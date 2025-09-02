@@ -901,7 +901,7 @@ fn parse_index(item: &PyAny, dim_size: usize) -> PyResult<TensorIndex> {
         }
         Ok(TensorIndex::Index(idx as usize))
     } else if let Ok(slice) = item.downcast::<PySlice>() {
-        let indices = slice.indices(dim_size as i32)?;
+        let indices = slice.indices(dim_size as i64)?;
         Ok(TensorIndex::Slice {
             start: indices.start as usize,
             end: indices.stop as usize,
