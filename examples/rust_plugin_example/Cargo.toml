@@ -1,0 +1,17 @@
+[package]
+name = "rust_plugin_example"
+version = "0.1.0"
+edition = "2021"
+description = "Example Rust plugin for minitensor"
+
+[lib]
+name = "rust_plugin_example"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Reference to the minitensor engine
+# In a real plugin, this would be a published crate dependency
+engine = { path = "../../engine" }
+
+[features]
+default = []

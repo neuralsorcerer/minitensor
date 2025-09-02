@@ -1,0 +1,50 @@
+[workspace]
+members = [
+    "engine",
+    "bindings"
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["Soumyadip Sarkar"]
+license = "Apache-2.0"
+repository = "https://github.com/neuralsorcerer/minitensor"
+homepage = "https://github.com/neuralsorcerer/minitensor"
+
+[workspace.dependencies]
+# Core dependencies
+ndarray = "0.15"
+num-traits = "0.2"
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# Memory management
+arc-swap = "1.6"
+parking_lot = "0.12"
+
+# SIMD and performance
+rayon = "1.7"
+wide = "0.7"
+
+# GPU backends
+cudarc = "0.9"
+metal = "0.27"
+opencl3 = "0.9"
+
+# BLAS integration (optional for now)
+# blas-src = { version = "0.8", features = ["netlib"] }
+# cblas = "0.4"
+# lapack = "0.19"
+
+# System information
+num_cpus = "1.16"
+libc = "0.2"
+
+# Python bindings
+pyo3 = { version = "0.20", features = ["extension-module", "auto-initialize"] }
+numpy = "0.20"
+
+[workspace.metadata.maturin]
+python-source = "py/src"
+module-name = "minitensor"

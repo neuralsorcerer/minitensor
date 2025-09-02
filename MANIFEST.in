@@ -1,0 +1,43 @@
+# Include important project files
+include README.md
+include LICENSE
+include pyproject.toml
+include Cargo.toml
+include Cargo.lock
+
+# Include Rust source code
+recursive-include engine *.rs *.toml
+recursive-include bindings *.rs *.toml
+
+# Include Python source
+recursive-include minitensor *.py *.pyi *.typed
+
+# Include documentation
+recursive-include docs *.md *.rst *.txt
+
+# Include examples
+recursive-include examples *.py *.rs *.toml *.md
+
+# Include tests
+recursive-include tests *.py
+include test_*.py
+
+# Include build scripts
+recursive-include scripts *.py
+
+# Include CI/CD configuration
+recursive-include .github *.yml *.yaml
+
+# Exclude build artifacts and cache
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.pyd
+global-exclude __pycache__
+global-exclude .pytest_cache
+global-exclude *.so
+global-exclude *.dylib
+global-exclude *.dll
+recursive-exclude target *
+recursive-exclude .git *
+recursive-exclude .vscode *
+recursive-exclude .idea *

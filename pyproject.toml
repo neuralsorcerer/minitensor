@@ -1,0 +1,150 @@
+[build-system]
+requires = [
+    "maturin>=1.0,<2.0",
+    "setuptools>=45",
+    "setuptools_scm[toml]>=6.2",
+]
+build-backend = "maturin"
+
+[project]
+name = "minitensor"
+description = "A lightweight, high-performance deep learning library built with Rust"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Soumyadip Sarkar", email = "soumyadip@soumyadipsarkar.com" }
+]
+maintainers = [
+    { name = "Soumyadip Sarkar", email = "soumyadip@soumyadipsarkar.com" }
+]
+keywords = ["deep-learning", "neural-networks", "tensor", "rust", "python", "machine-learning", "gpu", "cuda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.19.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-benchmark",
+    "black",
+    "isort",
+    "mypy",
+]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "myst-parser",
+]
+examples = [
+    "matplotlib>=3.0",
+    "jupyter",
+    "notebook",
+]
+
+[project.urls]
+Homepage = "https://github.com/neuralsorcerer/minitensor"
+Repository = "https://github.com/neuralsorcerer/minitensor"
+"Bug Tracker" = "https://github.com/neuralsorcerer/minitensor/issues"
+
+[tool.maturin]
+# Path to the Rust project directory
+manifest-path = "bindings/Cargo.toml"
+# Python source directory
+python-source = "."
+# Module name (should match the Rust crate name in bindings/Cargo.toml)
+module-name = "minitensor._core"
+# Features to enable
+features = ["pyo3/extension-module"]
+# Build configuration
+compatibility = "linux"
+strip = true
+# Skip audit for faster builds in development
+skip-auditwheel = false
+
+[tool.setuptools_scm]
+write_to = "minitensor/_version.py"
+version_scheme = "release-branch-semver"
+local_scheme = "no-local-version"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["minitensor"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "minitensor._core",
+    "minitensor._core.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
