@@ -41,9 +41,10 @@ impl Shape {
 
     /// Get the size of a specific dimension
     pub fn size(&self, dim: usize) -> Result<usize> {
-        self.dims.get(dim).copied().ok_or_else(|| {
-            MinitensorError::index_error(dim as isize, 0, self.dims.len())
-        })
+        self.dims
+            .get(dim)
+            .copied()
+            .ok_or_else(|| MinitensorError::index_error(dim as isize, 0, self.dims.len()))
     }
 
     /// Get all dimensions as a slice
@@ -59,7 +60,7 @@ impl Shape {
     /// Check if shapes are compatible for broadcasting
     pub fn is_broadcastable_with(&self, other: &Shape) -> bool {
         let max_ndim = self.ndim().max(other.ndim());
-        
+
         // Compare dimensions from right to left (broadcasting rules)
         for i in 0..max_ndim {
             // Get dimension from the right (i=0 is rightmost)
@@ -68,19 +69,19 @@ impl Shape {
             } else {
                 1 // Implicit dimension of size 1
             };
-            
+
             let other_dim = if i < other.ndim() {
                 other.dims[other.ndim() - 1 - i]
             } else {
                 1 // Implicit dimension of size 1
             };
-            
+
             // Broadcasting rule: dimensions must be equal, or one must be 1
             if self_dim != other_dim && self_dim != 1 && other_dim != 1 {
                 return false;
             }
         }
-        
+
         true
     }
 
@@ -107,7 +108,7 @@ impl Shape {
             } else {
                 1
             };
-            
+
             result_dims.push(self_dim.max(other_dim));
         }
 
@@ -150,12 +151,12 @@ impl Strides {
     pub fn from_shape(shape: &Shape) -> Self {
         let mut strides = Vec::with_capacity(shape.ndim());
         let mut stride = 1;
-        
+
         for &dim in shape.dims().iter().rev() {
             strides.push(stride);
             stride *= dim;
         }
-        
+
         strides.reverse();
         Self { strides }
     }
@@ -178,13 +179,14 @@ impl Strides {
             }
             expected_stride *= dim;
         }
-        
+
         true
     }
 
     /// Compute the linear index from multi-dimensional indices
     pub fn linear_index(&self, indices: &[usize]) -> usize {
-        indices.iter()
+        indices
+            .iter()
             .zip(self.strides.iter())
             .map(|(&idx, &stride)| idx * stride)
             .sum()
@@ -215,9 +217,9 @@ mod tests {
     fn test_broadcasting() {
         let shape1 = Shape::new(vec![3, 1]);
         let shape2 = Shape::new(vec![1, 4]);
-        
+
         assert!(shape1.is_broadcastable_with(&shape2));
-        
+
         let broadcasted = shape1.broadcast_with(&shape2).unwrap();
         assert_eq!(broadcasted.dims(), &[3, 4]);
     }
@@ -226,10 +228,10 @@ mod tests {
     fn test_strides() {
         let shape = Shape::new(vec![2, 3, 4]);
         let strides = Strides::from_shape(&shape);
-        
+
         assert_eq!(strides.as_slice(), &[12, 4, 1]);
         assert!(strides.is_contiguous(&shape));
-        
+
         let linear_idx = strides.linear_index(&[1, 2, 3]);
         assert_eq!(linear_idx, 1 * 12 + 2 * 4 + 3 * 1);
     }

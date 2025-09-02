@@ -4,8 +4,8 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
 use engine::Device;
+use pyo3::prelude::*;
 
 /// Python wrapper for Device
 #[pyclass(name = "Device")]
@@ -19,9 +19,8 @@ impl PyDevice {
     /// Create a new device
     #[new]
     fn new(device_str: &str) -> PyResult<Self> {
-        let device = Device::from_str(device_str).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(e)
-        })?;
+        let device = Device::from_str(device_str)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
         Ok(Self { inner: device })
     }

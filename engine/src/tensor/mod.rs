@@ -4,7 +4,6 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-
 pub mod data;
 pub mod dtype;
 pub mod shape;
@@ -50,7 +49,11 @@ pub enum TensorIndex {
     /// Select a single index along the dimension
     Index(usize),
     /// Select a range with optional step (step defaults to 1)
-    Slice { start: usize, end: usize, step: usize },
+    Slice {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
 impl Tensor {
@@ -196,14 +199,14 @@ impl Tensor {
     /// Perform backward pass from this tensor
     pub fn backward(&self, gradient: Option<Tensor>) -> Result<()> {
         use crate::autograd;
-        
+
         // If no gradient is provided, create a gradient of ones for scalar tensors
         let grad = match gradient {
             Some(g) => g,
             None => {
                 if self.numel() != 1 {
                     return Err(MinitensorError::gradient_error(
-                        "Gradient can only be implicitly created for scalar tensors"
+                        "Gradient can only be implicitly created for scalar tensors",
                     ));
                 }
                 // Create a tensor of ones with the same shape as self
@@ -212,8 +215,7 @@ impl Tensor {
         };
 
         // Perform backward pass through the computation graph
-        autograd::backward(self, Some(grad))
-            .map(|_| ()) // Convert HashMap result to ()
+        autograd::backward(self, Some(grad)).map(|_| ()) // Convert HashMap result to ()
     }
 
     /// Create a view of this tensor with a new shape
@@ -458,8 +460,9 @@ impl Tensor {
 
         match self.dtype {
             DataType::Float32 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_f32_slice(), other.data.as_f32_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_f32_slice(), other.data.as_f32_slice())
+                {
                     self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
                         let diff = (a - b).abs();
                         diff <= atol as f32 + rtol as f32 * b.abs()
@@ -469,8 +472,9 @@ impl Tensor {
                 }
             }
             DataType::Float64 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_f64_slice(), other.data.as_f64_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_f64_slice(), other.data.as_f64_slice())
+                {
                     self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
                         let diff = (a - b).abs();
                         diff <= atol + rtol * b.abs()
@@ -491,40 +495,45 @@ impl Tensor {
 
         match self.dtype {
             DataType::Float32 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_f32_slice(), other.data.as_f32_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_f32_slice(), other.data.as_f32_slice())
+                {
                     self_data == other_data
                 } else {
                     false
                 }
             }
             DataType::Float64 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_f64_slice(), other.data.as_f64_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_f64_slice(), other.data.as_f64_slice())
+                {
                     self_data == other_data
                 } else {
                     false
                 }
             }
             DataType::Int32 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_i32_slice(), other.data.as_i32_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_i32_slice(), other.data.as_i32_slice())
+                {
                     self_data == other_data
                 } else {
                     false
                 }
             }
             DataType::Int64 => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_i64_slice(), other.data.as_i64_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_i64_slice(), other.data.as_i64_slice())
+                {
                     self_data == other_data
                 } else {
                     false
                 }
             }
             DataType::Bool => {
-                if let (Some(self_data), Some(other_data)) = 
-                    (self.data.as_bool_slice(), other.data.as_bool_slice()) {
+                if let (Some(self_data), Some(other_data)) =
+                    (self.data.as_bool_slice(), other.data.as_bool_slice())
+                {
                     self_data == other_data
                 } else {
                     false
@@ -535,11 +544,14 @@ impl Tensor {
 
     /// Squeeze dimensions of size 1
     pub fn squeeze(&self) -> Result<Self> {
-        let new_dims: Vec<usize> = self.shape.dims().iter()
+        let new_dims: Vec<usize> = self
+            .shape
+            .dims()
+            .iter()
             .filter(|&&dim| dim != 1)
             .copied()
             .collect();
-        
+
         let new_shape = Shape::new(new_dims);
         self.view(new_shape)
     }
@@ -563,7 +575,11 @@ impl Tensor {
     /// Add dimension of size 1
     pub fn unsqueeze(&self, dim: usize) -> Result<Self> {
         if dim > self.ndim() {
-            return Err(MinitensorError::index_error(dim as isize, 0, self.ndim() + 1));
+            return Err(MinitensorError::index_error(
+                dim as isize,
+                0,
+                self.ndim() + 1,
+            ));
         }
 
         let mut new_dims = self.shape.dims().to_vec();
@@ -576,7 +592,7 @@ impl Tensor {
     pub fn flatten_range(&self, start_dim: usize, end_dim: usize) -> Result<Self> {
         if start_dim >= self.ndim() || end_dim >= self.ndim() || start_dim > end_dim {
             return Err(MinitensorError::invalid_argument(
-                "Invalid dimension range for flatten"
+                "Invalid dimension range for flatten",
             ));
         }
 
@@ -874,7 +890,11 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 { scalar.unwrap() } else { val_slice[idx] };
+                    let val = if value.numel() == 1 {
+                        scalar.unwrap()
+                    } else {
+                        val_slice[idx]
+                    };
                     slice[src_idx] = val;
                 }
             }
@@ -891,7 +911,11 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 { scalar.unwrap() } else { val_slice[idx] };
+                    let val = if value.numel() == 1 {
+                        scalar.unwrap()
+                    } else {
+                        val_slice[idx]
+                    };
                     slice[src_idx] = val;
                 }
             }
@@ -908,7 +932,11 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 { scalar.unwrap() } else { val_slice[idx] };
+                    let val = if value.numel() == 1 {
+                        scalar.unwrap()
+                    } else {
+                        val_slice[idx]
+                    };
                     slice[src_idx] = val;
                 }
             }
@@ -925,7 +953,11 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 { scalar.unwrap() } else { val_slice[idx] };
+                    let val = if value.numel() == 1 {
+                        scalar.unwrap()
+                    } else {
+                        val_slice[idx]
+                    };
                     slice[src_idx] = val;
                 }
             }
@@ -942,7 +974,11 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 { scalar.unwrap() } else { val_slice[idx] };
+                    let val = if value.numel() == 1 {
+                        scalar.unwrap()
+                    } else {
+                        val_slice[idx]
+                    };
                     slice[src_idx] = val;
                 }
             }
@@ -1136,8 +1172,12 @@ impl Tensor {
                 let mut vec = Vec::with_capacity(input.len());
                 for &x in input {
                     let mut v = x;
-                    if let Some(mn) = min { v = v.max(mn as f32); }
-                    if let Some(mx) = max { v = v.min(mx as f32); }
+                    if let Some(mn) = min {
+                        v = v.max(mn as f32);
+                    }
+                    if let Some(mx) = max {
+                        v = v.min(mx as f32);
+                    }
                     vec.push(v);
                 }
                 TensorData::from_vec_f32(vec, self.device)
@@ -1150,8 +1190,12 @@ impl Tensor {
                 let mut vec = Vec::with_capacity(input.len());
                 for &x in input {
                     let mut v = x;
-                    if let Some(mn) = min { v = v.max(mn); }
-                    if let Some(mx) = max { v = v.min(mx); }
+                    if let Some(mn) = min {
+                        v = v.max(mn);
+                    }
+                    if let Some(mx) = max {
+                        v = v.min(mx);
+                    }
                     vec.push(v);
                 }
                 TensorData::from_vec_f64(vec, self.device)
@@ -1164,8 +1208,12 @@ impl Tensor {
                 let mut vec = Vec::with_capacity(input.len());
                 for &x in input {
                     let mut v = x;
-                    if let Some(mn) = min { v = v.max(mn as i32); }
-                    if let Some(mx) = max { v = v.min(mx as i32); }
+                    if let Some(mn) = min {
+                        v = v.max(mn as i32);
+                    }
+                    if let Some(mx) = max {
+                        v = v.min(mx as i32);
+                    }
                     vec.push(v);
                 }
                 TensorData::from_vec_i32(vec, self.device)
@@ -1178,8 +1226,12 @@ impl Tensor {
                 let mut vec = Vec::with_capacity(input.len());
                 for &x in input {
                     let mut v = x;
-                    if let Some(mn) = min { v = v.max(mn as i64); }
-                    if let Some(mx) = max { v = v.min(mx as i64); }
+                    if let Some(mn) = min {
+                        v = v.max(mn as i64);
+                    }
+                    if let Some(mx) = max {
+                        v = v.min(mx as i64);
+                    }
                     vec.push(v);
                 }
                 TensorData::from_vec_i64(vec, self.device)
@@ -1202,24 +1254,26 @@ impl Tensor {
     /// Get the maximum value in the tensor
     pub fn max_value(&self) -> Option<f64> {
         match self.dtype {
-            DataType::Float32 => {
-                self.data.as_f32_slice()?.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|&x| x as f64)
-            }
-            DataType::Float64 => {
-                self.data.as_f64_slice()?.iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-            }
-            DataType::Int32 => {
-                self.data.as_i32_slice()?.iter().max().map(|&x| x as f64)
-            }
-            DataType::Int64 => {
-                self.data.as_i64_slice()?.iter().max().map(|&x| x as f64)
-            }
+            DataType::Float32 => self
+                .data
+                .as_f32_slice()?
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|&x| x as f64),
+            DataType::Float64 => self
+                .data
+                .as_f64_slice()?
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied(),
+            DataType::Int32 => self.data.as_i32_slice()?.iter().max().map(|&x| x as f64),
+            DataType::Int64 => self.data.as_i64_slice()?.iter().max().map(|&x| x as f64),
             DataType::Bool => {
-                self.data.as_bool_slice()?.iter().max().map(|&x| if x { 1.0 } else { 0.0 })
+                self.data
+                    .as_bool_slice()?
+                    .iter()
+                    .max()
+                    .map(|&x| if x { 1.0 } else { 0.0 })
             }
         }
     }
@@ -1227,24 +1281,26 @@ impl Tensor {
     /// Get the minimum value in the tensor
     pub fn min_value(&self) -> Option<f64> {
         match self.dtype {
-            DataType::Float32 => {
-                self.data.as_f32_slice()?.iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|&x| x as f64)
-            }
-            DataType::Float64 => {
-                self.data.as_f64_slice()?.iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .copied()
-            }
-            DataType::Int32 => {
-                self.data.as_i32_slice()?.iter().min().map(|&x| x as f64)
-            }
-            DataType::Int64 => {
-                self.data.as_i64_slice()?.iter().min().map(|&x| x as f64)
-            }
+            DataType::Float32 => self
+                .data
+                .as_f32_slice()?
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|&x| x as f64),
+            DataType::Float64 => self
+                .data
+                .as_f64_slice()?
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .copied(),
+            DataType::Int32 => self.data.as_i32_slice()?.iter().min().map(|&x| x as f64),
+            DataType::Int64 => self.data.as_i64_slice()?.iter().min().map(|&x| x as f64),
             DataType::Bool => {
-                self.data.as_bool_slice()?.iter().min().map(|&x| if x { 1.0 } else { 0.0 })
+                self.data
+                    .as_bool_slice()?
+                    .iter()
+                    .min()
+                    .map(|&x| if x { 1.0 } else { 0.0 })
             }
         }
     }
@@ -1295,13 +1351,7 @@ mod tests {
     fn test_tensor_creation() {
         let shape = Shape::new(vec![2, 3]);
         let data = Arc::new(TensorData::zeros(shape.numel(), DataType::Float32));
-        let tensor = Tensor::new(
-            data,
-            shape.clone(),
-            DataType::Float32,
-            Device::cpu(),
-            false,
-        );
+        let tensor = Tensor::new(data, shape.clone(), DataType::Float32, Device::cpu(), false);
 
         assert_eq!(tensor.shape(), &shape);
         assert_eq!(tensor.dtype(), DataType::Float32);
@@ -1315,13 +1365,7 @@ mod tests {
     fn test_tensor_view() {
         let shape = Shape::new(vec![2, 3]);
         let data = Arc::new(TensorData::zeros(shape.numel(), DataType::Float32));
-        let tensor = Tensor::new(
-            data,
-            shape,
-            DataType::Float32,
-            Device::cpu(),
-            false,
-        );
+        let tensor = Tensor::new(data, shape, DataType::Float32, Device::cpu(), false);
 
         let new_shape = Shape::new(vec![3, 2]);
         let reshaped = tensor.view(new_shape.clone()).unwrap();
@@ -1332,12 +1376,12 @@ mod tests {
     #[test]
     fn test_tensor_zeros_and_ones() {
         let shape = Shape::new(vec![2, 3]);
-        
+
         let zeros = Tensor::zeros(shape.clone(), DataType::Float32, Device::cpu(), false);
         assert_eq!(zeros.shape(), &shape);
         assert_eq!(zeros.dtype(), DataType::Float32);
         assert!(!zeros.requires_grad());
-        
+
         let ones = Tensor::ones(shape.clone(), DataType::Float32, Device::cpu(), true);
         assert_eq!(ones.shape(), &shape);
         assert_eq!(ones.dtype(), DataType::Float32);
@@ -1348,17 +1392,17 @@ mod tests {
     fn test_gradient_management() {
         let shape = Shape::new(vec![2, 2]);
         let mut tensor = Tensor::zeros(shape.clone(), DataType::Float32, Device::cpu(), true);
-        
+
         // Initially no gradient
         assert!(!tensor.has_grad());
         assert!(tensor.grad().is_none());
-        
+
         // Set a gradient
         let grad = Tensor::ones(shape.clone(), DataType::Float32, Device::cpu(), false);
         tensor.set_grad(Some(grad));
         assert!(tensor.has_grad());
         assert!(tensor.grad().is_some());
-        
+
         // Clear gradient
         tensor.zero_grad();
         assert!(!tensor.has_grad());
@@ -1369,14 +1413,14 @@ mod tests {
     fn test_gradient_accumulation() {
         let shape = Shape::new(vec![2, 2]);
         let mut tensor = Tensor::zeros(shape.clone(), DataType::Float32, Device::cpu(), true);
-        
+
         let grad1 = Tensor::ones(shape.clone(), DataType::Float32, Device::cpu(), false);
         let grad2 = Tensor::ones(shape.clone(), DataType::Float32, Device::cpu(), false);
-        
+
         // Accumulate first gradient
         tensor.accumulate_grad(grad1).unwrap();
         assert!(tensor.has_grad());
-        
+
         // Accumulate second gradient (should replace for now)
         tensor.accumulate_grad(grad2).unwrap();
         assert!(tensor.has_grad());

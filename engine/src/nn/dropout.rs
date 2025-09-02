@@ -6,9 +6,9 @@
 
 use super::Layer;
 use crate::{
-    tensor::{Tensor, Shape, DataType, TensorData},
-    error::{Result, MinitensorError},
+    error::{MinitensorError, Result},
     operations::arithmetic,
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand::Rng;
 use std::sync::Arc;
@@ -24,7 +24,11 @@ fn generate_dropout_mask(
     device: crate::device::Device,
 ) -> Result<Tensor> {
     let keep_prob = 1.0 - p;
-    let scale = if keep_prob == 0.0 { 0.0 } else { 1.0 / keep_prob };
+    let scale = if keep_prob == 0.0 {
+        0.0
+    } else {
+        1.0 / keep_prob
+    };
     let numel = shape.numel();
     let mut rng = rand::thread_rng();
 
@@ -40,7 +44,13 @@ fn generate_dropout_mask(
                 }
             }
             let td = TensorData::from_vec_f32(data, device);
-            Ok(Tensor::new(Arc::new(td), shape.clone(), dtype, device, false))
+            Ok(Tensor::new(
+                Arc::new(td),
+                shape.clone(),
+                dtype,
+                device,
+                false,
+            ))
         }
         DataType::Float64 => {
             let mut data = Vec::with_capacity(numel);
@@ -53,7 +63,13 @@ fn generate_dropout_mask(
                 }
             }
             let td = TensorData::from_vec_f64(data, device);
-            Ok(Tensor::new(Arc::new(td), shape.clone(), dtype, device, false))
+            Ok(Tensor::new(
+                Arc::new(td),
+                shape.clone(),
+                dtype,
+                device,
+                false,
+            ))
         }
         _ => Err(MinitensorError::invalid_argument(
             "Dropout mask generation only supports floating point tensors".to_string(),
@@ -62,11 +78,11 @@ fn generate_dropout_mask(
 }
 
 /// Dropout layer for regularization
-/// 
+///
 /// During training, randomly zeroes some of the elements of the input tensor
 /// with probability p using samples from a Bernoulli distribution. Each channel
 /// will be zeroed out independently on every forward call.
-/// 
+///
 /// This has proven to be an effective technique for regularization and preventing
 /// the co-adaptation of neurons as described in the paper "Improving neural networks
 /// by preventing co-adaptation of feature detectors".
@@ -77,22 +93,20 @@ pub struct Dropout {
 
 impl Dropout {
     /// Create a new Dropout layer
-    /// 
+    ///
     /// # Arguments
     /// * `p` - Probability of an element to be zeroed. Default: 0.5
     pub fn new(p: Option<f64>) -> Result<Self> {
         let p = p.unwrap_or(0.5);
-        
+
         if !(0.0..=1.0).contains(&p) {
-            return Err(MinitensorError::invalid_argument(
-                format!("Dropout probability must be between 0 and 1, got {}", p)
-            ));
+            return Err(MinitensorError::invalid_argument(format!(
+                "Dropout probability must be between 0 and 1, got {}",
+                p
+            )));
         }
 
-        Ok(Self {
-            p,
-            training: true,
-        })
+        Ok(Self { p, training: true })
     }
 
     /// Get the dropout probability
@@ -140,7 +154,12 @@ impl Layer for Dropout {
 
         if self.p == 1.0 {
             // When p=1, return zeros
-            return Ok(Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), input.requires_grad()));
+            return Ok(Tensor::zeros(
+                input.shape().clone(),
+                input.dtype(),
+                input.device(),
+                input.requires_grad(),
+            ));
         }
 
         // Generate dropout mask
@@ -170,7 +189,7 @@ impl Layer for Dropout {
 }
 
 /// 2D Dropout layer
-/// 
+///
 /// Randomly zero out entire channels (a channel is a 2D feature map,
 /// e.g., the j-th channel of the i-th sample in the batched input is a 2D tensor).
 /// Each channel will be zeroed out independently on every forward call with
@@ -182,22 +201,20 @@ pub struct Dropout2d {
 
 impl Dropout2d {
     /// Create a new Dropout2d layer
-    /// 
+    ///
     /// # Arguments
     /// * `p` - Probability of a channel to be zeroed. Default: 0.5
     pub fn new(p: Option<f64>) -> Result<Self> {
         let p = p.unwrap_or(0.5);
-        
+
         if !(0.0..=1.0).contains(&p) {
-            return Err(MinitensorError::invalid_argument(
-                format!("Dropout probability must be between 0 and 1, got {}", p)
-            ));
+            return Err(MinitensorError::invalid_argument(format!(
+                "Dropout probability must be between 0 and 1, got {}",
+                p
+            )));
         }
 
-        Ok(Self {
-            p,
-            training: true,
-        })
+        Ok(Self { p, training: true })
     }
 
     /// Get the dropout probability
@@ -237,7 +254,12 @@ impl Layer for Dropout2d {
 
         if self.p == 1.0 {
             // When p=1, return zeros
-            return Ok(Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), input.requires_grad()));
+            return Ok(Tensor::zeros(
+                input.shape().clone(),
+                input.dtype(),
+                input.device(),
+                input.requires_grad(),
+            ));
         }
 
         // Generate a mask that zeroes out entire channels. The mask has
@@ -270,8 +292,8 @@ impl Layer for Dropout2d {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{Shape, DataType};
     use crate::device::Device;
+    use crate::tensor::{DataType, Shape};
 
     #[test]
     fn test_dropout_creation() {
@@ -296,12 +318,12 @@ mod tests {
     #[test]
     fn test_dropout_training_mode() {
         let mut dropout = Dropout::new(Some(0.5)).unwrap();
-        
+
         assert!(dropout.is_training());
-        
+
         dropout.eval();
         assert!(!dropout.is_training());
-        
+
         dropout.train();
         assert!(dropout.is_training());
     }
@@ -309,13 +331,18 @@ mod tests {
     #[test]
     fn test_dropout_forward() {
         let mut dropout = Dropout::new(Some(0.5)).unwrap();
-        let input = Tensor::ones(Shape::new(vec![2, 3, 4]), DataType::Float32, Device::cpu(), false);
-        
+        let input = Tensor::ones(
+            Shape::new(vec![2, 3, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
         // Test training mode
         dropout.train();
         let output_train = dropout.forward(&input).unwrap();
         assert_eq!(output_train.shape(), input.shape());
-        
+
         // Test evaluation mode
         dropout.eval();
         let output_eval = dropout.forward(&input).unwrap();
@@ -324,14 +351,19 @@ mod tests {
 
     #[test]
     fn test_dropout_edge_cases() {
-        let input = Tensor::ones(Shape::new(vec![2, 3]), DataType::Float32, Device::cpu(), false);
-        
+        let input = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
         // Test p=0 (no dropout)
         let mut dropout_zero = Dropout::new(Some(0.0)).unwrap();
         dropout_zero.train();
         let output = dropout_zero.forward(&input).unwrap();
         assert_eq!(output.shape(), input.shape());
-        
+
         // Test p=1 (complete dropout)
         let mut dropout_one = Dropout::new(Some(1.0)).unwrap();
         dropout_one.train();
@@ -353,14 +385,24 @@ mod tests {
     #[test]
     fn test_dropout2d_forward_shape_validation() {
         let mut dropout2d = Dropout2d::new(Some(0.5)).unwrap();
-        
+
         // Test with correct 4D input
-        let input_4d = Tensor::ones(Shape::new(vec![2, 3, 8, 8]), DataType::Float32, Device::cpu(), false);
+        let input_4d = Tensor::ones(
+            Shape::new(vec![2, 3, 8, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = dropout2d.forward(&input_4d).unwrap();
         assert_eq!(output.shape(), input_4d.shape());
-        
+
         // Test with incorrect dimensions
-        let input_3d = Tensor::ones(Shape::new(vec![2, 3, 8]), DataType::Float32, Device::cpu(), false);
+        let input_3d = Tensor::ones(
+            Shape::new(vec![2, 3, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = dropout2d.forward(&input_3d);
         assert!(result.is_err());
     }
@@ -368,13 +410,18 @@ mod tests {
     #[test]
     fn test_dropout2d_training_mode() {
         let mut dropout2d = Dropout2d::new(Some(0.5)).unwrap();
-        let input = Tensor::ones(Shape::new(vec![2, 3, 8, 8]), DataType::Float32, Device::cpu(), false);
-        
+        let input = Tensor::ones(
+            Shape::new(vec![2, 3, 8, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
         // Test training mode
         dropout2d.train();
         let output_train = dropout2d.forward(&input).unwrap();
         assert_eq!(output_train.shape(), input.shape());
-        
+
         // Test evaluation mode
         dropout2d.eval();
         let output_eval = dropout2d.forward(&input).unwrap();

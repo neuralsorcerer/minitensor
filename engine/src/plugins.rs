@@ -5,17 +5,17 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    error::{MinitensorError, Result},
     custom_ops::{CustomOp, CustomOpRegistry},
+    error::{MinitensorError, Result},
     nn::Layer,
     VERSION,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-#[cfg(feature = "dynamic-loading")]
-use std::path::Path;
 #[cfg(feature = "dynamic-loading")]
 use std::ffi::OsStr;
+#[cfg(feature = "dynamic-loading")]
+use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 /// Version compatibility information for plugins
 #[derive(Debug, Clone, PartialEq)]
@@ -28,7 +28,11 @@ pub struct VersionInfo {
 impl VersionInfo {
     /// Create a new version info
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse version from string (e.g., "1.2.3")
@@ -36,19 +40,19 @@ impl VersionInfo {
         let parts: Vec<&str> = version_str.split('.').collect();
         if parts.len() != 3 {
             return Err(MinitensorError::invalid_argument(
-                "Version must be in format 'major.minor.patch'"
+                "Version must be in format 'major.minor.patch'",
             ));
         }
 
-        let major = parts[0].parse().map_err(|_| {
-            MinitensorError::invalid_argument("Invalid major version number")
-        })?;
-        let minor = parts[1].parse().map_err(|_| {
-            MinitensorError::invalid_argument("Invalid minor version number")
-        })?;
-        let patch = parts[2].parse().map_err(|_| {
-            MinitensorError::invalid_argument("Invalid patch version number")
-        })?;
+        let major = parts[0]
+            .parse()
+            .map_err(|_| MinitensorError::invalid_argument("Invalid major version number"))?;
+        let minor = parts[1]
+            .parse()
+            .map_err(|_| MinitensorError::invalid_argument("Invalid minor version number"))?;
+        let patch = parts[2]
+            .parse()
+            .map_err(|_| MinitensorError::invalid_argument("Invalid patch version number"))?;
 
         Ok(Self::new(major, minor, patch))
     }
@@ -56,9 +60,9 @@ impl VersionInfo {
     /// Check if this version is compatible with another version
     /// Compatible if major versions match and this version >= required version
     pub fn is_compatible_with(&self, required: &VersionInfo) -> bool {
-        self.major == required.major && 
-        (self.minor > required.minor || 
-         (self.minor == required.minor && self.patch >= required.patch))
+        self.major == required.major
+            && (self.minor > required.minor
+                || (self.minor == required.minor && self.patch >= required.patch))
     }
 
     /// Get current minitensor version
@@ -125,13 +129,14 @@ impl PluginManager {
         use libloading::{Library, Symbol};
 
         let path = path.as_ref();
-        
+
         // Validate file extension
-        if path.extension() != Some(OsStr::new("so")) && 
-           path.extension() != Some(OsStr::new("dll")) && 
-           path.extension() != Some(OsStr::new("dylib")) {
+        if path.extension() != Some(OsStr::new("so"))
+            && path.extension() != Some(OsStr::new("dll"))
+            && path.extension() != Some(OsStr::new("dylib"))
+        {
             return Err(MinitensorError::invalid_argument(
-                "Plugin file must have .so, .dll, or .dylib extension"
+                "Plugin file must have .so, .dll, or .dylib extension",
             ));
         }
 
@@ -145,14 +150,19 @@ impl PluginManager {
         // Get the plugin creation function
         let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
             lib.get(b"create_plugin").map_err(|e| {
-                MinitensorError::plugin_error(&format!("Plugin missing create_plugin function: {}", e))
+                MinitensorError::plugin_error(&format!(
+                    "Plugin missing create_plugin function: {}",
+                    e
+                ))
             })?
         };
 
         // Create the plugin instance
         let plugin_ptr = unsafe { create_plugin() };
         if plugin_ptr.is_null() {
-            return Err(MinitensorError::plugin_error("Plugin creation returned null"));
+            return Err(MinitensorError::plugin_error(
+                "Plugin creation returned null",
+            ));
         }
 
         let plugin = unsafe { Arc::from_raw(plugin_ptr) };
@@ -160,7 +170,7 @@ impl PluginManager {
         // Validate version compatibility
         let current_version = VersionInfo::current()?;
         let plugin_info = plugin.info();
-        
+
         if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
             return Err(MinitensorError::version_mismatch(&format!(
                 "Plugin '{}' requires minitensor >= {}, but current version is {}",
@@ -182,10 +192,11 @@ impl PluginManager {
             let plugins = self.loaded_plugins.read().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins read lock")
             })?;
-            
+
             if plugins.contains_key(&plugin_info.name) {
                 return Err(MinitensorError::plugin_error(&format!(
-                    "Plugin '{}' is already loaded", plugin_info.name
+                    "Plugin '{}' is already loaded",
+                    plugin_info.name
                 )));
             }
         }
@@ -203,7 +214,7 @@ impl PluginManager {
             let mut plugins = self.loaded_plugins.write().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
             })?;
-            
+
             plugins.insert(plugin_info.name.clone(), plugin);
         }
 
@@ -213,10 +224,10 @@ impl PluginManager {
     /// Register a plugin directly (for statically linked plugins)
     pub fn register_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
         let plugin_info = plugin.info();
-        
+
         // Validate version compatibility
         let current_version = VersionInfo::current()?;
-        
+
         if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
             return Err(MinitensorError::version_mismatch(&format!(
                 "Plugin '{}' requires minitensor >= {}, but current version is {}",
@@ -238,10 +249,11 @@ impl PluginManager {
             let plugins = self.loaded_plugins.read().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins read lock")
             })?;
-            
+
             if plugins.contains_key(&plugin_info.name) {
                 return Err(MinitensorError::plugin_error(&format!(
-                    "Plugin '{}' is already loaded", plugin_info.name
+                    "Plugin '{}' is already loaded",
+                    plugin_info.name
                 )));
             }
         }
@@ -259,7 +271,7 @@ impl PluginManager {
             let mut plugins = self.loaded_plugins.write().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
             })?;
-            
+
             plugins.insert(plugin_info.name.clone(), plugin);
         }
 
@@ -272,7 +284,7 @@ impl PluginManager {
             let mut plugins = self.loaded_plugins.write().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
             })?;
-            
+
             plugins.remove(name).ok_or_else(|| {
                 MinitensorError::plugin_error(&format!("Plugin '{}' is not loaded", name))
             })?
@@ -293,40 +305,40 @@ impl PluginManager {
 
     /// List all loaded plugins
     pub fn list_plugins(&self) -> Result<Vec<PluginInfo>> {
-        let plugins = self.loaded_plugins.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire plugins read lock")
-        })?;
-        
+        let plugins = self
+            .loaded_plugins
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire plugins read lock"))?;
+
         Ok(plugins.values().map(|p| p.info().clone()).collect())
     }
 
     /// Get information about a specific plugin
     pub fn get_plugin_info(&self, name: &str) -> Result<PluginInfo> {
-        let plugins = self.loaded_plugins.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire plugins read lock")
-        })?;
-        
-        plugins.get(name)
-            .map(|p| p.info().clone())
-            .ok_or_else(|| MinitensorError::plugin_error(&format!(
-                "Plugin '{}' is not loaded", name
-            )))
+        let plugins = self
+            .loaded_plugins
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire plugins read lock"))?;
+
+        plugins.get(name).map(|p| p.info().clone()).ok_or_else(|| {
+            MinitensorError::plugin_error(&format!("Plugin '{}' is not loaded", name))
+        })
     }
 
     /// Check if a plugin is loaded
     pub fn is_plugin_loaded(&self, name: &str) -> Result<bool> {
-        let plugins = self.loaded_plugins.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire plugins read lock")
-        })?;
-        
+        let plugins = self
+            .loaded_plugins
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire plugins read lock"))?;
+
         Ok(plugins.contains_key(name))
     }
 }
 
 /// Global plugin manager instance
-static GLOBAL_PLUGIN_MANAGER: std::sync::LazyLock<PluginManager> = std::sync::LazyLock::new(|| {
-    PluginManager::new(Arc::new(CustomOpRegistry::new()))
-});
+static GLOBAL_PLUGIN_MANAGER: std::sync::LazyLock<PluginManager> =
+    std::sync::LazyLock::new(|| PluginManager::new(Arc::new(CustomOpRegistry::new())));
 
 /// Load a plugin globally
 #[cfg(feature = "dynamic-loading")]
@@ -398,12 +410,10 @@ mod tests {
         }
 
         fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
-            vec![
-                CustomOpBuilder::new("test_plugin_op", 1)
-                    .forward(|inputs| Ok(inputs[0].clone()))
-                    .build()
-                    .unwrap()
-            ]
+            vec![CustomOpBuilder::new("test_plugin_op", 1)
+                .forward(|inputs| Ok(inputs[0].clone()))
+                .build()
+                .unwrap()]
         }
     }
 
@@ -431,7 +441,7 @@ mod tests {
         manager.register_plugin(plugin).unwrap();
 
         assert!(manager.is_plugin_loaded("test_plugin").unwrap());
-        
+
         let plugins = manager.list_plugins().unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].name, "test_plugin");

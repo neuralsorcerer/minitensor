@@ -5,18 +5,19 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+
 from minitensor.tensor import Tensor
 
 
 def test_tensor_pow_scalar():
     x = Tensor([1.0, 2.0, 3.0], dtype="float32")
-    y = x ** 2
+    y = x**2
     assert np.allclose(y.numpy(), np.array([1.0, 4.0, 9.0], dtype=np.float32))
 
 
 def test_tensor_pow_tensor():
     base = Tensor([2.0, 3.0, 4.0], dtype="float32")
     exp = Tensor([1.0, 2.0, 0.5], dtype="float32")
-    y = base ** exp
+    y = base**exp
     expected = np.array([2.0, 9.0, np.sqrt(4.0)], dtype=np.float32)
     assert np.allclose(y.numpy(), expected)

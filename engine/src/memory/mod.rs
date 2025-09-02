@@ -4,7 +4,10 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{device::Device, error::{MinitensorError, Result}};
+use crate::{
+    device::Device,
+    error::{MinitensorError, Result},
+};
 use std::alloc::{alloc, dealloc, Layout};
 
 /// Global memory allocator for tensors
@@ -13,10 +16,12 @@ pub fn global_allocate(size: usize, device: Device) -> Result<*mut u8> {
         // Use system allocator for CPU
         let layout = Layout::from_size_align(size, 8)
             .map_err(|_| MinitensorError::memory_error("Invalid memory layout"))?;
-        
+
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
-            Err(MinitensorError::memory_error("Failed to allocate CPU memory"))
+            Err(MinitensorError::memory_error(
+                "Failed to allocate CPU memory",
+            ))
         } else {
             Ok(ptr)
         }
@@ -77,7 +82,9 @@ impl MemoryPool {
             self.allocated_blocks.remove(pos);
             global_deallocate(ptr, self.device)
         } else {
-            Err(MinitensorError::memory_error("Pointer not found in memory pool"))
+            Err(MinitensorError::memory_error(
+                "Pointer not found in memory pool",
+            ))
         }
     }
 
@@ -146,30 +153,30 @@ mod tests {
     fn test_cpu_allocation() {
         let ptr = global_allocate(1024, Device::cpu()).unwrap();
         assert!(!ptr.is_null());
-        
+
         // Write some data to verify allocation works
         unsafe {
             *ptr = 42;
             assert_eq!(*ptr, 42);
         }
-        
+
         let _ = global_deallocate(ptr, Device::cpu());
     }
 
     #[test]
     fn test_memory_pool() {
         let mut pool = MemoryPool::new(Device::cpu());
-        
+
         let ptr1 = pool.allocate(512).unwrap();
         let ptr2 = pool.allocate(1024).unwrap();
-        
+
         assert_eq!(pool.num_blocks(), 2);
         assert_eq!(pool.total_allocated(), 1536);
-        
+
         pool.deallocate(ptr1).unwrap();
         assert_eq!(pool.num_blocks(), 1);
         assert_eq!(pool.total_allocated(), 1024);
-        
+
         pool.deallocate(ptr2).unwrap();
         assert_eq!(pool.num_blocks(), 0);
         assert_eq!(pool.total_allocated(), 0);
@@ -178,17 +185,17 @@ mod tests {
     #[test]
     fn test_memory_stats() {
         let mut stats = MemoryStats::new();
-        
+
         stats.record_allocation(1024);
         assert_eq!(stats.total_allocated, 1024);
         assert_eq!(stats.peak_allocated, 1024);
         assert_eq!(stats.num_allocations, 1);
-        
+
         stats.record_allocation(512);
         assert_eq!(stats.total_allocated, 1536);
         assert_eq!(stats.peak_allocated, 1536);
         assert_eq!(stats.num_allocations, 2);
-        
+
         stats.record_deallocation(512);
         assert_eq!(stats.total_allocated, 1024);
         assert_eq!(stats.peak_allocated, 1536); // Peak should remain

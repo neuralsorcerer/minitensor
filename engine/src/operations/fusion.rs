@@ -5,13 +5,13 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    tensor::{Tensor, TensorData, DataType, Shape},
-    error::{MinitensorError, Result},
     device::Device,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::{
-    sync::{Arc, Mutex},
     collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
 };
 
 /// Represents a fused operation that can combine multiple tensor operations
@@ -61,10 +61,10 @@ impl FusionSequence {
     pub fn add_operation(&mut self, op: FusedOp, input_shape: Shape) -> Result<()> {
         self.operations.push(op);
         self.input_shapes.push(input_shape.clone());
-        
+
         // Update output shape (for now, assume same as input for element-wise ops)
         self.output_shape = input_shape;
-        
+
         Ok(())
     }
 
@@ -72,11 +72,18 @@ impl FusionSequence {
     pub fn can_fuse_with(&self, op: &FusedOp, shape: &Shape) -> bool {
         // For now, only fuse element-wise operations with compatible shapes
         match op {
-            FusedOp::Add | FusedOp::Sub | FusedOp::Mul | FusedOp::Div |
-            FusedOp::ReLU | FusedOp::Sigmoid | FusedOp::Tanh | 
-            FusedOp::Exp | FusedOp::Log => {
+            FusedOp::Add
+            | FusedOp::Sub
+            | FusedOp::Mul
+            | FusedOp::Div
+            | FusedOp::ReLU
+            | FusedOp::Sigmoid
+            | FusedOp::Tanh
+            | FusedOp::Exp
+            | FusedOp::Log => {
                 // Check if shapes are compatible
-                self.output_shape.dims() == shape.dims() && self.operations.len() < 8 // Limit fusion depth
+                self.output_shape.dims() == shape.dims() && self.operations.len() < 8
+                // Limit fusion depth
             }
         }
     }
@@ -84,12 +91,14 @@ impl FusionSequence {
     /// Execute the fused operation sequence
     pub fn execute(&self, inputs: &[&Tensor]) -> Result<Tensor> {
         if inputs.is_empty() {
-            return Err(MinitensorError::invalid_operation("No input tensors provided"));
+            return Err(MinitensorError::invalid_operation(
+                "No input tensors provided",
+            ));
         }
 
         let device = inputs[0].device();
         let mut current_data = inputs[0].data().clone();
-        
+
         // Execute operations in sequence
         for (i, op) in self.operations.iter().enumerate() {
             let second_input = inputs.get(i + 1).map(|t| *t);
@@ -106,19 +115,31 @@ impl FusionSequence {
     }
 
     /// Execute a single operation in the fusion sequence
-    fn execute_single_op(&self, op: &FusedOp, input: &TensorData, second_input: Option<&Tensor>) -> Result<TensorData> {
+    fn execute_single_op(
+        &self,
+        op: &FusedOp,
+        input: &TensorData,
+        second_input: Option<&Tensor>,
+    ) -> Result<TensorData> {
         match self.dtype {
             DataType::Float32 => self.execute_f32_op(op, input, second_input),
             DataType::Float64 => self.execute_f64_op(op, input, second_input),
-            _ => Err(MinitensorError::invalid_operation("Unsupported data type for fusion")),
+            _ => Err(MinitensorError::invalid_operation(
+                "Unsupported data type for fusion",
+            )),
         }
     }
 
     /// Execute f32 operations
-    fn execute_f32_op(&self, op: &FusedOp, input: &TensorData, second_input: Option<&Tensor>) -> Result<TensorData> {
-        let input_slice = input.as_f32_slice().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get f32 slice from input")
-        })?;
+    fn execute_f32_op(
+        &self,
+        op: &FusedOp,
+        input: &TensorData,
+        second_input: Option<&Tensor>,
+    ) -> Result<TensorData> {
+        let input_slice = input
+            .as_f32_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice from input"))?;
 
         let mut output_data = TensorData::zeros(input_slice.len(), DataType::Float32);
         let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
@@ -135,9 +156,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] + second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Add operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Add operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Sub => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
@@ -147,9 +170,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] - second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Sub operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Sub operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Mul => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
@@ -159,9 +184,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] * second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Mul operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Mul operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Div => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
@@ -175,44 +202,51 @@ impl FusionSequence {
                         };
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Div operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Div operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::ReLU => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].max(0.0);
                 }
-            },
+            }
             FusedOp::Sigmoid => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = 1.0 / (1.0 + (-input_slice[i]).exp());
                 }
-            },
+            }
             FusedOp::Tanh => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].tanh();
                 }
-            },
+            }
             FusedOp::Exp => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].exp();
                 }
-            },
+            }
             FusedOp::Log => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].ln();
                 }
-            },
+            }
         }
 
         Ok(output_data)
     }
 
     /// Execute f64 operations
-    fn execute_f64_op(&self, op: &FusedOp, input: &TensorData, second_input: Option<&Tensor>) -> Result<TensorData> {
-        let input_slice = input.as_f64_slice().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get f64 slice from input")
-        })?;
+    fn execute_f64_op(
+        &self,
+        op: &FusedOp,
+        input: &TensorData,
+        second_input: Option<&Tensor>,
+    ) -> Result<TensorData> {
+        let input_slice = input
+            .as_f64_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice from input"))?;
 
         let mut output_data = TensorData::zeros(input_slice.len(), DataType::Float64);
         let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
@@ -229,9 +263,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] + second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Add operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Add operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Sub => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
@@ -241,9 +277,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] - second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Sub operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Sub operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Mul => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
@@ -253,9 +291,11 @@ impl FusionSequence {
                         output_slice[i] = input_slice[i] * second_slice[i];
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Mul operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Mul operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::Div => {
                 if let Some(second) = second_input {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
@@ -269,34 +309,36 @@ impl FusionSequence {
                         };
                     }
                 } else {
-                    return Err(MinitensorError::invalid_operation("Div operation requires two inputs"));
+                    return Err(MinitensorError::invalid_operation(
+                        "Div operation requires two inputs",
+                    ));
                 }
-            },
+            }
             FusedOp::ReLU => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].max(0.0);
                 }
-            },
+            }
             FusedOp::Sigmoid => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = 1.0 / (1.0 + (-input_slice[i]).exp());
                 }
-            },
+            }
             FusedOp::Tanh => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].tanh();
                 }
-            },
+            }
             FusedOp::Exp => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].exp();
                 }
-            },
+            }
             FusedOp::Log => {
                 for i in 0..input_slice.len() {
                     output_slice[i] = input_slice[i].ln();
                 }
-            },
+            }
         }
 
         Ok(output_data)
@@ -321,7 +363,7 @@ impl MemoryPool {
     /// Get a tensor data from the pool or allocate a new one
     pub fn get_or_allocate(&mut self, size: usize, dtype: DataType, device: Device) -> TensorData {
         let key = (dtype, device);
-        
+
         if let Some(pool) = self.pools.get_mut(&key) {
             // Try to find a suitable tensor in the pool
             for i in 0..pool.len() {
@@ -343,9 +385,9 @@ impl MemoryPool {
     /// Return a tensor data to the pool for reuse
     pub fn return_to_pool(&mut self, data: TensorData, dtype: DataType, device: Device) {
         let key = (dtype, device);
-        
+
         let pool = self.pools.entry(key).or_insert_with(VecDeque::new);
-        
+
         // Only keep the tensor if the pool isn't full
         if pool.len() < self.max_pool_size {
             pool.push_back(data);
@@ -362,7 +404,7 @@ impl MemoryPool {
     pub fn stats(&self) -> MemoryPoolStats {
         let mut total_tensors = 0;
         let mut total_memory = 0;
-        
+
         for pool in self.pools.values() {
             total_tensors += pool.len();
             for data in pool {
@@ -473,9 +515,12 @@ impl LazyTensor {
         for input in &mut self.inputs {
             // This is a simplified approach - in practice, you'd need interior mutability
             // or a different design to handle mutable references properly
-            input_values.push(input.computed_value.clone().ok_or_else(|| {
-                MinitensorError::internal_error("Input value not computed")
-            })?);
+            input_values.push(
+                input
+                    .computed_value
+                    .clone()
+                    .ok_or_else(|| MinitensorError::internal_error("Input value not computed"))?,
+            );
         }
 
         // Create a fusion sequence and execute it
@@ -486,7 +531,7 @@ impl LazyTensor {
         // In practice, you'd need to handle the conversion from TensorData to Tensor properly
         let result_data = get_pooled_tensor(self.shape.numel(), self.dtype, self.device);
         let result = Arc::new(result_data);
-        
+
         self.computed_value = Some(result.clone());
         Ok(result)
     }
@@ -501,25 +546,25 @@ mod tests {
     fn test_fusion_sequence_creation() {
         let mut sequence = FusionSequence::new(DataType::Float32);
         let shape = Shape::new(vec![4]);
-        
+
         sequence.add_operation(FusedOp::Add, shape.clone()).unwrap();
         sequence.add_operation(FusedOp::ReLU, shape).unwrap();
-        
+
         assert_eq!(sequence.operations.len(), 2);
     }
 
     #[test]
     fn test_memory_pool() {
         let mut pool = MemoryPool::new(5);
-        
+
         // Allocate some tensors
         let data1 = pool.get_or_allocate(100, DataType::Float32, Device::cpu());
         let data2 = pool.get_or_allocate(200, DataType::Float32, Device::cpu());
-        
+
         // Return them to pool
         pool.return_to_pool(data1, DataType::Float32, Device::cpu());
         pool.return_to_pool(data2, DataType::Float32, Device::cpu());
-        
+
         let stats = pool.stats();
         assert_eq!(stats.total_tensors, 2);
     }
@@ -528,9 +573,9 @@ mod tests {
     fn test_can_fuse_operations() {
         let mut sequence = FusionSequence::new(DataType::Float32);
         let shape = Shape::new(vec![4]);
-        
+
         sequence.add_operation(FusedOp::Add, shape.clone()).unwrap();
-        
+
         assert!(sequence.can_fuse_with(&FusedOp::ReLU, &shape));
         assert!(sequence.can_fuse_with(&FusedOp::Sigmoid, &shape));
     }
@@ -538,10 +583,10 @@ mod tests {
     #[test]
     fn test_global_memory_pool() {
         init_memory_pool(10);
-        
+
         let data = get_pooled_tensor(50, DataType::Float32, Device::cpu());
         return_pooled_tensor(data, DataType::Float32, Device::cpu());
-        
+
         if let Some(stats) = memory_pool_stats() {
             assert!(stats.total_tensors > 0);
         }

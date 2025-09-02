@@ -23,7 +23,9 @@ pub trait Backend: Send + Sync {
     fn device(&self) -> Device;
 
     /// Check if this backend is available
-    fn is_available() -> bool where Self: Sized;
+    fn is_available() -> bool
+    where
+        Self: Sized;
 
     /// Initialize the backend
     fn initialize() -> Result<Self>
@@ -46,24 +48,16 @@ pub trait Backend: Send + Sync {
 /// Get the appropriate backend for a device
 pub fn get_backend(device: Device) -> Result<Box<dyn Backend>> {
     match device.device_type() {
-        crate::device::DeviceType::Cpu => {
-            Ok(Box::new(cpu::CpuBackend::initialize()?))
-        }
+        crate::device::DeviceType::Cpu => Ok(Box::new(cpu::CpuBackend::initialize()?)),
         #[cfg(feature = "cuda")]
-        crate::device::DeviceType::CUDA => {
-            Ok(Box::new(cuda::CudaBackend::initialize()?))
-        }
+        crate::device::DeviceType::CUDA => Ok(Box::new(cuda::CudaBackend::initialize()?)),
         #[cfg(feature = "metal")]
-        crate::device::DeviceType::Metal => {
-            Ok(Box::new(metal::MetalBackend::initialize()?))
-        }
+        crate::device::DeviceType::Metal => Ok(Box::new(metal::MetalBackend::initialize()?)),
         #[cfg(feature = "opencl")]
-        crate::device::DeviceType::OpenCL => {
-            Ok(Box::new(opencl::OpenCLBackend::initialize()?))
-        }
+        crate::device::DeviceType::OpenCL => Ok(Box::new(opencl::OpenCLBackend::initialize()?)),
         _ => Err(crate::error::MinitensorError::backend_error(
             "Unknown",
-            format!("Backend not available for device: {}", device)
+            format!("Backend not available for device: {}", device),
         )),
     }
 }

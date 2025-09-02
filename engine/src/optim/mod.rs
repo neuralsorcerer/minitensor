@@ -4,23 +4,23 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-pub mod optimizer;
-pub mod sgd;
 pub mod adam;
+pub mod optimizer;
 pub mod rmsprop;
+pub mod sgd;
 pub mod utils;
 
 #[cfg(test)]
 mod tests;
 
-pub use optimizer::{
-    Optimizer, ParameterGroup, GradientClipping, LearningRateScheduler,
-    ConstantLR, StepLR, ExponentialLR, CosineAnnealingLR
-};
-pub use sgd::SGD;
 pub use adam::Adam;
+pub use optimizer::{
+    ConstantLR, CosineAnnealingLR, ExponentialLR, GradientClipping, LearningRateScheduler,
+    Optimizer, ParameterGroup, StepLR,
+};
 pub use rmsprop::RMSprop;
+pub use sgd::SGD;
 pub use utils::{
-    GradientUtils, SchedulerUtils,
-    LinearWarmupScheduler, PolynomialDecayScheduler, MultiStepScheduler, CompositeScheduler
+    CompositeScheduler, GradientUtils, LinearWarmupScheduler, MultiStepScheduler,
+    PolynomialDecayScheduler, SchedulerUtils,
 };

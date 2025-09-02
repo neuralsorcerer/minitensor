@@ -4,10 +4,9 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-
 use crate::{
-    tensor::{Tensor, TensorData, DataType, Shape},
     error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
@@ -78,18 +77,24 @@ fn cmp_f32(
     output_shape: &Shape,
     op: impl Fn(f32, f32) -> bool,
 ) -> Result<()> {
-    let lhs_slice = lhs
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice from lhs tensor"))?;
-    let rhs_slice = rhs
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice from rhs tensor"))?;
-    let output_slice = output_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from output data"))?;
-    broadcast_compare_op(lhs_slice, rhs_slice, output_slice, lhs.shape(), rhs.shape(), output_shape, op)
+    let lhs_slice = lhs.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
+    })?;
+    let rhs_slice = rhs.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
+    })?;
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from output data")
+    })?;
+    broadcast_compare_op(
+        lhs_slice,
+        rhs_slice,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )
 }
 
 fn cmp_f64(
@@ -99,18 +104,24 @@ fn cmp_f64(
     output_shape: &Shape,
     op: impl Fn(f64, f64) -> bool,
 ) -> Result<()> {
-    let lhs_slice = lhs
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice from lhs tensor"))?;
-    let rhs_slice = rhs
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice from rhs tensor"))?;
-    let output_slice = output_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from output data"))?;
-    broadcast_compare_op(lhs_slice, rhs_slice, output_slice, lhs.shape(), rhs.shape(), output_shape, op)
+    let lhs_slice = lhs.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
+    })?;
+    let rhs_slice = rhs.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
+    })?;
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from output data")
+    })?;
+    broadcast_compare_op(
+        lhs_slice,
+        rhs_slice,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )
 }
 
 fn cmp_i32(
@@ -120,18 +131,24 @@ fn cmp_i32(
     output_shape: &Shape,
     op: impl Fn(i32, i32) -> bool,
 ) -> Result<()> {
-    let lhs_slice = lhs
-        .data()
-        .as_i32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice from lhs tensor"))?;
-    let rhs_slice = rhs
-        .data()
-        .as_i32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice from rhs tensor"))?;
-    let output_slice = output_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from output data"))?;
-    broadcast_compare_op(lhs_slice, rhs_slice, output_slice, lhs.shape(), rhs.shape(), output_shape, op)
+    let lhs_slice = lhs.data().as_i32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
+    })?;
+    let rhs_slice = rhs.data().as_i32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
+    })?;
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from output data")
+    })?;
+    broadcast_compare_op(
+        lhs_slice,
+        rhs_slice,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )
 }
 
 fn cmp_i64(
@@ -141,18 +158,24 @@ fn cmp_i64(
     output_shape: &Shape,
     op: impl Fn(i64, i64) -> bool,
 ) -> Result<()> {
-    let lhs_slice = lhs
-        .data()
-        .as_i64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice from lhs tensor"))?;
-    let rhs_slice = rhs
-        .data()
-        .as_i64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice from rhs tensor"))?;
-    let output_slice = output_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from output data"))?;
-    broadcast_compare_op(lhs_slice, rhs_slice, output_slice, lhs.shape(), rhs.shape(), output_shape, op)
+    let lhs_slice = lhs.data().as_i64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
+    })?;
+    let rhs_slice = rhs.data().as_i64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
+    })?;
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from output data")
+    })?;
+    broadcast_compare_op(
+        lhs_slice,
+        rhs_slice,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )
 }
 
 fn cmp_bool(
@@ -162,18 +185,24 @@ fn cmp_bool(
     output_shape: &Shape,
     op: impl Fn(bool, bool) -> bool,
 ) -> Result<()> {
-    let lhs_slice = lhs
-        .data()
-        .as_bool_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from lhs tensor"))?;
-    let rhs_slice = rhs
-        .data()
-        .as_bool_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from rhs tensor"))?;
-    let output_slice = output_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from output data"))?;
-    broadcast_compare_op(lhs_slice, rhs_slice, output_slice, lhs.shape(), rhs.shape(), output_shape, op)
+    let lhs_slice = lhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
+    })?;
+    let rhs_slice = rhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
+    })?;
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from output data")
+    })?;
+    broadcast_compare_op(
+        lhs_slice,
+        rhs_slice,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )
 }
 
 macro_rules! cmp_op {
@@ -236,12 +265,21 @@ cmp_op!(ge, >=, false);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{tensor::{TensorData, Shape, DataType}, device::Device};
+    use crate::{
+        device::Device,
+        tensor::{DataType, Shape, TensorData},
+    };
 
     fn tensor_from_vec_f32(data: Vec<f32>) -> Tensor {
         let shape = Shape::new(vec![data.len()]);
         let data = TensorData::from_vec_f32(data, Device::cpu());
-        Tensor::new(Arc::new(data), shape, DataType::Float32, Device::cpu(), false)
+        Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
     }
 
     #[test]

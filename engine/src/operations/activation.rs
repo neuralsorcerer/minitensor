@@ -7,8 +7,7 @@
 use crate::{
     autograd::{
         add_to_graph, CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward,
-        ReluBackward, SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward,
-        TanhBackward,
+        ReluBackward, SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
@@ -429,7 +428,9 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
     match tensor.dtype() {
         DataType::Float32 => {
             let slice = exp_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from exponent data")
+                MinitensorError::internal_error(
+                    "Failed to get mutable f32 slice from exponent data",
+                )
             })?;
             for val in slice.iter_mut() {
                 *val = exponent as f32;
@@ -437,7 +438,9 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         }
         DataType::Float64 => {
             let slice = exp_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from exponent data")
+                MinitensorError::internal_error(
+                    "Failed to get mutable f64 slice from exponent data",
+                )
             })?;
             for val in slice.iter_mut() {
                 *val = exponent;
@@ -1004,7 +1007,11 @@ fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     // Compute the number of groups before and after the softmax dimension. This
     // allows us to iterate over all slices along `dim` for tensors of arbitrary
     // rank using row-major indexing.
-    let before: usize = if dim == 0 { 1 } else { dims[..dim].iter().product() };
+    let before: usize = if dim == 0 {
+        1
+    } else {
+        dims[..dim].iter().product()
+    };
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -1055,7 +1062,11 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
 
-    let before: usize = if dim == 0 { 1 } else { dims[..dim].iter().product() };
+    let before: usize = if dim == 0 {
+        1
+    } else {
+        dims[..dim].iter().product()
+    };
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -1753,7 +1764,12 @@ mod tests {
     fn test_powf_gradient() {
         let tensor = create_test_tensor_f32(vec![2.0, 3.0], vec![2], true);
         let result = powf(&tensor, 3.0).unwrap();
-        let ones = Tensor::ones(result.shape().clone(), result.dtype(), result.device(), false);
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
         let grads = autograd::backward(&result, Some(ones)).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();

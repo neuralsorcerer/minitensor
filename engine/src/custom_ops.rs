@@ -7,10 +7,10 @@
 pub mod examples;
 
 use crate::{
-    tensor::{Tensor, DataType, Shape},
-    error::{MinitensorError, Result},
-    autograd::{GradientFunction, TensorId, add_to_graph},
+    autograd::{add_to_graph, GradientFunction, TensorId},
     device::Device,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -19,25 +19,29 @@ use std::sync::{Arc, RwLock};
 pub trait CustomOp: Send + Sync {
     /// The name of the operation (must be unique)
     fn name(&self) -> &str;
-    
+
     /// Validate input tensors before execution
     fn validate_inputs(&self, inputs: &[&Tensor]) -> Result<()>;
-    
+
     /// Execute the forward pass of the operation
     fn forward(&self, inputs: &[&Tensor]) -> Result<Tensor>;
-    
+
     /// Create a gradient function for the backward pass
-    fn create_gradient_function(&self, inputs: &[&Tensor], output: &Tensor) -> Option<Arc<dyn GradientFunction>>;
-    
+    fn create_gradient_function(
+        &self,
+        inputs: &[&Tensor],
+        output: &Tensor,
+    ) -> Option<Arc<dyn GradientFunction>>;
+
     /// Get the expected number of input tensors
     fn num_inputs(&self) -> usize;
-    
+
     /// Get the expected output shape given input shapes
     fn output_shape(&self, input_shapes: &[&Shape]) -> Result<Shape>;
-    
+
     /// Get the expected output data type given input data types
     fn output_dtype(&self, input_dtypes: &[DataType]) -> Result<DataType>;
-    
+
     /// Get the expected output device given input devices
     fn output_device(&self, input_devices: &[&Device]) -> Result<Device>;
 }
@@ -58,25 +62,26 @@ impl CustomOpRegistry {
     /// Register a custom operation
     pub fn register(&self, op: Arc<dyn CustomOp>) -> Result<()> {
         let name = op.name().to_string();
-        
+
         // Validate operation name
         if name.is_empty() {
             return Err(MinitensorError::invalid_argument(
-                "Operation name cannot be empty"
+                "Operation name cannot be empty",
             ));
         }
-        
+
         let mut ops = self.operations.write().map_err(|_| {
             MinitensorError::internal_error("Failed to acquire registry write lock")
         })?;
-        
+
         // Check for duplicate names
         if ops.contains_key(&name) {
             return Err(MinitensorError::invalid_argument(&format!(
-                "Operation '{}' is already registered", name
+                "Operation '{}' is already registered",
+                name
             )));
         }
-        
+
         ops.insert(name, op);
         Ok(())
     }
@@ -86,57 +91,59 @@ impl CustomOpRegistry {
         let mut ops = self.operations.write().map_err(|_| {
             MinitensorError::internal_error("Failed to acquire registry write lock")
         })?;
-        
+
         if ops.remove(name).is_none() {
             return Err(MinitensorError::invalid_argument(&format!(
-                "Operation '{}' is not registered", name
+                "Operation '{}' is not registered",
+                name
             )));
         }
-        
+
         Ok(())
     }
 
     /// Get a registered operation by name
     pub fn get(&self, name: &str) -> Result<Arc<dyn CustomOp>> {
-        let ops = self.operations.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire registry read lock")
-        })?;
-        
-        ops.get(name)
-            .cloned()
-            .ok_or_else(|| MinitensorError::invalid_argument(&format!(
-                "Operation '{}' is not registered", name
-            )))
+        let ops = self
+            .operations
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire registry read lock"))?;
+
+        ops.get(name).cloned().ok_or_else(|| {
+            MinitensorError::invalid_argument(&format!("Operation '{}' is not registered", name))
+        })
     }
 
     /// List all registered operation names
     pub fn list_operations(&self) -> Result<Vec<String>> {
-        let ops = self.operations.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire registry read lock")
-        })?;
-        
+        let ops = self
+            .operations
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire registry read lock"))?;
+
         Ok(ops.keys().cloned().collect())
     }
 
     /// Check if an operation is registered
     pub fn is_registered(&self, name: &str) -> Result<bool> {
-        let ops = self.operations.read().map_err(|_| {
-            MinitensorError::internal_error("Failed to acquire registry read lock")
-        })?;
-        
+        let ops = self
+            .operations
+            .read()
+            .map_err(|_| MinitensorError::internal_error("Failed to acquire registry read lock"))?;
+
         Ok(ops.contains_key(name))
     }
 
     /// Execute a registered custom operation
     pub fn execute(&self, name: &str, inputs: &[&Tensor]) -> Result<Tensor> {
         let op = self.get(name)?;
-        
+
         // Validate inputs
         op.validate_inputs(inputs)?;
-        
+
         // Execute forward pass
         let output = op.forward(inputs)?;
-        
+
         // Set up gradient tracking if any input requires gradients
         let requires_grad = inputs.iter().any(|t| t.requires_grad());
         if requires_grad {
@@ -144,7 +151,7 @@ impl CustomOpRegistry {
                 add_to_graph(&output, Some(grad_fn))?;
             }
         }
-        
+
         Ok(output)
     }
 }
@@ -156,9 +163,8 @@ impl Default for CustomOpRegistry {
 }
 
 /// Global custom operation registry
-static GLOBAL_REGISTRY: std::sync::LazyLock<CustomOpRegistry> = std::sync::LazyLock::new(|| {
-    CustomOpRegistry::new()
-});
+static GLOBAL_REGISTRY: std::sync::LazyLock<CustomOpRegistry> =
+    std::sync::LazyLock::new(|| CustomOpRegistry::new());
 
 /// Register a custom operation globally
 pub fn register_custom_op(op: Arc<dyn CustomOp>) -> Result<()> {
@@ -192,7 +198,17 @@ pub struct CustomOpBackward {
     pub input_shapes: Vec<Vec<usize>>,
     pub input_dtypes: Vec<DataType>,
     pub input_devices: Vec<Device>,
-    pub backward_fn: Arc<dyn Fn(&Tensor, &[TensorId], &[Vec<usize>], &[DataType], &[Device]) -> Result<HashMap<TensorId, Tensor>> + Send + Sync>,
+    pub backward_fn: Arc<
+        dyn Fn(
+                &Tensor,
+                &[TensorId],
+                &[Vec<usize>],
+                &[DataType],
+                &[Device],
+            ) -> Result<HashMap<TensorId, Tensor>>
+            + Send
+            + Sync,
+    >,
 }
 
 impl GradientFunction for CustomOpBackward {
@@ -216,7 +232,19 @@ pub struct CustomOpBuilder {
     name: String,
     num_inputs: usize,
     forward_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>>,
-    backward_fn: Option<Arc<dyn Fn(&Tensor, &[TensorId], &[Vec<usize>], &[DataType], &[Device]) -> Result<HashMap<TensorId, Tensor>> + Send + Sync>>,
+    backward_fn: Option<
+        Arc<
+            dyn Fn(
+                    &Tensor,
+                    &[TensorId],
+                    &[Vec<usize>],
+                    &[DataType],
+                    &[Device],
+                ) -> Result<HashMap<TensorId, Tensor>>
+                + Send
+                + Sync,
+        >,
+    >,
     validate_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>>,
     output_shape_fn: Option<Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>>,
     output_dtype_fn: Option<Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>>,
@@ -250,7 +278,16 @@ impl CustomOpBuilder {
     /// Set the backward function
     pub fn backward<F>(mut self, f: F) -> Self
     where
-        F: Fn(&Tensor, &[TensorId], &[Vec<usize>], &[DataType], &[Device]) -> Result<HashMap<TensorId, Tensor>> + Send + Sync + 'static,
+        F: Fn(
+                &Tensor,
+                &[TensorId],
+                &[Vec<usize>],
+                &[DataType],
+                &[Device],
+            ) -> Result<HashMap<TensorId, Tensor>>
+            + Send
+            + Sync
+            + 'static,
     {
         self.backward_fn = Some(Arc::new(f));
         self
@@ -294,9 +331,9 @@ impl CustomOpBuilder {
 
     /// Build the custom operation
     pub fn build(self) -> Result<Arc<dyn CustomOp>> {
-        let forward_fn = self.forward_fn.ok_or_else(|| {
-            MinitensorError::invalid_argument("Forward function is required")
-        })?;
+        let forward_fn = self
+            .forward_fn
+            .ok_or_else(|| MinitensorError::invalid_argument("Forward function is required"))?;
 
         Ok(Arc::new(BuiltCustomOp {
             name: self.name,
@@ -316,7 +353,19 @@ struct BuiltCustomOp {
     name: String,
     num_inputs: usize,
     forward_fn: Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>,
-    backward_fn: Option<Arc<dyn Fn(&Tensor, &[TensorId], &[Vec<usize>], &[DataType], &[Device]) -> Result<HashMap<TensorId, Tensor>> + Send + Sync>>,
+    backward_fn: Option<
+        Arc<
+            dyn Fn(
+                    &Tensor,
+                    &[TensorId],
+                    &[Vec<usize>],
+                    &[DataType],
+                    &[Device],
+                ) -> Result<HashMap<TensorId, Tensor>>
+                + Send
+                + Sync,
+        >,
+    >,
     validate_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>>,
     output_shape_fn: Option<Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>>,
     output_dtype_fn: Option<Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>>,
@@ -333,7 +382,9 @@ impl CustomOp for BuiltCustomOp {
         if inputs.len() != self.num_inputs {
             return Err(MinitensorError::invalid_argument(&format!(
                 "Operation '{}' expects {} inputs, got {}",
-                self.name, self.num_inputs, inputs.len()
+                self.name,
+                self.num_inputs,
+                inputs.len()
             )));
         }
 
@@ -349,10 +400,15 @@ impl CustomOp for BuiltCustomOp {
         (self.forward_fn)(inputs)
     }
 
-    fn create_gradient_function(&self, inputs: &[&Tensor], _output: &Tensor) -> Option<Arc<dyn GradientFunction>> {
+    fn create_gradient_function(
+        &self,
+        inputs: &[&Tensor],
+        _output: &Tensor,
+    ) -> Option<Arc<dyn GradientFunction>> {
         if let Some(backward_fn) = &self.backward_fn {
             let input_ids: Vec<TensorId> = inputs.iter().map(|t| t.id()).collect();
-            let input_shapes: Vec<Vec<usize>> = inputs.iter().map(|t| t.shape().dims().to_vec()).collect();
+            let input_shapes: Vec<Vec<usize>> =
+                inputs.iter().map(|t| t.shape().dims().to_vec()).collect();
             let input_dtypes: Vec<DataType> = inputs.iter().map(|t| t.dtype()).collect();
             let input_devices: Vec<Device> = inputs.iter().map(|t| t.device()).collect();
 
@@ -379,7 +435,9 @@ impl CustomOp for BuiltCustomOp {
         } else {
             // Default: use the shape of the first input
             if input_shapes.is_empty() {
-                Err(MinitensorError::invalid_argument("No input shapes provided"))
+                Err(MinitensorError::invalid_argument(
+                    "No input shapes provided",
+                ))
             } else {
                 Ok(input_shapes[0].clone())
             }
@@ -392,7 +450,9 @@ impl CustomOp for BuiltCustomOp {
         } else {
             // Default: use the dtype of the first input
             if input_dtypes.is_empty() {
-                Err(MinitensorError::invalid_argument("No input dtypes provided"))
+                Err(MinitensorError::invalid_argument(
+                    "No input dtypes provided",
+                ))
             } else {
                 Ok(input_dtypes[0])
             }
@@ -405,7 +465,9 @@ impl CustomOp for BuiltCustomOp {
         } else {
             // Default: use the device of the first input
             if input_devices.is_empty() {
-                Err(MinitensorError::invalid_argument("No input devices provided"))
+                Err(MinitensorError::invalid_argument(
+                    "No input devices provided",
+                ))
             } else {
                 Ok(input_devices[0].clone())
             }
@@ -416,12 +478,11 @@ impl CustomOp for BuiltCustomOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_custom_op_registry() {
         let registry = CustomOpRegistry::new();
-        
+
         // Create a simple custom operation
         let op = CustomOpBuilder::new("test_add", 2)
             .forward(|inputs| {
@@ -430,17 +491,17 @@ mod tests {
             })
             .build()
             .unwrap();
-        
+
         // Register the operation
         registry.register(op).unwrap();
-        
+
         // Check if it's registered
         assert!(registry.is_registered("test_add").unwrap());
-        
+
         // List operations
         let ops = registry.list_operations().unwrap();
         assert!(ops.contains(&"test_add".to_string()));
-        
+
         // Unregister the operation
         registry.unregister("test_add").unwrap();
         assert!(!registry.is_registered("test_add").unwrap());
@@ -449,9 +510,7 @@ mod tests {
     #[test]
     fn test_custom_op_builder() {
         let op = CustomOpBuilder::new("test_mul", 2)
-            .forward(|inputs| {
-                crate::operations::arithmetic::mul(inputs[0], inputs[1])
-            })
+            .forward(|inputs| crate::operations::arithmetic::mul(inputs[0], inputs[1]))
             .validate(|inputs| {
                 if inputs[0].shape() != inputs[1].shape() {
                     return Err(MinitensorError::shape_mismatch(
@@ -461,12 +520,10 @@ mod tests {
                 }
                 Ok(())
             })
-            .output_shape(|input_shapes| {
-                Ok(input_shapes[0].clone())
-            })
+            .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
             .build()
             .unwrap();
-        
+
         assert_eq!(op.name(), "test_mul");
         assert_eq!(op.num_inputs(), 2);
     }
@@ -474,18 +531,16 @@ mod tests {
     #[test]
     fn test_global_registry() {
         let op = CustomOpBuilder::new("global_test", 1)
-            .forward(|inputs| {
-                Ok(inputs[0].clone())
-            })
+            .forward(|inputs| Ok(inputs[0].clone()))
             .build()
             .unwrap();
-        
+
         register_custom_op(op).unwrap();
         assert!(is_custom_op_registered("global_test").unwrap());
-        
+
         let ops = list_custom_ops().unwrap();
         assert!(ops.contains(&"global_test".to_string()));
-        
+
         unregister_custom_op("global_test").unwrap();
         assert!(!is_custom_op_registered("global_test").unwrap());
     }

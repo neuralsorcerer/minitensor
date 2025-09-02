@@ -4,11 +4,7 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{
-    tensor::Tensor,
-    error::Result,
-    nn::layer::Layer,
-};
+use crate::{error::Result, nn::layer::Layer, tensor::Tensor};
 use std::collections::HashMap;
 
 /// Sequential container for neural network layers
@@ -78,11 +74,11 @@ impl Default for Sequential {
 impl Layer for Sequential {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         let mut output = input.clone();
-        
+
         for layer in &mut self.layers {
             output = layer.forward(&output)?;
         }
-        
+
         Ok(output)
     }
 
@@ -125,7 +121,7 @@ impl Sequential {
     /// Get named parameters of the sequential model
     pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut named_params = HashMap::new();
-        
+
         for (i, layer) in self.layers.iter().enumerate() {
             let layer_params = layer.parameters();
             for (j, param) in layer_params.iter().enumerate() {
@@ -133,14 +129,14 @@ impl Sequential {
                 named_params.insert(name, *param);
             }
         }
-        
+
         named_params
     }
 
     /// Get named mutable parameters of the sequential model
     pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut named_params = HashMap::new();
-        
+
         for (i, layer) in self.layers.iter_mut().enumerate() {
             let layer_params = layer.parameters_mut();
             for (j, param) in layer_params.into_iter().enumerate() {
@@ -148,7 +144,7 @@ impl Sequential {
                 named_params.insert(name, param);
             }
         }
-        
+
         named_params
     }
 }
@@ -161,9 +157,7 @@ pub struct SequentialBuilder {
 impl SequentialBuilder {
     /// Create a new sequential builder
     pub fn new() -> Self {
-        Self {
-            layers: Vec::new(),
-        }
+        Self { layers: Vec::new() }
     }
 
     /// Add a layer to the builder
@@ -188,9 +182,9 @@ impl Default for SequentialBuilder {
 mod tests {
     use super::*;
     use crate::{
-        tensor::{Tensor, Shape, DataType},
         device::Device,
         nn::layer::Layer,
+        tensor::{DataType, Shape, Tensor},
     };
 
     // Mock layer for testing

@@ -148,39 +148,34 @@ impl SerializedTensor {
     pub fn from_tensor(tensor: &Tensor) -> Result<Self> {
         let data = match tensor.dtype() {
             DataType::Float32 => {
-                let slice = tensor.data().as_f32_slice()
-                    .ok_or_else(|| MinitensorError::serialization_error("Failed to get f32 data"))?;
-                slice.iter()
-                    .flat_map(|&x| x.to_le_bytes())
-                    .collect()
+                let slice = tensor.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::serialization_error("Failed to get f32 data")
+                })?;
+                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
             DataType::Float64 => {
-                let slice = tensor.data().as_f64_slice()
-                    .ok_or_else(|| MinitensorError::serialization_error("Failed to get f64 data"))?;
-                slice.iter()
-                    .flat_map(|&x| x.to_le_bytes())
-                    .collect()
+                let slice = tensor.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::serialization_error("Failed to get f64 data")
+                })?;
+                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
             DataType::Int32 => {
-                let slice = tensor.data().as_i32_slice()
-                    .ok_or_else(|| MinitensorError::serialization_error("Failed to get i32 data"))?;
-                slice.iter()
-                    .flat_map(|&x| x.to_le_bytes())
-                    .collect()
+                let slice = tensor.data().as_i32_slice().ok_or_else(|| {
+                    MinitensorError::serialization_error("Failed to get i32 data")
+                })?;
+                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
             DataType::Int64 => {
-                let slice = tensor.data().as_i64_slice()
-                    .ok_or_else(|| MinitensorError::serialization_error("Failed to get i64 data"))?;
-                slice.iter()
-                    .flat_map(|&x| x.to_le_bytes())
-                    .collect()
+                let slice = tensor.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::serialization_error("Failed to get i64 data")
+                })?;
+                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
             DataType::Bool => {
-                let slice = tensor.data().as_bool_slice()
-                    .ok_or_else(|| MinitensorError::serialization_error("Failed to get bool data"))?;
-                slice.iter()
-                    .map(|&x| if x { 1u8 } else { 0u8 })
-                    .collect()
+                let slice = tensor.data().as_bool_slice().ok_or_else(|| {
+                    MinitensorError::serialization_error("Failed to get bool data")
+                })?;
+                slice.iter().map(|&x| if x { 1u8 } else { 0u8 }).collect()
             }
         };
 
@@ -202,11 +197,14 @@ impl SerializedTensor {
         let tensor_data = match self.dtype {
             DataType::Float32 => {
                 if self.data.len() != numel * 4 {
-                    return Err(MinitensorError::serialization_error("Invalid f32 data length"));
+                    return Err(MinitensorError::serialization_error(
+                        "Invalid f32 data length",
+                    ));
                 }
                 let mut values = Vec::with_capacity(numel);
                 for chunk in self.data.chunks_exact(4) {
-                    let bytes: [u8; 4] = chunk.try_into()
+                    let bytes: [u8; 4] = chunk
+                        .try_into()
                         .map_err(|_| MinitensorError::serialization_error("Invalid f32 bytes"))?;
                     values.push(f32::from_le_bytes(bytes));
                 }
@@ -214,11 +212,14 @@ impl SerializedTensor {
             }
             DataType::Float64 => {
                 if self.data.len() != numel * 8 {
-                    return Err(MinitensorError::serialization_error("Invalid f64 data length"));
+                    return Err(MinitensorError::serialization_error(
+                        "Invalid f64 data length",
+                    ));
                 }
                 let mut values = Vec::with_capacity(numel);
                 for chunk in self.data.chunks_exact(8) {
-                    let bytes: [u8; 8] = chunk.try_into()
+                    let bytes: [u8; 8] = chunk
+                        .try_into()
                         .map_err(|_| MinitensorError::serialization_error("Invalid f64 bytes"))?;
                     values.push(f64::from_le_bytes(bytes));
                 }
@@ -226,11 +227,14 @@ impl SerializedTensor {
             }
             DataType::Int32 => {
                 if self.data.len() != numel * 4 {
-                    return Err(MinitensorError::serialization_error("Invalid i32 data length"));
+                    return Err(MinitensorError::serialization_error(
+                        "Invalid i32 data length",
+                    ));
                 }
                 let mut values = Vec::with_capacity(numel);
                 for chunk in self.data.chunks_exact(4) {
-                    let bytes: [u8; 4] = chunk.try_into()
+                    let bytes: [u8; 4] = chunk
+                        .try_into()
                         .map_err(|_| MinitensorError::serialization_error("Invalid i32 bytes"))?;
                     values.push(i32::from_le_bytes(bytes));
                 }
@@ -238,11 +242,14 @@ impl SerializedTensor {
             }
             DataType::Int64 => {
                 if self.data.len() != numel * 8 {
-                    return Err(MinitensorError::serialization_error("Invalid i64 data length"));
+                    return Err(MinitensorError::serialization_error(
+                        "Invalid i64 data length",
+                    ));
                 }
                 let mut values = Vec::with_capacity(numel);
                 for chunk in self.data.chunks_exact(8) {
-                    let bytes: [u8; 8] = chunk.try_into()
+                    let bytes: [u8; 8] = chunk
+                        .try_into()
                         .map_err(|_| MinitensorError::serialization_error("Invalid i64 bytes"))?;
                     values.push(i64::from_le_bytes(bytes));
                 }
@@ -250,7 +257,9 @@ impl SerializedTensor {
             }
             DataType::Bool => {
                 if self.data.len() != numel {
-                    return Err(MinitensorError::serialization_error("Invalid bool data length"));
+                    return Err(MinitensorError::serialization_error(
+                        "Invalid bool data length",
+                    ));
                 }
                 let values: Vec<bool> = self.data.iter().map(|&x| x != 0).collect();
                 crate::tensor::TensorData::from_vec_bool(values, device)
@@ -313,15 +322,17 @@ impl StateDict {
 
     /// Load parameter tensor
     pub fn load_parameter(&self, name: &str, device: Option<Device>) -> Result<Tensor> {
-        let serialized = self.parameters.get(name)
-            .ok_or_else(|| MinitensorError::serialization_error(&format!("Parameter '{}' not found", name)))?;
+        let serialized = self.parameters.get(name).ok_or_else(|| {
+            MinitensorError::serialization_error(&format!("Parameter '{}' not found", name))
+        })?;
         serialized.to_tensor(device)
     }
 
     /// Load buffer tensor
     pub fn load_buffer(&self, name: &str, device: Option<Device>) -> Result<Tensor> {
-        let serialized = self.buffers.get(name)
-            .ok_or_else(|| MinitensorError::serialization_error(&format!("Buffer '{}' not found", name)))?;
+        let serialized = self.buffers.get(name).ok_or_else(|| {
+            MinitensorError::serialization_error(&format!("Buffer '{}' not found", name))
+        })?;
         serialized.to_tensor(device)
     }
 }
@@ -409,51 +420,68 @@ impl ModelSerializer {
         path: P,
         format: SerializationFormat,
     ) -> Result<()> {
-        let file = File::create(path)
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to create file: {}", e)))?;
+        let file = File::create(path).map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to create file: {}", e))
+        })?;
         let mut writer = BufWriter::new(file);
 
         match format {
             SerializationFormat::Json => {
-                serde_json::to_writer_pretty(&mut writer, model)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("JSON serialization failed: {}", e)))?;
+                serde_json::to_writer_pretty(&mut writer, model).map_err(|e| {
+                    MinitensorError::serialization_error(&format!(
+                        "JSON serialization failed: {}",
+                        e
+                    ))
+                })?;
             }
             SerializationFormat::Binary => {
-                bincode::serialize_into(&mut writer, model)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("Binary serialization failed: {}", e)))?;
+                bincode::serialize_into(&mut writer, model).map_err(|e| {
+                    MinitensorError::serialization_error(&format!(
+                        "Binary serialization failed: {}",
+                        e
+                    ))
+                })?;
             }
             SerializationFormat::MessagePack => {
-                rmp_serde::encode::write(&mut writer, model)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("MessagePack serialization failed: {}", e)))?;
+                rmp_serde::encode::write(&mut writer, model).map_err(|e| {
+                    MinitensorError::serialization_error(&format!(
+                        "MessagePack serialization failed: {}",
+                        e
+                    ))
+                })?;
             }
         }
 
-        writer.flush()
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to flush writer: {}", e)))?;
+        writer.flush().map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to flush writer: {}", e))
+        })?;
         Ok(())
     }
 
     /// Load model from file
-    pub fn load<P: AsRef<Path>>(
-        path: P,
-        format: SerializationFormat,
-    ) -> Result<SerializedModel> {
-        let file = File::open(path)
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
+    pub fn load<P: AsRef<Path>>(path: P, format: SerializationFormat) -> Result<SerializedModel> {
+        let file = File::open(path).map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to open file: {}", e))
+        })?;
         let mut reader = BufReader::new(file);
 
         let model = match format {
-            SerializationFormat::Json => {
-                serde_json::from_reader(&mut reader)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("JSON deserialization failed: {}", e)))?
-            }
-            SerializationFormat::Binary => {
-                bincode::deserialize_from(&mut reader)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("Binary deserialization failed: {}", e)))?
-            }
+            SerializationFormat::Json => serde_json::from_reader(&mut reader).map_err(|e| {
+                MinitensorError::serialization_error(&format!("JSON deserialization failed: {}", e))
+            })?,
+            SerializationFormat::Binary => bincode::deserialize_from(&mut reader).map_err(|e| {
+                MinitensorError::serialization_error(&format!(
+                    "Binary deserialization failed: {}",
+                    e
+                ))
+            })?,
             SerializationFormat::MessagePack => {
-                rmp_serde::decode::from_read(&mut reader)
-                    .map_err(|e| MinitensorError::serialization_error(&format!("MessagePack deserialization failed: {}", e)))?
+                rmp_serde::decode::from_read(&mut reader).map_err(|e| {
+                    MinitensorError::serialization_error(&format!(
+                        "MessagePack deserialization failed: {}",
+                        e
+                    ))
+                })?
             }
         };
 
@@ -461,10 +489,7 @@ impl ModelSerializer {
     }
 
     /// Save model with automatic format detection from extension
-    pub fn save_auto<P: AsRef<Path>>(
-        model: &SerializedModel,
-        path: P,
-    ) -> Result<()> {
+    pub fn save_auto<P: AsRef<Path>>(model: &SerializedModel, path: P) -> Result<()> {
         let path_ref = path.as_ref();
         let format = match path_ref.extension().and_then(|ext| ext.to_str()) {
             Some("json") => SerializationFormat::Json,
@@ -485,12 +510,17 @@ impl ModelSerializer {
             Some("msgpack") => SerializationFormat::MessagePack,
             _ => {
                 // Try to detect format by reading first few bytes
-                let mut file = File::open(path_ref)
-                    .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
+                let mut file = File::open(path_ref).map_err(|e| {
+                    MinitensorError::serialization_error(format!("Failed to open file: {}", e))
+                })?;
                 let mut buffer = [0u8; 4];
-                file.read_exact(&mut buffer)
-                    .map_err(|e| MinitensorError::serialization_error(format!("Failed to read file header: {}", e)))?;
-                
+                file.read_exact(&mut buffer).map_err(|e| {
+                    MinitensorError::serialization_error(format!(
+                        "Failed to read file header: {}",
+                        e
+                    ))
+                })?;
+
                 if buffer[0] == b'{' {
                     SerializationFormat::Json
                 } else if buffer[0] == 0x90 || buffer[0] == 0x80 {
@@ -524,7 +554,8 @@ impl DeploymentModel {
     pub fn from_serialized_model(model: &SerializedModel) -> Self {
         Self {
             name: model.metadata.name.clone(),
-            version: format!("{}.{}.{}", 
+            version: format!(
+                "{}.{}.{}",
                 model.metadata.version.major,
                 model.metadata.version.minor,
                 model.metadata.version.patch
@@ -544,26 +575,37 @@ impl DeploymentModel {
 
     /// Save deployment model (always uses binary format for efficiency)
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let file = File::create(path)
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to create file: {}", e)))?;
+        let file = File::create(path).map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to create file: {}", e))
+        })?;
         let mut writer = BufWriter::new(file);
-        
-        bincode::serialize_into(&mut writer, self)
-            .map_err(|e| MinitensorError::serialization_error(&format!("Deployment model serialization failed: {}", e)))?;
-        
-        writer.flush()
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to flush writer: {}", e)))?;
+
+        bincode::serialize_into(&mut writer, self).map_err(|e| {
+            MinitensorError::serialization_error(&format!(
+                "Deployment model serialization failed: {}",
+                e
+            ))
+        })?;
+
+        writer.flush().map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to flush writer: {}", e))
+        })?;
         Ok(())
     }
 
     /// Load deployment model
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)
-            .map_err(|e| MinitensorError::serialization_error(format!("Failed to open file: {}", e)))?;
+        let file = File::open(path).map_err(|e| {
+            MinitensorError::serialization_error(format!("Failed to open file: {}", e))
+        })?;
         let reader = BufReader::new(file);
-        
-        bincode::deserialize_from(reader)
-            .map_err(|e| MinitensorError::serialization_error(&format!("Deployment model deserialization failed: {}", e)))
+
+        bincode::deserialize_from(reader).map_err(|e| {
+            MinitensorError::serialization_error(&format!(
+                "Deployment model deserialization failed: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -609,17 +651,21 @@ mod tests {
     #[test]
     fn test_state_dict() {
         let mut state_dict = StateDict::new();
-        
+
         // Create test tensor
         let shape = Shape::new(vec![2, 3]);
         let tensor = Tensor::zeros(shape, DataType::Float32, Device::cpu(), false);
-        
+
         // Add parameter
-        state_dict.add_parameter("weight".to_string(), &tensor).unwrap();
-        
+        state_dict
+            .add_parameter("weight".to_string(), &tensor)
+            .unwrap();
+
         assert_eq!(state_dict.parameter_names().len(), 1);
-        assert!(state_dict.parameter_names().contains(&&"weight".to_string()));
-        
+        assert!(state_dict
+            .parameter_names()
+            .contains(&&"weight".to_string()));
+
         // Load parameter
         let loaded = state_dict.load_parameter("weight", None).unwrap();
         assert_eq!(loaded.shape(), tensor.shape());

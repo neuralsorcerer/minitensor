@@ -4,7 +4,7 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{tensor::Tensor, error::Result, autograd::TensorId};
+use crate::{autograd::TensorId, error::Result, tensor::Tensor};
 use std::collections::HashMap;
 
 /// Parameter group for managing different learning rates and settings
@@ -70,7 +70,7 @@ impl Default for GradientClipping {
 pub trait LearningRateScheduler: Send + Sync {
     /// Get the learning rate for the current step
     fn get_lr(&self, step: usize, base_lr: f64) -> f64;
-    
+
     /// Update scheduler state (if needed)
     fn step(&mut self) {}
 }
@@ -141,15 +141,16 @@ impl LearningRateScheduler for CosineAnnealingLR {
         if step == 0 {
             return base_lr;
         }
-        
+
         let t = (step % self.t_max) as f64;
         let t_max = self.t_max as f64;
-        
+
         // Standard cosine annealing formula
         // At t=0: cos(0) = 1, lr = base_lr
-        // At t=t_max/2: cos(π/2) = 0, lr = (base_lr + eta_min)/2  
+        // At t=t_max/2: cos(π/2) = 0, lr = (base_lr + eta_min)/2
         // At t=t_max: cos(π) = -1, lr = eta_min
-        self.eta_min + (base_lr - self.eta_min) * (1.0 + (std::f64::consts::PI * t / t_max).cos()) / 2.0
+        self.eta_min
+            + (base_lr - self.eta_min) * (1.0 + (std::f64::consts::PI * t / t_max).cos()) / 2.0
     }
 }
 
@@ -157,58 +158,61 @@ impl LearningRateScheduler for CosineAnnealingLR {
 pub trait Optimizer: Send + Sync {
     /// Perform one optimization step
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()>;
-    
+
     /// Zero out gradients of parameters
     fn zero_grad(&self, parameters: &mut [&mut Tensor]) -> Result<()>;
-    
+
     /// Get the learning rate (for single parameter group optimizers)
     fn learning_rate(&self) -> f64;
-    
+
     /// Set the learning rate (for single parameter group optimizers)
     fn set_learning_rate(&mut self, lr: f64);
-    
+
     /// Get parameter groups
     fn param_groups(&self) -> &[ParameterGroup] {
         // Default implementation for backward compatibility
         &[]
     }
-    
+
     /// Get mutable parameter groups
     fn param_groups_mut(&mut self) -> &mut [ParameterGroup] {
         // Default implementation for backward compatibility
         &mut []
     }
-    
+
     /// Add a parameter group
     fn add_param_group(&mut self, _group: ParameterGroup) -> Result<()> {
         // Default implementation for backward compatibility
         Ok(())
     }
-    
+
     /// Get the current step count
     fn step_count(&self) -> usize {
         0
     }
-    
+
     /// Apply gradient clipping to parameters
-    fn clip_gradients(&self, parameters: &mut [&mut Tensor], clipping: &GradientClipping) -> Result<()> {
+    fn clip_gradients(
+        &self,
+        parameters: &mut [&mut Tensor],
+        clipping: &GradientClipping,
+    ) -> Result<()> {
         match clipping {
             GradientClipping::None => Ok(()),
-            GradientClipping::ByNorm { max_norm } => {
-                self.clip_grad_norm(parameters, *max_norm)
-            }
-            GradientClipping::ByValue { min_value, max_value } => {
-                self.clip_grad_value(parameters, *min_value, *max_value)
-            }
+            GradientClipping::ByNorm { max_norm } => self.clip_grad_norm(parameters, *max_norm),
+            GradientClipping::ByValue {
+                min_value,
+                max_value,
+            } => self.clip_grad_value(parameters, *min_value, *max_value),
         }
     }
-    
+
     /// Clip gradients by norm
     fn clip_grad_norm(&self, parameters: &mut [&mut Tensor], max_norm: f64) -> Result<()> {
         // Calculate total norm of all gradients
         let mut total_norm = 0.0;
         let mut grad_count = 0;
-        
+
         for param in parameters.iter() {
             if let Some(grad) = param.grad() {
                 // For now, we'll use a simple approximation
@@ -217,36 +221,41 @@ pub trait Optimizer: Send + Sync {
                 grad_count += 1;
             }
         }
-        
+
         if grad_count == 0 {
             return Ok(());
         }
-        
+
         // Approximate norm calculation (simplified)
         total_norm = total_norm.sqrt();
-        
+
         if total_norm > max_norm {
             let _clip_coef = max_norm / total_norm;
             // In a full implementation, we would scale all gradients by _clip_coef
             // For now, we'll just log that clipping would occur
             // Gradient clipping applied with coefficient: _clip_coef
         }
-        
+
         Ok(())
     }
-    
+
     /// Clip gradients by value
-    fn clip_grad_value(&self, _parameters: &mut [&mut Tensor], _min_value: f64, _max_value: f64) -> Result<()> {
+    fn clip_grad_value(
+        &self,
+        _parameters: &mut [&mut Tensor],
+        _min_value: f64,
+        _max_value: f64,
+    ) -> Result<()> {
         // In a full implementation, we would clamp all gradient values
         // For now, we'll just log that clipping would occur
         // Gradient value clipping applied
         Ok(())
     }
-    
+
     /// Apply learning rate scheduling
     fn apply_lr_scheduler(&mut self, scheduler: &dyn LearningRateScheduler) {
         let step = self.step_count();
-        
+
         // For single parameter group optimizers
         if self.param_groups().is_empty() {
             let new_lr = scheduler.get_lr(step, self.learning_rate());

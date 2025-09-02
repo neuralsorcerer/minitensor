@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+
 import minitensor as mt
 from minitensor import functional as F
 
@@ -25,4 +26,3 @@ def test_functional_softmax_dim():
     expected = np.exp(x_np - x_np.max(axis=0, keepdims=True))
     expected = expected / expected.sum(axis=0, keepdims=True)
     assert np.allclose(result.numpy(), expected)
-

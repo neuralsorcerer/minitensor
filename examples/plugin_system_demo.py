@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "minitensor"))
 import numpy as np
 
 import minitensor as mt
+
 try:  # pragma: no cover - optional feature
     import minitensor.plugins as plugins
 except Exception as exc:  # pragma: no cover - optional feature

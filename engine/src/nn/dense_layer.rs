@@ -4,12 +4,15 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::{Layer, init::{InitMethod, init_parameter, init_bias}};
+use super::{
+    init::{init_bias, init_parameter, InitMethod},
+    Layer,
+};
 use crate::{
-    tensor::{Tensor, Shape, DataType},
     device::Device,
-    error::{Result, MinitensorError},
+    error::{MinitensorError, Result},
     operations::linalg::matmul,
+    tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
 
@@ -26,7 +29,7 @@ pub struct DenseLayer {
 
 impl DenseLayer {
     /// Create a new dense layer
-    /// 
+    ///
     /// # Arguments
     /// * `in_features` - Size of each input sample
     /// * `out_features` - Size of each output sample  
@@ -34,8 +37,8 @@ impl DenseLayer {
     /// * `device` - Device to place the layer parameters on
     /// * `dtype` - Data type for the layer parameters
     pub fn new(
-        in_features: usize, 
-        out_features: usize, 
+        in_features: usize,
+        out_features: usize,
         bias: bool,
         device: Device,
         dtype: DataType,
@@ -137,7 +140,7 @@ impl Layer for DenseLayer {
         // Validate input dimensions
         if input.ndim() < 2 {
             return Err(MinitensorError::invalid_operation(
-                "DenseLayer expects input with at least 2 dimensions (batch_size, features)"
+                "DenseLayer expects input with at least 2 dimensions (batch_size, features)",
             ));
         }
 
@@ -186,13 +189,13 @@ impl Layer for DenseLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{Shape, DataType};
     use crate::device::Device;
+    use crate::tensor::{DataType, Shape};
 
     #[test]
     fn test_dense_layer_creation() {
         let layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         assert_eq!(layer.in_features(), 10);
         assert_eq!(layer.out_features(), 5);
         assert_eq!(layer.weight().shape(), &Shape::new(vec![5, 10]));
@@ -203,7 +206,7 @@ mod tests {
     #[test]
     fn test_dense_layer_without_bias() {
         let layer = DenseLayer::new(10, 5, false, Device::cpu(), DataType::Float32).unwrap();
-        
+
         assert_eq!(layer.in_features(), 10);
         assert_eq!(layer.out_features(), 5);
         assert!(layer.bias().is_none());
@@ -212,10 +215,10 @@ mod tests {
     #[test]
     fn test_dense_layer_parameters() {
         let mut layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         let params = layer.parameters();
         assert_eq!(params.len(), 2); // weight + bias
-        
+
         let mut_params = layer.parameters_mut();
         assert_eq!(mut_params.len(), 2);
     }
@@ -223,10 +226,10 @@ mod tests {
     #[test]
     fn test_dense_layer_parameters_no_bias() {
         let mut layer = DenseLayer::new(10, 5, false, Device::cpu(), DataType::Float32).unwrap();
-        
+
         let params = layer.parameters();
         assert_eq!(params.len(), 1); // weight only
-        
+
         let mut_params = layer.parameters_mut();
         assert_eq!(mut_params.len(), 1);
     }
@@ -234,12 +237,12 @@ mod tests {
     #[test]
     fn test_dense_layer_named_parameters() {
         let mut layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         let named_params = layer.named_parameters();
         assert_eq!(named_params.len(), 2);
         assert!(named_params.contains_key("weight"));
         assert!(named_params.contains_key("bias"));
-        
+
         let named_params_mut = layer.named_parameters_mut();
         assert_eq!(named_params_mut.len(), 2);
         assert!(named_params_mut.contains_key("weight"));
@@ -249,15 +252,16 @@ mod tests {
     #[test]
     fn test_dense_layer_custom_init() {
         let layer = DenseLayer::new_with_init(
-            10, 
-            5, 
-            true, 
-            InitMethod::HeUniform, 
-            Some(InitMethod::Constant(0.1)), 
-            Device::cpu(), 
-            DataType::Float32
-        ).unwrap();
-        
+            10,
+            5,
+            true,
+            InitMethod::HeUniform,
+            Some(InitMethod::Constant(0.1)),
+            Device::cpu(),
+            DataType::Float32,
+        )
+        .unwrap();
+
         assert_eq!(layer.in_features(), 10);
         assert_eq!(layer.out_features(), 5);
         assert!(layer.bias().is_some());
@@ -266,14 +270,24 @@ mod tests {
     #[test]
     fn test_dense_layer_forward_shape_validation() {
         let mut layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         // Test with correct input shape
-        let input = Tensor::zeros(Shape::new(vec![2, 10]), DataType::Float32, Device::cpu(), false);
+        let input = Tensor::zeros(
+            Shape::new(vec![2, 10]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&input).unwrap();
         assert_eq!(result.shape(), &Shape::new(vec![2, 5]));
-        
+
         // Test with incorrect input shape
-        let wrong_input = Tensor::zeros(Shape::new(vec![2, 8]), DataType::Float32, Device::cpu(), false);
+        let wrong_input = Tensor::zeros(
+            Shape::new(vec![2, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&wrong_input);
         assert!(result.is_err());
     }
@@ -281,9 +295,14 @@ mod tests {
     #[test]
     fn test_dense_layer_forward_dimension_validation() {
         let mut layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         // Test with 1D input (should fail)
-        let input_1d = Tensor::zeros(Shape::new(vec![10]), DataType::Float32, Device::cpu(), false);
+        let input_1d = Tensor::zeros(
+            Shape::new(vec![10]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&input_1d);
         assert!(result.is_err());
     }

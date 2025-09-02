@@ -4,23 +4,22 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-
 use engine::{
-    tensor::{Tensor, TensorData, DataType, Shape},
-    operations::{arithmetic, linalg, shape_ops, activation, comparison},
-    device::Device,
     autograd,
+    device::Device,
+    operations::{activation, arithmetic, comparison, linalg, shape_ops},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
 fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
     let shape_obj = Shape::new(shape);
     let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-    
+
     if let Some(slice) = tensor_data.as_f32_slice_mut() {
         slice.copy_from_slice(&data);
     }
-    
+
     Tensor::new(
         Arc::new(tensor_data),
         shape_obj,
@@ -35,38 +34,38 @@ fn test_basic_operations_integration() {
     // Create test tensors
     let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
     let b = create_test_tensor_f32(vec![2.0, 3.0, 4.0, 5.0], vec![2, 2], true);
-    
+
     // Test arithmetic operations
     let sum = arithmetic::add(&a, &b).unwrap();
     let diff = arithmetic::sub(&sum, &b).unwrap();
     let product = arithmetic::mul(&a, &b).unwrap();
     let _quotient = arithmetic::div(&product, &b).unwrap();
-    
+
     // Verify arithmetic results
     let sum_data = sum.data().as_f32_slice().unwrap();
     assert_eq!(sum_data, &[3.0, 5.0, 7.0, 9.0]);
-    
+
     let diff_data = diff.data().as_f32_slice().unwrap();
     assert_eq!(diff_data, &[1.0, 2.0, 3.0, 4.0]); // Should equal original a
-    
+
     // Test matrix operations
     let transposed = linalg::transpose(&a, 0, 1).unwrap();
     let matmul_result = linalg::matmul(&a, &transposed).unwrap();
-    
+
     // Verify shapes
     assert_eq!(transposed.shape().dims(), &[2, 2]);
     assert_eq!(matmul_result.shape().dims(), &[2, 2]);
-    
+
     // Test shape operations
     let reshaped = shape_ops::reshape(&a, Shape::new(vec![4])).unwrap();
     assert_eq!(reshaped.shape().dims(), &[4]);
-    
+
     let squeezed = shape_ops::squeeze(&reshaped, None).unwrap();
     assert_eq!(squeezed.shape().dims(), &[4]);
-    
+
     let unsqueezed = shape_ops::unsqueeze(&reshaped, 0).unwrap();
     assert_eq!(unsqueezed.shape().dims(), &[1, 4]);
-    
+
     // Clear computation graph
     let _ = autograd::clear_graph();
 }
@@ -83,40 +82,48 @@ fn test_comparison_operations() {
     let gt_res = comparison::gt(&a, &b).unwrap();
     let ge_res = comparison::ge(&a, &b).unwrap();
 
-    assert_eq!(eq_res.data().as_bool_slice().unwrap(), &[true, false, false]);
+    assert_eq!(
+        eq_res.data().as_bool_slice().unwrap(),
+        &[true, false, false]
+    );
     assert_eq!(ne_res.data().as_bool_slice().unwrap(), &[false, true, true]);
-    assert_eq!(lt_res.data().as_bool_slice().unwrap(), &[false, false, true]);
+    assert_eq!(
+        lt_res.data().as_bool_slice().unwrap(),
+        &[false, false, true]
+    );
     assert_eq!(le_res.data().as_bool_slice().unwrap(), &[true, false, true]);
-    assert_eq!(gt_res.data().as_bool_slice().unwrap(), &[false, true, false]);
+    assert_eq!(
+        gt_res.data().as_bool_slice().unwrap(),
+        &[false, true, false]
+    );
     assert_eq!(ge_res.data().as_bool_slice().unwrap(), &[true, true, false]);
 
     let _ = autograd::clear_graph();
 }
 
-
 #[test]
 fn test_activation_functions_integration() {
     // Create test tensor
     let x = create_test_tensor_f32(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5], true);
-    
+
     // Test mathematical functions
     let exp_result = activation::exp(&x).unwrap();
     let log_input = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5], true);
     let log_result = activation::log(&log_input).unwrap();
-    
+
     // Test trigonometric functions
     let sin_result = activation::sin(&x).unwrap();
     let cos_result = activation::cos(&x).unwrap();
     let tanh_result = activation::tanh(&x).unwrap();
-    
+
     // Test activation functions
     let sigmoid_result = activation::sigmoid(&x).unwrap();
     let relu_result = activation::relu(&x).unwrap();
-    
+
     // Test softmax
     let softmax_input = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], true);
     let softmax_result = activation::softmax(&softmax_input, None).unwrap();
-    
+
     // Verify that all operations maintain gradient tracking
     assert!(exp_result.requires_grad());
     assert!(log_result.requires_grad());
@@ -126,16 +133,16 @@ fn test_activation_functions_integration() {
     assert!(sigmoid_result.requires_grad());
     assert!(relu_result.requires_grad());
     assert!(softmax_result.requires_grad());
-    
+
     // Verify ReLU behavior
     let relu_data = relu_result.data().as_f32_slice().unwrap();
     assert_eq!(relu_data, &[0.0, 0.0, 0.0, 1.0, 2.0]);
-    
+
     // Verify softmax sums to 1
     let softmax_data = softmax_result.data().as_f32_slice().unwrap();
     let sum: f32 = softmax_data.iter().sum();
     assert!((sum - 1.0).abs() < 1e-6);
-    
+
     // Clear computation graph
     let _ = autograd::clear_graph();
 }
@@ -145,30 +152,30 @@ fn test_complex_computation_chain() {
     // Create input tensors
     let x = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
     let y = create_test_tensor_f32(vec![0.5, 1.5, 2.5, 3.5], vec![2, 2], true);
-    
+
     // Complex computation: sigmoid(tanh(x * y) + relu(x - y))
     let product = arithmetic::mul(&x, &y).unwrap();
     let tanh_product = activation::tanh(&product).unwrap();
-    
+
     let diff = arithmetic::sub(&x, &y).unwrap();
     let relu_diff = activation::relu(&diff).unwrap();
-    
+
     let sum = arithmetic::add(&tanh_product, &relu_diff).unwrap();
     let final_result = activation::sigmoid(&sum).unwrap();
-    
+
     // Verify the computation chain maintains gradient tracking
     assert!(final_result.requires_grad());
     assert!(final_result.grad_fn().is_some());
-    
+
     // Verify output shape
     assert_eq!(final_result.shape().dims(), &[2, 2]);
-    
+
     // Verify all values are in sigmoid range [0, 1]
     let result_data = final_result.data().as_f32_slice().unwrap();
     for &val in result_data {
         assert!(val >= 0.0 && val <= 1.0);
     }
-    
+
     // Clear computation graph
     let _ = autograd::clear_graph();
 }
@@ -222,7 +229,12 @@ fn test_softmax_backward_dim1() {
 
     let result = activation::softmax(&input, Some(1)).unwrap();
     let grads = autograd::backward(&result, Some(grad_output.clone())).unwrap();
-    let grad_data = grads.get(&input.id()).unwrap().data().as_f32_slice().unwrap();
+    let grad_data = grads
+        .get(&input.id())
+        .unwrap()
+        .data()
+        .as_f32_slice()
+        .unwrap();
     let softmax_data = result.data().as_f32_slice().unwrap();
     let grad_out_data = grad_output.data().as_f32_slice().unwrap();
 
@@ -252,7 +264,12 @@ fn test_softmax_backward_dim0() {
 
     let result = activation::softmax(&input, Some(0)).unwrap();
     let grads = autograd::backward(&result, Some(grad_output.clone())).unwrap();
-    let grad_data = grads.get(&input.id()).unwrap().data().as_f32_slice().unwrap();
+    let grad_data = grads
+        .get(&input.id())
+        .unwrap()
+        .data()
+        .as_f32_slice()
+        .unwrap();
     let softmax_data = result.data().as_f32_slice().unwrap();
     let grad_out_data = grad_output.data().as_f32_slice().unwrap();
 
@@ -280,27 +297,23 @@ fn test_broadcasting_and_reshaping() {
     // Create tensors with different shapes for broadcasting
     let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
     let b = create_test_tensor_f32(vec![10.0], vec![1], false);
-    
+
     // Test broadcasting in addition
     let broadcasted_sum = arithmetic::add(&a, &b).unwrap();
     assert_eq!(broadcasted_sum.shape().dims(), &[3]);
-    
+
     let sum_data = broadcasted_sum.data().as_f32_slice().unwrap();
     assert_eq!(sum_data, &[11.0, 12.0, 13.0]);
-    
+
     // Test reshaping
-    let matrix = create_test_tensor_f32(
-        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 
-        vec![2, 3], 
-        false
-    );
-    
+    let matrix = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+
     let reshaped = shape_ops::reshape(&matrix, Shape::new(vec![3, 2])).unwrap();
     assert_eq!(reshaped.shape().dims(), &[3, 2]);
-    
+
     let transposed = linalg::transpose(&reshaped, 0, 1).unwrap();
     assert_eq!(transposed.shape().dims(), &[2, 3]);
-    
+
     // Clear computation graph
     let _ = autograd::clear_graph();
 }

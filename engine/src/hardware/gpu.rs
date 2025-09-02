@@ -103,10 +103,12 @@ impl GpuDevice {
         match cudarc::driver::CudaDevice::new(0) {
             Ok(device) => {
                 let device_count = device.num_devices().unwrap_or(0);
-                
+
                 for device_id in 0..device_count {
                     if let Ok(cuda_device) = cudarc::driver::CudaDevice::new(device_id) {
-                        let name = cuda_device.name().unwrap_or_else(|_| format!("CUDA Device {}", device_id));
+                        let name = cuda_device
+                            .name()
+                            .unwrap_or_else(|_| format!("CUDA Device {}", device_id));
                         let memory_info = cuda_device.memory_info().unwrap_or((0, 0));
                         let total_memory = memory_info.1;
 
@@ -133,7 +135,7 @@ impl GpuDevice {
                                 max_texture_size: Some((65536, 65536)),
                                 local_memory_size: 48 * 1024, // 48KB shared memory typical
                                 constant_memory_size: 64 * 1024, // 64KB constant memory
-                                memory_bandwidth: None, // Would need device-specific lookup
+                                memory_bandwidth: None,       // Would need device-specific lookup
                             },
                         });
                     }
@@ -167,7 +169,9 @@ impl GpuDevice {
                 name: "Apple GPU".to_string(),
                 vendor: "Apple".to_string(),
                 memory_size: 8 * 1024 * 1024 * 1024, // Placeholder: 8GB
-                compute_capability: ComputeCapability::Metal { family: MetalFamily::Mac2 },
+                compute_capability: ComputeCapability::Metal {
+                    family: MetalFamily::Mac2,
+                },
                 max_compute_units: 32, // Placeholder
                 max_work_group_size: 1024,
                 max_clock_frequency: None,
@@ -201,15 +205,22 @@ impl GpuDevice {
         // OpenCL detection using opencl3
         if let Ok(platforms) = opencl3::platform::get_platforms() {
             for platform in platforms {
-                if let Ok(device_ids) = opencl3::device::get_device_ids(platform.id(), opencl3::device::CL_DEVICE_TYPE_GPU) {
+                if let Ok(device_ids) = opencl3::device::get_device_ids(
+                    platform.id(),
+                    opencl3::device::CL_DEVICE_TYPE_GPU,
+                ) {
                     for (device_id, &device_id_raw) in device_ids.iter().enumerate() {
                         let device = opencl3::device::Device::new(device_id_raw);
-                        let name = device.name().unwrap_or_else(|_| format!("OpenCL Device {}", device_id));
+                        let name = device
+                            .name()
+                            .unwrap_or_else(|_| format!("OpenCL Device {}", device_id));
                         let vendor = device.vendor().unwrap_or_else(|_| "Unknown".to_string());
                         let memory_size = device.global_mem_size().unwrap_or(0) as usize;
                         let max_compute_units = device.max_compute_units().unwrap_or(0) as usize;
                         let max_work_group_size = device.max_work_group_size().unwrap_or(0);
-                        let version = device.opencl_c_version().unwrap_or_else(|_| "Unknown".to_string());
+                        let version = device
+                            .opencl_c_version()
+                            .unwrap_or_else(|_| "Unknown".to_string());
 
                         devices.push(Self {
                             device_type: DeviceType::OpenCL,
@@ -220,17 +231,27 @@ impl GpuDevice {
                             compute_capability: ComputeCapability::OpenCL { version },
                             max_compute_units,
                             max_work_group_size,
-                            max_clock_frequency: device.max_clock_frequency().ok().map(|f| f as f64),
+                            max_clock_frequency: device
+                                .max_clock_frequency()
+                                .ok()
+                                .map(|f| f as f64),
                             is_available: true,
                             capabilities: GpuCapabilities {
-                                supports_fp16: device.extensions().map(|ext| ext.contains("cl_khr_fp16")).unwrap_or(false),
-                                supports_fp64: device.extensions().map(|ext| ext.contains("cl_khr_fp64")).unwrap_or(false),
+                                supports_fp16: device
+                                    .extensions()
+                                    .map(|ext| ext.contains("cl_khr_fp16"))
+                                    .unwrap_or(false),
+                                supports_fp64: device
+                                    .extensions()
+                                    .map(|ext| ext.contains("cl_khr_fp64"))
+                                    .unwrap_or(false),
                                 supports_int8: true, // Most OpenCL devices support int8
                                 supports_unified_memory: false, // Conservative default
                                 supports_async_compute: true,
                                 max_texture_size: None, // OpenCL doesn't have textures in the same way
                                 local_memory_size: device.local_mem_size().unwrap_or(0) as usize,
-                                constant_memory_size: device.max_constant_buffer_size().unwrap_or(0) as usize,
+                                constant_memory_size: device.max_constant_buffer_size().unwrap_or(0)
+                                    as usize,
                                 memory_bandwidth: None, // Not directly available in OpenCL
                             },
                         });
@@ -264,28 +285,30 @@ impl GpuDevice {
             match self.device_type {
                 DeviceType::Cuda => {
                     // Rough estimate based on memory size
-                    if self.memory_size > 32 * 1024 * 1024 * 1024 { // > 32GB
+                    if self.memory_size > 32 * 1024 * 1024 * 1024 {
+                        // > 32GB
                         900.0 // High-end datacenter GPU
-                    } else if self.memory_size > 16 * 1024 * 1024 * 1024 { // > 16GB
+                    } else if self.memory_size > 16 * 1024 * 1024 * 1024 {
+                        // > 16GB
                         600.0 // High-end consumer GPU
-                    } else if self.memory_size > 8 * 1024 * 1024 * 1024 { // > 8GB
+                    } else if self.memory_size > 8 * 1024 * 1024 * 1024 {
+                        // > 8GB
                         400.0 // Mid-range GPU
                     } else {
                         200.0 // Entry-level GPU
                     }
                 }
-                DeviceType::Metal => 400.0, // Apple Silicon estimate
+                DeviceType::Metal => 400.0,  // Apple Silicon estimate
                 DeviceType::OpenCL => 300.0, // Conservative estimate
-                DeviceType::Cpu => 50.0, // Should not happen for GPU device
+                DeviceType::Cpu => 50.0,     // Should not happen for GPU device
             }
         })
     }
 
     /// Check if this device is suitable for a given workload
     pub fn is_suitable_for_workload(&self, workload_size: usize, required_memory: usize) -> bool {
-        self.is_available 
-            && self.memory_size >= required_memory
-            && workload_size >= 1000 // GPUs are better for larger workloads
+        self.is_available && self.memory_size >= required_memory && workload_size >= 1000
+        // GPUs are better for larger workloads
     }
 }
 
@@ -302,18 +325,16 @@ impl ComputeCapability {
     /// Check if this compute capability supports a specific feature
     pub fn supports_feature(&self, feature: &str) -> bool {
         match self {
-            ComputeCapability::CUDA { major, minor } => {
-                match feature {
-                    "fp16" => *major >= 5 || (*major == 5 && *minor >= 3),
-                    "tensor_cores" => *major >= 7,
-                    "unified_memory" => *major >= 6,
-                    "cooperative_groups" => *major >= 6,
-                    _ => false,
-                }
-            }
+            ComputeCapability::CUDA { major, minor } => match feature {
+                "fp16" => *major >= 5 || (*major == 5 && *minor >= 3),
+                "tensor_cores" => *major >= 7,
+                "unified_memory" => *major >= 6,
+                "cooperative_groups" => *major >= 6,
+                _ => false,
+            },
             ComputeCapability::Metal { family: _ } => {
                 match feature {
-                    "fp16" => true, // Most Metal devices support fp16
+                    "fp16" => true,           // Most Metal devices support fp16
                     "unified_memory" => true, // Apple Silicon has unified memory
                     "async_compute" => true,
                     _ => false,
@@ -337,7 +358,10 @@ mod tests {
         // Should not panic, may return empty vec if no GPUs available
         println!("Detected {} GPU devices", devices.len());
         for device in &devices {
-            println!("  {}: {} ({})", device.device_type, device.name, device.vendor);
+            println!(
+                "  {}: {} ({})",
+                device.device_type, device.name, device.vendor
+            );
         }
     }
 
@@ -380,7 +404,9 @@ mod tests {
         assert!(cuda_cap.supports_feature("tensor_cores"));
         assert!(cuda_cap.supports_feature("unified_memory"));
 
-        let metal_cap = ComputeCapability::Metal { family: MetalFamily::Mac2 };
+        let metal_cap = ComputeCapability::Metal {
+            family: MetalFamily::Mac2,
+        };
         assert!(metal_cap.supports_feature("fp16"));
         assert!(metal_cap.supports_feature("unified_memory"));
     }

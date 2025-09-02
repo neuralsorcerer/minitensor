@@ -5,9 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::HardwareProfile;
-use crate::device::{Device, DeviceType};
 use crate::autograd::ComputationGraph;
 use crate::autograd::TensorId;
+use crate::device::{Device, DeviceType};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -77,9 +77,9 @@ pub struct ParallelizationPotential {
 /// Computational intensity classification
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputationalIntensity {
-    MemoryBound,    // Low compute-to-memory ratio
-    ComputeBound,   // High compute-to-memory ratio
-    Balanced,       // Moderate ratio
+    MemoryBound,  // Low compute-to-memory ratio
+    ComputeBound, // High compute-to-memory ratio
+    Balanced,     // Moderate ratio
 }
 
 /// Data dependency graph for optimization
@@ -134,11 +134,11 @@ pub struct MemoryOptimizationPlan {
 /// Memory allocation strategies
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllocationStrategy {
-    Eager,           // Allocate immediately when needed
-    Lazy,            // Defer allocation until last moment
-    Pooled,          // Use memory pools
-    Streaming,       // Stream data for large tensors
-    Hybrid,          // Combination of strategies
+    Eager,     // Allocate immediately when needed
+    Lazy,      // Defer allocation until last moment
+    Pooled,    // Use memory pools
+    Streaming, // Stream data for large tensors
+    Hybrid,    // Combination of strategies
 }
 
 /// Memory pool configuration
@@ -199,9 +199,9 @@ pub struct DevicePlacementOptimizer {
 /// Device capabilities for optimization
 #[derive(Debug, Clone)]
 pub struct DeviceCapabilities {
-    pub compute_throughput: f64,    // FLOPS
-    pub memory_bandwidth: f64,      // GB/s
-    pub memory_capacity: usize,     // bytes
+    pub compute_throughput: f64, // FLOPS
+    pub memory_bandwidth: f64,   // GB/s
+    pub memory_capacity: usize,  // bytes
     pub supports_fp16: bool,
     pub supports_int8: bool,
     pub parallel_execution_units: usize,
@@ -216,9 +216,12 @@ impl ResourceOptimizer {
     /// Create a new resource optimizer
     pub fn new(hardware_profile: HardwareProfile) -> Self {
         let available_devices = Self::extract_available_devices(&hardware_profile);
-        let device_capabilities = Self::build_device_capabilities(&hardware_profile, &available_devices);
-        let transfer_costs = Self::estimate_transfer_costs(&available_devices, &device_capabilities);
-        let memory_constraints = Self::extract_memory_constraints(&hardware_profile, &available_devices);
+        let device_capabilities =
+            Self::build_device_capabilities(&hardware_profile, &available_devices);
+        let transfer_costs =
+            Self::estimate_transfer_costs(&available_devices, &device_capabilities);
+        let memory_constraints =
+            Self::extract_memory_constraints(&hardware_profile, &available_devices);
 
         Self {
             workload_analyzer: WorkloadAnalyzer,
@@ -227,9 +230,7 @@ impl ResourceOptimizer {
                 _device_capabilities: device_capabilities,
                 _transfer_costs: transfer_costs,
             },
-            memory_optimizer: MemoryOptimizer {
-                memory_constraints,
-            },
+            memory_optimizer: MemoryOptimizer { memory_constraints },
             _hardware_profile: hardware_profile,
         }
     }
@@ -240,18 +241,23 @@ impl ResourceOptimizer {
         let workload_analysis = self.workload_analyzer.analyze(computation_graph);
 
         // Optimize device placement
-        let device_placement = self.device_placement_optimizer
+        let device_placement = self
+            .device_placement_optimizer
             .optimize_placement(computation_graph, &workload_analysis);
 
         // Optimize memory usage
-        let memory_plan = self.memory_optimizer
-            .create_optimization_plan(computation_graph, &workload_analysis, &device_placement);
+        let memory_plan = self.memory_optimizer.create_optimization_plan(
+            computation_graph,
+            &workload_analysis,
+            &device_placement,
+        );
 
         // Create parallelization strategy
         let parallelization_strategy = self.create_parallelization_strategy(&workload_analysis);
 
-        let estimated_total_time = self.estimate_total_execution_time(&device_placement, &memory_plan);
-        
+        let estimated_total_time =
+            self.estimate_total_execution_time(&device_placement, &memory_plan);
+
         ExecutionPlan {
             device_placement,
             memory_plan,
@@ -263,7 +269,7 @@ impl ResourceOptimizer {
 
     fn extract_available_devices(hardware_profile: &HardwareProfile) -> Vec<Device> {
         let mut devices = vec![Device::cpu()];
-        
+
         for gpu in &hardware_profile.gpu_devices {
             if gpu.is_available {
                 let device = match gpu.device_type {
@@ -275,7 +281,7 @@ impl ResourceOptimizer {
                 devices.push(device);
             }
         }
-        
+
         devices
     }
 
@@ -300,8 +306,9 @@ impl ResourceOptimizer {
                 }
                 _ => {
                     // Find corresponding GPU device
-                    if let Some(gpu) = hardware_profile.gpu_devices.iter()
-                        .find(|g| g.device_id == device.id() && g.device_type == device.device_type()) {
+                    if let Some(gpu) = hardware_profile.gpu_devices.iter().find(|g| {
+                        g.device_id == device.id() && g.device_type == device.device_type()
+                    }) {
                         DeviceCapabilities {
                             compute_throughput: Self::estimate_gpu_flops(gpu),
                             memory_bandwidth: gpu.memory_bandwidth(),
@@ -313,8 +320,8 @@ impl ResourceOptimizer {
                     } else {
                         // Fallback for unknown GPU
                         DeviceCapabilities {
-                            compute_throughput: 1e12, // 1 TFLOPS
-                            memory_bandwidth: 200.0,  // 200 GB/s
+                            compute_throughput: 1e12,                // 1 TFLOPS
+                            memory_bandwidth: 200.0,                 // 200 GB/s
                             memory_capacity: 8 * 1024 * 1024 * 1024, // 8GB
                             supports_fp16: true,
                             supports_int8: true,
@@ -332,7 +339,7 @@ impl ResourceOptimizer {
     fn estimate_cpu_flops(cpu: &super::CpuInfo) -> f64 {
         let base_freq = cpu.base_frequency.unwrap_or(2500.0) * 1e6; // Convert MHz to Hz
         let cores = cpu.cores as f64;
-        
+
         // Estimate FLOPS based on SIMD capabilities
         let simd_factor = match cpu.features.simd_support {
             super::SIMDSupport::AVX512 => 16.0, // 16 single-precision ops per cycle
@@ -349,7 +356,7 @@ impl ResourceOptimizer {
         // Rough estimation based on compute units and clock frequency
         let compute_units = gpu.max_compute_units as f64;
         let clock_freq = gpu.max_clock_frequency.unwrap_or(1000.0) * 1e6; // Convert MHz to Hz
-        
+
         // Assume each compute unit can do multiple operations per cycle
         let ops_per_cycle = match gpu.device_type {
             DeviceType::Cuda => 64.0,   // CUDA cores per SM
@@ -414,8 +421,12 @@ impl ResourceOptimizer {
                 }
                 _ => {
                     // Find corresponding GPU
-                    hardware_profile.gpu_devices.iter()
-                        .find(|g| g.device_id == device.id() && g.device_type == device.device_type())
+                    hardware_profile
+                        .gpu_devices
+                        .iter()
+                        .find(|g| {
+                            g.device_id == device.id() && g.device_type == device.device_type()
+                        })
                         .map(|g| (g.memory_size as f64 * 0.9) as usize) // Use 90% of GPU memory
                         .unwrap_or(4 * 1024 * 1024 * 1024) // 4GB fallback
                 }
@@ -426,7 +437,10 @@ impl ResourceOptimizer {
         constraints
     }
 
-    fn create_parallelization_strategy(&self, analysis: &WorkloadAnalysis) -> ParallelizationStrategy {
+    fn create_parallelization_strategy(
+        &self,
+        analysis: &WorkloadAnalysis,
+    ) -> ParallelizationStrategy {
         ParallelizationStrategy {
             data_parallel_degree: self.calculate_data_parallel_degree(analysis),
             pipeline_parallel_stages: analysis.parallelization_potential.pipeline_parallel_stages,
@@ -440,7 +454,7 @@ impl ResourceOptimizer {
         // Base data parallel degree on available devices and workload characteristics
         let available_devices = self.device_placement_optimizer.available_devices.len();
         let parallel_ops = analysis.parallelization_potential.data_parallel_ops;
-        
+
         if parallel_ops > 1000 && available_devices > 1 {
             available_devices.min(4) // Cap at 4-way data parallelism for now
         } else {
@@ -450,7 +464,8 @@ impl ResourceOptimizer {
 
     fn calculate_model_parallel_partitions(&self, analysis: &WorkloadAnalysis) -> usize {
         // Simple heuristic: use model parallelism for very large models
-        if analysis.memory_requirements.peak_memory > 8 * 1024 * 1024 * 1024 { // > 8GB
+        if analysis.memory_requirements.peak_memory > 8 * 1024 * 1024 * 1024 {
+            // > 8GB
             2 // Split model across 2 devices
         } else {
             1 // No model parallelism
@@ -464,15 +479,15 @@ impl ResourceOptimizer {
     ) -> Duration {
         // Rough estimation based on device placement and memory transfers
         let compute_time = device_placement.estimated_execution_time;
-        let transfer_time: Duration = device_placement.transfer_schedule
+        let transfer_time: Duration = device_placement
+            .transfer_schedule
             .iter()
             .map(|transfer| transfer.estimated_time)
             .sum();
-        
+
         // Add some overhead for memory management
-        let memory_overhead = Duration::from_millis(
-            (memory_plan.peak_memory_reduction * 100.0) as u64
-        );
+        let memory_overhead =
+            Duration::from_millis((memory_plan.peak_memory_reduction * 100.0) as u64);
 
         compute_time + transfer_time + memory_overhead
     }
@@ -504,7 +519,8 @@ impl WorkloadAnalyzer {
         let operation_types = self.classify_operations(computation_graph);
         let memory_requirements = self.analyze_memory_requirements(computation_graph);
         let parallelization_potential = self.assess_parallelization_potential(computation_graph);
-        let computational_intensity = self.classify_computational_intensity(&operation_types, &memory_requirements);
+        let computational_intensity =
+            self.classify_computational_intensity(&operation_types, &memory_requirements);
         let data_dependencies = self.build_dependency_graph(computation_graph);
 
         WorkloadAnalysis {
@@ -517,7 +533,10 @@ impl WorkloadAnalyzer {
         }
     }
 
-    fn classify_operations(&self, _computation_graph: &ComputationGraph) -> HashMap<OperationType, usize> {
+    fn classify_operations(
+        &self,
+        _computation_graph: &ComputationGraph,
+    ) -> HashMap<OperationType, usize> {
         // Placeholder implementation - would analyze actual operations
         let mut operation_counts = HashMap::new();
         operation_counts.insert(OperationType::ElementWise, 50);
@@ -527,26 +546,32 @@ impl WorkloadAnalyzer {
         operation_counts
     }
 
-    fn analyze_memory_requirements(&self, _computation_graph: &ComputationGraph) -> MemoryRequirements {
+    fn analyze_memory_requirements(
+        &self,
+        _computation_graph: &ComputationGraph,
+    ) -> MemoryRequirements {
         // Placeholder implementation - would analyze actual memory usage
         MemoryRequirements {
-            peak_memory: 1024 * 1024 * 1024, // 1GB
+            peak_memory: 1024 * 1024 * 1024,     // 1GB
             working_set_size: 512 * 1024 * 1024, // 512MB
             temporary_memory: 256 * 1024 * 1024, // 256MB
-            gradient_memory: 256 * 1024 * 1024, // 256MB
+            gradient_memory: 256 * 1024 * 1024,  // 256MB
             memory_access_pattern: MemoryAccessPattern::Sequential,
         }
     }
 
-    fn assess_parallelization_potential(&self, computation_graph: &ComputationGraph) -> ParallelizationPotential {
+    fn assess_parallelization_potential(
+        &self,
+        computation_graph: &ComputationGraph,
+    ) -> ParallelizationPotential {
         let total_ops = computation_graph.nodes().len();
-        
+
         ParallelizationPotential {
             data_parallel_ops: total_ops * 80 / 100, // 80% can be data parallel
-            pipeline_parallel_stages: 4, // Assume 4 pipeline stages
-            independent_subgraphs: 2, // Assume some independence
-            synchronization_points: 5, // Assume some sync points
-            parallel_efficiency: 0.85, // 85% efficiency
+            pipeline_parallel_stages: 4,             // Assume 4 pipeline stages
+            independent_subgraphs: 2,                // Assume some independence
+            synchronization_points: 5,               // Assume some sync points
+            parallel_efficiency: 0.85,               // 85% efficiency
         }
     }
 
@@ -555,9 +580,15 @@ impl WorkloadAnalyzer {
         operation_types: &HashMap<OperationType, usize>,
         _memory_requirements: &MemoryRequirements,
     ) -> ComputationalIntensity {
-        let compute_ops = *operation_types.get(&OperationType::MatrixMultiplication).unwrap_or(&0)
-            + *operation_types.get(&OperationType::Convolution).unwrap_or(&0);
-        let memory_ops = *operation_types.get(&OperationType::ElementWise).unwrap_or(&0)
+        let compute_ops = *operation_types
+            .get(&OperationType::MatrixMultiplication)
+            .unwrap_or(&0)
+            + *operation_types
+                .get(&OperationType::Convolution)
+                .unwrap_or(&0);
+        let memory_ops = *operation_types
+            .get(&OperationType::ElementWise)
+            .unwrap_or(&0)
             + *operation_types.get(&OperationType::Reshape).unwrap_or(&0);
 
         let compute_to_memory_ratio = compute_ops as f64 / (memory_ops as f64 + 1.0);
@@ -592,7 +623,8 @@ impl DevicePlacementOptimizer {
         let primary_device = match workload_analysis.computational_intensity {
             ComputationalIntensity::ComputeBound => {
                 // Prefer GPU for compute-bound workloads
-                self.available_devices.iter()
+                self.available_devices
+                    .iter()
                     .find(|d| d.is_gpu())
                     .copied()
                     .unwrap_or(Device::cpu())
@@ -603,17 +635,25 @@ impl DevicePlacementOptimizer {
             }
             ComputationalIntensity::Balanced => {
                 // Use best available device
-                self.available_devices.first().copied().unwrap_or(Device::cpu())
+                self.available_devices
+                    .first()
+                    .copied()
+                    .unwrap_or(Device::cpu())
             }
         };
 
         DevicePlacement {
             tensor_placements: HashMap::new(), // Would be populated with actual tensor placements
             operation_placements: HashMap::new(), // Would be populated with operation placements
-            transfer_schedule: Vec::new(), // Would include necessary transfers
+            transfer_schedule: Vec::new(),     // Would include necessary transfers
             estimated_execution_time: Duration::from_millis(100), // Placeholder
-            memory_usage_per_device: [(primary_device, workload_analysis.memory_requirements.peak_memory)]
-                .iter().cloned().collect(),
+            memory_usage_per_device: [(
+                primary_device,
+                workload_analysis.memory_requirements.peak_memory,
+            )]
+            .iter()
+            .cloned()
+            .collect(),
         }
     }
 }
@@ -640,7 +680,10 @@ impl MemoryOptimizer {
         }
     }
 
-    fn select_allocation_strategy(&self, workload_analysis: &WorkloadAnalysis) -> AllocationStrategy {
+    fn select_allocation_strategy(
+        &self,
+        workload_analysis: &WorkloadAnalysis,
+    ) -> AllocationStrategy {
         match workload_analysis.memory_requirements.memory_access_pattern {
             MemoryAccessPattern::Sequential => AllocationStrategy::Pooled,
             MemoryAccessPattern::Random => AllocationStrategy::Lazy,
@@ -651,7 +694,7 @@ impl MemoryOptimizer {
 
     fn configure_memory_pools(&self) -> HashMap<Device, MemoryPoolConfig> {
         let mut pools = HashMap::new();
-        
+
         for (&device, &memory_limit) in &self.memory_constraints {
             let pool_config = MemoryPoolConfig {
                 initial_size: memory_limit / 4, // Start with 25% of available memory
@@ -662,14 +705,17 @@ impl MemoryOptimizer {
             };
             pools.insert(device, pool_config);
         }
-        
+
         pools
     }
 
-    fn plan_gradient_checkpointing(&self, workload_analysis: &WorkloadAnalysis) -> GradientCheckpointingPlan {
+    fn plan_gradient_checkpointing(
+        &self,
+        workload_analysis: &WorkloadAnalysis,
+    ) -> GradientCheckpointingPlan {
         // Use gradient checkpointing if memory pressure is high
-        let should_checkpoint = workload_analysis.memory_requirements.peak_memory > 
-            4 * 1024 * 1024 * 1024; // > 4GB
+        let should_checkpoint =
+            workload_analysis.memory_requirements.peak_memory > 4 * 1024 * 1024 * 1024; // > 4GB
 
         if should_checkpoint {
             GradientCheckpointingPlan {
@@ -711,16 +757,22 @@ mod tests {
     fn test_resource_optimizer_creation() {
         let hardware_profile = create_test_hardware_profile();
         let optimizer = ResourceOptimizer::new(hardware_profile);
-        
-        assert!(!optimizer.device_placement_optimizer.available_devices.is_empty());
-        assert!(!optimizer.device_placement_optimizer._device_capabilities.is_empty());
+
+        assert!(!optimizer
+            .device_placement_optimizer
+            .available_devices
+            .is_empty());
+        assert!(!optimizer
+            .device_placement_optimizer
+            ._device_capabilities
+            .is_empty());
     }
 
     #[test]
     fn test_workload_analysis() {
         let analyzer = WorkloadAnalyzer;
         let computation_graph = ComputationGraph::new(); // Empty graph for testing
-        
+
         let analysis = analyzer.analyze(&computation_graph);
         assert_eq!(analysis.total_operations, 0); // Empty graph
     }
@@ -729,8 +781,9 @@ mod tests {
     fn test_device_capabilities_estimation() {
         let hardware_profile = create_test_hardware_profile();
         let devices = vec![Device::cpu()];
-        let capabilities = ResourceOptimizer::build_device_capabilities(&hardware_profile, &devices);
-        
+        let capabilities =
+            ResourceOptimizer::build_device_capabilities(&hardware_profile, &devices);
+
         assert!(capabilities.contains_key(&Device::cpu()));
         let cpu_cap = &capabilities[&Device::cpu()];
         assert!(cpu_cap.compute_throughput > 0.0);
@@ -739,9 +792,12 @@ mod tests {
 
     #[test]
     fn test_memory_optimization_plan() {
-        let memory_constraints = [(Device::cpu(), 8 * 1024 * 1024 * 1024)].iter().cloned().collect();
+        let memory_constraints = [(Device::cpu(), 8 * 1024 * 1024 * 1024)]
+            .iter()
+            .cloned()
+            .collect();
         let optimizer = MemoryOptimizer { memory_constraints };
-        
+
         let workload_analysis = WorkloadAnalysis {
             total_operations: 100,
             operation_types: HashMap::new(),
@@ -776,8 +832,15 @@ mod tests {
             memory_usage_per_device: HashMap::new(),
         };
 
-        let plan = optimizer.create_optimization_plan(&computation_graph, &workload_analysis, &device_placement);
-        assert!(matches!(plan.allocation_strategy, AllocationStrategy::Pooled));
+        let plan = optimizer.create_optimization_plan(
+            &computation_graph,
+            &workload_analysis,
+            &device_placement,
+        );
+        assert!(matches!(
+            plan.allocation_strategy,
+            AllocationStrategy::Pooled
+        ));
         assert!(!plan.memory_pools.is_empty());
     }
 }

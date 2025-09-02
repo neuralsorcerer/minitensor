@@ -4,9 +4,9 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
-use engine::debug::{TensorInfo, TensorDebugger, MemoryTracker, OperationProfiler};
 use crate::tensor::PyTensor;
+use engine::debug::{MemoryTracker, OperationProfiler, TensorDebugger, TensorInfo};
+use pyo3::prelude::*;
 
 /// Python wrapper for TensorInfo
 #[pyclass(name = "TensorInfo")]
@@ -187,9 +187,11 @@ impl PyMemoryTracker {
     }
 
     fn __repr__(&self) -> String {
-        format!("MemoryTracker(current={:.2}MB, peak={:.2}MB)", 
-                self.inner.current_usage_mb(), 
-                self.inner.peak_usage_mb())
+        format!(
+            "MemoryTracker(current={:.2}MB, peak={:.2}MB)",
+            self.inner.current_usage_mb(),
+            self.inner.peak_usage_mb()
+        )
     }
 }
 
@@ -278,7 +280,9 @@ impl PyTimer {
         let duration_ms = duration.as_secs_f64() * 1000.0;
 
         if let Some(ref profiler) = self.profiler {
-            profiler.borrow_mut(py).record_timing(self.operation.clone(), duration_ms);
+            profiler
+                .borrow_mut(py)
+                .record_timing(self.operation.clone(), duration_ms);
         }
 
         Ok(false) // Don't suppress exceptions

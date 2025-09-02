@@ -42,13 +42,21 @@ impl MetalBackend {
     }
 
     /// Create a Metal buffer
-    pub fn create_buffer(&self, length: u64, options: metal::MTLResourceOptions) -> Result<metal::Buffer> {
+    pub fn create_buffer(
+        &self,
+        length: u64,
+        options: metal::MTLResourceOptions,
+    ) -> Result<metal::Buffer> {
         let buffer = self.metal_device.new_buffer(length, options);
         Ok(buffer)
     }
 
     /// Create a Metal buffer with data
-    pub fn create_buffer_with_data<T>(&self, data: &[T], options: metal::MTLResourceOptions) -> Result<metal::Buffer>
+    pub fn create_buffer_with_data<T>(
+        &self,
+        data: &[T],
+        options: metal::MTLResourceOptions,
+    ) -> Result<metal::Buffer>
     where
         T: Copy,
     {
@@ -58,36 +66,56 @@ impl MetalBackend {
             byte_length,
             options,
         );
-        
+
         Ok(buffer)
     }
 
     /// Load Metal shaders from source
     pub fn load_library_from_source(&self, source: &str) -> Result<()> {
         let compile_options = metal::CompileOptions::new();
-        
-        let library = self.metal_device
+
+        let library = self
+            .metal_device
             .new_library_with_source(source, &compile_options)
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to compile Metal library: {}", e)))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Failed to compile Metal library: {}",
+                    e
+                ))
+            })?;
 
         let mut lib = self.library.lock().unwrap();
         *lib = Some(library);
-        
+
         Ok(())
     }
 
     /// Create a compute pipeline state
-    pub fn create_compute_pipeline(&self, function_name: &str) -> Result<metal::ComputePipelineState> {
+    pub fn create_compute_pipeline(
+        &self,
+        function_name: &str,
+    ) -> Result<metal::ComputePipelineState> {
         let library = self.library.lock().unwrap();
-        let library = library.as_ref()
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("No Metal library loaded"))?;
+        let library = library.as_ref().ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("No Metal library loaded")
+        })?;
 
-        let function = library.get_function(function_name, None)
-            .ok_or_else(|| crate::error::MinitensorError::backend_error(format!("Function '{}' not found in Metal library", function_name)))?;
+        let function = library.get_function(function_name, None).ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Function '{}' not found in Metal library",
+                function_name
+            ))
+        })?;
 
-        let pipeline_state = self.metal_device
+        let pipeline_state = self
+            .metal_device
             .new_compute_pipeline_state_with_function(&function)
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to create compute pipeline: {}", e)))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Failed to create compute pipeline: {}",
+                    e
+                ))
+            })?;
 
         // Cache the pipeline state
         let mut pipelines = self.compute_pipelines.lock().unwrap();
@@ -127,7 +155,7 @@ impl MetalBackend {
         let byte_length = data.len() * std::mem::size_of::<T>();
         if buffer.length() as usize != byte_length {
             return Err(crate::error::MinitensorError::memory_error(
-                "Buffer size mismatch"
+                "Buffer size mismatch",
             ));
         }
 
@@ -147,7 +175,7 @@ impl MetalBackend {
         let byte_length = data.len() * std::mem::size_of::<T>();
         if buffer.length() as usize != byte_length {
             return Err(crate::error::MinitensorError::memory_error(
-                "Buffer size mismatch"
+                "Buffer size mismatch",
             ));
         }
 
@@ -163,7 +191,9 @@ impl MetalBackend {
     pub fn get_buffer_info(&self, ptr: *const u8) -> Option<(usize, usize)> {
         let buffer_id = ptr as usize;
         let buffers = self.buffers.lock().unwrap();
-        buffers.get(&buffer_id).map(|buf| (buffer_id, buf.size_bytes))
+        buffers
+            .get(&buffer_id)
+            .map(|buf| (buffer_id, buf.size_bytes))
     }
 
     /// Get total number of tracked buffers
@@ -182,26 +212,32 @@ impl MetalBackend {
             operation(&metal_buffer.buffer)
         } else {
             Err(crate::error::MinitensorError::memory_error(
-                "Metal buffer not found for pointer"
+                "Metal buffer not found for pointer",
             ))
         }
     }
 
     /// Get optimal thread group size for the device
-    pub fn optimal_thread_group_size(&self, pipeline: &metal::ComputePipelineState) -> metal::MTLSize {
+    pub fn optimal_thread_group_size(
+        &self,
+        pipeline: &metal::ComputePipelineState,
+    ) -> metal::MTLSize {
         let max_threads = pipeline.max_total_threads_per_threadgroup();
         let thread_execution_width = pipeline.thread_execution_width();
-        
+
         // Use thread execution width as a good default for 1D operations
         let threads_per_group = std::cmp::min(max_threads, thread_execution_width);
         metal::MTLSize::new(threads_per_group, 1, 1)
     }
 
     /// Get optimal thread group size for 2D operations
-    pub fn optimal_thread_group_size_2d(&self, pipeline: &metal::ComputePipelineState) -> metal::MTLSize {
+    pub fn optimal_thread_group_size_2d(
+        &self,
+        pipeline: &metal::ComputePipelineState,
+    ) -> metal::MTLSize {
         let max_threads = pipeline.max_total_threads_per_threadgroup();
         let thread_execution_width = pipeline.thread_execution_width();
-        
+
         // For 2D operations, use square thread groups
         let side = (max_threads as f64).sqrt() as u64;
         let side = std::cmp::min(side, 16); // Cap at 16x16 for good occupancy
@@ -229,8 +265,9 @@ impl Backend for MetalBackend {
     fn initialize() -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
-            let metal_device = metal::Device::system_default()
-                .ok_or_else(|| crate::error::MinitensorError::backend_error("No Metal device available"))?;
+            let metal_device = metal::Device::system_default().ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("No Metal device available")
+            })?;
 
             let command_queue = metal_device.new_command_queue();
 
@@ -247,7 +284,7 @@ impl Backend for MetalBackend {
         #[cfg(not(target_os = "macos"))]
         {
             Err(crate::error::MinitensorError::backend_error(
-                "Metal backend is only available on macOS"
+                "Metal backend is only available on macOS",
             ))
         }
     }
@@ -269,11 +306,8 @@ impl Backend for MetalBackend {
             *next_id += 1;
             id
         };
-        
-        let metal_buffer = MetalBufferWrapper {
-            buffer,
-            size_bytes,
-        };
+
+        let metal_buffer = MetalBufferWrapper { buffer, size_bytes };
 
         // Store the buffer for tracking
         let mut buffers = self.buffers.lock().unwrap();
@@ -300,7 +334,7 @@ impl Backend for MetalBackend {
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null destination pointer"
+                "Null destination pointer",
             ));
         }
 
@@ -314,7 +348,7 @@ impl Backend for MetalBackend {
             }
         } else {
             return Err(crate::error::MinitensorError::memory_error(
-                "Metal buffer not found for pointer"
+                "Metal buffer not found for pointer",
             ));
         }
 
@@ -324,7 +358,7 @@ impl Backend for MetalBackend {
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null source pointer"
+                "Null source pointer",
             ));
         }
 
@@ -338,7 +372,7 @@ impl Backend for MetalBackend {
             }
         } else {
             return Err(crate::error::MinitensorError::memory_error(
-                "Metal buffer not found for pointer"
+                "Metal buffer not found for pointer",
             ));
         }
 
@@ -501,32 +535,47 @@ impl MetalOps {
     pub fn new(backend: Arc<MetalBackend>) -> Result<Self> {
         // Load all shaders
         backend.load_library_from_source(shaders::ALL_SHADERS)?;
-        
+
         // Create compute pipelines
         backend.create_compute_pipeline("add_kernel")?;
         backend.create_compute_pipeline("mul_kernel")?;
         backend.create_compute_pipeline("matmul_kernel")?;
         backend.create_compute_pipeline("relu_kernel")?;
         backend.create_compute_pipeline("sigmoid_kernel")?;
-        
+
         Ok(Self { backend })
     }
 
     /// Element-wise addition on GPU
-    pub fn add(&self, a: &metal::Buffer, b: &metal::Buffer, c: &metal::Buffer, n: u32) -> Result<()> {
-        let pipeline = self.backend.get_compute_pipeline("add_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Add pipeline not found"))?;
+    pub fn add(
+        &self,
+        a: &metal::Buffer,
+        b: &metal::Buffer,
+        c: &metal::Buffer,
+        n: u32,
+    ) -> Result<()> {
+        let pipeline = self
+            .backend
+            .get_compute_pipeline("add_kernel")
+            .ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("Add pipeline not found")
+            })?;
 
         self.backend.execute_compute_command(|encoder| {
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_buffer(0, Some(a), 0);
             encoder.set_buffer(1, Some(b), 0);
             encoder.set_buffer(2, Some(c), 0);
-            encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &n as *const u32 as *const std::ffi::c_void);
+            encoder.set_bytes(
+                3,
+                std::mem::size_of::<u32>() as u64,
+                &n as *const u32 as *const std::ffi::c_void,
+            );
 
             let thread_group_size = self.backend.optimal_thread_group_size(&pipeline);
             let threads_per_group = thread_group_size.width;
-            let thread_group_count = metal::MTLSize::new((n as u64 + threads_per_group - 1) / threads_per_group, 1, 1);
+            let thread_group_count =
+                metal::MTLSize::new((n as u64 + threads_per_group - 1) / threads_per_group, 1, 1);
 
             encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
             Ok(())
@@ -534,16 +583,30 @@ impl MetalOps {
     }
 
     /// Element-wise multiplication on GPU
-    pub fn mul(&self, a: &metal::Buffer, b: &metal::Buffer, c: &metal::Buffer, n: u32) -> Result<()> {
-        let pipeline = self.backend.get_compute_pipeline("mul_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Mul pipeline not found"))?;
+    pub fn mul(
+        &self,
+        a: &metal::Buffer,
+        b: &metal::Buffer,
+        c: &metal::Buffer,
+        n: u32,
+    ) -> Result<()> {
+        let pipeline = self
+            .backend
+            .get_compute_pipeline("mul_kernel")
+            .ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("Mul pipeline not found")
+            })?;
 
         self.backend.execute_compute_command(|encoder| {
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_buffer(0, Some(a), 0);
             encoder.set_buffer(1, Some(b), 0);
             encoder.set_buffer(2, Some(c), 0);
-            encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &n as *const u32 as *const std::ffi::c_void);
+            encoder.set_bytes(
+                3,
+                std::mem::size_of::<u32>() as u64,
+                &n as *const u32 as *const std::ffi::c_void,
+            );
 
             let thread_group_count = metal::MTLSize::new((n as u64 + 255) / 256, 1, 1);
             let thread_group_size = metal::MTLSize::new(256, 1, 1);
@@ -554,20 +617,45 @@ impl MetalOps {
     }
 
     /// Matrix multiplication on GPU
-    pub fn matmul(&self, a: &metal::Buffer, b: &metal::Buffer, c: &metal::Buffer, m: u32, n: u32, k: u32) -> Result<()> {
-        let pipeline = self.backend.get_compute_pipeline("matmul_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Matmul pipeline not found"))?;
+    pub fn matmul(
+        &self,
+        a: &metal::Buffer,
+        b: &metal::Buffer,
+        c: &metal::Buffer,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<()> {
+        let pipeline = self
+            .backend
+            .get_compute_pipeline("matmul_kernel")
+            .ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("Matmul pipeline not found")
+            })?;
 
         self.backend.execute_compute_command(|encoder| {
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_buffer(0, Some(a), 0);
             encoder.set_buffer(1, Some(b), 0);
             encoder.set_buffer(2, Some(c), 0);
-            encoder.set_bytes(3, std::mem::size_of::<u32>() as u64, &m as *const u32 as *const std::ffi::c_void);
-            encoder.set_bytes(4, std::mem::size_of::<u32>() as u64, &n as *const u32 as *const std::ffi::c_void);
-            encoder.set_bytes(5, std::mem::size_of::<u32>() as u64, &k as *const u32 as *const std::ffi::c_void);
+            encoder.set_bytes(
+                3,
+                std::mem::size_of::<u32>() as u64,
+                &m as *const u32 as *const std::ffi::c_void,
+            );
+            encoder.set_bytes(
+                4,
+                std::mem::size_of::<u32>() as u64,
+                &n as *const u32 as *const std::ffi::c_void,
+            );
+            encoder.set_bytes(
+                5,
+                std::mem::size_of::<u32>() as u64,
+                &k as *const u32 as *const std::ffi::c_void,
+            );
 
-            let thread_group_count = metal::MTLSize::new((n as u64 + 15) / 16, (m as u64 + 15) / 16, 1);
+            let thread_group_count =
+                metal::MTLSize::new((n as u64 + 15) / 16, (m as u64 + 15) / 16, 1);
             let thread_group_size = metal::MTLSize::new(16, 16, 1);
 
             encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
@@ -577,14 +665,22 @@ impl MetalOps {
 
     /// ReLU activation on GPU
     pub fn relu(&self, input: &metal::Buffer, output: &metal::Buffer, n: u32) -> Result<()> {
-        let pipeline = self.backend.get_compute_pipeline("relu_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("ReLU pipeline not found"))?;
+        let pipeline = self
+            .backend
+            .get_compute_pipeline("relu_kernel")
+            .ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("ReLU pipeline not found")
+            })?;
 
         self.backend.execute_compute_command(|encoder| {
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_buffer(0, Some(input), 0);
             encoder.set_buffer(1, Some(output), 0);
-            encoder.set_bytes(2, std::mem::size_of::<u32>() as u64, &n as *const u32 as *const std::ffi::c_void);
+            encoder.set_bytes(
+                2,
+                std::mem::size_of::<u32>() as u64,
+                &n as *const u32 as *const std::ffi::c_void,
+            );
 
             let thread_group_count = metal::MTLSize::new((n as u64 + 255) / 256, 1, 1);
             let thread_group_size = metal::MTLSize::new(256, 1, 1);
@@ -596,14 +692,22 @@ impl MetalOps {
 
     /// Sigmoid activation on GPU
     pub fn sigmoid(&self, input: &metal::Buffer, output: &metal::Buffer, n: u32) -> Result<()> {
-        let pipeline = self.backend.get_compute_pipeline("sigmoid_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Sigmoid pipeline not found"))?;
+        let pipeline = self
+            .backend
+            .get_compute_pipeline("sigmoid_kernel")
+            .ok_or_else(|| {
+                crate::error::MinitensorError::backend_error("Sigmoid pipeline not found")
+            })?;
 
         self.backend.execute_compute_command(|encoder| {
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_buffer(0, Some(input), 0);
             encoder.set_buffer(1, Some(output), 0);
-            encoder.set_bytes(2, std::mem::size_of::<u32>() as u64, &n as *const u32 as *const std::ffi::c_void);
+            encoder.set_bytes(
+                2,
+                std::mem::size_of::<u32>() as u64,
+                &n as *const u32 as *const std::ffi::c_void,
+            );
 
             let thread_group_count = metal::MTLSize::new((n as u64 + 255) / 256, 1, 1);
             let thread_group_size = metal::MTLSize::new(256, 1, 1);
@@ -614,59 +718,85 @@ impl MetalOps {
     }
 
     /// Execute element-wise addition using pointers
-    pub fn add_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, n: u32) -> Result<()> {
+    pub fn add_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        n: u32,
+    ) -> Result<()> {
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.add(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("Metal buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "Metal buffer not found for operation",
+            ))
         }
     }
 
     /// Execute element-wise multiplication using pointers
-    pub fn mul_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, n: u32) -> Result<()> {
+    pub fn mul_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        n: u32,
+    ) -> Result<()> {
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.mul(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("Metal buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "Metal buffer not found for operation",
+            ))
         }
     }
 
     /// Execute matrix multiplication using pointers
-    pub fn matmul_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, m: u32, n: u32, k: u32) -> Result<()> {
+    pub fn matmul_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<()> {
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.matmul(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, m, n, k)
         } else {
-            Err(crate::error::MinitensorError::memory_error("Metal buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "Metal buffer not found for operation",
+            ))
         }
     }
 
@@ -674,16 +804,18 @@ impl MetalOps {
     pub fn relu_ptr(&self, input_ptr: *const u8, output_ptr: *mut u8, n: u32) -> Result<()> {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
-            buffers.get(&output_buffer_id)
+            buffers.get(&output_buffer_id),
         ) {
             self.relu(&input_buf.buffer, &output_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("Metal buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "Metal buffer not found for operation",
+            ))
         }
     }
 
@@ -691,16 +823,18 @@ impl MetalOps {
     pub fn sigmoid_ptr(&self, input_ptr: *const u8, output_ptr: *mut u8, n: u32) -> Result<()> {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
-            buffers.get(&output_buffer_id)
+            buffers.get(&output_buffer_id),
         ) {
             self.sigmoid(&input_buf.buffer, &output_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("Metal buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "Metal buffer not found for operation",
+            ))
         }
     }
 }
@@ -733,14 +867,16 @@ mod tests {
             }
 
             let backend = MetalBackend::initialize().unwrap();
-            
+
             // Test buffer creation and data transfer
             let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
-            let buffer = backend.create_buffer_with_data(&data, metal::MTLResourceOptions::StorageModeShared).unwrap();
-            
+            let buffer = backend
+                .create_buffer_with_data(&data, metal::MTLResourceOptions::StorageModeShared)
+                .unwrap();
+
             let mut result = vec![0.0f32; 5];
             backend.copy_buffer_to_host(&buffer, &mut result).unwrap();
-            
+
             assert_eq!(data, result);
         }
     }
@@ -755,20 +891,26 @@ mod tests {
 
             let backend = Arc::new(MetalBackend::initialize().unwrap());
             let ops = MetalOps::new(backend.clone()).unwrap();
-            
+
             // Test addition
             let a_data = vec![1.0f32, 2.0, 3.0, 4.0];
             let b_data = vec![5.0f32, 6.0, 7.0, 8.0];
-            
-            let a_buffer = backend.create_buffer_with_data(&a_data, metal::MTLResourceOptions::StorageModeShared).unwrap();
-            let b_buffer = backend.create_buffer_with_data(&b_data, metal::MTLResourceOptions::StorageModeShared).unwrap();
-            let c_buffer = backend.create_buffer(16, metal::MTLResourceOptions::StorageModeShared).unwrap();
-            
+
+            let a_buffer = backend
+                .create_buffer_with_data(&a_data, metal::MTLResourceOptions::StorageModeShared)
+                .unwrap();
+            let b_buffer = backend
+                .create_buffer_with_data(&b_data, metal::MTLResourceOptions::StorageModeShared)
+                .unwrap();
+            let c_buffer = backend
+                .create_buffer(16, metal::MTLResourceOptions::StorageModeShared)
+                .unwrap();
+
             ops.add(&a_buffer, &b_buffer, &c_buffer, 4).unwrap();
-            
+
             let mut result = vec![0.0f32; 4];
             backend.copy_buffer_to_host(&c_buffer, &mut result).unwrap();
-            
+
             let expected = vec![6.0f32, 8.0, 10.0, 12.0];
             for (r, e) in result.iter().zip(expected.iter()) {
                 assert!((r - e).abs() < 1e-6);

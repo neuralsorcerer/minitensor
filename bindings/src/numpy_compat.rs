@@ -4,13 +4,13 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
-use pyo3::types::PyList;
-use crate::tensor::PyTensor;
 use crate::error::_convert_error;
-use engine::TensorIndex;
+use crate::tensor::PyTensor;
 use engine::operations::arithmetic::{mul, sub};
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
+use engine::TensorIndex;
+use pyo3::prelude::*;
+use pyo3::types::PyList;
 
 /// NumPy-style array creation functions
 #[pymodule]
@@ -20,7 +20,7 @@ pub fn numpy_compat(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ones_like, m)?)?;
     m.add_function(wrap_pyfunction!(empty_like, m)?)?;
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
-    
+
     // Array manipulation functions
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
@@ -29,16 +29,16 @@ pub fn numpy_compat(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(hsplit, m)?)?;
     m.add_function(wrap_pyfunction!(vsplit, m)?)?;
-    
+
     // Mathematical functions
     m.add_function(wrap_pyfunction!(dot, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
-    
+
     // Comparison functions
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(array_equal, m)?)?;
-    
+
     // Statistical functions
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(tensor_std, m)?)?;
@@ -46,7 +46,7 @@ pub fn numpy_compat(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(max, m)?)?;
     m.add_function(wrap_pyfunction!(min, m)?)?;
-    
+
     Ok(())
 }
 
@@ -171,28 +171,52 @@ fn cross(a: &PyTensor, b: &PyTensor, _axis: Option<i32>) -> PyResult<PyTensor> {
         ));
     }
 
-    let a0 = a.tensor().index(&[TensorIndex::Index(0)]).map_err(_convert_error)?;
-    let a1 = a.tensor().index(&[TensorIndex::Index(1)]).map_err(_convert_error)?;
-    let a2 = a.tensor().index(&[TensorIndex::Index(2)]).map_err(_convert_error)?;
-    let b0 = b.tensor().index(&[TensorIndex::Index(0)]).map_err(_convert_error)?;
-    let b1 = b.tensor().index(&[TensorIndex::Index(1)]).map_err(_convert_error)?;
-    let b2 = b.tensor().index(&[TensorIndex::Index(2)]).map_err(_convert_error)?;
+    let a0 = a
+        .tensor()
+        .index(&[TensorIndex::Index(0)])
+        .map_err(_convert_error)?;
+    let a1 = a
+        .tensor()
+        .index(&[TensorIndex::Index(1)])
+        .map_err(_convert_error)?;
+    let a2 = a
+        .tensor()
+        .index(&[TensorIndex::Index(2)])
+        .map_err(_convert_error)?;
+    let b0 = b
+        .tensor()
+        .index(&[TensorIndex::Index(0)])
+        .map_err(_convert_error)?;
+    let b1 = b
+        .tensor()
+        .index(&[TensorIndex::Index(1)])
+        .map_err(_convert_error)?;
+    let b2 = b
+        .tensor()
+        .index(&[TensorIndex::Index(2)])
+        .map_err(_convert_error)?;
 
-    let c0 = sub(&mul(&a1, &b2).map_err(_convert_error)?,
-                 &mul(&a2, &b1).map_err(_convert_error)?)
-        .map_err(_convert_error)?
-        .unsqueeze(0)
-        .map_err(_convert_error)?;
-    let c1 = sub(&mul(&a2, &b0).map_err(_convert_error)?,
-                 &mul(&a0, &b2).map_err(_convert_error)?)
-        .map_err(_convert_error)?
-        .unsqueeze(0)
-        .map_err(_convert_error)?;
-    let c2 = sub(&mul(&a0, &b1).map_err(_convert_error)?,
-                 &mul(&a1, &b0).map_err(_convert_error)?)
-        .map_err(_convert_error)?
-        .unsqueeze(0)
-        .map_err(_convert_error)?;
+    let c0 = sub(
+        &mul(&a1, &b2).map_err(_convert_error)?,
+        &mul(&a2, &b1).map_err(_convert_error)?,
+    )
+    .map_err(_convert_error)?
+    .unsqueeze(0)
+    .map_err(_convert_error)?;
+    let c1 = sub(
+        &mul(&a2, &b0).map_err(_convert_error)?,
+        &mul(&a0, &b2).map_err(_convert_error)?,
+    )
+    .map_err(_convert_error)?
+    .unsqueeze(0)
+    .map_err(_convert_error)?;
+    let c2 = sub(
+        &mul(&a0, &b1).map_err(_convert_error)?,
+        &mul(&a1, &b0).map_err(_convert_error)?,
+    )
+    .map_err(_convert_error)?
+    .unsqueeze(0)
+    .map_err(_convert_error)?;
 
     let result = tensor_concatenate(&[&c0, &c1, &c2], 0).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -218,7 +242,11 @@ fn mean(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyRes
 
 /// Compute standard deviation along axis
 #[pyfunction]
-fn tensor_std(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn tensor_std(
+    tensor: &PyTensor,
+    axis: Option<usize>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
     tensor.std(axis, keepdims)
 }
 

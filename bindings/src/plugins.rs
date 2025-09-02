@@ -4,14 +4,14 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::error::_convert_error;
+use engine::{
+    get_plugin_info as engine_get_plugin_info, is_plugin_loaded as engine_is_plugin_loaded,
+    list_plugins as engine_list_plugins, unload_plugin as engine_unload_plugin, PluginInfo,
+    VersionInfo,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use engine::{
-    PluginInfo, VersionInfo,
-    unload_plugin as engine_unload_plugin, list_plugins as engine_list_plugins,
-    get_plugin_info as engine_get_plugin_info, is_plugin_loaded as engine_is_plugin_loaded,
-};
-use crate::error::_convert_error;
 use std::collections::HashMap;
 
 /// Python wrapper for VersionInfo
@@ -32,15 +32,13 @@ impl PyVersionInfo {
 
     #[staticmethod]
     fn parse(version_str: &str) -> PyResult<Self> {
-        let version = VersionInfo::parse(version_str)
-            .map_err(_convert_error)?;
+        let version = VersionInfo::parse(version_str).map_err(_convert_error)?;
         Ok(Self { inner: version })
     }
 
     #[staticmethod]
     fn current() -> PyResult<Self> {
-        let version = VersionInfo::current()
-            .map_err(_convert_error)?;
+        let version = VersionInfo::current().map_err(_convert_error)?;
         Ok(Self { inner: version })
     }
 
@@ -68,7 +66,10 @@ impl PyVersionInfo {
     }
 
     fn __repr__(&self) -> String {
-        format!("VersionInfo({}, {}, {})", self.inner.major, self.inner.minor, self.inner.patch)
+        format!(
+            "VersionInfo({}, {}, {})",
+            self.inner.major, self.inner.minor, self.inner.patch
+        )
     }
 }
 
@@ -88,7 +89,9 @@ impl PyPluginInfo {
 
     #[getter]
     fn version(&self) -> PyVersionInfo {
-        PyVersionInfo { inner: self.inner.version.clone() }
+        PyVersionInfo {
+            inner: self.inner.version.clone(),
+        }
     }
 
     #[getter]
@@ -103,22 +106,31 @@ impl PyPluginInfo {
 
     #[getter]
     fn min_minitensor_version(&self) -> PyVersionInfo {
-        PyVersionInfo { inner: self.inner.min_minitensor_version.clone() }
+        PyVersionInfo {
+            inner: self.inner.min_minitensor_version.clone(),
+        }
     }
 
     #[getter]
     fn max_minitensor_version(&self) -> Option<PyVersionInfo> {
-        self.inner.max_minitensor_version.as_ref()
+        self.inner
+            .max_minitensor_version
+            .as_ref()
             .map(|v| PyVersionInfo { inner: v.clone() })
     }
 
     fn __str__(&self) -> String {
-        format!("{} v{} by {}", self.inner.name, self.inner.version, self.inner.author)
+        format!(
+            "{} v{} by {}",
+            self.inner.name, self.inner.version, self.inner.author
+        )
     }
 
     fn __repr__(&self) -> String {
-        format!("PluginInfo(name='{}', version='{}', author='{}')", 
-                self.inner.name, self.inner.version, self.inner.author)
+        format!(
+            "PluginInfo(name='{}', version='{}', author='{}')",
+            self.inner.name, self.inner.version, self.inner.author
+        )
     }
 }
 
@@ -175,7 +187,9 @@ impl PyCustomPlugin {
 
     #[getter]
     fn info(&self) -> PyPluginInfo {
-        PyPluginInfo { inner: self.info.clone() }
+        PyPluginInfo {
+            inner: self.info.clone(),
+        }
     }
 }
 
@@ -187,39 +201,36 @@ impl PyCustomPlugin {
 #[pyfunction]
 fn load_plugin(_path: &str) -> PyResult<()> {
     Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-        "Dynamic plugin loading is not available in this build"
+        "Dynamic plugin loading is not available in this build",
     ))
 }
 
 #[pyfunction]
 fn unload_plugin(name: &str) -> PyResult<()> {
-    engine_unload_plugin(name)
-        .map_err(_convert_error)?;
+    engine_unload_plugin(name).map_err(_convert_error)?;
     Ok(())
 }
 
 #[pyfunction]
 fn list_plugins() -> PyResult<Vec<PyPluginInfo>> {
-    let plugins = engine_list_plugins()
-        .map_err(_convert_error)?;
-    
-    Ok(plugins.into_iter()
+    let plugins = engine_list_plugins().map_err(_convert_error)?;
+
+    Ok(plugins
+        .into_iter()
         .map(|info| PyPluginInfo { inner: info })
         .collect())
 }
 
 #[pyfunction]
 fn get_plugin_info(name: &str) -> PyResult<PyPluginInfo> {
-    let info = engine_get_plugin_info(name)
-        .map_err(_convert_error)?;
-    
+    let info = engine_get_plugin_info(name).map_err(_convert_error)?;
+
     Ok(PyPluginInfo { inner: info })
 }
 
 #[pyfunction]
 fn is_plugin_loaded(name: &str) -> PyResult<bool> {
-    engine_is_plugin_loaded(name)
-        .map_err(_convert_error)
+    engine_is_plugin_loaded(name).map_err(_convert_error)
 }
 
 /// Plugin registry for managing Python-based plugins
@@ -239,47 +250,56 @@ impl PyPluginRegistry {
 
     fn register(&mut self, plugin: &PyCustomPlugin) -> PyResult<()> {
         let name = plugin.info.name.clone();
-        
+
         // Check for duplicates
         if self.plugins.contains_key(&name) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Plugin '{}' is already registered", name)
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Plugin '{}' is already registered",
+                name
+            )));
         }
 
-    self.plugins.insert(name, plugin.clone());
+        self.plugins.insert(name, plugin.clone());
         Ok(())
     }
 
     fn unregister(&mut self, name: &str) -> PyResult<()> {
         if self.plugins.remove(name).is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Plugin '{}' is not registered", name)
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Plugin '{}' is not registered",
+                name
+            )));
         }
         Ok(())
     }
 
     fn list_plugins(&self) -> Vec<PyPluginInfo> {
-        self.plugins.values()
-            .map(|plugin| PyPluginInfo { inner: plugin.info.clone() })
+        self.plugins
+            .values()
+            .map(|plugin| PyPluginInfo {
+                inner: plugin.info.clone(),
+            })
             .collect()
     }
 
     fn get_plugin<'py>(&self, name: &str) -> PyResult<Py<PyCustomPlugin>> {
         Python::with_gil(|py| {
             if let Some(plugin) = self.plugins.get(name) {
-                Py::new(py, PyCustomPlugin {
-                    info: plugin.info.clone(),
-                    initialize_fn: plugin.initialize_fn.clone(),
-                    cleanup_fn: plugin.cleanup_fn.clone(),
-                    custom_operations_fn: plugin.custom_operations_fn.clone(),
-                })
+                Py::new(
+                    py,
+                    PyCustomPlugin {
+                        info: plugin.info.clone(),
+                        initialize_fn: plugin.initialize_fn.clone(),
+                        cleanup_fn: plugin.cleanup_fn.clone(),
+                        custom_operations_fn: plugin.custom_operations_fn.clone(),
+                    },
+                )
                 .map_err(|e| e)
             } else {
-                Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                    format!("Plugin '{}' not found", name)
-                ))
+                Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "Plugin '{}' not found",
+                    name
+                )))
             }
         })
     }
@@ -317,11 +337,9 @@ impl PyCustomLayer {
     }
 
     fn get_parameter(&self, name: &str) -> PyResult<PyObject> {
-        self.parameters.get(name)
-            .cloned()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-                format!("Parameter '{}' not found", name)
-            ))
+        self.parameters.get(name).cloned().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Parameter '{}' not found", name))
+        })
     }
 
     fn list_parameters(&self) -> Vec<String> {
@@ -338,7 +356,7 @@ impl PyCustomLayer {
             forward_fn.call1(py, (inputs,))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "Forward function not implemented"
+                "Forward function not implemented",
             ))
         }
     }
@@ -389,35 +407,63 @@ impl PyPluginBuilder {
         slf
     }
 
-    fn min_minitensor_version<'a>(mut slf: PyRefMut<'a, Self>, version: &'a PyVersionInfo) -> PyRefMut<'a, Self> {
+    fn min_minitensor_version<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        version: &'a PyVersionInfo,
+    ) -> PyRefMut<'a, Self> {
         slf.min_minitensor_version = Some(version.inner.clone());
         slf
     }
 
-    fn max_minitensor_version<'a>(mut slf: PyRefMut<'a, Self>, version: &'a PyVersionInfo) -> PyRefMut<'a, Self> {
+    fn max_minitensor_version<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        version: &'a PyVersionInfo,
+    ) -> PyRefMut<'a, Self> {
         slf.max_minitensor_version = Some(version.inner.clone());
         slf
     }
 
     fn build(slf: PyRef<Self>) -> PyResult<PyCustomPlugin> {
-        let name = slf.name.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin name is required"))?
+        let name = slf
+            .name
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin name is required")
+            })?
             .clone();
-        
-        let version = slf.version.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin version is required"))?
+
+        let version = slf
+            .version
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin version is required")
+            })?
             .clone();
-        
-        let description = slf.description.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin description is required"))?
+
+        let description = slf
+            .description
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin description is required")
+            })?
             .clone();
-        
-        let author = slf.author.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin author is required"))?
+
+        let author = slf
+            .author
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Plugin author is required")
+            })?
             .clone();
-        
-        let min_minitensor_version = slf.min_minitensor_version.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Minimum minitensor version is required"))?
+
+        let min_minitensor_version = slf
+            .min_minitensor_version
+            .as_ref()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Minimum minitensor version is required",
+                )
+            })?
             .clone();
 
         let info = PluginInfo {
@@ -445,12 +491,12 @@ pub fn register_plugin_module(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyPluginRegistry>()?;
     m.add_class::<PyCustomLayer>()?;
     m.add_class::<PyPluginBuilder>()?;
-    
+
     m.add_function(wrap_pyfunction!(load_plugin, m)?)?;
     m.add_function(wrap_pyfunction!(unload_plugin, m)?)?;
     m.add_function(wrap_pyfunction!(list_plugins, m)?)?;
     m.add_function(wrap_pyfunction!(get_plugin_info, m)?)?;
     m.add_function(wrap_pyfunction!(is_plugin_loaded, m)?)?;
-    
+
     Ok(())
 }

@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 /// System memory information
 #[derive(Debug, Clone)]
 pub struct MemoryInfo {
-    pub total_ram: usize,        // bytes
-    pub available_ram: usize,    // bytes
-    pub total_swap: usize,       // bytes
-    pub available_swap: usize,   // bytes
-    pub page_size: usize,        // bytes
+    pub total_ram: usize,      // bytes
+    pub available_ram: usize,  // bytes
+    pub total_swap: usize,     // bytes
+    pub available_swap: usize, // bytes
+    pub page_size: usize,      // bytes
     pub bandwidth: MemoryBandwidth,
     pub cache_info: Vec<CacheInfo>,
 }
@@ -21,22 +21,22 @@ pub struct MemoryInfo {
 /// Memory bandwidth measurements
 #[derive(Debug, Clone)]
 pub struct MemoryBandwidth {
-    pub sequential_read: f64,    // GB/s
-    pub sequential_write: f64,   // GB/s
-    pub random_read: f64,        // GB/s
-    pub random_write: f64,       // GB/s
-    pub copy_bandwidth: f64,     // GB/s
+    pub sequential_read: f64,  // GB/s
+    pub sequential_write: f64, // GB/s
+    pub random_read: f64,      // GB/s
+    pub random_write: f64,     // GB/s
+    pub copy_bandwidth: f64,   // GB/s
 }
 
 /// Cache hierarchy information
 #[derive(Debug, Clone)]
 pub struct CacheInfo {
     pub level: u8,
-    pub size: usize,             // bytes
-    pub line_size: usize,        // bytes
+    pub size: usize,      // bytes
+    pub line_size: usize, // bytes
     pub associativity: usize,
     pub latency_cycles: Option<usize>,
-    pub bandwidth: Option<f64>,  // GB/s
+    pub bandwidth: Option<f64>, // GB/s
 }
 
 impl MemoryInfo {
@@ -72,10 +72,7 @@ impl MemoryInfo {
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
-            if let Ok(output) = Command::new("sysctl")
-                .args(&["-n", "hw.memsize"])
-                .output()
-            {
+            if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.memsize"]).output() {
                 if let Ok(size_str) = String::from_utf8(output.stdout) {
                     if let Ok(size) = size_str.trim().parse::<usize>() {
                         return size;
@@ -156,9 +153,7 @@ impl MemoryInfo {
     fn get_page_size() -> usize {
         #[cfg(unix)]
         {
-            unsafe {
-                libc::sysconf(libc::_SC_PAGESIZE) as usize
-            }
+            unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
         }
         #[cfg(not(unix))]
         {
@@ -174,20 +169,23 @@ impl MemoryInfo {
             // Try to read cache information from sysfs
             for level in 1..=4 {
                 let cache_path = format!("/sys/devices/system/cpu/cpu0/cache/index{}", level - 1);
-                
+
                 if let (Ok(size_str), Ok(line_size_str)) = (
                     std::fs::read_to_string(format!("{}/size", cache_path)),
-                    std::fs::read_to_string(format!("{}/coherency_line_size", cache_path))
+                    std::fs::read_to_string(format!("{}/coherency_line_size", cache_path)),
                 ) {
                     if let (Some(size), Ok(line_size)) = (
                         Self::parse_cache_size(&size_str),
-                        line_size_str.trim().parse::<usize>()
+                        line_size_str.trim().parse::<usize>(),
                     ) {
                         // Try to read associativity
-                        let associativity = std::fs::read_to_string(format!("{}/ways_of_associativity", cache_path))
-                            .ok()
-                            .and_then(|s| s.trim().parse::<usize>().ok())
-                            .unwrap_or(8); // Default associativity
+                        let associativity = std::fs::read_to_string(format!(
+                            "{}/ways_of_associativity",
+                            cache_path
+                        ))
+                        .ok()
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                        .unwrap_or(8); // Default associativity
 
                         cache_info.push(CacheInfo {
                             level: level as u8,
@@ -237,13 +235,13 @@ impl MemoryInfo {
 
     fn parse_cache_size(size_str: &str) -> Option<usize> {
         let size_str = size_str.trim().to_uppercase();
-        
+
         if let Some(kb_pos) = size_str.find('K') {
             if let Ok(kb) = size_str[..kb_pos].parse::<usize>() {
                 return Some(kb * 1024);
             }
         }
-        
+
         if let Some(mb_pos) = size_str.find('M') {
             if let Ok(mb) = size_str[..mb_pos].parse::<usize>() {
                 return Some(mb * 1024 * 1024);
@@ -255,9 +253,9 @@ impl MemoryInfo {
 
     fn estimate_cache_latency(level: u8) -> Option<usize> {
         match level {
-            1 => Some(4),   // ~4 cycles for L1
-            2 => Some(12),  // ~12 cycles for L2
-            3 => Some(40),  // ~40 cycles for L3
+            1 => Some(4),  // ~4 cycles for L1
+            2 => Some(12), // ~12 cycles for L2
+            3 => Some(40), // ~40 cycles for L3
             _ => None,
         }
     }
@@ -288,7 +286,7 @@ impl MemoryBandwidth {
     /// Benchmark memory bandwidth
     pub fn benchmark() -> Self {
         let test_size = 64 * 1024 * 1024; // 64MB test buffer
-        
+
         Self {
             sequential_read: Self::benchmark_sequential_read(test_size),
             sequential_write: Self::benchmark_sequential_write(test_size),
@@ -305,16 +303,16 @@ impl MemoryBandwidth {
 
         for _ in 0..iterations {
             let start = Instant::now();
-            
+
             // Sequential read benchmark
             let mut sum = 0u64;
             for chunk in buffer.chunks(8) {
                 sum += chunk.iter().map(|&b| b as u64).sum::<u64>();
             }
-            
+
             // Prevent optimization
             std::hint::black_box(sum);
-            
+
             total_time += start.elapsed();
         }
 
@@ -330,12 +328,12 @@ impl MemoryBandwidth {
 
         for _ in 0..iterations {
             let start = Instant::now();
-            
+
             // Sequential write benchmark
             for (i, byte) in buffer.iter_mut().enumerate() {
                 *byte = (i % 256) as u8;
             }
-            
+
             total_time += start.elapsed();
         }
 
@@ -352,7 +350,7 @@ impl MemoryBandwidth {
 
         for _ in 0..iterations {
             let start = Instant::now();
-            
+
             // Random read benchmark
             let mut sum = 0u64;
             for &idx in &indices {
@@ -360,10 +358,10 @@ impl MemoryBandwidth {
                     sum += buffer[idx] as u64;
                 }
             }
-            
+
             // Prevent optimization
             std::hint::black_box(sum);
-            
+
             total_time += start.elapsed();
         }
 
@@ -381,14 +379,14 @@ impl MemoryBandwidth {
 
         for _ in 0..iterations {
             let start = Instant::now();
-            
+
             // Random write benchmark
             for (i, &idx) in indices.iter().enumerate() {
                 if idx < buffer.len() {
                     buffer[idx] = (i % 256) as u8;
                 }
             }
-            
+
             total_time += start.elapsed();
         }
 
@@ -406,10 +404,10 @@ impl MemoryBandwidth {
 
         for _ in 0..iterations {
             let start = Instant::now();
-            
+
             // Memory copy benchmark
             dst.copy_from_slice(&src);
-            
+
             total_time += start.elapsed();
         }
 
@@ -458,13 +456,11 @@ impl CacheInfo {
 
     /// Estimate access latency for this cache level
     pub fn access_latency(&self) -> Duration {
-        let cycles = self.latency_cycles.unwrap_or_else(|| {
-            match self.level {
-                1 => 4,
-                2 => 12,
-                3 => 40,
-                _ => 100,
-            }
+        let cycles = self.latency_cycles.unwrap_or_else(|| match self.level {
+            1 => 4,
+            2 => 12,
+            3 => 40,
+            _ => 100,
         });
 
         // Assume 3GHz CPU for latency estimation
@@ -515,7 +511,7 @@ mod tests {
     #[test]
     fn test_memory_pressure() {
         let memory_info = MemoryInfo {
-            total_ram: 8 * 1024 * 1024 * 1024, // 8GB
+            total_ram: 8 * 1024 * 1024 * 1024,     // 8GB
             available_ram: 4 * 1024 * 1024 * 1024, // 4GB available
             total_swap: 0,
             available_swap: 0,

@@ -7,7 +7,7 @@
 use engine::{
     autograd,
     operations::{arithmetic, linalg, reduction},
-    tensor::{Tensor, TensorData, DataType, Shape},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
@@ -47,8 +47,14 @@ fn test_linear_regression_training() {
         let lr_tensor = create_tensor(vec![lr], vec![1], false);
         let step_w = arithmetic::mul(&grad_w, &lr_tensor).unwrap();
         let step_b = arithmetic::mul(&grad_b, &lr_tensor).unwrap();
-        w = arithmetic::sub(&w, &step_w).unwrap().detach().requires_grad_(true);
-        b = arithmetic::sub(&b, &step_b).unwrap().detach().requires_grad_(true);
+        w = arithmetic::sub(&w, &step_w)
+            .unwrap()
+            .detach()
+            .requires_grad_(true);
+        b = arithmetic::sub(&b, &step_b)
+            .unwrap()
+            .detach()
+            .requires_grad_(true);
         autograd::clear_graph().unwrap();
     }
 

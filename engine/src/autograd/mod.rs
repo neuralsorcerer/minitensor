@@ -362,10 +362,7 @@ impl GradientFunction for SumBackward {
                 }
                 grad = shape_ops::reshape(&grad, Shape::new(shape))?;
             } else {
-                grad = shape_ops::reshape(
-                    &grad,
-                    Shape::new(vec![1; self.input_shape.len()]),
-                )?;
+                grad = shape_ops::reshape(&grad, Shape::new(vec![1; self.input_shape.len()]))?;
             }
         }
 
@@ -607,15 +604,19 @@ impl GradientFunction for PowBackward {
                 })?;
 
                 if self.base_requires_grad {
-                    let mut grad_data =
-                        TensorData::zeros_on_device(self.base.numel(), self.base.dtype(), self.base.device());
+                    let mut grad_data = TensorData::zeros_on_device(
+                        self.base.numel(),
+                        self.base.dtype(),
+                        self.base.device(),
+                    );
                     let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
                         MinitensorError::internal_error(
                             "Failed to get mutable f32 slice from grad_data",
                         )
                     })?;
                     for i in 0..base_slice.len() {
-                        grad_slice[i] = exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
+                        grad_slice[i] =
+                            exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
                     }
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),

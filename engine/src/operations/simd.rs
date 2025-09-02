@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    tensor::Shape,
     error::{MinitensorError, Result},
+    tensor::Shape,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -41,7 +41,7 @@ impl SimdCapabilities {
             avx512: false,
             #[cfg(not(target_arch = "x86_64"))]
             sse4_1: false,
-            
+
             #[cfg(target_arch = "aarch64")]
             neon: std::arch::is_aarch64_feature_detected!("neon"),
             #[cfg(target_arch = "aarch64")]
@@ -66,12 +66,12 @@ pub fn simd_capabilities() -> SimdCapabilities {
 pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -80,14 +80,14 @@ pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
             return unsafe { simd_add_f32_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_add_f32_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_add_f32_scalar(lhs, rhs, output)
 }
@@ -96,12 +96,12 @@ pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -110,14 +110,14 @@ pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
             return unsafe { simd_sub_f32_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_sub_f32_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_sub_f32_scalar(lhs, rhs, output)
 }
@@ -126,12 +126,12 @@ pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -140,14 +140,14 @@ pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
             return unsafe { simd_mul_f32_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_mul_f32_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_mul_f32_scalar(lhs, rhs, output)
 }
@@ -156,12 +156,12 @@ pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -170,14 +170,14 @@ pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
             return unsafe { simd_div_f32_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_div_f32_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_div_f32_scalar(lhs, rhs, output)
 }
@@ -206,7 +206,11 @@ fn simd_mul_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<(
 
 fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = if rhs[i] == 0.0 { f32::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f32::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
     Ok(())
 }
@@ -216,10 +220,10 @@ fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<(
 #[target_feature(enable = "avx2")]
 unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 8; // AVX2 processes 8 f32s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     // Process SIMD_WIDTH elements at a time
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
@@ -227,12 +231,12 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
         let result = _mm256_add_ps(a, b);
         _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     // Handle remaining elements
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -240,21 +244,21 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm256_sub_ps(a, b);
         _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -262,21 +266,21 @@ unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm256_mul_ps(a, b);
         _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -284,21 +288,25 @@ unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm256_div_ps(a, b);
         _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f32::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f32::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }
 
@@ -307,21 +315,21 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // SSE processes 4 f32s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm_add_ps(a, b);
         _mm_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -329,21 +337,21 @@ unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm_sub_ps(a, b);
         _mm_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -351,21 +359,21 @@ unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm_mul_ps(a, b);
         _mm_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -373,21 +381,25 @@ unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_ps(lhs.as_ptr().add(i));
         let b = _mm_loadu_ps(rhs.as_ptr().add(i));
         let result = _mm_div_ps(a, b);
         _mm_storeu_ps(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f32::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f32::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }
 
@@ -396,21 +408,21 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 #[target_feature(enable = "neon")]
 unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // NEON processes 4 f32s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f32(lhs.as_ptr().add(i));
         let b = vld1q_f32(rhs.as_ptr().add(i));
         let result = vaddq_f32(a, b);
         vst1q_f32(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -418,21 +430,21 @@ unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f32(lhs.as_ptr().add(i));
         let b = vld1q_f32(rhs.as_ptr().add(i));
         let result = vsubq_f32(a, b);
         vst1q_f32(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -440,21 +452,21 @@ unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f32(lhs.as_ptr().add(i));
         let b = vld1q_f32(rhs.as_ptr().add(i));
         let result = vmulq_f32(a, b);
         vst1q_f32(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -462,21 +474,25 @@ unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f32(lhs.as_ptr().add(i));
         let b = vld1q_f32(rhs.as_ptr().add(i));
         let result = vdivq_f32(a, b);
         vst1q_f32(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f32::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f32::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }
 
@@ -484,9 +500,9 @@ unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 pub fn can_use_simd_fast_path(lhs_shape: &Shape, rhs_shape: &Shape, output_shape: &Shape) -> bool {
     // For now, only optimize when all shapes are identical (no broadcasting)
     // This ensures contiguous memory access patterns optimal for SIMD
-    lhs_shape.dims() == rhs_shape.dims() && 
-    lhs_shape.dims() == output_shape.dims() &&
-    lhs_shape.numel() >= 16 // Only use SIMD for reasonably sized arrays
+    lhs_shape.dims() == rhs_shape.dims()
+        && lhs_shape.dims() == output_shape.dims()
+        && lhs_shape.numel() >= 16 // Only use SIMD for reasonably sized arrays
 }
 
 #[cfg(test)]
@@ -505,9 +521,9 @@ mod tests {
         let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
         let mut result = vec![0.0; 8];
-        
+
         simd_add_f32(&a, &b, &mut result).unwrap();
-        
+
         for i in 0..8 {
             assert_eq!(result[i], 9.0);
         }
@@ -518,9 +534,9 @@ mod tests {
         let a = vec![2.0, 3.0, 4.0, 5.0];
         let b = vec![3.0, 4.0, 5.0, 6.0];
         let mut result = vec![0.0; 4];
-        
+
         simd_mul_f32(&a, &b, &mut result).unwrap();
-        
+
         assert_eq!(result, vec![6.0, 12.0, 20.0, 30.0]);
     }
 
@@ -529,9 +545,9 @@ mod tests {
         let a = vec![12.0, 15.0, 20.0, 24.0];
         let b = vec![3.0, 5.0, 4.0, 6.0];
         let mut result = vec![0.0; 4];
-        
+
         simd_div_f32(&a, &b, &mut result).unwrap();
-        
+
         assert_eq!(result, vec![4.0, 3.0, 5.0, 4.0]);
     }
 
@@ -540,9 +556,9 @@ mod tests {
         let a = vec![1.0, 2.0];
         let b = vec![0.0, 2.0];
         let mut result = vec![0.0; 2];
-        
+
         simd_div_f32(&a, &b, &mut result).unwrap();
-        
+
         assert_eq!(result[0], f32::INFINITY);
         assert_eq!(result[1], 1.0);
     }
@@ -552,12 +568,12 @@ mod tests {
 pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -566,14 +582,14 @@ pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
             return unsafe { simd_add_f64_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_add_f64_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_add_f64_scalar(lhs, rhs, output)
 }
@@ -582,12 +598,12 @@ pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -596,14 +612,14 @@ pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
             return unsafe { simd_sub_f64_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_sub_f64_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_sub_f64_scalar(lhs, rhs, output)
 }
@@ -612,12 +628,12 @@ pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -626,14 +642,14 @@ pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
             return unsafe { simd_mul_f64_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_mul_f64_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_mul_f64_scalar(lhs, rhs, output)
 }
@@ -642,12 +658,12 @@ pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations"
+            "Array lengths must match for SIMD operations",
         ));
     }
 
     let caps = simd_capabilities();
-    
+
     #[cfg(target_arch = "x86_64")]
     {
         if caps.avx2 {
@@ -656,14 +672,14 @@ pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
             return unsafe { simd_div_f64_sse(lhs, rhs, output) };
         }
     }
-    
+
     #[cfg(target_arch = "aarch64")]
     {
         if caps.neon {
             return unsafe { simd_div_f64_neon(lhs, rhs, output) };
         }
     }
-    
+
     // Fallback to scalar implementation
     simd_div_f64_scalar(lhs, rhs, output)
 }
@@ -692,7 +708,11 @@ fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<(
 
 fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = if rhs[i] == 0.0 { f64::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f64::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
     Ok(())
 }
@@ -702,21 +722,21 @@ fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<(
 #[target_feature(enable = "avx2")]
 unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // AVX2 processes 4 f64s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm256_add_pd(a, b);
         _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -724,21 +744,21 @@ unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm256_sub_pd(a, b);
         _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -746,21 +766,21 @@ unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm256_mul_pd(a, b);
         _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -768,21 +788,25 @@ unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "avx2")]
 unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm256_div_pd(a, b);
         _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f64::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f64::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }
 
@@ -791,21 +815,21 @@ unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2; // SSE processes 2 f64s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm_add_pd(a, b);
         _mm_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -813,21 +837,21 @@ unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm_sub_pd(a, b);
         _mm_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -835,21 +859,21 @@ unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm_mul_pd(a, b);
         _mm_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -857,21 +881,25 @@ unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = _mm_loadu_pd(lhs.as_ptr().add(i));
         let b = _mm_loadu_pd(rhs.as_ptr().add(i));
         let result = _mm_div_pd(a, b);
         _mm_storeu_pd(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f64::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f64::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }
 
@@ -880,21 +908,21 @@ unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 #[target_feature(enable = "neon")]
 unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2; // NEON processes 2 f64s at once
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f64(lhs.as_ptr().add(i));
         let b = vld1q_f64(rhs.as_ptr().add(i));
         let result = vaddq_f64(a, b);
         vst1q_f64(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] + rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -902,21 +930,21 @@ unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f64(lhs.as_ptr().add(i));
         let b = vld1q_f64(rhs.as_ptr().add(i));
         let result = vsubq_f64(a, b);
         vst1q_f64(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] - rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -924,21 +952,21 @@ unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f64(lhs.as_ptr().add(i));
         let b = vld1q_f64(rhs.as_ptr().add(i));
         let result = vmulq_f64(a, b);
         vst1q_f64(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
         output[i] = lhs[i] * rhs[i];
     }
-    
+
     Ok(())
 }
 
@@ -946,20 +974,24 @@ unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 #[target_feature(enable = "neon")]
 unsafe fn simd_div_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
-    
+
     let len = lhs.len();
     let simd_len = len - (len % SIMD_WIDTH);
-    
+
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
         let a = vld1q_f64(lhs.as_ptr().add(i));
         let b = vld1q_f64(rhs.as_ptr().add(i));
         let result = vdivq_f64(a, b);
         vst1q_f64(output.as_mut_ptr().add(i), result);
     }
-    
+
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 { f64::INFINITY } else { lhs[i] / rhs[i] };
+        output[i] = if rhs[i] == 0.0 {
+            f64::INFINITY
+        } else {
+            lhs[i] / rhs[i]
+        };
     }
-    
+
     Ok(())
 }

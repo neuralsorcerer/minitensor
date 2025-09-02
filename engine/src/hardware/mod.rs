@@ -7,17 +7,17 @@
 pub mod cpu;
 pub mod gpu;
 pub mod memory;
-pub mod profiler;
 pub mod optimizer;
+pub mod profiler;
 
-pub use cpu::{CpuInfo, CpuFeatures, SIMDSupport};
-pub use gpu::{GpuDevice, GpuType, GpuCapabilities, ComputeCapability};
-pub use memory::{MemoryInfo, MemoryBandwidth, CacheInfo};
-pub use profiler::{HardwareProfiler, HardwareProfile, SystemInfo};
+pub use cpu::{CpuFeatures, CpuInfo, SIMDSupport};
+pub use gpu::{ComputeCapability, GpuCapabilities, GpuDevice, GpuType};
+pub use memory::{CacheInfo, MemoryBandwidth, MemoryInfo};
 pub use optimizer::{
-    ResourceOptimizer, WorkloadAnalysis, DevicePlacement, MemoryOptimizationPlan,
-    ExecutionPlan, ParallelizationStrategy, AllocationStrategy
+    AllocationStrategy, DevicePlacement, ExecutionPlan, MemoryOptimizationPlan,
+    ParallelizationStrategy, ResourceOptimizer, WorkloadAnalysis,
 };
+pub use profiler::{HardwareProfile, HardwareProfiler, SystemInfo};
 
 use crate::device::{Device, DeviceType};
 
@@ -35,7 +35,7 @@ impl SystemHardware {
     pub fn detect() -> Self {
         let profiler = HardwareProfiler::new();
         let profile = profiler.profile_system();
-        
+
         Self {
             cpu_info: profile.cpu_info,
             gpu_devices: profile.gpu_devices.clone(),
@@ -70,18 +70,17 @@ impl SystemHardware {
     pub fn device_memory(&self, device: &Device) -> Option<usize> {
         match device.device_type() {
             DeviceType::Cpu => Some(self.memory_info.total_ram),
-            _ => {
-                self.gpu_devices
-                    .iter()
-                    .find(|gpu| gpu.device_id == device.id())
-                    .map(|gpu| gpu.memory_size)
-            }
+            _ => self
+                .gpu_devices
+                .iter()
+                .find(|gpu| gpu.device_id == device.id())
+                .map(|gpu| gpu.memory_size),
         }
     }
 
     fn enumerate_devices(gpu_devices: &[GpuDevice]) -> Vec<Device> {
         let mut devices = vec![Device::cpu()];
-        
+
         for gpu in gpu_devices {
             if gpu.is_available {
                 let device = match gpu.device_type {
@@ -93,7 +92,7 @@ impl SystemHardware {
                 devices.push(device);
             }
         }
-        
+
         devices
     }
 }

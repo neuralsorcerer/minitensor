@@ -18,7 +18,8 @@ impl LayerUtils {
 
     /// Count the total number of trainable parameters in a layer
     pub fn count_trainable_parameters(layer: &dyn Layer) -> usize {
-        layer.parameters()
+        layer
+            .parameters()
             .iter()
             .filter(|p| p.requires_grad())
             .map(|p| p.numel())
@@ -53,7 +54,7 @@ impl LayerUtils {
         for param in params {
             let param_bytes = param.numel() * param.dtype().size_in_bytes();
             total_bytes += param_bytes;
-            
+
             let dtype_name = format!("{:?}", param.dtype());
             *bytes_by_dtype.entry(dtype_name).or_insert(0) += param_bytes;
         }
@@ -68,7 +69,7 @@ impl LayerUtils {
     pub fn layer_summary(layer: &dyn Layer, layer_name: &str) -> String {
         let stats = Self::parameter_stats(layer);
         let memory = Self::memory_usage(layer);
-        
+
         format!(
             "Layer: {}\n\
              Total Parameters: {}\n\
@@ -96,7 +97,8 @@ impl SequentialUtils {
 
     /// Count trainable parameters in a sequential model
     pub fn count_trainable_parameters(model: &Sequential) -> usize {
-        model.parameters()
+        model
+            .parameters()
             .iter()
             .filter(|p| p.requires_grad())
             .map(|p| p.numel())
@@ -130,9 +132,9 @@ impl SequentialUtils {
     pub fn model_summary(model: &Sequential, model_name: Option<&str>) -> String {
         let stats = Self::parameter_stats(model);
         let memory = LayerUtils::memory_usage(model);
-        
+
         let mut summary = String::new();
-        
+
         // Model header
         if let Some(name) = model_name {
             summary.push_str(&format!("Model: {}\n", name));
@@ -146,9 +148,7 @@ impl SequentialUtils {
         for (layer_idx, layer_stats) in &stats.layer_stats {
             summary.push_str(&format!(
                 "Layer {}: {} parameters ({} trainable)\n",
-                layer_idx,
-                layer_stats.total_parameters,
-                layer_stats.trainable_parameters
+                layer_idx, layer_stats.total_parameters, layer_stats.trainable_parameters
             ));
         }
 
@@ -174,16 +174,20 @@ impl SequentialUtils {
     }
 
     /// Calculate the theoretical memory usage for forward pass
-    pub fn estimate_forward_memory(model: &Sequential, input_shape: &[usize], batch_size: usize) -> ForwardMemoryEstimate {
+    pub fn estimate_forward_memory(
+        model: &Sequential,
+        input_shape: &[usize],
+        batch_size: usize,
+    ) -> ForwardMemoryEstimate {
         // This is a simplified estimation
         // In practice, this would need to trace through each layer to get accurate intermediate tensor sizes
-        
+
         let input_elements = input_shape.iter().product::<usize>() * batch_size;
         let parameter_memory = LayerUtils::memory_usage(model).total_bytes;
-        
+
         // Rough estimate: assume each layer doubles the memory requirement for activations
         let estimated_activation_memory = input_elements * 4 * model.len(); // Assuming f32
-        
+
         ForwardMemoryEstimate {
             parameter_memory,
             estimated_activation_memory,
@@ -251,19 +255,19 @@ impl DataTypeExt for crate::tensor::DataType {
 mod tests {
     use super::*;
     use crate::{
+        device::Device,
         nn::{DenseLayer, ReLU, SequentialBuilder},
         tensor::DataType,
-        device::Device,
     };
 
     #[test]
     fn test_layer_utils_parameter_counting() {
         // Create a DenseLayer with known parameter count
         let layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
-        
+
         let total_params = LayerUtils::count_parameters(&layer);
         assert_eq!(total_params, 10 * 5 + 5); // weight + bias
-        
+
         let trainable_params = LayerUtils::count_trainable_parameters(&layer);
         assert_eq!(trainable_params, total_params); // All parameters are trainable
     }
@@ -272,7 +276,7 @@ mod tests {
     fn test_layer_utils_parameter_stats() {
         let layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
         let stats = LayerUtils::parameter_stats(&layer);
-        
+
         assert_eq!(stats.total_parameters, 55); // 10*5 + 5
         assert_eq!(stats.trainable_parameters, 55);
         assert_eq!(stats.non_trainable_parameters, 0);
@@ -283,7 +287,7 @@ mod tests {
     fn test_layer_utils_memory_usage() {
         let layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
         let memory = LayerUtils::memory_usage(&layer);
-        
+
         assert_eq!(memory.total_bytes, 55 * 4); // 55 parameters * 4 bytes each (f32)
         assert!(memory.bytes_by_dtype.contains_key("Float32"));
     }
@@ -292,7 +296,7 @@ mod tests {
     fn test_layer_utils_summary() {
         let layer = DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap();
         let summary = LayerUtils::layer_summary(&layer, "DenseLayer");
-        
+
         assert!(summary.contains("Layer: DenseLayer"));
         assert!(summary.contains("Total Parameters: 55"));
         assert!(summary.contains("Trainable Parameters: 55"));
@@ -301,14 +305,18 @@ mod tests {
     #[test]
     fn test_sequential_utils_parameter_counting() {
         let model = SequentialBuilder::new()
-            .add(Box::new(DenseLayer::new(10, 8, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(10, 8, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .add(Box::new(ReLU::new()))
-            .add(Box::new(DenseLayer::new(8, 5, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(8, 5, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .build();
-        
+
         let total_params = SequentialUtils::count_parameters(&model);
         assert_eq!(total_params, (10 * 8 + 8) + (8 * 5 + 5)); // Two dense layers
-        
+
         let trainable_params = SequentialUtils::count_trainable_parameters(&model);
         assert_eq!(trainable_params, total_params);
     }
@@ -316,13 +324,17 @@ mod tests {
     #[test]
     fn test_sequential_utils_stats() {
         let model = SequentialBuilder::new()
-            .add(Box::new(DenseLayer::new(10, 8, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(10, 8, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .add(Box::new(ReLU::new()))
-            .add(Box::new(DenseLayer::new(8, 5, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(8, 5, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .build();
-        
+
         let stats = SequentialUtils::parameter_stats(&model);
-        
+
         assert_eq!(stats.num_layers, 3);
         assert_eq!(stats.total_parameters, (10 * 8 + 8) + (8 * 5 + 5));
         assert_eq!(stats.layer_stats.len(), 3);
@@ -331,11 +343,13 @@ mod tests {
     #[test]
     fn test_sequential_utils_summary() {
         let model = SequentialBuilder::new()
-            .add(Box::new(DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .build();
-        
+
         let summary = SequentialUtils::model_summary(&model, Some("TestModel"));
-        
+
         assert!(summary.contains("Model: TestModel"));
         assert!(summary.contains("Total Parameters:"));
         assert!(summary.contains("Number of Layers: 1"));
@@ -344,7 +358,7 @@ mod tests {
     #[test]
     fn test_datatype_size_in_bytes() {
         use crate::tensor::DataType;
-        
+
         assert_eq!(DataType::Float32.size_in_bytes(), 4);
         assert_eq!(DataType::Float64.size_in_bytes(), 8);
         assert_eq!(DataType::Int32.size_in_bytes(), 4);
@@ -355,11 +369,13 @@ mod tests {
     #[test]
     fn test_forward_memory_estimation() {
         let model = SequentialBuilder::new()
-            .add(Box::new(DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap()))
+            .add(Box::new(
+                DenseLayer::new(10, 5, true, Device::cpu(), DataType::Float32).unwrap(),
+            ))
             .build();
-        
+
         let estimate = SequentialUtils::estimate_forward_memory(&model, &[10], 32);
-        
+
         assert!(estimate.parameter_memory > 0);
         assert!(estimate.estimated_activation_memory > 0);
         assert!(estimate.estimated_total_memory > estimate.parameter_memory);

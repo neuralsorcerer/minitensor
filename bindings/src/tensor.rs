@@ -4,15 +4,14 @@
 // This source code is licensed under the license found in the
 // LICENSE file in the root directory of this source tree.
 
-
 use crate::device::PyDevice;
 use crate::error::_convert_error;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn};
+use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
-use pyo3::exceptions::{PyIndexError, PyTypeError};
 use std::sync::Arc;
 
 /// Python wrapper for Tensor with comprehensive functionality
@@ -389,10 +388,7 @@ impl PyTensor {
 
     fn pow(&self, exponent: &PyAny) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
-            let result = self
-                .inner
-                .pow(&exp_tensor.inner)
-                .map_err(_convert_error)?;
+            let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
             Ok(Self { inner: result })
         } else {
             let exp = exponent.extract::<f64>()?;
@@ -578,12 +574,7 @@ impl PyTensor {
         let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner
         } else {
-            convert_python_data_to_tensor(
-                value,
-                self.inner.dtype(),
-                self.inner.device(),
-                false,
-            )?
+            convert_python_data_to_tensor(value, self.inner.dtype(), self.inner.device(), false)?
         };
         self.inner
             .index_assign(&indices, &val_tensor)

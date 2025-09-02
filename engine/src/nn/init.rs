@@ -5,9 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    tensor::{Tensor, TensorData, Shape, DataType},
     device::Device,
     error::Result,
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;
@@ -63,24 +63,12 @@ impl InitMethod {
             InitMethod::Normal { mean, std } => {
                 init_normal(shape, *mean, *std, dtype, device, requires_grad)
             }
-            InitMethod::XavierUniform => {
-                xavier_uniform_init(shape, dtype, device, requires_grad)
-            }
-            InitMethod::XavierNormal => {
-                xavier_normal_init(shape, dtype, device, requires_grad)
-            }
-            InitMethod::HeUniform => {
-                he_uniform_init(shape, dtype, device, requires_grad)
-            }
-            InitMethod::HeNormal => {
-                he_normal_init(shape, dtype, device, requires_grad)
-            }
-            InitMethod::LeCunUniform => {
-                lecun_uniform_init(shape, dtype, device, requires_grad)
-            }
-            InitMethod::LeCunNormal => {
-                lecun_normal_init(shape, dtype, device, requires_grad)
-            }
+            InitMethod::XavierUniform => xavier_uniform_init(shape, dtype, device, requires_grad),
+            InitMethod::XavierNormal => xavier_normal_init(shape, dtype, device, requires_grad),
+            InitMethod::HeUniform => he_uniform_init(shape, dtype, device, requires_grad),
+            InitMethod::HeNormal => he_normal_init(shape, dtype, device, requires_grad),
+            InitMethod::LeCunUniform => lecun_uniform_init(shape, dtype, device, requires_grad),
+            InitMethod::LeCunNormal => lecun_normal_init(shape, dtype, device, requires_grad),
         }
     }
 }
@@ -116,7 +104,13 @@ pub fn init_constant(
             TensorData::from_vec_bool(vec, device)
         }
     };
-    Ok(Tensor::new(Arc::new(data), shape, dtype, device, requires_grad))
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
 }
 
 /// Initialize tensor with uniform distribution
@@ -157,7 +151,13 @@ pub fn init_uniform(
             TensorData::from_vec_bool(vec, device)
         }
     };
-    Ok(Tensor::new(Arc::new(data), shape, dtype, device, requires_grad))
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
 }
 
 /// Initialize tensor with normal distribution
@@ -198,13 +198,17 @@ pub fn init_normal(
         }
         DataType::Bool => {
             let dist = Normal::new(mean, std).unwrap();
-            let vec: Vec<bool> = (0..numel)
-                .map(|_| dist.sample(&mut rng) > 0.0)
-                .collect();
+            let vec: Vec<bool> = (0..numel).map(|_| dist.sample(&mut rng) > 0.0).collect();
             TensorData::from_vec_bool(vec, device)
         }
     };
-    Ok(Tensor::new(Arc::new(data), shape, dtype, device, requires_grad))
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
 }
 
 /// Xavier/Glorot uniform initialization
@@ -288,9 +292,9 @@ pub fn lecun_normal_init(
 /// Calculate fan_in and fan_out for a tensor shape
 fn calculate_fan_in_fan_out(shape: &Shape) -> Result<(usize, usize)> {
     let dims = shape.dims();
-    
+
     match dims.len() {
-        0 => Ok((1, 1)), // Scalar
+        0 => Ok((1, 1)),             // Scalar
         1 => Ok((dims[0], dims[0])), // 1D tensor
         2 => Ok((dims[1], dims[0])), // 2D tensor (weight matrix)
         _ => {
@@ -298,10 +302,10 @@ fn calculate_fan_in_fan_out(shape: &Shape) -> Result<(usize, usize)> {
             let num_input_fmaps = dims[1];
             let num_output_fmaps = dims[0];
             let receptive_field_size: usize = dims[2..].iter().product();
-            
+
             let fan_in = num_input_fmaps * receptive_field_size;
             let fan_out = num_output_fmaps * receptive_field_size;
-            
+
             Ok((fan_in, fan_out))
         }
     }
@@ -318,11 +322,7 @@ pub fn init_parameter(
 }
 
 /// Utility function to initialize a bias tensor (typically zeros)
-pub fn init_bias(
-    shape: Shape,
-    dtype: DataType,
-    device: Device,
-) -> Result<Tensor> {
+pub fn init_bias(shape: Shape, dtype: DataType, device: Device) -> Result<Tensor> {
     InitMethod::Zeros.init_tensor(shape, dtype, device, true)
 }
 
@@ -338,12 +338,16 @@ mod tests {
         let device = Device::cpu();
 
         // Test zeros initialization
-        let zeros = InitMethod::Zeros.init_tensor(shape.clone(), dtype, device, true).unwrap();
+        let zeros = InitMethod::Zeros
+            .init_tensor(shape.clone(), dtype, device, true)
+            .unwrap();
         assert_eq!(zeros.shape(), &shape);
         assert!(zeros.requires_grad());
 
         // Test ones initialization
-        let ones = InitMethod::Ones.init_tensor(shape.clone(), dtype, device, true).unwrap();
+        let ones = InitMethod::Ones
+            .init_tensor(shape.clone(), dtype, device, true)
+            .unwrap();
         assert_eq!(ones.shape(), &shape);
         assert!(ones.requires_grad());
     }
@@ -370,7 +374,8 @@ mod tests {
         let device = Device::cpu();
 
         // Test parameter initialization
-        let param = init_parameter(shape.clone(), InitMethod::XavierUniform, dtype, device).unwrap();
+        let param =
+            init_parameter(shape.clone(), InitMethod::XavierUniform, dtype, device).unwrap();
         assert_eq!(param.shape(), &shape);
         assert!(param.requires_grad());
 

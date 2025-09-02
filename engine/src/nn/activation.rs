@@ -6,25 +6,42 @@
 
 use super::Layer;
 use crate::{
-    tensor::{Tensor, DataType, Shape, TensorData},
     device::Device,
-    error::{Result, MinitensorError},
+    error::{MinitensorError, Result},
     operations::{
-        activation::{relu, sigmoid, tanh, softmax, leaky_relu, exp},
+        activation::{exp, leaky_relu, relu, sigmoid, softmax, tanh},
         arithmetic,
     },
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
-fn scalar_tensor(value: f64, dtype: DataType, device: Device, requires_grad: bool) -> Result<Tensor> {
+fn scalar_tensor(
+    value: f64,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> Result<Tensor> {
     match dtype {
         DataType::Float32 => {
             let td = TensorData::from_vec_f32(vec![value as f32], device);
-            Ok(Tensor::new(Arc::new(td), Shape::new(vec![1]), dtype, device, requires_grad))
+            Ok(Tensor::new(
+                Arc::new(td),
+                Shape::new(vec![1]),
+                dtype,
+                device,
+                requires_grad,
+            ))
         }
         DataType::Float64 => {
             let td = TensorData::from_vec_f64(vec![value], device);
-            Ok(Tensor::new(Arc::new(td), Shape::new(vec![1]), dtype, device, requires_grad))
+            Ok(Tensor::new(
+                Arc::new(td),
+                Shape::new(vec![1]),
+                dtype,
+                device,
+                requires_grad,
+            ))
         }
         _ => Err(MinitensorError::invalid_argument(
             "Scalar tensors only support floating point types".to_string(),
@@ -66,7 +83,7 @@ impl Layer for ReLU {
 }
 
 /// Sigmoid activation layer
-/// 
+///
 /// Applies the sigmoid function element-wise:
 /// Sigmoid(x) = 1 / (1 + exp(-x))
 pub struct Sigmoid;
@@ -99,7 +116,7 @@ impl Layer for Sigmoid {
 }
 
 /// Tanh (Hyperbolic Tangent) activation layer
-/// 
+///
 /// Applies the hyperbolic tangent function element-wise:
 /// Tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
 pub struct Tanh;
@@ -132,7 +149,7 @@ impl Layer for Tanh {
 }
 
 /// Softmax activation layer
-/// 
+///
 /// Applies the softmax function to an n-dimensional input tensor
 /// rescaling them so that the elements of the n-dimensional output tensor
 /// lie in the range [0,1] and sum to 1.
@@ -142,7 +159,7 @@ pub struct Softmax {
 
 impl Softmax {
     /// Create a new Softmax activation layer
-    /// 
+    ///
     /// # Arguments
     /// * `dim` - A dimension along which Softmax will be computed (so every slice
     ///           along dim will sum to 1). Default: None (applies to the last dimension)
@@ -178,7 +195,7 @@ impl Layer for Softmax {
 }
 
 /// LeakyReLU activation layer
-/// 
+///
 /// Applies the leaky rectified linear unit function element-wise:
 /// LeakyReLU(x) = max(negative_slope * x, x)
 pub struct LeakyReLU {
@@ -187,7 +204,7 @@ pub struct LeakyReLU {
 
 impl LeakyReLU {
     /// Create a new LeakyReLU activation layer
-    /// 
+    ///
     /// # Arguments
     /// * `negative_slope` - Controls the angle of the negative slope. Default: 0.01
     pub fn new(negative_slope: Option<f64>) -> Self {
@@ -223,7 +240,7 @@ impl Layer for LeakyReLU {
 }
 
 /// ELU (Exponential Linear Unit) activation layer
-/// 
+///
 /// Applies the exponential linear unit function element-wise:
 /// ELU(x) = max(0, x) + min(0, alpha * (exp(x) - 1))
 pub struct ELU {
@@ -232,7 +249,7 @@ pub struct ELU {
 
 impl ELU {
     /// Create a new ELU activation layer
-    /// 
+    ///
     /// # Arguments
     /// * `alpha` - The α value for the ELU formulation. Default: 1.0
     pub fn new(alpha: Option<f64>) -> Self {
@@ -286,7 +303,7 @@ impl Layer for ELU {
 }
 
 /// GELU (Gaussian Error Linear Unit) activation layer
-/// 
+///
 /// Applies the Gaussian Error Linear Unit function:
 /// GELU(x) = x * Φ(x)
 /// where Φ(x) is the Cumulative Distribution Function for Gaussian Distribution.
@@ -311,7 +328,12 @@ impl Layer for GELU {
         // 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715x^3)))
         let half = scalar_tensor(0.5, input.dtype(), input.device(), false)?;
         let one = scalar_tensor(1.0, input.dtype(), input.device(), false)?;
-        let coeff = scalar_tensor((2.0 / std::f64::consts::PI).sqrt(), input.dtype(), input.device(), false)?;
+        let coeff = scalar_tensor(
+            (2.0 / std::f64::consts::PI).sqrt(),
+            input.dtype(),
+            input.device(),
+            false,
+        )?;
         let cubic_coeff = scalar_tensor(0.044_715, input.dtype(), input.device(), false)?;
 
         let x_sq = arithmetic::mul(input, input)?;
@@ -337,8 +359,8 @@ impl Layer for GELU {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{Tensor, Shape, DataType, TensorData};
     use crate::device::Device;
+    use crate::tensor::{DataType, Shape, Tensor, TensorData};
     use std::sync::Arc;
 
     #[test]
@@ -399,7 +421,13 @@ mod tests {
     fn test_elu_forward_values() {
         let mut elu = ELU::new(Some(1.0));
         let data = TensorData::from_vec_f32(vec![-1.0, 0.0, 1.0], Device::cpu());
-        let input = Tensor::new(Arc::new(data), Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = elu.forward(&input).unwrap();
         let out_slice = output.data().as_f32_slice().unwrap();
         let expected = vec![(-1f32).exp() - 1.0, 0.0, 1.0];
@@ -412,7 +440,13 @@ mod tests {
     fn test_gelu_forward_values() {
         let mut gelu = GELU::new();
         let data = TensorData::from_vec_f32(vec![-1.0, 0.0, 1.0], Device::cpu());
-        let input = Tensor::new(Arc::new(data), Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = gelu.forward(&input).unwrap();
         let out_slice = output.data().as_f32_slice().unwrap();
         let expected: Vec<f32> = [-1.0f32, 0.0, 1.0]
@@ -431,8 +465,13 @@ mod tests {
 
     #[test]
     fn test_activation_forward_shapes() {
-        let input = Tensor::zeros(Shape::new(vec![2, 3, 4]), DataType::Float32, Device::cpu(), false);
-        
+        let input = Tensor::zeros(
+            Shape::new(vec![2, 3, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
         // Test that activations preserve input shape (when operations are implemented)
         let mut relu = ReLU::new();
         let mut sigmoid = Sigmoid::new();

@@ -4,7 +4,6 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-
 /// CPU information and capabilities
 #[derive(Debug, Clone)]
 pub struct CpuInfo {
@@ -88,7 +87,7 @@ impl CpuInfo {
     #[cfg(target_arch = "x86_64")]
     fn detect_x86_64() -> Self {
         let mut cpu_info = Self::detect_generic();
-        
+
         // Use CPUID to detect features
         if is_x86_feature_detected!("sse") {
             cpu_info.features.has_sse = true;
@@ -145,7 +144,7 @@ impl CpuInfo {
     #[cfg(target_arch = "aarch64")]
     fn detect_aarch64() -> Self {
         let mut cpu_info = Self::detect_generic();
-        
+
         // ARM NEON is standard on AArch64
         cpu_info.features.has_neon = true;
         cpu_info.features.simd_support = SIMDSupport::NEON;
@@ -219,20 +218,24 @@ impl CpuInfo {
         #[cfg(target_os = "linux")]
         {
             // L1 data cache
-            if let Ok(size_str) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index0/size") {
+            if let Ok(size_str) =
+                std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index0/size")
+            {
                 if let Some(size) = Self::parse_cache_size(&size_str) {
                     cache_levels.push(CacheLevel {
                         level: 1,
                         cache_type: CacheType::Data,
                         size,
-                        line_size: 64, // Common default
+                        line_size: 64,    // Common default
                         associativity: 8, // Common default
                     });
                 }
             }
 
             // L1 instruction cache
-            if let Ok(size_str) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index1/size") {
+            if let Ok(size_str) =
+                std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index1/size")
+            {
                 if let Some(size) = Self::parse_cache_size(&size_str) {
                     cache_levels.push(CacheLevel {
                         level: 1,
@@ -245,7 +248,9 @@ impl CpuInfo {
             }
 
             // L2 cache
-            if let Ok(size_str) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index2/size") {
+            if let Ok(size_str) =
+                std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index2/size")
+            {
                 if let Some(size) = Self::parse_cache_size(&size_str) {
                     cache_levels.push(CacheLevel {
                         level: 2,
@@ -258,7 +263,9 @@ impl CpuInfo {
             }
 
             // L3 cache
-            if let Ok(size_str) = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index3/size") {
+            if let Ok(size_str) =
+                std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index3/size")
+            {
                 if let Some(size) = Self::parse_cache_size(&size_str) {
                     cache_levels.push(CacheLevel {
                         level: 3,
@@ -303,13 +310,13 @@ impl CpuInfo {
 
     fn parse_cache_size(size_str: &str) -> Option<usize> {
         let size_str = size_str.trim().to_uppercase();
-        
+
         if let Some(kb_pos) = size_str.find('K') {
             if let Ok(kb) = size_str[..kb_pos].parse::<usize>() {
                 return Some(kb * 1024);
             }
         }
-        
+
         if let Some(mb_pos) = size_str.find('M') {
             if let Ok(mb) = size_str[..mb_pos].parse::<usize>() {
                 return Some(mb * 1024 * 1024);
@@ -367,12 +374,15 @@ impl SIMDSupport {
     pub fn vector_width(&self) -> usize {
         match self {
             SIMDSupport::None => 1,
-            SIMDSupport::SSE | SIMDSupport::SSE2 | SIMDSupport::SSE3 
-            | SIMDSupport::SSE4_1 | SIMDSupport::SSE4_2 => 16, // 128-bit
+            SIMDSupport::SSE
+            | SIMDSupport::SSE2
+            | SIMDSupport::SSE3
+            | SIMDSupport::SSE4_1
+            | SIMDSupport::SSE4_2 => 16, // 128-bit
             SIMDSupport::AVX | SIMDSupport::AVX2 => 32, // 256-bit
-            SIMDSupport::AVX512 => 64, // 512-bit
-            SIMDSupport::NEON => 16, // 128-bit
-            SIMDSupport::SVE => 16, // Variable, but assume 128-bit minimum
+            SIMDSupport::AVX512 => 64,                  // 512-bit
+            SIMDSupport::NEON => 16,                    // 128-bit
+            SIMDSupport::SVE => 16,                     // Variable, but assume 128-bit minimum
         }
     }
 

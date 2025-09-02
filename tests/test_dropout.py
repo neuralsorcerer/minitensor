@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
-from minitensor.tensor import Tensor
+
 from minitensor import functional as F
+from minitensor.tensor import Tensor
 
 
 def test_dropout_extreme_probabilities():

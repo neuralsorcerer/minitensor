@@ -28,21 +28,24 @@ impl CudaStreamPool {
     /// Get a stream from the pool or create a new one
     pub fn get_stream(&self) -> Result<CudaStream> {
         let mut streams = self.available_streams.lock().unwrap();
-        
+
         if let Some(stream) = streams.pop() {
             Ok(stream)
         } else {
             // Create a new stream if we haven't reached the limit
-            self.device
-                .fork_default_stream()
-                .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to create CUDA stream: {}", e)))
+            self.device.fork_default_stream().map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Failed to create CUDA stream: {}",
+                    e
+                ))
+            })
         }
     }
 
     /// Return a stream to the pool
     pub fn return_stream(&self, stream: CudaStream) {
         let mut streams = self.available_streams.lock().unwrap();
-        
+
         // Only keep streams if we haven't exceeded the max
         if streams.len() < self.max_streams {
             streams.push(stream);
@@ -58,12 +61,16 @@ impl CudaStreamPool {
     /// Synchronize all streams in the pool
     pub fn synchronize_all(&self) -> Result<()> {
         let streams = self.available_streams.lock().unwrap();
-        
+
         for stream in streams.iter() {
-            stream.synchronize()
-                .map_err(|e| crate::error::MinitensorError::backend_error(format!("Stream synchronization failed: {}", e)))?;
+            stream.synchronize().map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Stream synchronization failed: {}",
+                    e
+                ))
+            })?;
         }
-        
+
         Ok(())
     }
 }
@@ -113,7 +120,7 @@ impl CudaExecutionContext {
     /// Create a new execution context
     pub fn new(device: Arc<CudaDevice>, max_streams: usize) -> Self {
         let stream_pool = Arc::new(CudaStreamPool::new(device, max_streams));
-        
+
         Self {
             stream_pool,
             current_stream: None,
@@ -125,15 +132,19 @@ impl CudaExecutionContext {
         if self.current_stream.is_none() {
             self.current_stream = Some(PooledCudaStream::new(self.stream_pool.clone())?);
         }
-        
+
         Ok(self.current_stream.as_ref().unwrap().stream())
     }
 
     /// Synchronize the current stream
     pub fn synchronize(&self) -> Result<()> {
         if let Some(ref stream) = self.current_stream {
-            stream.stream().synchronize()
-                .map_err(|e| crate::error::MinitensorError::backend_error(format!("Stream synchronization failed: {}", e)))?;
+            stream.stream().synchronize().map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Stream synchronization failed: {}",
+                    e
+                ))
+            })?;
         }
         Ok(())
     }
@@ -159,14 +170,14 @@ mod tests {
         if let Ok(device) = CudaDevice::new(0) {
             let device = Arc::new(device);
             let pool = CudaStreamPool::new(device, 4);
-            
+
             // Test getting and returning streams
             let stream1 = pool.get_stream().unwrap();
             let stream2 = pool.get_stream().unwrap();
-            
+
             pool.return_stream(stream1);
             pool.return_stream(stream2);
-            
+
             assert_eq!(pool.available_count(), 2);
         }
     }
@@ -176,12 +187,12 @@ mod tests {
         if let Ok(device) = CudaDevice::new(0) {
             let device = Arc::new(device);
             let pool = Arc::new(CudaStreamPool::new(device, 4));
-            
+
             {
                 let _pooled_stream = PooledCudaStream::new(pool.clone()).unwrap();
                 // Stream should be automatically returned when dropped
             }
-            
+
             assert_eq!(pool.available_count(), 1);
         }
     }
@@ -191,13 +202,13 @@ mod tests {
         if let Ok(device) = CudaDevice::new(0) {
             let device = Arc::new(device);
             let mut context = CudaExecutionContext::new(device, 4);
-            
+
             // Test getting a stream
             let _stream = context.get_stream().unwrap();
-            
+
             // Test synchronization
             context.synchronize().unwrap();
-            
+
             // Test releasing stream
             context.release_stream();
         }

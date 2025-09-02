@@ -124,13 +124,15 @@ impl Device {
             "opencl" => Ok(Self::opencl(Some(0))),
             s if s.starts_with("cuda:") => {
                 let id_str = &s[5..];
-                let id = id_str.parse::<usize>()
+                let id = id_str
+                    .parse::<usize>()
                     .map_err(|_| format!("Invalid CUDA device ID: {}", id_str))?;
                 Ok(Self::cuda(Some(id)))
             }
             s if s.starts_with("opencl:") => {
                 let id_str = &s[7..];
-                let id = id_str.parse::<usize>()
+                let id = id_str
+                    .parse::<usize>()
                     .map_err(|_| format!("Invalid OpenCL device ID: {}", id_str))?;
                 Ok(Self::opencl(Some(id)))
             }
@@ -191,7 +193,7 @@ mod tests {
         assert_eq!(Device::from_str("cuda").unwrap(), Device::cuda(Some(0)));
         assert_eq!(Device::from_str("cuda:2").unwrap(), Device::cuda(Some(2)));
         assert_eq!(Device::from_str("metal").unwrap(), Device::metal());
-        
+
         assert!(Device::from_str("invalid").is_err());
         assert!(Device::from_str("cuda:abc").is_err());
     }

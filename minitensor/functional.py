@@ -19,8 +19,9 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
-from .tensor import Tensor
 from typing import Optional, Union
+
+from .tensor import Tensor
 
 
 def relu(input: Tensor) -> Tensor:
@@ -243,6 +244,7 @@ def cross_entropy(
     """
 
     import numpy as np
+
     axis = dim if dim >= 0 else input.ndim + dim
     if axis < 0 or axis >= input.ndim:
         raise IndexError("dim out of range")
@@ -298,7 +300,18 @@ def binary_cross_entropy(
 
 
 __all__ = [
-    'relu', 'sigmoid', 'tanh', 'sin', 'cos', 'tan', 'softmax',
-    'dense_layer', 'conv2d', 'batch_norm', 'dropout',
-    'mse_loss', 'cross_entropy', 'binary_cross_entropy'
+    "relu",
+    "sigmoid",
+    "tanh",
+    "sin",
+    "cos",
+    "tan",
+    "softmax",
+    "dense_layer",
+    "conv2d",
+    "batch_norm",
+    "dropout",
+    "mse_loss",
+    "cross_entropy",
+    "binary_cross_entropy",
 ]

@@ -4,15 +4,15 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
+use crate::error::_convert_error;
 use engine::{
     serialization::{
-        ModelVersion, ModelMetadata, SerializedModel, SerializationFormat, 
-        ModelSerializer, DeploymentModel, StateDict
+        DeploymentModel, ModelMetadata, ModelSerializer, ModelVersion, SerializationFormat,
+        SerializedModel, StateDict,
     },
     tensor::Shape,
 };
-use crate::error::_convert_error;
+use pyo3::prelude::*;
 use std::collections::HashMap;
 
 /// Python wrapper for ModelVersion
@@ -67,11 +67,17 @@ impl PyModelVersion {
     }
 
     fn __repr__(&self) -> String {
-        format!("ModelVersion({}.{}.{})", self.inner.major, self.inner.minor, self.inner.patch)
+        format!(
+            "ModelVersion({}.{}.{})",
+            self.inner.major, self.inner.minor, self.inner.patch
+        )
     }
 
     fn __str__(&self) -> String {
-        format!("{}.{}.{}", self.inner.major, self.inner.minor, self.inner.patch)
+        format!(
+            "{}.{}.{}",
+            self.inner.major, self.inner.minor, self.inner.patch
+        )
     }
 }
 
@@ -130,12 +136,20 @@ impl PyModelMetadata {
 
     #[getter]
     fn input_shapes(&self) -> Vec<Vec<usize>> {
-        self.inner.input_shapes.iter().map(|s| s.dims().to_vec()).collect()
+        self.inner
+            .input_shapes
+            .iter()
+            .map(|s| s.dims().to_vec())
+            .collect()
     }
 
     #[getter]
     fn output_shapes(&self) -> Vec<Vec<usize>> {
-        self.inner.output_shapes.iter().map(|s| s.dims().to_vec()).collect()
+        self.inner
+            .output_shapes
+            .iter()
+            .map(|s| s.dims().to_vec())
+            .collect()
     }
 
     fn add_input_shape(&mut self, shape: Vec<usize>) {
@@ -155,7 +169,10 @@ impl PyModelMetadata {
     }
 
     fn __repr__(&self) -> String {
-        format!("ModelMetadata(name='{}', architecture='{}')", self.inner.name, self.inner.architecture)
+        format!(
+            "ModelMetadata(name='{}', architecture='{}')",
+            self.inner.name, self.inner.architecture
+        )
     }
 }
 
@@ -174,26 +191,35 @@ impl PySerializationFormat {
             "json" => SerializationFormat::Json,
             "binary" | "bin" => SerializationFormat::Binary,
             "messagepack" | "msgpack" => SerializationFormat::MessagePack,
-            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Unknown serialization format: {}", format_str)
-            )),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown serialization format: {}",
+                    format_str
+                )))
+            }
         };
         Ok(Self { inner: format })
     }
 
     #[staticmethod]
     fn json() -> Self {
-        Self { inner: SerializationFormat::Json }
+        Self {
+            inner: SerializationFormat::Json,
+        }
     }
 
     #[staticmethod]
     fn binary() -> Self {
-        Self { inner: SerializationFormat::Binary }
+        Self {
+            inner: SerializationFormat::Binary,
+        }
     }
 
     #[staticmethod]
     fn messagepack() -> Self {
-        Self { inner: SerializationFormat::MessagePack }
+        Self {
+            inner: SerializationFormat::MessagePack,
+        }
     }
 
     fn extension(&self) -> &'static str {
@@ -226,31 +252,31 @@ impl PyModelSerializer {
         path: &str,
         format: Option<&PySerializationFormat>,
     ) -> PyResult<()> {
-        let format = format.map(|f| f.inner).unwrap_or(SerializationFormat::Binary);
-        ModelSerializer::save(&model.inner, path, format)
-            .map_err(_convert_error)?;
+        let format = format
+            .map(|f| f.inner)
+            .unwrap_or(SerializationFormat::Binary);
+        ModelSerializer::save(&model.inner, path, format).map_err(_convert_error)?;
         Ok(())
     }
 
     #[staticmethod]
     fn load(path: &str, format: Option<&PySerializationFormat>) -> PyResult<PySerializedModel> {
-        let format = format.map(|f| f.inner).unwrap_or(SerializationFormat::Binary);
-        let model = ModelSerializer::load(path, format)
-            .map_err(_convert_error)?;
+        let format = format
+            .map(|f| f.inner)
+            .unwrap_or(SerializationFormat::Binary);
+        let model = ModelSerializer::load(path, format).map_err(_convert_error)?;
         Ok(PySerializedModel { inner: model })
     }
 
     #[staticmethod]
     fn save_auto(model: &PySerializedModel, path: &str) -> PyResult<()> {
-        ModelSerializer::save_auto(&model.inner, path)
-            .map_err(_convert_error)?;
+        ModelSerializer::save_auto(&model.inner, path).map_err(_convert_error)?;
         Ok(())
     }
 
     #[staticmethod]
     fn load_auto(path: &str) -> PyResult<PySerializedModel> {
-        let model = ModelSerializer::load_auto(path)
-            .map_err(_convert_error)?;
+        let model = ModelSerializer::load_auto(path).map_err(_convert_error)?;
         Ok(PySerializedModel { inner: model })
     }
 }
@@ -296,8 +322,7 @@ impl PySerializedModel {
     }
 
     fn check_compatibility(&self) -> PyResult<()> {
-        self.inner.check_compatibility()
-            .map_err(_convert_error)?;
+        self.inner.check_compatibility().map_err(_convert_error)?;
         Ok(())
     }
 
@@ -345,16 +370,22 @@ impl PyStateDict {
     }
 
     fn __repr__(&self) -> String {
-        format!("StateDict({} parameters, {} buffers)", 
-            self.inner.parameters.len(), 
-            self.inner.buffers.len())
+        format!(
+            "StateDict({} parameters, {} buffers)",
+            self.inner.parameters.len(),
+            self.inner.buffers.len()
+        )
     }
 }
 
 // Internal helpers for other binding modules
 impl PyStateDict {
-    pub(crate) fn from_engine(inner: StateDict) -> Self { Self { inner } }
-    pub(crate) fn inner_ref(s: &PyStateDict) -> &StateDict { &s.inner }
+    pub(crate) fn from_engine(inner: StateDict) -> Self {
+        Self { inner }
+    }
+    pub(crate) fn inner_ref(s: &PyStateDict) -> &StateDict {
+        &s.inner
+    }
 }
 
 /// Python wrapper for DeploymentModel
@@ -392,12 +423,20 @@ impl PyDeploymentModel {
 
     #[getter]
     fn input_shapes(&self) -> Vec<Vec<usize>> {
-        self.inner.input_shapes.iter().map(|s| s.dims().to_vec()).collect()
+        self.inner
+            .input_shapes
+            .iter()
+            .map(|s| s.dims().to_vec())
+            .collect()
     }
 
     #[getter]
     fn output_shapes(&self) -> Vec<Vec<usize>> {
-        self.inner.output_shapes.iter().map(|s| s.dims().to_vec()).collect()
+        self.inner
+            .output_shapes
+            .iter()
+            .map(|s| s.dims().to_vec())
+            .collect()
     }
 
     fn add_inference_config(&mut self, key: String, value: String) {
@@ -409,20 +448,21 @@ impl PyDeploymentModel {
     }
 
     fn save(&self, path: &str) -> PyResult<()> {
-        self.inner.save(path)
-            .map_err(_convert_error)?;
+        self.inner.save(path).map_err(_convert_error)?;
         Ok(())
     }
 
     #[staticmethod]
     fn load(path: &str) -> PyResult<PyDeploymentModel> {
-        let model = DeploymentModel::load(path)
-            .map_err(_convert_error)?;
+        let model = DeploymentModel::load(path).map_err(_convert_error)?;
         Ok(PyDeploymentModel { inner: model })
     }
 
     fn __repr__(&self) -> String {
-        format!("DeploymentModel(name='{}', version='{}')", self.inner.name, self.inner.version)
+        format!(
+            "DeploymentModel(name='{}', version='{}')",
+            self.inner.name, self.inner.version
+        )
     }
 }
 
@@ -449,7 +489,7 @@ fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
 
 pub fn register_serialization_module(py: Python, parent_module: &PyModule) -> PyResult<()> {
     let serialization_module = PyModule::new(py, "serialization")?;
-    
+
     // Add classes
     serialization_module.add_class::<PyModelVersion>()?;
     serialization_module.add_class::<PyModelMetadata>()?;
@@ -458,11 +498,11 @@ pub fn register_serialization_module(py: Python, parent_module: &PyModule) -> Py
     serialization_module.add_class::<PySerializedModel>()?;
     serialization_module.add_class::<PyStateDict>()?;
     serialization_module.add_class::<PyDeploymentModel>()?;
-    
+
     // Add convenience functions
     serialization_module.add_function(wrap_pyfunction!(save_model, serialization_module)?)?;
     serialization_module.add_function(wrap_pyfunction!(load_model, serialization_module)?)?;
-    
+
     parent_module.add_submodule(serialization_module)?;
     Ok(())
 }

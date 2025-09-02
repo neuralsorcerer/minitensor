@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::{
-    tensor::{Tensor, TensorData, DataType, Shape},
     operations::arithmetic,
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use ndarray::Array2;
 use std::sync::Arc;
@@ -18,7 +18,13 @@ fn create_tensor(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
     if let Some(slice) = tensor_data.as_f32_slice_mut() {
         slice.copy_from_slice(&data);
     }
-    Tensor::new(Arc::new(tensor_data), shape_obj, DataType::Float32, engine::device::Device::cpu(), false)
+    Tensor::new(
+        Arc::new(tensor_data),
+        shape_obj,
+        DataType::Float32,
+        engine::device::Device::cpu(),
+        false,
+    )
 }
 
 #[test]

@@ -29,8 +29,9 @@ def cross(a, b):
 
 
 # Re-export remaining public symbols from the Rust implementation
-__all__ = [name for name in dir(_numpy_compat) if not name.startswith("_") and name != "cross"] + ["cross"]
+__all__ = [
+    name for name in dir(_numpy_compat) if not name.startswith("_") and name != "cross"
+] + ["cross"]
 for name in __all__:
     if name != "cross":
         globals()[name] = getattr(_numpy_compat, name)
-

@@ -34,12 +34,14 @@ impl Backend for CpuBackend {
         }
 
         let layout = Layout::from_size_align(size_bytes, 64) // 64-byte alignment for SIMD
-            .map_err(|e| crate::error::MinitensorError::memory_error(format!("Invalid layout: {}", e)))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!("Invalid layout: {}", e))
+            })?;
 
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Failed to allocate memory"
+                "Failed to allocate memory",
             ));
         }
 
@@ -51,8 +53,9 @@ impl Backend for CpuBackend {
             return Ok(());
         }
 
-        let layout = Layout::from_size_align(size_bytes, 64)
-            .map_err(|e| crate::error::MinitensorError::memory_error(format!("Invalid layout: {}", e)))?;
+        let layout = Layout::from_size_align(size_bytes, 64).map_err(|e| {
+            crate::error::MinitensorError::memory_error(format!("Invalid layout: {}", e))
+        })?;
 
         unsafe { dealloc(ptr, layout) };
         Ok(())
@@ -61,7 +64,7 @@ impl Backend for CpuBackend {
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null destination pointer"
+                "Null destination pointer",
             ));
         }
 
@@ -74,7 +77,7 @@ impl Backend for CpuBackend {
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null source pointer"
+                "Null source pointer",
             ));
         }
 
@@ -92,7 +95,7 @@ mod tests {
     #[test]
     fn test_cpu_backend() {
         assert!(CpuBackend::is_available());
-        
+
         let backend = CpuBackend::initialize().unwrap();
         assert_eq!(backend.device(), Device::cpu());
     }
@@ -100,27 +103,27 @@ mod tests {
     #[test]
     fn test_memory_allocation() {
         let backend = CpuBackend::initialize().unwrap();
-        
+
         let ptr = backend.allocate(1024).unwrap();
         assert!(!ptr.is_null());
-        
+
         backend.deallocate(ptr, 1024).unwrap();
     }
 
     #[test]
     fn test_memory_copy() {
         let backend = CpuBackend::initialize().unwrap();
-        
+
         let src_data = vec![1u8, 2, 3, 4, 5];
         let ptr = backend.allocate(5).unwrap();
-        
+
         backend.copy_from_host(ptr, &src_data).unwrap();
-        
+
         let mut dst_data = vec![0u8; 5];
         backend.copy_to_host(&mut dst_data, ptr).unwrap();
-        
+
         assert_eq!(src_data, dst_data);
-        
+
         backend.deallocate(ptr, 5).unwrap();
     }
 }

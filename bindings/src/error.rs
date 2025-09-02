@@ -4,14 +4,14 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
 use engine::MinitensorError;
+use pyo3::prelude::*;
 
 /// Convert Rust errors to Python exceptions with detailed messages
 pub fn _convert_error(err: MinitensorError) -> PyErr {
     // Use the detailed message that includes suggestions and context
     let detailed_msg = err.detailed_message();
-    
+
     match err {
         MinitensorError::ShapeError { .. } => {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(detailed_msg)

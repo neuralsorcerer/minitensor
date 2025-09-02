@@ -4,21 +4,23 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use pyo3::prelude::*;
-use pyo3::types::PyModule as Pyo3Module;
-use engine::nn::{
-    Layer, DenseLayer, ReLU, Sigmoid, Tanh, Softmax, Sequential, 
-    conv::Conv2d, normalization::{BatchNorm1d, BatchNorm2d}, dropout::Dropout, activation::{LeakyReLU, ELU, GELU},
-    MSELoss, MAELoss, HuberLoss
-};
-use engine::nn::loss::{CrossEntropyLoss, BCELoss, FocalLoss};
-use engine::tensor::DataType;
-use engine::Device;
-use crate::tensor::PyTensor;
 use crate::device::PyDevice;
 use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
-use engine::serialization::{ModelMetadata, SerializedModel, ModelSerializer, SerializationFormat};
+use crate::tensor::PyTensor;
+use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss};
+use engine::nn::{
+    activation::{LeakyReLU, ELU, GELU},
+    conv::Conv2d,
+    dropout::Dropout,
+    normalization::{BatchNorm1d, BatchNorm2d},
+    DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
+};
+use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
+use engine::tensor::DataType;
+use engine::Device;
+use pyo3::prelude::*;
+use pyo3::types::PyModule as Pyo3Module;
 
 /// Base class for neural network modules
 #[pyclass(name = "Module", subclass)]
@@ -62,8 +64,9 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.forward(input.tensor()),
             ModuleType::BatchNorm2d(layer) => layer.forward(input.tensor()),
             ModuleType::Dropout(layer) => layer.forward(input.tensor()),
-        }.map_err(_convert_error)?;
-        
+        }
+        .map_err(_convert_error)?;
+
         Ok(PyTensor::from_tensor(result))
     }
 
@@ -84,8 +87,9 @@ impl PyModule {
             ModuleType::BatchNorm2d(layer) => layer.parameters(),
             ModuleType::Dropout(layer) => layer.parameters(),
         };
-        
-        params.into_iter()
+
+        params
+            .into_iter()
             .map(|tensor| PyTensor::from_tensor(tensor.clone()))
             .collect()
     }
@@ -150,20 +154,33 @@ impl PyModule {
     /// String representation
     fn __repr__(&self) -> String {
         match &self.inner {
-            ModuleType::DenseLayer(layer) => format!("DenseLayer(in_features={}, out_features={})", 
-                layer.in_features(), layer.out_features()),
+            ModuleType::DenseLayer(layer) => format!(
+                "DenseLayer(in_features={}, out_features={})",
+                layer.in_features(),
+                layer.out_features()
+            ),
             ModuleType::ReLU(_) => "ReLU()".to_string(),
             ModuleType::Sigmoid(_) => "Sigmoid()".to_string(),
             ModuleType::Tanh(_) => "Tanh()".to_string(),
             ModuleType::Softmax(layer) => format!("Softmax(dim={:?})", layer.dim()),
-            ModuleType::LeakyReLU(layer) => format!("LeakyReLU(negative_slope={})", layer.negative_slope()),
+            ModuleType::LeakyReLU(layer) => {
+                format!("LeakyReLU(negative_slope={})", layer.negative_slope())
+            }
             ModuleType::ELU(layer) => format!("ELU(alpha={})", layer.alpha()),
             ModuleType::GELU(_) => "GELU()".to_string(),
             ModuleType::Sequential(_) => "Sequential(...)".to_string(),
-            ModuleType::Conv2d(layer) => format!("Conv2d(in_channels={}, out_channels={}, kernel_size={:?})", 
-                layer.in_channels(), layer.out_channels(), layer.kernel_size()),
-            ModuleType::BatchNorm1d(layer) => format!("BatchNorm1d(num_features={})", layer.num_features()),
-            ModuleType::BatchNorm2d(layer) => format!("BatchNorm2d(num_features={})", layer.num_features()),
+            ModuleType::Conv2d(layer) => format!(
+                "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",
+                layer.in_channels(),
+                layer.out_channels(),
+                layer.kernel_size()
+            ),
+            ModuleType::BatchNorm1d(layer) => {
+                format!("BatchNorm1d(num_features={})", layer.num_features())
+            }
+            ModuleType::BatchNorm2d(layer) => {
+                format!("BatchNorm2d(num_features={})", layer.num_features())
+            }
             ModuleType::Dropout(layer) => format!("Dropout(p={})", layer.p()),
         }
     }
@@ -191,9 +208,15 @@ impl PyModule {
         let metadata = ModelMetadata::new("module".to_string(), "Module".to_string());
         let model = SerializedModel::new(metadata, state);
         match format.map(|s| s.to_lowercase()) {
-            Some(ref s) if s == "json" => ModelSerializer::save(&model, path, SerializationFormat::Json),
-            Some(ref s) if s == "bin" || s == "binary" => ModelSerializer::save(&model, path, SerializationFormat::Binary),
-            Some(ref s) if s == "msgpack" || s == "messagepack" => ModelSerializer::save(&model, path, SerializationFormat::MessagePack),
+            Some(ref s) if s == "json" => {
+                ModelSerializer::save(&model, path, SerializationFormat::Json)
+            }
+            Some(ref s) if s == "bin" || s == "binary" => {
+                ModelSerializer::save(&model, path, SerializationFormat::Binary)
+            }
+            Some(ref s) if s == "msgpack" || s == "messagepack" => {
+                ModelSerializer::save(&model, path, SerializationFormat::MessagePack)
+            }
             _ => ModelSerializer::save_auto(&model, path),
         }
         .map_err(_convert_error)
@@ -204,18 +227,24 @@ impl PyModule {
     fn load_state_from(path: &str, format: Option<&str>) -> PyResult<PyStateDict> {
         let model = match format.map(|s| s.to_lowercase()) {
             Some(ref s) if s == "json" => ModelSerializer::load(path, SerializationFormat::Json),
-            Some(ref s) if s == "bin" || s == "binary" => ModelSerializer::load(path, SerializationFormat::Binary),
-            Some(ref s) if s == "msgpack" || s == "messagepack" => ModelSerializer::load(path, SerializationFormat::MessagePack),
+            Some(ref s) if s == "bin" || s == "binary" => {
+                ModelSerializer::load(path, SerializationFormat::Binary)
+            }
+            Some(ref s) if s == "msgpack" || s == "messagepack" => {
+                ModelSerializer::load(path, SerializationFormat::MessagePack)
+            }
             _ => ModelSerializer::load_auto(path),
         }
         .map_err(_convert_error)?;
-        Ok(crate::serialization::PyStateDict::from_engine(model.state_dict))
+        Ok(crate::serialization::PyStateDict::from_engine(
+            model.state_dict,
+        ))
     }
 
     /// Return a StateDict snapshot of this module
     fn state_dict(&self) -> PyStateDict {
         use engine::nn::Module as _;
-    let state = match &self.inner {
+        let state = match &self.inner {
             ModuleType::DenseLayer(layer) => layer.state_dict(),
             ModuleType::ReLU(layer) => layer.state_dict(),
             ModuleType::Sigmoid(layer) => layer.state_dict(),
@@ -229,8 +258,8 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.state_dict(),
             ModuleType::BatchNorm2d(layer) => layer.state_dict(),
             ModuleType::Dropout(layer) => layer.state_dict(),
-    };
-    crate::serialization::PyStateDict::from_engine(state)
+        };
+        crate::serialization::PyStateDict::from_engine(state)
     }
 
     /// Load a provided StateDict into this module
@@ -259,55 +288,81 @@ impl PyModule {
 
 impl PyModule {
     pub fn from_dense_layer(dense_layer: DenseLayer) -> Self {
-        Self { inner: ModuleType::DenseLayer(dense_layer) }
+        Self {
+            inner: ModuleType::DenseLayer(dense_layer),
+        }
     }
 
     pub fn from_relu(relu: ReLU) -> Self {
-        Self { inner: ModuleType::ReLU(relu) }
+        Self {
+            inner: ModuleType::ReLU(relu),
+        }
     }
 
     pub fn from_sigmoid(sigmoid: Sigmoid) -> Self {
-        Self { inner: ModuleType::Sigmoid(sigmoid) }
+        Self {
+            inner: ModuleType::Sigmoid(sigmoid),
+        }
     }
 
     pub fn from_tanh(tanh: Tanh) -> Self {
-        Self { inner: ModuleType::Tanh(tanh) }
+        Self {
+            inner: ModuleType::Tanh(tanh),
+        }
     }
 
     pub fn from_softmax(softmax: Softmax) -> Self {
-        Self { inner: ModuleType::Softmax(softmax) }
+        Self {
+            inner: ModuleType::Softmax(softmax),
+        }
     }
 
     pub fn from_leaky_relu(leaky_relu: LeakyReLU) -> Self {
-        Self { inner: ModuleType::LeakyReLU(leaky_relu) }
+        Self {
+            inner: ModuleType::LeakyReLU(leaky_relu),
+        }
     }
 
     pub fn from_elu(elu: ELU) -> Self {
-        Self { inner: ModuleType::ELU(elu) }
+        Self {
+            inner: ModuleType::ELU(elu),
+        }
     }
 
     pub fn from_gelu(gelu: GELU) -> Self {
-        Self { inner: ModuleType::GELU(gelu) }
+        Self {
+            inner: ModuleType::GELU(gelu),
+        }
     }
 
     pub fn from_sequential(sequential: Sequential) -> Self {
-        Self { inner: ModuleType::Sequential(sequential) }
+        Self {
+            inner: ModuleType::Sequential(sequential),
+        }
     }
 
     pub fn from_conv2d(conv2d: Conv2d) -> Self {
-        Self { inner: ModuleType::Conv2d(conv2d) }
+        Self {
+            inner: ModuleType::Conv2d(conv2d),
+        }
     }
 
     pub fn from_batch_norm1d(batch_norm1d: BatchNorm1d) -> Self {
-        Self { inner: ModuleType::BatchNorm1d(batch_norm1d) }
+        Self {
+            inner: ModuleType::BatchNorm1d(batch_norm1d),
+        }
     }
 
     pub fn from_batch_norm2d(batch_norm2d: BatchNorm2d) -> Self {
-        Self { inner: ModuleType::BatchNorm2d(batch_norm2d) }
+        Self {
+            inner: ModuleType::BatchNorm2d(batch_norm2d),
+        }
     }
 
     pub fn from_dropout(dropout: Dropout) -> Self {
-        Self { inner: ModuleType::Dropout(dropout) }
+        Self {
+            inner: ModuleType::Dropout(dropout),
+        }
     }
 }
 
@@ -343,7 +398,9 @@ impl PyDenseLayer {
         if let ModuleType::DenseLayer(layer) = &module.inner {
             Ok(layer.in_features())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 
@@ -354,7 +411,9 @@ impl PyDenseLayer {
         if let ModuleType::DenseLayer(layer) = &module.inner {
             Ok(layer.out_features())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 
@@ -365,7 +424,9 @@ impl PyDenseLayer {
         if let ModuleType::DenseLayer(layer) = &module.inner {
             Ok(PyTensor::from_tensor(layer.weight().clone()))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 
@@ -376,7 +437,9 @@ impl PyDenseLayer {
         if let ModuleType::DenseLayer(layer) = &module.inner {
             Ok(layer.bias().map(|b| PyTensor::from_tensor(b.clone())))
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -443,7 +506,9 @@ impl PySoftmax {
         if let ModuleType::Softmax(layer) = &module.inner {
             Ok(layer.dim())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -469,7 +534,9 @@ impl PyLeakyReLU {
         if let ModuleType::LeakyReLU(layer) = &module.inner {
             Ok(layer.negative_slope())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -495,7 +562,9 @@ impl PyELU {
         if let ModuleType::ELU(layer) = &module.inner {
             Ok(layer.alpha())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -535,7 +604,9 @@ impl PyDropout {
         if let ModuleType::Dropout(layer) = &module.inner {
             Ok(layer.p())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -564,8 +635,17 @@ impl PyConv2d {
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
         let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
 
-        let conv2d = Conv2d::new(in_channels, out_channels, kernel_size, Some(stride), Some(padding), bias, device, dtype)
-            .map_err(_convert_error)?;
+        let conv2d = Conv2d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            Some(stride),
+            Some(padding),
+            bias,
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
 
         Ok((Self, PyModule::from_conv2d(conv2d)))
     }
@@ -577,7 +657,9 @@ impl PyConv2d {
         if let ModuleType::Conv2d(layer) = &module.inner {
             Ok(layer.in_channels())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 
@@ -588,7 +670,9 @@ impl PyConv2d {
         if let ModuleType::Conv2d(layer) = &module.inner {
             Ok(layer.out_channels())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 
@@ -599,7 +683,9 @@ impl PyConv2d {
         if let ModuleType::Conv2d(layer) = &module.inner {
             Ok(layer.kernel_size())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -639,7 +725,9 @@ impl PyBatchNorm1d {
         if let ModuleType::BatchNorm1d(layer) = &module.inner {
             Ok(layer.num_features())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -679,7 +767,9 @@ impl PyBatchNorm2d {
         if let ModuleType::BatchNorm2d(layer) = &module.inner {
             Ok(layer.num_features())
         } else {
-            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Invalid layer type"))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
         }
     }
 }
@@ -704,7 +794,7 @@ impl PySequential {
         // This would require a more complex implementation to handle dynamic layer addition
         // For now, we'll return a not implemented error
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Dynamic layer addition not yet implemented"
+            "Dynamic layer addition not yet implemented",
         ))
     }
 }
@@ -717,9 +807,10 @@ fn parse_dtype(dtype_str: &str) -> PyResult<DataType> {
         "int32" | "i32" => Ok(DataType::Int32),
         "int64" | "i64" => Ok(DataType::Int64),
         "bool" => Ok(DataType::Bool),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Unsupported data type: {}", dtype_str)
-        )),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unsupported data type: {}",
+            dtype_str
+        ))),
     }
 }
 
@@ -742,7 +833,9 @@ impl PyMSELoss {
 
     /// Compute the MSE loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -778,7 +871,9 @@ impl PyMAELoss {
 
     /// Compute the MAE loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -815,7 +910,9 @@ impl PyHuberLoss {
 
     /// Compute the Huber loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -834,7 +931,11 @@ impl PyHuberLoss {
 
     /// String representation
     fn __repr__(&self) -> String {
-        format!("HuberLoss(delta={}, reduction='{}')", self.inner.delta(), self.inner.reduction())
+        format!(
+            "HuberLoss(delta={}, reduction='{}')",
+            self.inner.delta(),
+            self.inner.reduction()
+        )
     }
 }
 
@@ -857,7 +958,9 @@ impl PyCrossEntropyLoss {
 
     /// Compute the Cross Entropy loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -893,7 +996,9 @@ impl PyBCELoss {
 
     /// Compute the BCE loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -931,7 +1036,9 @@ impl PyFocalLoss {
 
     /// Compute the Focal loss
     fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
-        let result = self.inner.forward(predictions.tensor(), targets.tensor())
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -956,15 +1063,19 @@ impl PyFocalLoss {
 
     /// String representation
     fn __repr__(&self) -> String {
-        format!("FocalLoss(alpha={}, gamma={}, reduction='{}')", 
-                self.inner.alpha(), self.inner.gamma(), self.inner.reduction())
+        format!(
+            "FocalLoss(alpha={}, gamma={}, reduction='{}')",
+            self.inner.alpha(),
+            self.inner.gamma(),
+            self.inner.reduction()
+        )
     }
 }
 
 /// Register neural network module with Python
 pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()> {
     let nn_module = Pyo3Module::new(py, "nn")?;
-    
+
     // Add layer classes
     nn_module.add_class::<PyModule>()?;
     nn_module.add_class::<PyDenseLayer>()?;
@@ -980,7 +1091,7 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PyBatchNorm1d>()?;
     nn_module.add_class::<PyBatchNorm2d>()?;
     nn_module.add_class::<PySequential>()?;
-    
+
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;
     nn_module.add_class::<PyMAELoss>()?;
@@ -988,7 +1099,7 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PyCrossEntropyLoss>()?;
     nn_module.add_class::<PyBCELoss>()?;
     nn_module.add_class::<PyFocalLoss>()?;
-    
+
     parent_module.add_submodule(nn_module)?;
     Ok(())
 }

@@ -4,24 +4,24 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-pub mod layer;
-pub mod dense_layer;
 pub mod activation;
-pub mod loss;
-pub mod sequential;
-pub mod init;
 pub mod conv;
+pub mod dense_layer;
 pub mod dropout;
+pub mod init;
+pub mod layer;
+pub mod loss;
 pub mod normalization;
+pub mod sequential;
 pub mod utils;
 
 // Re-export the main trait and common types
-pub use layer::{Layer, Module};
+pub use activation::{LeakyReLU, ReLU, Sigmoid, Softmax, Tanh, ELU, GELU};
 pub use dense_layer::DenseLayer;
-pub use activation::{ReLU, Sigmoid, Tanh, Softmax, LeakyReLU, ELU, GELU};
-pub use loss::{MSELoss, MAELoss, HuberLoss, CrossEntropyLoss, BCELoss, FocalLoss};
+pub use init::{init_bias, init_parameter, InitMethod};
+pub use layer::{Layer, Module};
+pub use loss::{BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, MAELoss, MSELoss};
 pub use sequential::{Sequential, SequentialBuilder};
-pub use init::{InitMethod, init_parameter, init_bias};
 
 // Re-export from other modules when they exist
 #[cfg(feature = "conv")]

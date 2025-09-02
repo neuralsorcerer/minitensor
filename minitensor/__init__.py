@@ -13,11 +13,11 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
+from . import functional, nn, optim
+
 # Re-export core classes and functions
 from .tensor import Tensor
-from . import nn
-from . import optim
-from . import functional
+
 try:
     from . import numpy_compat
 except ImportError:
@@ -52,34 +52,42 @@ try:
 except (AttributeError, NameError):
     pass
 
+
 # Core tensor creation functions
 def zeros(*args, **kwargs):
     """Create a tensor filled with zeros."""
     return Tensor.zeros(*args, **kwargs)
 
+
 def ones(*args, **kwargs):
     """Create a tensor filled with ones."""
     return Tensor.ones(*args, **kwargs)
+
 
 def rand(*args, **kwargs):
     """Create a tensor with random values from uniform distribution."""
     return Tensor.rand(*args, **kwargs)
 
+
 def randn(*args, **kwargs):
     """Create a tensor with random values from normal distribution."""
     return Tensor.randn(*args, **kwargs)
+
 
 def eye(*args, **kwargs):
     """Create an identity matrix."""
     return Tensor.eye(*args, **kwargs)
 
+
 def full(*args, **kwargs):
     """Create a tensor filled with a specific value."""
     return Tensor.full(*args, **kwargs)
 
+
 def arange(*args, **kwargs):
     """Create a tensor with values from a range."""
     return Tensor.arange(*args, **kwargs)
+
 
 def from_numpy(array, requires_grad=False):
     """Create a tensor from a NumPy array."""
@@ -87,7 +95,10 @@ def from_numpy(array, requires_grad=False):
         return Tensor.from_numpy(array, requires_grad)
     except AttributeError:
         # Fallback if Rust extension is not available
-        raise NotImplementedError("from_numpy requires the Rust extension to be built. Please build the project with 'maturin develop' or 'pip install -e .'")
+        raise NotImplementedError(
+            "from_numpy requires the Rust extension to be built. Please build the project with 'maturin develop' or 'pip install -e .'"
+        )
+
 
 def from_numpy_shared(array, requires_grad=False):
     """Create a tensor from a NumPy array with zero-copy when possible."""
@@ -97,31 +108,38 @@ def from_numpy_shared(array, requires_grad=False):
         # Fallback to regular from_numpy
         return from_numpy(array, requires_grad)
 
+
 # NumPy compatibility functions (commonly used ones at top level)
 def asarray(data, dtype=None, requires_grad=False):
     """Convert input to tensor (NumPy compatibility)."""
     return numpy_compat.asarray(data, dtype, requires_grad)
 
+
 def concatenate(tensors, axis=0):
     """Concatenate tensors along an axis (NumPy compatibility)."""
     return numpy_compat.concatenate(tensors, axis)
 
+
 def stack(tensors, axis=0):
     """Stack tensors along a new axis (NumPy compatibility)."""
     return numpy_compat.stack(tensors, axis)
+
 
 # Device management
 def device(device_str):
     """Create a device object."""
     return _minitensor_core.Device(device_str)
 
+
 def cpu():
     """Get CPU device."""
     return device("cpu")
 
+
 def cuda(device_id=0):
     """Get CUDA device."""
     return device(f"cuda:{device_id}")
+
 
 # Utility functions
 def set_default_dtype(dtype):
@@ -129,23 +147,41 @@ def set_default_dtype(dtype):
     # This would be implemented in the engine
     pass
 
+
 def get_default_dtype():
     """Get the default tensor data type."""
     # This would be implemented in the engine
     return "float32"
 
+
 __all__ = [
-    'Tensor', 'nn', 'optim', 'functional',
-    'zeros', 'ones', 'rand', 'randn', 'eye', 'full', 'arange',
-    'from_numpy', 'from_numpy_shared', 'asarray', 'concatenate', 'stack',
-    'device', 'cpu', 'cuda',
-    'set_default_dtype', 'get_default_dtype'
+    "Tensor",
+    "nn",
+    "optim",
+    "functional",
+    "zeros",
+    "ones",
+    "rand",
+    "randn",
+    "eye",
+    "full",
+    "arange",
+    "from_numpy",
+    "from_numpy_shared",
+    "asarray",
+    "concatenate",
+    "stack",
+    "device",
+    "cpu",
+    "cuda",
+    "set_default_dtype",
+    "get_default_dtype",
 ]
 
 if numpy_compat is not None:
-    __all__.append('numpy_compat')
+    __all__.append("numpy_compat")
 # Add plugins to __all__ if available
 if plugins is not None:
-    __all__.append('plugins')
+    __all__.append("plugins")
 if serialization is not None:
-    __all__.append('serialization')
+    __all__.append("serialization")

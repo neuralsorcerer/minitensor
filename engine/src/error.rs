@@ -6,7 +6,6 @@
 
 use thiserror::Error;
 
-
 /// Result type alias for minitensor operations
 pub type Result<T> = std::result::Result<T, MinitensorError>;
 
@@ -38,35 +37,37 @@ pub enum MinitensorError {
     },
 
     #[error("Gradient computation error: {message}")]
-    GradientError { 
+    GradientError {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
     #[error("Memory allocation error: {message}")]
-    MemoryError { 
+    MemoryError {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
     #[error("Invalid operation: {message}")]
-    InvalidOperation { 
+    InvalidOperation {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
     #[error("Backend error ({backend}): {message}")]
-    BackendError { 
+    BackendError {
         backend: String,
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
-    #[error("Index out of bounds: index {index} is out of bounds for dimension {dim} with size {size}")]
+    #[error(
+        "Index out of bounds: index {index} is out of bounds for dimension {dim} with size {size}"
+    )]
     IndexError {
         index: isize,
         dim: usize,
@@ -76,21 +77,21 @@ pub enum MinitensorError {
     },
 
     #[error("Internal error: {message}")]
-    InternalError { 
+    InternalError {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
     #[error("Not implemented: {message}")]
-    NotImplemented { 
+    NotImplemented {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
     },
 
     #[error("Invalid argument: {message}")]
-    InvalidArgument { 
+    InvalidArgument {
         message: String,
         suggestion: Option<String>,
         context: Option<String>,
@@ -146,9 +147,9 @@ impl MinitensorError {
     /// Create a new shape error with suggestion
     pub fn shape_mismatch(expected: Vec<usize>, actual: Vec<usize>) -> Self {
         let suggestion = Self::generate_shape_suggestion(&expected, &actual);
-        Self::ShapeError { 
-            expected, 
-            actual, 
+        Self::ShapeError {
+            expected,
+            actual,
             suggestion: Some(suggestion),
             context: None,
         }
@@ -156,14 +157,14 @@ impl MinitensorError {
 
     /// Create a shape error with custom context
     pub fn shape_mismatch_with_context(
-        expected: Vec<usize>, 
-        actual: Vec<usize>, 
-        context: impl Into<String>
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+        context: impl Into<String>,
     ) -> Self {
         let suggestion = Self::generate_shape_suggestion(&expected, &actual);
-        Self::ShapeError { 
-            expected, 
-            actual, 
+        Self::ShapeError {
+            expected,
+            actual,
             suggestion: Some(suggestion),
             context: Some(context.into()),
         }
@@ -182,8 +183,11 @@ impl MinitensorError {
     pub fn type_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!("Use .to_dtype({}) to convert the tensor to the expected type", expected_str);
-        
+        let suggestion = format!(
+            "Use .to_dtype({}) to convert the tensor to the expected type",
+            expected_str
+        );
+
         Self::TypeError {
             expected: expected_str,
             actual: actual_str,
@@ -194,14 +198,17 @@ impl MinitensorError {
 
     /// Create a type error with custom context
     pub fn type_mismatch_with_context(
-        expected: impl Into<String>, 
+        expected: impl Into<String>,
         actual: impl Into<String>,
-        context: impl Into<String>
+        context: impl Into<String>,
     ) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!("Use .to_dtype({}) to convert the tensor to the expected type", expected_str);
-        
+        let suggestion = format!(
+            "Use .to_dtype({}) to convert the tensor to the expected type",
+            expected_str
+        );
+
         Self::TypeError {
             expected: expected_str,
             actual: actual_str,
@@ -214,8 +221,11 @@ impl MinitensorError {
     pub fn device_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!("Use .to({}) to move the tensor to the expected device", expected_str);
-        
+        let suggestion = format!(
+            "Use .to({}) to move the tensor to the expected device",
+            expected_str
+        );
+
         Self::DeviceError {
             expected: expected_str,
             actual: actual_str,
@@ -226,14 +236,17 @@ impl MinitensorError {
 
     /// Create a device error with custom context
     pub fn device_mismatch_with_context(
-        expected: impl Into<String>, 
+        expected: impl Into<String>,
         actual: impl Into<String>,
-        context: impl Into<String>
+        context: impl Into<String>,
     ) -> Self {
         let expected_str = expected.into();
         let actual_str = actual.into();
-        let suggestion = format!("Use .to({}) to move the tensor to the expected device", expected_str);
-        
+        let suggestion = format!(
+            "Use .to({}) to move the tensor to the expected device",
+            expected_str
+        );
+
         Self::DeviceError {
             expected: expected_str,
             actual: actual_str,
@@ -246,7 +259,10 @@ impl MinitensorError {
     pub fn gradient_error(message: impl Into<String>) -> Self {
         Self::GradientError {
             message: message.into(),
-            suggestion: Some("Ensure tensors have requires_grad=True and are part of a computation graph".to_string()),
+            suggestion: Some(
+                "Ensure tensors have requires_grad=True and are part of a computation graph"
+                    .to_string(),
+            ),
             context: None,
         }
     }
@@ -255,7 +271,7 @@ impl MinitensorError {
     pub fn gradient_error_with_suggestion(
         message: impl Into<String>,
         suggestion: impl Into<String>,
-        context: Option<String>
+        context: Option<String>,
     ) -> Self {
         Self::GradientError {
             message: message.into(),
@@ -276,7 +292,7 @@ impl MinitensorError {
     /// Create a memory error with custom suggestion
     pub fn memory_error_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::MemoryError {
             message: message.into(),
@@ -297,7 +313,7 @@ impl MinitensorError {
     /// Create an invalid operation error with suggestion
     pub fn invalid_operation_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::InvalidOperation {
             message: message.into(),
@@ -311,7 +327,9 @@ impl MinitensorError {
         Self::BackendError {
             backend: backend.into(),
             message: message.into(),
-            suggestion: Some("Check if the backend is properly installed and configured".to_string()),
+            suggestion: Some(
+                "Check if the backend is properly installed and configured".to_string(),
+            ),
             context: None,
         }
     }
@@ -320,7 +338,7 @@ impl MinitensorError {
     pub fn backend_error_with_suggestion(
         backend: impl Into<String>,
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::BackendError {
             backend: backend.into(),
@@ -333,14 +351,18 @@ impl MinitensorError {
     /// Create a new index error with suggestion
     pub fn index_error(index: isize, dim: usize, size: usize) -> Self {
         let suggestion = if index < 0 {
-            format!("Use positive indices (0 to {}) or negative indices (-{} to -1)", size - 1, size)
+            format!(
+                "Use positive indices (0 to {}) or negative indices (-{} to -1)",
+                size - 1,
+                size
+            )
         } else {
             format!("Index must be in range [0, {})", size)
         };
-        
-        Self::IndexError { 
-            index, 
-            dim, 
+
+        Self::IndexError {
+            index,
+            dim,
             size,
             suggestion: Some(suggestion),
             context: None,
@@ -349,20 +371,24 @@ impl MinitensorError {
 
     /// Create an index error with custom context
     pub fn index_error_with_context(
-        index: isize, 
-        dim: usize, 
+        index: isize,
+        dim: usize,
         size: usize,
-        context: impl Into<String>
+        context: impl Into<String>,
     ) -> Self {
         let suggestion = if index < 0 {
-            format!("Use positive indices (0 to {}) or negative indices (-{} to -1)", size - 1, size)
+            format!(
+                "Use positive indices (0 to {}) or negative indices (-{} to -1)",
+                size - 1,
+                size
+            )
         } else {
             format!("Index must be in range [0, {})", size)
         };
-        
-        Self::IndexError { 
-            index, 
-            dim, 
+
+        Self::IndexError {
+            index,
+            dim,
             size,
             suggestion: Some(suggestion),
             context: Some(context.into()),
@@ -373,7 +399,10 @@ impl MinitensorError {
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::InternalError {
             message: message.into(),
-            suggestion: Some("This is likely a bug. Please report it with a minimal reproduction case".to_string()),
+            suggestion: Some(
+                "This is likely a bug. Please report it with a minimal reproduction case"
+                    .to_string(),
+            ),
             context: None,
         }
     }
@@ -390,7 +419,7 @@ impl MinitensorError {
     /// Create a not implemented error with custom suggestion
     pub fn not_implemented_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::NotImplemented {
             message: message.into(),
@@ -411,7 +440,7 @@ impl MinitensorError {
     /// Create an invalid argument error with suggestion
     pub fn invalid_argument_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::InvalidArgument {
             message: message.into(),
@@ -435,14 +464,18 @@ impl MinitensorError {
     pub fn dimension_error(
         message: impl Into<String>,
         expected_dims: Option<usize>,
-        actual_dims: Option<usize>
+        actual_dims: Option<usize>,
     ) -> Self {
         let suggestion = match (expected_dims, actual_dims) {
             (Some(expected), Some(actual)) => {
                 if expected > actual {
-                    Some(format!("Use .unsqueeze() to add dimensions or .view() to reshape"))
+                    Some(format!(
+                        "Use .unsqueeze() to add dimensions or .view() to reshape"
+                    ))
                 } else {
-                    Some(format!("Use .squeeze() to remove dimensions or .view() to reshape"))
+                    Some(format!(
+                        "Use .squeeze() to remove dimensions or .view() to reshape"
+                    ))
                 }
             }
             _ => Some("Check tensor dimensions and use reshape operations if needed".to_string()),
@@ -461,7 +494,9 @@ impl MinitensorError {
     pub fn computation_graph_error(message: impl Into<String>) -> Self {
         Self::ComputationGraphError {
             message: message.into(),
-            suggestion: Some("Ensure all tensors are properly connected in the computation graph".to_string()),
+            suggestion: Some(
+                "Ensure all tensors are properly connected in the computation graph".to_string(),
+            ),
             context: None,
         }
     }
@@ -487,7 +522,7 @@ impl MinitensorError {
     /// Create a plugin error with custom suggestion
     pub fn plugin_error_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::PluginError {
             message: message.into(),
@@ -508,7 +543,7 @@ impl MinitensorError {
     /// Create a version mismatch error with custom suggestion
     pub fn version_mismatch_with_suggestion(
         message: impl Into<String>,
-        suggestion: impl Into<String>
+        suggestion: impl Into<String>,
     ) -> Self {
         Self::VersionMismatch {
             message: message.into(),
@@ -526,13 +561,14 @@ impl MinitensorError {
                 actual.len()
             )
         } else {
-            let mismatched_dims: Vec<_> = expected.iter()
+            let mismatched_dims: Vec<_> = expected
+                .iter()
                 .zip(actual.iter())
                 .enumerate()
                 .filter(|(_, (e, a))| e != a)
                 .map(|(i, (e, a))| format!("dim {}: expected {}, got {}", i, e, a))
                 .collect();
-            
+
             format!(
                 "Shape mismatch in dimensions: {}. Use .view() or .reshape() to change the tensor shape",
                 mismatched_dims.join(", ")
@@ -597,15 +633,15 @@ impl MinitensorError {
     /// Create a formatted error message with suggestion and context
     pub fn detailed_message(&self) -> String {
         let mut message = self.to_string();
-        
+
         if let Some(suggestion) = self.suggestion() {
             message.push_str(&format!("\n💡 Suggestion: {}", suggestion));
         }
-        
+
         if let Some(context) = self.context() {
             message.push_str(&format!("\n📍 Context: {}", context));
         }
-        
+
         message
     }
 }

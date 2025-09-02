@@ -14,7 +14,7 @@ if sys.version_info < (3, 8):
     sys.exit(1)
 
 try:
-    from setuptools import setup, find_packages
+    from setuptools import find_packages, setup
 except ImportError:
     print("Error: setuptools is required to build minitensor")
     print("Please install it with: pip install setuptools")
@@ -60,7 +60,9 @@ EXTRAS_REQUIRE = {
 }
 
 # Add 'all' extra that includes everything
-EXTRAS_REQUIRE["all"] = sorted({dep for deps in EXTRAS_REQUIRE.values() for dep in deps})
+EXTRAS_REQUIRE["all"] = sorted(
+    {dep for deps in EXTRAS_REQUIRE.values() for dep in deps}
+)
 
 setup(
     name="minitensor",

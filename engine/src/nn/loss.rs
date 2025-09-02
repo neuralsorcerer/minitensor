@@ -5,9 +5,11 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    tensor::Tensor,
     error::Result,
-    operations::loss::{mse_loss, mae_loss, huber_loss, cross_entropy_loss, binary_cross_entropy_loss, focal_loss},
+    operations::loss::{
+        binary_cross_entropy_loss, cross_entropy_loss, focal_loss, huber_loss, mae_loss, mse_loss,
+    },
+    tensor::Tensor,
 };
 
 /// Mean Squared Error loss layer
@@ -161,19 +163,19 @@ impl HuberLoss {
 mod tests {
     use super::*;
     use crate::{
-        tensor::{Tensor, TensorData, DataType, Shape},
         device::Device,
+        tensor::{DataType, Shape, Tensor, TensorData},
     };
     use std::sync::Arc;
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);
         let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-        
+
         if let Some(slice) = tensor_data.as_f32_slice_mut() {
             slice.copy_from_slice(&data);
         }
-        
+
         Tensor::new(
             Arc::new(tensor_data),
             shape_obj,
@@ -190,10 +192,10 @@ mod tests {
 
         let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
         let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.5], vec![3], false);
-        
+
         let loss = mse.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
-        
+
         // Expected: ((1.0-1.5)² + (2.0-2.5)² + (3.0-2.5)²) / 3 = 0.25
         assert!((loss_data[0] - 0.25).abs() < 1e-6);
     }
@@ -205,12 +207,12 @@ mod tests {
 
         let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
         let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.0], vec![3], false);
-        
+
         let loss = mae.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
-        
+
         // Expected: (0.5 + 0.5 + 1.0) / 3 = 2.0/3
-        assert!((loss_data[0] - (2.0/3.0)).abs() < 1e-6);
+        assert!((loss_data[0] - (2.0 / 3.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -221,7 +223,7 @@ mod tests {
 
         let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
         let targets = create_test_tensor_f32(vec![1.2, 2.3], vec![2], false);
-        
+
         let loss = huber.forward(&predictions, &targets).unwrap();
         // Just check that the loss was computed successfully
         assert_eq!(loss.shape().dims(), &[1]);
@@ -389,7 +391,13 @@ impl FocalLoss {
 
     /// Compute the Focal loss between predictions (logits) and targets
     pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        focal_loss(predictions, targets, self.alpha, self.gamma, &self.reduction)
+        focal_loss(
+            predictions,
+            targets,
+            self.alpha,
+            self.gamma,
+            &self.reduction,
+        )
     }
 
     /// Get the alpha parameter
@@ -427,19 +435,19 @@ impl FocalLoss {
 mod classification_tests {
     use super::*;
     use crate::{
-        tensor::{Tensor, TensorData, DataType, Shape},
         device::Device,
+        tensor::{DataType, Shape, Tensor, TensorData},
     };
     use std::sync::Arc;
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);
         let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-        
+
         if let Some(slice) = tensor_data.as_f32_slice_mut() {
             slice.copy_from_slice(&data);
         }
-        
+
         Tensor::new(
             Arc::new(tensor_data),
             shape_obj,
@@ -457,7 +465,7 @@ mod classification_tests {
         // Create simple 2-class classification example
         let predictions = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
         let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
-        
+
         let loss = ce_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully
         assert!(loss.is_ok());
@@ -471,7 +479,7 @@ mod classification_tests {
         // Create binary classification example with probabilities
         let predictions = create_test_tensor_f32(vec![0.8, 0.2, 0.3, 0.9], vec![4], false);
         let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![4], false);
-        
+
         let loss = bce_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully
         assert!(loss.is_ok());
@@ -487,7 +495,7 @@ mod classification_tests {
         // Create simple classification example
         let predictions = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
         let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
-        
+
         let loss = focal_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully
         assert!(loss.is_ok());

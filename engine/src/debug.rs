@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    tensor::{Tensor, Shape},
     device::Device,
+    tensor::{Shape, Tensor},
 };
 use std::collections::HashMap;
 
@@ -211,21 +211,21 @@ impl GraphVisualizer {
     /// Generate a text-based visualization of the computation graph
     pub fn to_text(&self) -> String {
         let mut result = String::from("Computation Graph:\n");
-        
+
         for node in &self.nodes {
             result.push_str(&format!(
                 "Node {}: {} (shape: {:?}, dtype: {}, grad: {})\n",
                 node.id, node.operation, node.shape, node.dtype, node.requires_grad
             ));
         }
-        
+
         result.push('\n');
-        
+
         for edge in &self.edges {
             let label = edge.label.as_deref().unwrap_or("");
             result.push_str(&format!("{} -> {} {}\n", edge.from, edge.to, label));
         }
-        
+
         result
     }
 
@@ -234,22 +234,29 @@ impl GraphVisualizer {
         let mut result = String::from("digraph ComputationGraph {\n");
         result.push_str("  rankdir=TB;\n");
         result.push_str("  node [shape=box];\n\n");
-        
+
         for node in &self.nodes {
-            let color = if node.requires_grad { "lightblue" } else { "lightgray" };
+            let color = if node.requires_grad {
+                "lightblue"
+            } else {
+                "lightgray"
+            };
             result.push_str(&format!(
                 "  \"{}\" [label=\"{}\\nshape: {:?}\\ndtype: {}\" fillcolor={} style=filled];\n",
                 node.id, node.operation, node.shape, node.dtype, color
             ));
         }
-        
+
         result.push('\n');
-        
+
         for edge in &self.edges {
             let label = edge.label.as_deref().unwrap_or("");
-            result.push_str(&format!("  \"{}\" -> \"{}\" [label=\"{}\"];\n", edge.from, edge.to, label));
+            result.push_str(&format!(
+                "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+                edge.from, edge.to, label
+            ));
         }
-        
+
         result.push_str("}\n");
         result
     }
@@ -284,45 +291,52 @@ impl OperationProfiler {
 
     /// Record memory usage for an operation
     pub fn record_memory(&mut self, operation: String, memory_bytes: usize) {
-        self.memory_usage.entry(operation).or_default().push(memory_bytes);
+        self.memory_usage
+            .entry(operation)
+            .or_default()
+            .push(memory_bytes);
     }
 
     /// Get average timing for an operation
     pub fn average_timing(&self, operation: &str) -> Option<f64> {
-        self.timings.get(operation).map(|times| {
-            times.iter().sum::<f64>() / times.len() as f64
-        })
+        self.timings
+            .get(operation)
+            .map(|times| times.iter().sum::<f64>() / times.len() as f64)
     }
 
     /// Get average memory usage for an operation
     pub fn average_memory(&self, operation: &str) -> Option<f64> {
-        self.memory_usage.get(operation).map(|memories| {
-            memories.iter().sum::<usize>() as f64 / memories.len() as f64
-        })
+        self.memory_usage
+            .get(operation)
+            .map(|memories| memories.iter().sum::<usize>() as f64 / memories.len() as f64)
     }
 
     /// Generate a performance report
     pub fn report(&self) -> String {
         let mut result = String::from("Performance Report:\n");
-        
+
         result.push_str("\nTiming Statistics:\n");
         for (op, times) in &self.timings {
             let avg = times.iter().sum::<f64>() / times.len() as f64;
             let min = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
             let max = times.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            
+
             result.push_str(&format!(
                 "├─ {}: avg={:.2}ms, min={:.2}ms, max={:.2}ms, count={}\n",
-                op, avg, min, max, times.len()
+                op,
+                avg,
+                min,
+                max,
+                times.len()
             ));
         }
-        
+
         result.push_str("\nMemory Statistics:\n");
         for (op, memories) in &self.memory_usage {
             let avg = memories.iter().sum::<usize>() as f64 / memories.len() as f64;
             let min = *memories.iter().min().unwrap_or(&0);
             let max = *memories.iter().max().unwrap_or(&0);
-            
+
             result.push_str(&format!(
                 "├─ {}: avg={:.2}MB, min={:.2}MB, max={:.2}MB, count={}\n",
                 op,
@@ -332,7 +346,7 @@ impl OperationProfiler {
                 memories.len()
             ));
         }
-        
+
         result
     }
 }
@@ -357,9 +371,9 @@ impl TensorDebugger {
     pub fn compare(tensor1: &Tensor, tensor2: &Tensor) -> String {
         let info1 = TensorInfo::from_tensor(tensor1);
         let info2 = TensorInfo::from_tensor(tensor2);
-        
+
         let mut result = String::from("Tensor Comparison:\n");
-        
+
         // Compare shapes
         if info1.shape.dims() != info2.shape.dims() {
             result.push_str(&format!(
@@ -370,21 +384,24 @@ impl TensorDebugger {
         } else {
             result.push_str(&format!("✅ Shape: {:?}\n", info1.shape.dims()));
         }
-        
+
         // Compare dtypes
         if info1.dtype != info2.dtype {
             result.push_str(&format!("❌ DType: {} vs {}\n", info1.dtype, info2.dtype));
         } else {
             result.push_str(&format!("✅ DType: {}\n", info1.dtype));
         }
-        
+
         // Compare devices
         if info1.device != info2.device {
-            result.push_str(&format!("❌ Device: {:?} vs {:?}\n", info1.device, info2.device));
+            result.push_str(&format!(
+                "❌ Device: {:?} vs {:?}\n",
+                info1.device, info2.device
+            ));
         } else {
             result.push_str(&format!("✅ Device: {:?}\n", info1.device));
         }
-        
+
         // Compare gradient requirements
         if info1.requires_grad != info2.requires_grad {
             result.push_str(&format!(
@@ -394,52 +411,58 @@ impl TensorDebugger {
         } else {
             result.push_str(&format!("✅ Requires Grad: {}\n", info1.requires_grad));
         }
-        
+
         result
     }
 
     /// Check if tensor has common issues
     pub fn health_check(tensor: &Tensor) -> Vec<String> {
         let mut issues = Vec::new();
-        
+
         // Check for NaN values
         if tensor.has_nan() {
             issues.push("⚠️  Tensor contains NaN values".to_string());
         }
-        
+
         // Check for infinite values
         if tensor.has_inf() {
             issues.push("⚠️  Tensor contains infinite values".to_string());
         }
-        
+
         // Check for very large values
         if let Some(max_val) = tensor.max_value() {
             if max_val > 1e6 {
-                issues.push(format!("⚠️  Tensor has very large values (max: {:.2e})", max_val));
+                issues.push(format!(
+                    "⚠️  Tensor has very large values (max: {:.2e})",
+                    max_val
+                ));
             }
         }
-        
+
         // Check for very small gradients
         if tensor.requires_grad() {
             if let Some(grad) = tensor.grad() {
                 if let Some(grad_max) = grad.max_value() {
                     if grad_max < 1e-8 {
-                        issues.push("⚠️  Gradients are very small, may indicate vanishing gradient problem".to_string());
+                        issues.push(
+                            "⚠️  Gradients are very small, may indicate vanishing gradient problem"
+                                .to_string(),
+                        );
                     }
                 }
             }
         }
-        
+
         // Check memory usage
         let memory_mb = tensor.memory_usage_bytes() as f64 / 1024.0 / 1024.0;
         if memory_mb > 1000.0 {
             issues.push(format!("⚠️  Large memory usage: {:.2} MB", memory_mb));
         }
-        
+
         if issues.is_empty() {
             issues.push("✅ No issues detected".to_string());
         }
-        
+
         issues
     }
 }

@@ -4,24 +4,27 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::{Layer, init::{InitMethod, init_parameter}};
+use super::{
+    init::{init_parameter, InitMethod},
+    Layer,
+};
 use crate::{
-    tensor::{Tensor, Shape, DataType},
     device::Device,
-    error::{Result, MinitensorError},
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
 
 /// 1D Batch normalization layer
-/// 
+///
 /// Applies Batch Normalization over a 2D or 3D input (a mini-batch of 1D inputs
 /// with optional additional channel dimension).
-/// 
+///
 /// The mean and standard-deviation are calculated per-dimension over the mini-batches
 /// and γ and β are learnable parameter vectors of size C (where C is the input size).
 pub struct BatchNorm1d {
-    weight: Tensor,      // γ (gamma) - learnable scale parameter
-    bias: Tensor,        // β (beta) - learnable shift parameter
+    weight: Tensor,       // γ (gamma) - learnable scale parameter
+    bias: Tensor,         // β (beta) - learnable shift parameter
     running_mean: Tensor, // Running mean for inference
     running_var: Tensor,  // Running variance for inference
     num_features: usize,
@@ -32,7 +35,7 @@ pub struct BatchNorm1d {
 
 impl BatchNorm1d {
     /// Create a new 1D batch normalization layer
-    /// 
+    ///
     /// # Arguments
     /// * `num_features` - Number of features or channels C from an expected input of size (N, C) or (N, C, L)
     /// * `eps` - A value added to the denominator for numerical stability. Default: 1e-5
@@ -40,8 +43,8 @@ impl BatchNorm1d {
     /// * `device` - Device to place the layer parameters on
     /// * `dtype` - Data type for the layer parameters
     pub fn new(
-        num_features: usize, 
-        eps: Option<f64>, 
+        num_features: usize,
+        eps: Option<f64>,
         momentum: Option<f64>,
         device: Device,
         dtype: DataType,
@@ -53,10 +56,10 @@ impl BatchNorm1d {
 
         // Initialize weight (gamma) to ones
         let weight = init_parameter(param_shape.clone(), InitMethod::Ones, dtype, device)?;
-        
+
         // Initialize bias (beta) to zeros
         let bias = init_parameter(param_shape.clone(), InitMethod::Zeros, dtype, device)?;
-        
+
         // Initialize running statistics to zeros and ones respectively
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false); // No gradients for running stats
         let running_var = Tensor::ones(param_shape, dtype, device, false); // No gradients for running stats
@@ -179,8 +182,8 @@ impl Layer for BatchNorm1d {
 
         let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
         let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-        let var = crate::operations::arithmetic::mul(&centered, &centered)?
-            .mean(Some(vec![0]), true)?; // [1,C]
+        let var =
+            crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(vec![0]), true)?; // [1,C]
 
         let mean = if input.ndim() == 3 {
             mean.view(Shape::new(vec![1, self.num_features, 1]))?
@@ -263,7 +266,13 @@ impl Layer for BatchNorm1d {
                     }
                     _ => unreachable!(),
                 }
-                Tensor::new(Arc::new(data), Shape::new(vec![1]), input.dtype(), input.device(), false)
+                Tensor::new(
+                    Arc::new(data),
+                    Shape::new(vec![1]),
+                    input.dtype(),
+                    input.device(),
+                    false,
+                )
             };
 
             let one_minus_tensor = {
@@ -281,7 +290,13 @@ impl Layer for BatchNorm1d {
                     }
                     _ => unreachable!(),
                 }
-                Tensor::new(Arc::new(data), Shape::new(vec![1]), input.dtype(), input.device(), false)
+                Tensor::new(
+                    Arc::new(data),
+                    Shape::new(vec![1]),
+                    input.dtype(),
+                    input.device(),
+                    false,
+                )
             };
 
             self.running_mean = crate::operations::arithmetic::add(
@@ -315,7 +330,7 @@ impl Layer for BatchNorm1d {
 }
 
 /// 2D Batch normalization layer for convolutional layers
-/// 
+///
 /// Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
 /// with additional channel dimension).
 pub struct BatchNorm2d {
@@ -331,7 +346,7 @@ pub struct BatchNorm2d {
 
 impl BatchNorm2d {
     /// Create a new 2D batch normalization layer
-    /// 
+    ///
     /// # Arguments
     /// * `num_features` - Number of features or channels C from an expected input of size (N, C, H, W)
     /// * `eps` - A value added to the denominator for numerical stability. Default: 1e-5
@@ -352,10 +367,10 @@ impl BatchNorm2d {
 
         // Initialize weight (gamma) to ones
         let weight = init_parameter(param_shape.clone(), InitMethod::Ones, dtype, device)?;
-        
+
         // Initialize bias (beta) to zeros
         let bias = init_parameter(param_shape.clone(), InitMethod::Zeros, dtype, device)?;
-        
+
         // Initialize running statistics
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false);
         let running_var = Tensor::ones(param_shape, dtype, device, false);
@@ -393,7 +408,7 @@ impl Layer for BatchNorm2d {
         // Validate input dimensions - expect 4D [N, C, H, W]
         if input.ndim() != 4 {
             return Err(MinitensorError::invalid_operation(
-                "BatchNorm2d expects 4D input [batch_size, channels, height, width]"
+                "BatchNorm2d expects 4D input [batch_size, channels, height, width]",
             ));
         }
 
@@ -415,8 +430,8 @@ impl Layer for BatchNorm2d {
 
         let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
         let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-        let var = crate::operations::arithmetic::mul(&centered, &centered)?
-            .mean(Some(vec![0]), true)?; // [1,C]
+        let var =
+            crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(vec![0]), true)?; // [1,C]
 
         let mean = mean.view(Shape::new(vec![1, self.num_features, 1, 1]))?;
         let var = var.view(Shape::new(vec![1, self.num_features, 1, 1]))?;
@@ -450,12 +465,7 @@ impl Layer for BatchNorm2d {
             .unsqueeze(0)?
             .unsqueeze(2)?
             .unsqueeze(3)?;
-        let bias = self
-            .bias
-            .clone()
-            .unsqueeze(0)?
-            .unsqueeze(2)?
-            .unsqueeze(3)?;
+        let bias = self.bias.clone().unsqueeze(0)?.unsqueeze(2)?.unsqueeze(3)?;
         let output = crate::operations::arithmetic::add(
             &crate::operations::arithmetic::mul(&normalized, &weight)?,
             &bias,
@@ -484,13 +494,14 @@ impl Layer for BatchNorm2d {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{Shape, DataType};
     use crate::device::Device;
+    use crate::tensor::{DataType, Shape};
 
     #[test]
     fn test_batchnorm1d_creation() {
-        let layer = BatchNorm1d::new(128, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32).unwrap();
-        
+        let layer =
+            BatchNorm1d::new(128, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32).unwrap();
+
         assert_eq!(layer.num_features(), 128);
         assert_eq!(layer.eps(), 1e-5);
         assert_eq!(layer.momentum(), 0.1);
@@ -503,32 +514,34 @@ mod tests {
 
     #[test]
     fn test_batchnorm1d_training_mode() {
-        let mut layer = BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
-        
+        let mut layer =
+            BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
+
         assert!(layer.is_training());
-        
+
         layer.eval();
         assert!(!layer.is_training());
-        
+
         layer.train();
         assert!(layer.is_training());
     }
 
     #[test]
     fn test_batchnorm1d_parameters() {
-        let mut layer = BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
-        
+        let mut layer =
+            BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
+
         let params = layer.parameters();
         assert_eq!(params.len(), 2); // weight + bias
-        
+
         let mut_params = layer.parameters_mut();
         assert_eq!(mut_params.len(), 2);
-        
+
         let named_params = layer.named_parameters();
         assert_eq!(named_params.len(), 2);
         assert!(named_params.contains_key("weight"));
         assert!(named_params.contains_key("bias"));
-        
+
         let buffers = layer.named_buffers();
         assert_eq!(buffers.len(), 2);
         assert!(buffers.contains_key("running_mean"));
@@ -537,52 +550,89 @@ mod tests {
 
     #[test]
     fn test_batchnorm1d_forward_shape_validation() {
-        let mut layer = BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
-        
+        let mut layer =
+            BatchNorm1d::new(128, None, None, Device::cpu(), DataType::Float32).unwrap();
+
         // Test with correct 2D input [batch=32, features=128]
-        let input_2d = Tensor::zeros(Shape::new(vec![32, 128]), DataType::Float32, Device::cpu(), false);
+        let input_2d = Tensor::zeros(
+            Shape::new(vec![32, 128]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = layer.forward(&input_2d).unwrap();
         assert_eq!(output.shape(), input_2d.shape());
-        
+
         // Test with correct 3D input [batch=32, features=128, length=10]
-        let input_3d = Tensor::zeros(Shape::new(vec![32, 128, 10]), DataType::Float32, Device::cpu(), false);
+        let input_3d = Tensor::zeros(
+            Shape::new(vec![32, 128, 10]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = layer.forward(&input_3d).unwrap();
         assert_eq!(output.shape(), input_3d.shape());
-        
+
         // Test with incorrect number of features
-        let wrong_input = Tensor::zeros(Shape::new(vec![32, 64]), DataType::Float32, Device::cpu(), false);
+        let wrong_input = Tensor::zeros(
+            Shape::new(vec![32, 64]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&wrong_input);
         assert!(result.is_err());
-        
+
         // Test with wrong number of dimensions
-        let wrong_dim_input = Tensor::zeros(Shape::new(vec![128]), DataType::Float32, Device::cpu(), false);
+        let wrong_dim_input = Tensor::zeros(
+            Shape::new(vec![128]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&wrong_dim_input);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_batchnorm2d_creation() {
-        let layer = BatchNorm2d::new(64, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32).unwrap();
-        
+        let layer =
+            BatchNorm2d::new(64, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32).unwrap();
+
         assert_eq!(layer.num_features(), 64);
     }
 
     #[test]
     fn test_batchnorm2d_forward_shape_validation() {
         let mut layer = BatchNorm2d::new(64, None, None, Device::cpu(), DataType::Float32).unwrap();
-        
+
         // Test with correct 4D input [batch=16, channels=64, height=32, width=32]
-        let input = Tensor::zeros(Shape::new(vec![16, 64, 32, 32]), DataType::Float32, Device::cpu(), false);
+        let input = Tensor::zeros(
+            Shape::new(vec![16, 64, 32, 32]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let output = layer.forward(&input).unwrap();
         assert_eq!(output.shape(), input.shape());
-        
+
         // Test with incorrect number of channels
-        let wrong_input = Tensor::zeros(Shape::new(vec![16, 32, 32, 32]), DataType::Float32, Device::cpu(), false);
+        let wrong_input = Tensor::zeros(
+            Shape::new(vec![16, 32, 32, 32]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&wrong_input);
         assert!(result.is_err());
-        
+
         // Test with wrong number of dimensions
-        let wrong_dim_input = Tensor::zeros(Shape::new(vec![16, 64, 32]), DataType::Float32, Device::cpu(), false);
+        let wrong_dim_input = Tensor::zeros(
+            Shape::new(vec![16, 64, 32]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let result = layer.forward(&wrong_dim_input);
         assert!(result.is_err());
     }

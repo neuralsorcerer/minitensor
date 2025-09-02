@@ -57,9 +57,14 @@ impl OpenCLBackend {
 
     /// Create an OpenCL buffer
     pub fn create_buffer(&self, size: usize, flags: u64) -> Result<Buffer<cl_float>> {
-        let buffer = unsafe {
-            Buffer::<cl_float>::create(&self.context, flags, size, ptr::null_mut())
-        }.map_err(|e| crate::error::MinitensorError::memory_error(format!("Failed to create OpenCL buffer: {}", e)))?;
+        let buffer =
+            unsafe { Buffer::<cl_float>::create(&self.context, flags, size, ptr::null_mut()) }
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "Failed to create OpenCL buffer: {}",
+                        e
+                    ))
+                })?;
 
         Ok(buffer)
     }
@@ -68,13 +73,24 @@ impl OpenCLBackend {
     pub fn create_buffer_with_data(&self, data: &[f32], flags: u64) -> Result<Buffer<cl_float>> {
         let mut buffer = unsafe {
             Buffer::<cl_float>::create(&self.context, flags, data.len(), ptr::null_mut())
-        }.map_err(|e| crate::error::MinitensorError::memory_error(format!("Failed to create OpenCL buffer: {}", e)))?;
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::memory_error(format!(
+                "Failed to create OpenCL buffer: {}",
+                e
+            ))
+        })?;
 
         // Write data to buffer
         unsafe {
             self.command_queue
                 .enqueue_write_buffer(&mut buffer, CL_BLOCKING, 0, data, &[])
-                .map_err(|e| crate::error::MinitensorError::memory_error(format!("Failed to write to OpenCL buffer: {}", e)))?;
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "Failed to write to OpenCL buffer: {}",
+                        e
+                    ))
+                })?;
         }
 
         Ok(buffer)
@@ -82,8 +98,13 @@ impl OpenCLBackend {
 
     /// Build an OpenCL program from source
     pub fn build_program(&self, name: &str, source: &str) -> Result<()> {
-        let program = Program::create_and_build_from_source(&self.context, source, "")
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to build OpenCL program: {}", e)))?;
+        let program =
+            Program::create_and_build_from_source(&self.context, source, "").map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Failed to build OpenCL program: {}",
+                    e
+                ))
+            })?;
 
         let mut programs = self.programs.lock().unwrap();
         programs.insert(name.to_string(), program);
@@ -94,11 +115,19 @@ impl OpenCLBackend {
     /// Create a kernel from a program
     pub fn create_kernel(&self, program_name: &str, kernel_name: &str) -> Result<()> {
         let programs = self.programs.lock().unwrap();
-        let program = programs.get(program_name)
-            .ok_or_else(|| crate::error::MinitensorError::backend_error(format!("Program '{}' not found", program_name)))?;
+        let program = programs.get(program_name).ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Program '{}' not found",
+                program_name
+            ))
+        })?;
 
-        let kernel = Kernel::create(program, kernel_name)
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to create kernel '{}': {}", kernel_name, e)))?;
+        let kernel = Kernel::create(program, kernel_name).map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to create kernel '{}': {}",
+                kernel_name, e
+            ))
+        })?;
 
         let mut kernels = self.kernels.lock().unwrap();
         kernels.insert(kernel_name.to_string(), kernel);
@@ -117,19 +146,35 @@ impl OpenCLBackend {
     }
 
     /// Execute a kernel
-    pub fn execute_kernel(&self, kernel_name: &str, global_work_size: &[usize], local_work_size: Option<&[usize]>) -> Result<()> {
-        let kernel = self.get_kernel(kernel_name)
-            .ok_or_else(|| crate::error::MinitensorError::backend_error(format!("Kernel '{}' not found", kernel_name)))?;
+    pub fn execute_kernel(
+        &self,
+        kernel_name: &str,
+        global_work_size: &[usize],
+        local_work_size: Option<&[usize]>,
+    ) -> Result<()> {
+        let kernel = self.get_kernel(kernel_name).ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Kernel '{}' not found",
+                kernel_name
+            ))
+        })?;
 
         let kernel_event = unsafe {
             ExecuteKernel::new(&kernel)
                 .set_global_work_sizes(global_work_size)
                 .set_local_work_sizes(local_work_size.unwrap_or(&[]))
                 .enqueue_nd_range(&self.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute kernel: {}", e)))?;
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!("Failed to execute kernel: {}", e))
+        })?;
 
-        kernel_event.wait()
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for kernel completion: {}", e)))?;
+        kernel_event.wait().map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for kernel completion: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
@@ -139,7 +184,12 @@ impl OpenCLBackend {
         unsafe {
             self.command_queue
                 .enqueue_read_buffer(buffer, CL_BLOCKING, 0, data, &[])
-                .map_err(|e| crate::error::MinitensorError::memory_error(format!("Failed to read from OpenCL buffer: {}", e)))?;
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "Failed to read from OpenCL buffer: {}",
+                        e
+                    ))
+                })?;
         }
 
         Ok(())
@@ -150,7 +200,12 @@ impl OpenCLBackend {
         unsafe {
             self.command_queue
                 .enqueue_write_buffer(buffer, CL_BLOCKING, 0, data, &[])
-                .map_err(|e| crate::error::MinitensorError::memory_error(format!("Failed to write to OpenCL buffer: {}", e)))?;
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "Failed to write to OpenCL buffer: {}",
+                        e
+                    ))
+                })?;
         }
 
         Ok(())
@@ -167,7 +222,7 @@ impl OpenCLBackend {
             operation(&opencl_buffer.buffer)
         } else {
             Err(crate::error::MinitensorError::memory_error(
-                "OpenCL buffer not found for pointer"
+                "OpenCL buffer not found for pointer",
             ))
         }
     }
@@ -176,7 +231,9 @@ impl OpenCLBackend {
     pub fn get_buffer_info(&self, ptr: *const u8) -> Option<(usize, usize)> {
         let buffer_id = ptr as usize;
         let buffers = self.buffers.lock().unwrap();
-        buffers.get(&buffer_id).map(|buf| (buffer_id, buf.size_bytes))
+        buffers
+            .get(&buffer_id)
+            .map(|buf| (buffer_id, buf.size_bytes))
     }
 
     /// Get total number of tracked buffers
@@ -186,8 +243,12 @@ impl OpenCLBackend {
 
     /// Finish all operations in the command queue
     pub fn finish(&self) -> Result<()> {
-        self.command_queue.finish()
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to finish OpenCL operations: {}", e)))
+        self.command_queue.finish().map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to finish OpenCL operations: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -200,7 +261,9 @@ impl Backend for OpenCLBackend {
         // Check if OpenCL platforms and GPU devices are available
         if let Ok(platforms) = get_platforms() {
             for platform in platforms {
-                if let Ok(devices) = opencl3::device::get_device_ids(platform.id(), CL_DEVICE_TYPE_GPU) {
+                if let Ok(devices) =
+                    opencl3::device::get_device_ids(platform.id(), CL_DEVICE_TYPE_GPU)
+                {
                     if !devices.is_empty() {
                         return true;
                     }
@@ -212,30 +275,47 @@ impl Backend for OpenCLBackend {
 
     fn initialize() -> Result<Self> {
         // Get the first available GPU device
-        let platforms = get_platforms()
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to get OpenCL platforms: {}", e)))?;
+        let platforms = get_platforms().map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to get OpenCL platforms: {}",
+                e
+            ))
+        })?;
 
         let mut all_devices = Vec::new();
         for platform in platforms {
-            if let Ok(platform_devices) = opencl3::device::get_device_ids(platform.id(), CL_DEVICE_TYPE_GPU) {
+            if let Ok(platform_devices) =
+                opencl3::device::get_device_ids(platform.id(), CL_DEVICE_TYPE_GPU)
+            {
                 all_devices.extend(platform_devices);
             }
         }
         let devices = all_devices;
 
         if devices.is_empty() {
-            return Err(crate::error::MinitensorError::backend_error("No OpenCL GPU device found"));
+            return Err(crate::error::MinitensorError::backend_error(
+                "No OpenCL GPU device found",
+            ));
         }
 
         let opencl_device_id = devices[0];
         let opencl_device = opencl3::device::Device::new(opencl_device_id);
 
         // Create context and command queue
-        let context = Context::from_device(&opencl_device)
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to create OpenCL context: {}", e)))?;
+        let context = Context::from_device(&opencl_device).map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to create OpenCL context: {}",
+                e
+            ))
+        })?;
 
         let command_queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)
-            .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to create OpenCL command queue: {}", e)))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::backend_error(format!(
+                    "Failed to create OpenCL command queue: {}",
+                    e
+                ))
+            })?;
 
         Ok(Self {
             device: Device::opencl(Some(0)),
@@ -254,7 +334,8 @@ impl Backend for OpenCLBackend {
             return Ok(std::ptr::null_mut());
         }
 
-        let size_floats = (size_bytes + std::mem::size_of::<f32>() - 1) / std::mem::size_of::<f32>();
+        let size_floats =
+            (size_bytes + std::mem::size_of::<f32>() - 1) / std::mem::size_of::<f32>();
         let buffer = self.create_buffer(size_floats, CL_MEM_READ_WRITE)?;
 
         // Create a unique ID to track this buffer
@@ -264,11 +345,8 @@ impl Backend for OpenCLBackend {
             *next_id += 1;
             id
         };
-        
-        let opencl_buffer = OpenCLBuffer {
-            buffer,
-            size_bytes,
-        };
+
+        let opencl_buffer = OpenCLBuffer { buffer, size_bytes };
 
         // Store the buffer for tracking
         let mut buffers = self.buffers.lock().unwrap();
@@ -295,7 +373,7 @@ impl Backend for OpenCLBackend {
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null destination pointer"
+                "Null destination pointer",
             ));
         }
 
@@ -307,20 +385,28 @@ impl Backend for OpenCLBackend {
             let src_floats = unsafe {
                 std::slice::from_raw_parts(
                     src.as_ptr() as *const f32,
-                    src.len() / std::mem::size_of::<f32>()
+                    src.len() / std::mem::size_of::<f32>(),
                 )
             };
-            
+
             unsafe {
-                self.command_queue
-                    .enqueue_write_buffer(&mut opencl_buffer.buffer, CL_BLOCKING, 0, src_floats, &[])
+                self.command_queue.enqueue_write_buffer(
+                    &mut opencl_buffer.buffer,
+                    CL_BLOCKING,
+                    0,
+                    src_floats,
+                    &[],
+                )
             }
-                .map_err(|e| crate::error::MinitensorError::memory_error(
-                    format!("Failed to copy data to OpenCL buffer: {}", e)
-                ))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!(
+                    "Failed to copy data to OpenCL buffer: {}",
+                    e
+                ))
+            })?;
         } else {
             return Err(crate::error::MinitensorError::memory_error(
-                "OpenCL buffer not found for pointer"
+                "OpenCL buffer not found for pointer",
             ));
         }
 
@@ -330,7 +416,7 @@ impl Backend for OpenCLBackend {
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
-                "Null source pointer"
+                "Null source pointer",
             ));
         }
 
@@ -342,20 +428,28 @@ impl Backend for OpenCLBackend {
             let dst_floats = unsafe {
                 std::slice::from_raw_parts_mut(
                     dst.as_mut_ptr() as *mut f32,
-                    dst.len() / std::mem::size_of::<f32>()
+                    dst.len() / std::mem::size_of::<f32>(),
                 )
             };
-            
+
             unsafe {
-                self.command_queue
-                    .enqueue_read_buffer(&opencl_buffer.buffer, CL_BLOCKING, 0, dst_floats, &[])
+                self.command_queue.enqueue_read_buffer(
+                    &opencl_buffer.buffer,
+                    CL_BLOCKING,
+                    0,
+                    dst_floats,
+                    &[],
+                )
             }
-                .map_err(|e| crate::error::MinitensorError::memory_error(
-                    format!("Failed to copy data from OpenCL buffer: {}", e)
-                ))?;
+            .map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!(
+                    "Failed to copy data from OpenCL buffer: {}",
+                    e
+                ))
+            })?;
         } else {
             return Err(crate::error::MinitensorError::memory_error(
-                "OpenCL buffer not found for pointer"
+                "OpenCL buffer not found for pointer",
             ));
         }
 
@@ -518,8 +612,16 @@ impl OpenCLOps {
     }
 
     /// Element-wise addition on GPU
-    pub fn add(&self, a: &Buffer<cl_float>, b: &Buffer<cl_float>, c: &Buffer<cl_float>, n: u32) -> Result<()> {
-        let kernel = self.backend.get_kernel("add_kernel")
+    pub fn add(
+        &self,
+        a: &Buffer<cl_float>,
+        b: &Buffer<cl_float>,
+        c: &Buffer<cl_float>,
+        n: u32,
+    ) -> Result<()> {
+        let kernel = self
+            .backend
+            .get_kernel("add_kernel")
             .ok_or_else(|| crate::error::MinitensorError::backend_error("Add kernel not found"))?;
 
         unsafe {
@@ -530,16 +632,35 @@ impl OpenCLOps {
                 .set_arg(&n)
                 .set_global_work_size(n as usize)
                 .enqueue_nd_range(&self.backend.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute add kernel: {}", e)))?
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to execute add kernel: {}",
+                e
+            ))
+        })?
         .wait()
-        .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for add kernel: {}", e)))?;
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for add kernel: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// Element-wise multiplication on GPU
-    pub fn mul(&self, a: &Buffer<cl_float>, b: &Buffer<cl_float>, c: &Buffer<cl_float>, n: u32) -> Result<()> {
-        let kernel = self.backend.get_kernel("mul_kernel")
+    pub fn mul(
+        &self,
+        a: &Buffer<cl_float>,
+        b: &Buffer<cl_float>,
+        c: &Buffer<cl_float>,
+        n: u32,
+    ) -> Result<()> {
+        let kernel = self
+            .backend
+            .get_kernel("mul_kernel")
             .ok_or_else(|| crate::error::MinitensorError::backend_error("Mul kernel not found"))?;
 
         unsafe {
@@ -550,17 +671,37 @@ impl OpenCLOps {
                 .set_arg(&n)
                 .set_global_work_size(n as usize)
                 .enqueue_nd_range(&self.backend.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute mul kernel: {}", e)))?
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to execute mul kernel: {}",
+                e
+            ))
+        })?
         .wait()
-        .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for mul kernel: {}", e)))?;
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for mul kernel: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// Matrix multiplication on GPU
-    pub fn matmul(&self, a: &Buffer<cl_float>, b: &Buffer<cl_float>, c: &Buffer<cl_float>, m: u32, n: u32, k: u32) -> Result<()> {
-        let kernel = self.backend.get_kernel("matmul_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Matmul kernel not found"))?;
+    pub fn matmul(
+        &self,
+        a: &Buffer<cl_float>,
+        b: &Buffer<cl_float>,
+        c: &Buffer<cl_float>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<()> {
+        let kernel = self.backend.get_kernel("matmul_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("Matmul kernel not found")
+        })?;
 
         unsafe {
             ExecuteKernel::new(&kernel)
@@ -572,16 +713,29 @@ impl OpenCLOps {
                 .set_arg(&k)
                 .set_global_work_sizes(&[n as usize, m as usize])
                 .enqueue_nd_range(&self.backend.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute matmul kernel: {}", e)))?
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to execute matmul kernel: {}",
+                e
+            ))
+        })?
         .wait()
-        .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for matmul kernel: {}", e)))?;
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for matmul kernel: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// ReLU activation on GPU
     pub fn relu(&self, input: &Buffer<cl_float>, output: &Buffer<cl_float>, n: u32) -> Result<()> {
-        let kernel = self.backend.get_kernel("relu_kernel")
+        let kernel = self
+            .backend
+            .get_kernel("relu_kernel")
             .ok_or_else(|| crate::error::MinitensorError::backend_error("ReLU kernel not found"))?;
 
         unsafe {
@@ -591,17 +745,34 @@ impl OpenCLOps {
                 .set_arg(&n)
                 .set_global_work_size(n as usize)
                 .enqueue_nd_range(&self.backend.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute relu kernel: {}", e)))?
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to execute relu kernel: {}",
+                e
+            ))
+        })?
         .wait()
-        .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for relu kernel: {}", e)))?;
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for relu kernel: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// Sigmoid activation on GPU
-    pub fn sigmoid(&self, input: &Buffer<cl_float>, output: &Buffer<cl_float>, n: u32) -> Result<()> {
-        let kernel = self.backend.get_kernel("sigmoid_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Sigmoid kernel not found"))?;
+    pub fn sigmoid(
+        &self,
+        input: &Buffer<cl_float>,
+        output: &Buffer<cl_float>,
+        n: u32,
+    ) -> Result<()> {
+        let kernel = self.backend.get_kernel("sigmoid_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("Sigmoid kernel not found")
+        })?;
 
         unsafe {
             ExecuteKernel::new(&kernel)
@@ -610,68 +781,105 @@ impl OpenCLOps {
                 .set_arg(&n)
                 .set_global_work_size(n as usize)
                 .enqueue_nd_range(&self.backend.command_queue)
-        }.map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to execute sigmoid kernel: {}", e)))?
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to execute sigmoid kernel: {}",
+                e
+            ))
+        })?
         .wait()
-        .map_err(|e| crate::error::MinitensorError::backend_error(format!("Failed to wait for sigmoid kernel: {}", e)))?;
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(format!(
+                "Failed to wait for sigmoid kernel: {}",
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// Execute element-wise addition using pointers
-    pub fn add_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, n: u32) -> Result<()> {
+    pub fn add_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        n: u32,
+    ) -> Result<()> {
         // Get buffers from the backend's buffer tracking system
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.add(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("OpenCL buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "OpenCL buffer not found for operation",
+            ))
         }
     }
 
     /// Execute element-wise multiplication using pointers
-    pub fn mul_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, n: u32) -> Result<()> {
+    pub fn mul_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        n: u32,
+    ) -> Result<()> {
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.mul(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("OpenCL buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "OpenCL buffer not found for operation",
+            ))
         }
     }
 
     /// Execute matrix multiplication using pointers
-    pub fn matmul_ptr(&self, a_ptr: *const u8, b_ptr: *const u8, c_ptr: *mut u8, m: u32, n: u32, k: u32) -> Result<()> {
+    pub fn matmul_ptr(
+        &self,
+        a_ptr: *const u8,
+        b_ptr: *const u8,
+        c_ptr: *mut u8,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<()> {
         let a_buffer_id = a_ptr as usize;
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
             buffers.get(&b_buffer_id),
-            buffers.get(&c_buffer_id)
+            buffers.get(&c_buffer_id),
         ) {
             self.matmul(&a_buf.buffer, &b_buf.buffer, &c_buf.buffer, m, n, k)
         } else {
-            Err(crate::error::MinitensorError::memory_error("OpenCL buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "OpenCL buffer not found for operation",
+            ))
         }
     }
 
@@ -679,16 +887,18 @@ impl OpenCLOps {
     pub fn relu_ptr(&self, input_ptr: *const u8, output_ptr: *mut u8, n: u32) -> Result<()> {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
-            buffers.get(&output_buffer_id)
+            buffers.get(&output_buffer_id),
         ) {
             self.relu(&input_buf.buffer, &output_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("OpenCL buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "OpenCL buffer not found for operation",
+            ))
         }
     }
 
@@ -696,16 +906,18 @@ impl OpenCLOps {
     pub fn sigmoid_ptr(&self, input_ptr: *const u8, output_ptr: *mut u8, n: u32) -> Result<()> {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
-        
+
         let buffers = self.backend.buffers.lock().unwrap();
-        
+
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
-            buffers.get(&output_buffer_id)
+            buffers.get(&output_buffer_id),
         ) {
             self.sigmoid(&input_buf.buffer, &output_buf.buffer, n)
         } else {
-            Err(crate::error::MinitensorError::memory_error("OpenCL buffer not found for operation"))
+            Err(crate::error::MinitensorError::memory_error(
+                "OpenCL buffer not found for operation",
+            ))
         }
     }
 }
@@ -733,14 +945,16 @@ mod tests {
         }
 
         let backend = OpenCLBackend::initialize().unwrap();
-        
+
         // Test buffer creation and data transfer
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let buffer = backend.create_buffer_with_data(&data, CL_MEM_READ_WRITE).unwrap();
-        
+        let buffer = backend
+            .create_buffer_with_data(&data, CL_MEM_READ_WRITE)
+            .unwrap();
+
         let mut result = vec![0.0f32; 5];
         backend.read_buffer(&buffer, &mut result).unwrap();
-        
+
         assert_eq!(data, result);
     }
 
@@ -752,20 +966,24 @@ mod tests {
 
         let backend = Arc::new(OpenCLBackend::initialize().unwrap());
         let ops = OpenCLOps::new(backend.clone()).unwrap();
-        
+
         // Test addition
         let a_data = vec![1.0f32, 2.0, 3.0, 4.0];
         let b_data = vec![5.0f32, 6.0, 7.0, 8.0];
-        
-        let a_buffer = backend.create_buffer_with_data(&a_data, CL_MEM_READ_ONLY).unwrap();
-        let b_buffer = backend.create_buffer_with_data(&b_data, CL_MEM_READ_ONLY).unwrap();
+
+        let a_buffer = backend
+            .create_buffer_with_data(&a_data, CL_MEM_READ_ONLY)
+            .unwrap();
+        let b_buffer = backend
+            .create_buffer_with_data(&b_data, CL_MEM_READ_ONLY)
+            .unwrap();
         let c_buffer = backend.create_buffer(4, CL_MEM_WRITE_ONLY).unwrap();
-        
+
         ops.add(&a_buffer, &b_buffer, &c_buffer, 4).unwrap();
-        
+
         let mut result = vec![0.0f32; 4];
         backend.read_buffer(&c_buffer, &mut result).unwrap();
-        
+
         let expected = vec![6.0f32, 8.0, 10.0, 12.0];
         for (r, e) in result.iter().zip(expected.iter()) {
             assert!((r - e).abs() < 1e-6);

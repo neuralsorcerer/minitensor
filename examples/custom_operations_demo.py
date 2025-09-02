@@ -21,7 +21,9 @@ import numpy as np
 
 import minitensor as mt
 
-if not hasattr(mt, "register_example_custom_ops") or not hasattr(mt, "list_custom_ops_py"):
+if not hasattr(mt, "register_example_custom_ops") or not hasattr(
+    mt, "list_custom_ops_py"
+):
     print("Custom operations extension unavailable; skipping demo.")
     sys.exit(0)
 

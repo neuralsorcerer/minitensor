@@ -6,7 +6,9 @@
 
 import numpy as np
 import pytest
+
 import minitensor as mt
+
 
 def test_permute_reorders_dimensions():
     x = mt.arange(24).reshape(2, 3, 4)
@@ -14,11 +16,13 @@ def test_permute_reorders_dimensions():
     expected = np.arange(24, dtype=np.float32).reshape(2, 3, 4).transpose(2, 0, 1)
     assert np.allclose(y.numpy(), expected)
 
+
 def test_permute_supports_negative_dims():
     x = mt.arange(24).reshape(2, 3, 4)
     y = x.permute(2, -3, -2)
     expected = np.arange(24, dtype=np.float32).reshape(2, 3, 4).transpose(2, 0, 1)
     assert np.allclose(y.numpy(), expected)
+
 
 def test_permute_accepts_sequence():
     x = mt.arange(24).reshape(2, 3, 4)
