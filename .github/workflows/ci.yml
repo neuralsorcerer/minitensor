@@ -22,7 +22,10 @@ jobs:
           toolchain: stable
           override: true
       - name: Install dependencies
-        run: pip install .[dev]
+        run: |
+          pip install .[dev]
+          pip install maturin[patchelf]
+          maturin develop
       - name: Run Rust tests
         run: |
           cargo test --manifest-path engine/Cargo.toml
