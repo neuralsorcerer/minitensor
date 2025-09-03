@@ -120,7 +120,7 @@ Minitensor is built with a modular architecture:
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Python API    │    │   PyO3 Bindings  │    │   Rust Engine   │
-│                 │◄──►│                  │◄──►│                 │
+│                 │<-->│                  │<-->│                 │
 │ • Tensor        │    │ • Type Safety    │    │ • Performance   │
 │ • nn.Module     │    │ • Memory Mgmt    │    │ • Autograd      │
 │ • Optimizers    │    │ • Error Handling │    │ • SIMD/GPU      │
@@ -209,12 +209,12 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 }
 ```
 
-## 📄 License
+## License
 
 This project is licensed under the Apache License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-- Inspired by PyTorch's design and API
-- Built with Rust's performance and safety
-- Powered by PyO3 for Python integration
+- Inspired by [PyTorch's design and API](https://pytorch.org)
+- Built with [Rust's](https://www.rust-lang.org) performance and safety
+- Powered by [PyO3](https://github.com/PyO3/pyo3) for Python integration

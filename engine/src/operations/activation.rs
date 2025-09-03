@@ -1131,28 +1131,8 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
 
 /// Square root function
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => sqrt_f32(tensor, &mut output_data)?,
-        DataType::Float64 => sqrt_f64(tensor, &mut output_data)?,
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Square root only supported for floating point tensors",
-            ))
-        }
-    }
-
-    let output = Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    );
-
-    Ok(output)
+    // Use powf implementation for gradient support: sqrt(x) = x.powf(0.5)
+    powf(tensor, 0.5)
 }
 
 /// Clip tensor values to range
@@ -1322,38 +1302,6 @@ fn abs_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
 
     for (i, &val) in input_data.iter().enumerate() {
         output_slice[i] = val.abs();
-    }
-
-    Ok(())
-}
-
-fn sqrt_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    for (i, &val) in input_data.iter().enumerate() {
-        output_slice[i] = val.sqrt();
-    }
-
-    Ok(())
-}
-
-fn sqrt_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    for (i, &val) in input_data.iter().enumerate() {
-        output_slice[i] = val.sqrt();
     }
 
     Ok(())
@@ -1775,6 +1723,31 @@ mod tests {
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - 3.0 * 2.0_f32.powf(2.0)).abs() < 1e-6);
         assert!((g[1] - 3.0 * 3.0_f32.powf(2.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sqrt() {
+        let tensor = create_test_tensor_f32(vec![1.0, 4.0, 9.0], vec![3], false);
+        let result = sqrt(&tensor).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_sqrt_gradient() {
+        let tensor = create_test_tensor_f32(vec![4.0, 9.0], vec![2], true);
+        let result = sqrt(&tensor).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad = grads.get(&tensor.id()).unwrap();
+        let g = grad.data().as_f32_slice().unwrap();
+        assert!((g[0] - 0.25).abs() < 1e-6);
+        assert!((g[1] - (1.0 / 6.0)).abs() < 1e-6);
     }
 
     #[test]
