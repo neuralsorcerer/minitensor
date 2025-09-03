@@ -64,8 +64,8 @@ lint:
 # Format code
 format:
 	cargo fmt --all
-	python -m black minitensor/ examples/ *.py
-	python -m isort minitensor/ examples/ *.py
+	python -m black .
+	python -m isort .
 
 # Clean build artifacts
 clean:

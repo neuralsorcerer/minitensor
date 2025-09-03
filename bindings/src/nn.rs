@@ -16,6 +16,7 @@ use engine::nn::{
     normalization::{BatchNorm1d, BatchNorm2d},
     DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
 };
+use engine::operations::batch_norm as batch_norm_op;
 use engine::operations::conv2d as conv2d_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use engine::tensor::DataType;
@@ -41,6 +42,36 @@ fn conv2d(
         bias_tensor,
         stride,
         padding,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, running_mean=None, running_var=None, weight=None, bias=None, training=true, momentum=0.1, eps=1e-5))]
+fn batch_norm(
+    input: &PyTensor,
+    running_mean: Option<PyRefMut<PyTensor>>,
+    running_var: Option<PyRefMut<PyTensor>>,
+    weight: Option<&PyTensor>,
+    bias: Option<&PyTensor>,
+    training: bool,
+    momentum: f64,
+    eps: f64,
+) -> PyResult<PyTensor> {
+    let mut rm_opt = running_mean;
+    let mut rv_opt = running_var;
+    let rm_tensor = rm_opt.as_mut().map(|t| t.tensor_mut());
+    let rv_tensor = rv_opt.as_mut().map(|t| t.tensor_mut());
+    let result = batch_norm_op(
+        input.tensor(),
+        rm_tensor,
+        rv_tensor,
+        weight.map(|w| w.tensor()),
+        bias.map(|b| b.tensor()),
+        training,
+        momentum,
+        eps,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -1133,6 +1164,7 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
 
     // Add functional APIs
     nn_module.add_function(wrap_pyfunction!(conv2d, nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(batch_norm, nn_module)?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;

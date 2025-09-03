@@ -168,13 +168,20 @@ def batch_norm(
 
     Returns:
         Tensor: Normalized tensor.
-
-    Note:
-        This function is a placeholder. The actual implementation lives in the
-        Rust backend and is not yet exposed to Python.
     """
-    # This would need to be implemented in the Rust backend
-    raise NotImplementedError("Functional batch_norm not yet implemented")
+    result = _minitensor_core.nn.batch_norm(
+        input._tensor,
+        None if running_mean is None else running_mean._tensor,
+        None if running_var is None else running_var._tensor,
+        None if weight is None else weight._tensor,
+        None if bias is None else bias._tensor,
+        training,
+        momentum,
+        eps,
+    )
+    tensor = Tensor.__new__(Tensor)
+    tensor._tensor = result
+    return tensor
 
 
 def dropout(input: Tensor, p: float = 0.5, training: bool = True) -> Tensor:
