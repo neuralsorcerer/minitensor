@@ -351,13 +351,13 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn argmax(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn argmax(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmax(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    fn argmin(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn argmin(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmin(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })

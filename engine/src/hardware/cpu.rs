@@ -308,6 +308,7 @@ impl CpuInfo {
         cache_levels
     }
 
+    #[cfg(target_os = "linux")]
     fn parse_cache_size(size_str: &str) -> Option<usize> {
         let size_str = size_str.trim().to_uppercase();
 

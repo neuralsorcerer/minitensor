@@ -233,6 +233,7 @@ impl MemoryInfo {
         cache_info
     }
 
+    #[cfg(target_os = "linux")]
     fn parse_cache_size(size_str: &str) -> Option<usize> {
         let size_str = size_str.trim().to_uppercase();
 
@@ -251,6 +252,7 @@ impl MemoryInfo {
         None
     }
 
+    #[cfg(target_os = "linux")]
     fn estimate_cache_latency(level: u8) -> Option<usize> {
         match level {
             1 => Some(4),  // ~4 cycles for L1

@@ -434,8 +434,9 @@ class Tensor:
         if dim is None:
             return result
         else:
-            # Should return (values, indices) tuple for specific dim
-            return result  # Simplified for now
+            indices = Tensor.__new__(Tensor)
+            indices._tensor = self._tensor.argmax(dim, keepdim)
+            return result, indices
 
     def min(
         self, dim: Optional[int] = None, keepdim: bool = False
@@ -446,17 +447,21 @@ class Tensor:
         if dim is None:
             return result
         else:
-            return result  # Simplified for now
+            indices = Tensor.__new__(Tensor)
+            indices._tensor = self._tensor.argmin(dim, keepdim)
+            return result, indices
 
     def argmax(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Indices of maximum values."""
-        result_np = self.numpy().argmax(axis=dim, keepdims=keepdim)
-        return Tensor(result_np.astype(np.float32))
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.argmax(dim, keepdim)
+        return result
 
     def argmin(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Indices of minimum values."""
-        result_np = self.numpy().argmin(axis=dim, keepdims=keepdim)
-        return Tensor(result_np.astype(np.float32))
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.argmin(dim, keepdim)
+        return result
 
     def std(
         self, dim: Optional[int] = None, keepdim: bool = False, unbiased: bool = True
@@ -539,7 +544,7 @@ class Tensor:
     def softmax(self, dim: int = -1) -> "Tensor":
         """Softmax activation function."""
         # Numerically stable softmax implementation
-        x_max = self.max(dim=dim, keepdim=True)
+        x_max, _ = self.max(dim=dim, keepdim=True)
         x_shifted = self - x_max
         exp_x = x_shifted.exp()
         return exp_x / exp_x.sum(dim=dim, keepdim=True)
@@ -611,13 +616,15 @@ class Tensor:
     # Utility methods
     def all(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if all elements evaluate to True."""
-        result_np = self.numpy().astype(bool).all(axis=dim, keepdims=keepdim)
-        return Tensor(result_np.astype(np.float32))
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.all(dim, keepdim)
+        return result
 
     def any(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if any element evaluates to True."""
-        result_np = self.numpy().astype(bool).any(axis=dim, keepdims=keepdim)
-        return Tensor(result_np.astype(np.float32))
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.any(dim, keepdim)
+        return result
 
     def clamp(
         self, min_val: Optional[float] = None, max_val: Optional[float] = None

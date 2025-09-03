@@ -22,4 +22,4 @@ rand = "0.8"
 rand_distr = "0.4"
 
 [build-dependencies]
-pyo3-build-config = "0.20"
+pyo3-build-config = { version = "0.20", features = ["resolve-config"] }

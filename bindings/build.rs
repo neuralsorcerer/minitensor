@@ -6,7 +6,11 @@
 
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
-    // Ensure linking against the Python shared library for tests
-    println!("cargo:rustc-link-lib=python3.12");
-    println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+    let config = pyo3_build_config::get();
+    if let Some(dir) = &config.lib_dir {
+        println!("cargo:rustc-link-search=native={}", dir);
+    }
+    if let Some(lib) = &config.lib_name {
+        println!("cargo:rustc-link-lib={}", lib);
+    }
 }
