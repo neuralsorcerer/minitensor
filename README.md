@@ -1,6 +1,6 @@
 # Minitensor
 
-A lightweight, high-performance deep learning library inspired by [PyTorch](https://pytorch.org) with Rust backend and Python bindings.
+A lightweight, high-performance deep learning library inspired by [PyTorch](https://github.com/pytorch/pytorch) with Rust backend and Python bindings.
 
 > [!CAUTION]
 > This library is in active development stage. Things may break often. Use carefully.

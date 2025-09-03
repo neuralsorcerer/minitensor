@@ -88,8 +88,11 @@ impl MemoryInfo {
             return 8 * 1024 * 1024 * 1024; // 8GB default
         }
 
-        // Fallback for unsupported platforms or if detection fails
-        8 * 1024 * 1024 * 1024 // 8GB default
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Fallback for unsupported platforms or if detection fails
+            8 * 1024 * 1024 * 1024 // 8GB default
+        }
     }
 
     fn get_available_ram() -> usize {

@@ -9,7 +9,7 @@ use crate::error::_convert_error;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn};
-use pyo3::exceptions::{PyIndexError, PyTypeError};
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
 use std::sync::Arc;
@@ -901,7 +901,13 @@ fn parse_index(item: &PyAny, dim_size: usize) -> PyResult<TensorIndex> {
         }
         Ok(TensorIndex::Index(idx as usize))
     } else if let Ok(slice) = item.downcast::<PySlice>() {
-        let indices = slice.indices(dim_size as i64)?;
+        use std::convert::TryInto;
+        use std::os::raw::c_long;
+
+        let dim_size: c_long = dim_size
+            .try_into()
+            .map_err(|_| PyValueError::new_err("dim_size too large"))?;
+        let indices = slice.indices(dim_size)?;
         Ok(TensorIndex::Slice {
             start: indices.start as usize,
             end: indices.stop as usize,
