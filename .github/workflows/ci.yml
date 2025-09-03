@@ -23,7 +23,7 @@ jobs:
           override: true
       - name: Install dependencies
         run: |
-          python -n venv .venv
+          python -m venv .venv
           pip install .[dev]
           pip install maturin[patchelf]
           maturin develop
