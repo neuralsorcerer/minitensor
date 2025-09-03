@@ -2,11 +2,6 @@
 
 A lightweight, high-performance deep learning library inspired by [PyTorch](https://pytorch.org) with Rust backend and Python bindings.
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/minitensor/minitensor)
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
-[![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-APACHE-green)](LICENSE)
-
 > [!CAUTION]
 > This library is in active development stage. Things may break often. Use carefully.
 
