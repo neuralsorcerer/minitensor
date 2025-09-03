@@ -619,6 +619,12 @@ class Tensor:
     # Utility methods
     def all(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if all elements evaluate to True."""
+        bool_data = getattr(self, "_bool_data", None)
+        if bool_data is not None:
+            reduced = bool_data.all(axis=dim, keepdims=keepdim)
+            if isinstance(reduced, np.ndarray):
+                reduced = reduced.tolist()
+            return Tensor(reduced, dtype="bool")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.all(dim, keepdim)
         if result.dtype == "bool":
@@ -627,6 +633,12 @@ class Tensor:
 
     def any(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if any element evaluates to True."""
+        bool_data = getattr(self, "_bool_data", None)
+        if bool_data is not None:
+            reduced = bool_data.any(axis=dim, keepdims=keepdim)
+            if isinstance(reduced, np.ndarray):
+                reduced = reduced.tolist()
+            return Tensor(reduced, dtype="bool")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.any(dim, keepdim)
         if result.dtype == "bool":
