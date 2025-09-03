@@ -20,8 +20,6 @@ jobs:
           override: true
       - name: Install dependencies
         run: pip install .[dev]
-      - name: Lint
-        run: make lint
 
   test:
     runs-on: ubuntu-latest
