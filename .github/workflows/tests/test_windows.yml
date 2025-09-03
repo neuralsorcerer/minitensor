@@ -1,0 +1,58 @@
+name: tests (windows)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Set up Rust (stable)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Install dependencies (Python + Rust bindings)
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
+          python -m pip install -U "pip>=22.1.2"
+          python -m pip install "maturin"
+          maturin develop
+          python -m pip install ".[dev]"
+
+      - name: Run Rust tests
+        shell: bash
+        run: |
+          cargo test --manifest-path engine/Cargo.toml
+          cargo test --manifest-path bindings/Cargo.toml
+
+      - name: Run Python tests
+        shell: bash
+        run: |
+          source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
+          pytest -v tests/
