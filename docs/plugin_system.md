@@ -39,15 +39,19 @@ if current_version.is_compatible_with(min_required):
 Every plugin must provide metadata:
 
 ```python
-# Plugin information
-info = plugins.PluginInfo(
-    name="my_custom_plugin",
-    version=plugins.VersionInfo(1, 0, 0),
-    description="A custom plugin for special operations",
-    author="Your Name",
-    min_minitensor_version=plugins.VersionInfo(0, 1, 0),
-    max_minitensor_version=None  # No maximum version limit
+import minitensor.plugins as plugins
+
+plugin = (
+    plugins.PluginBuilder()
+    .name("my_custom_plugin")
+    .version(plugins.VersionInfo(1, 0, 0))
+    .description("A custom plugin for special operations")
+    .author("Your Name")
+    .min_minitensor_version(plugins.VersionInfo(0, 1, 0))
+    .build()
 )
+info = plugin.info
+print(f"Plugin: {info.name} v{info.version}")
 ```
 
 ## Creating Python Plugins
@@ -140,78 +144,6 @@ def create_math_plugin():
         return [create_square_operation()]
 
     plugin.set_custom_operations_fn(get_operations)
-    return plugin
-```
-
-### Custom Layers in Plugins
-
-```python
-import minitensor as mt
-import minitensor.plugins as plugins
-
-class CustomAttentionLayer(plugins.CustomLayer):
-    """Example custom attention layer"""
-
-    def __init__(self, d_model, num_heads):
-        super().__init__("custom_attention")
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.head_dim = d_model // num_heads
-
-        # Initialize parameters
-        self.add_parameter("query_weight", mt.randn([d_model, d_model]))
-        self.add_parameter("key_weight", mt.randn([d_model, d_model]))
-        self.add_parameter("value_weight", mt.randn([d_model, d_model]))
-        self.add_parameter("output_weight", mt.randn([d_model, d_model]))
-
-    def forward(self, inputs):
-        """Forward pass of attention layer"""
-        x = inputs[0]  # Input tensor
-
-        # Get parameters
-        W_q = self.get_parameter("query_weight")
-        W_k = self.get_parameter("key_weight")
-        W_v = self.get_parameter("value_weight")
-        W_o = self.get_parameter("output_weight")
-
-        # Compute queries, keys, values
-        Q = mt.matmul(x, W_q)
-        K = mt.matmul(x, W_k)
-        V = mt.matmul(x, W_v)
-
-        # Reshape for multi-head attention
-        batch_size, seq_len = x.shape[:2]
-        Q = Q.view([batch_size, seq_len, self.num_heads, self.head_dim])
-        K = K.view([batch_size, seq_len, self.num_heads, self.head_dim])
-        V = V.view([batch_size, seq_len, self.num_heads, self.head_dim])
-
-        # Transpose for attention computation
-        Q = Q.transpose(1, 2)  # [batch, heads, seq_len, head_dim]
-        K = K.transpose(1, 2)
-        V = V.transpose(1, 2)
-
-        # Scaled dot-product attention
-        scores = mt.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        attn_weights = mt.softmax(scores, dim=-1)
-        attn_output = mt.matmul(attn_weights, V)
-
-        # Reshape and apply output projection
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view([batch_size, seq_len, self.d_model])
-        output = mt.matmul(attn_output, W_o)
-
-        return output
-
-def create_attention_plugin():
-    """Create plugin with custom attention layer"""
-    plugin = (plugins.PluginBuilder()
-        .name("attention_layers")
-        .version(plugins.VersionInfo(1, 0, 0))
-        .description("Custom attention mechanisms")
-        .author("Attention Team")
-        .min_minitensor_version(plugins.VersionInfo(0, 1, 0))
-        .build())
-
     return plugin
 ```
 

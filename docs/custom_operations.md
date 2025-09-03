@@ -134,11 +134,11 @@ import minitensor as mt
 mt.register_example_custom_ops()
 
 # List registered operations
-ops = mt.list_custom_ops()
+ops = mt.list_custom_ops_py()
 print("Available operations:", ops)
 
 # Check if an operation is registered
-is_registered = mt.is_custom_op_registered("swish")
+is_registered = mt.is_custom_op_registered_py("swish")
 print("Swish registered:", is_registered)
 ```
 
@@ -146,37 +146,39 @@ print("Swish registered:", is_registered)
 
 ```python
 import minitensor as mt
-import numpy as np
 
-# Create input tensors
-x = mt.tensor([[1.0, 2.0, -1.0]], requires_grad=True)
+# Create input tensor
+x = mt.Tensor([[1.0, 2.0, -1.0]], requires_grad=True)
 
-# Execute custom operation
-result = mt.execute_custom_op("swish", [x])
+# Execute custom operation (result is a core tensor)
+res_core = mt.execute_custom_op_py("swish", [x._tensor])
+result = mt.Tensor.__new__(mt.Tensor)
+result._tensor = res_core
 print("Swish result:", result)
-
-# Gradient computation works automatically
-loss = mt.sum(result)
-loss.backward()
-print("Input gradients:", x.grad)
 ```
 
 ### Advanced Usage
 
 ```python
 # Power operation with two inputs
-base = mt.tensor([[2.0, 3.0], [4.0, 5.0]], requires_grad=True)
-exponent = mt.tensor([[2.0, 2.0], [3.0, 2.0]], requires_grad=True)
+base = mt.Tensor([[2.0, 3.0], [4.0, 5.0]], requires_grad=True)
+exponent = mt.Tensor([[2.0, 2.0], [3.0, 2.0]], requires_grad=True)
 
-result = mt.execute_custom_op("power", [base, exponent])
-print("Power result:", result)
+power_core = mt.execute_custom_op_py("power", [base._tensor, exponent._tensor])
+power = mt.Tensor.__new__(mt.Tensor)
+power._tensor = power_core
+print("Power result:", power)
 
 # Layer normalization with three inputs
-input_tensor = mt.tensor([[1.0, 2.0, 3.0, 4.0]], requires_grad=True)
-weight = mt.tensor([1.0, 1.0, 1.0, 1.0], requires_grad=True)
-bias = mt.tensor([0.0, 0.0, 0.0, 0.0], requires_grad=True)
+input_tensor = mt.Tensor([[1.0, 2.0, 3.0, 4.0]], requires_grad=True)
+weight = mt.Tensor([1.0, 1.0, 1.0, 1.0], requires_grad=True)
+bias = mt.Tensor([0.0, 0.0, 0.0, 0.0], requires_grad=True)
 
-normalized = mt.execute_custom_op("layer_norm", [input_tensor, weight, bias])
+norm_core = mt.execute_custom_op_py(
+    "layer_norm", [input_tensor._tensor, weight._tensor, bias._tensor]
+)
+normalized = mt.Tensor.__new__(mt.Tensor)
+normalized._tensor = norm_core
 print("Layer norm result:", normalized)
 ```
 
