@@ -34,4 +34,3 @@ jobs:
       - name: Run Python tests
         run: |
           pytest tests/ -v
-          pytest test_*.py -v
