@@ -18,15 +18,32 @@ from . import functional, nn, optim
 # Re-export core classes and functions
 from .tensor import Tensor
 
+import sys
+
 try:
     from . import numpy_compat
 except ImportError:
     numpy_compat = None
 
-# Plugin system (if available)
+# Custom operations and plugin system (if available)
 try:
-    from . import plugins
-except ImportError:
+    from ._core import (
+        execute_custom_op_py,
+        is_custom_op_registered_py,
+        list_custom_ops_py,
+        register_example_custom_ops,
+        unregister_custom_op_py,
+        plugins as _plugins,
+    )
+
+    plugins = _plugins
+    sys.modules[__name__ + ".plugins"] = plugins
+except Exception:
+    execute_custom_op_py = None
+    is_custom_op_registered_py = None
+    list_custom_ops_py = None
+    register_example_custom_ops = None
+    unregister_custom_op_py = None
     plugins = None
 
 # Serialization (if available)
@@ -183,5 +200,15 @@ if numpy_compat is not None:
 # Add plugins to __all__ if available
 if plugins is not None:
     __all__.append("plugins")
+if register_example_custom_ops is not None:
+    __all__.extend(
+        [
+            "register_example_custom_ops",
+            "unregister_custom_op_py",
+            "execute_custom_op_py",
+            "list_custom_ops_py",
+            "is_custom_op_registered_py",
+        ]
+    )
 if serialization is not None:
     __all__.append("serialization")

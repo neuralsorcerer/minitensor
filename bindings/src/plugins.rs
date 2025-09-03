@@ -310,7 +310,7 @@ impl PyPluginRegistry {
 }
 
 /// Helper class for creating custom layers in Python
-#[pyclass(name = "CustomLayer")]
+#[pyclass(name = "CustomLayer", subclass)]
 pub struct PyCustomLayer {
     name: String,
     forward_fn: Option<PyObject>,

@@ -35,7 +35,13 @@ fn execute_custom_op_py(name: &str, inputs: &PyList) -> PyResult<PyTensor> {
     let mut tensors = Vec::new();
 
     for item in inputs.iter() {
-        let py_tensor: PyTensor = item.extract()?;
+        let py_tensor: PyTensor = match item.extract::<PyTensor>() {
+            Ok(t) => t,
+            Err(_) => {
+                let inner = item.getattr("_tensor")?;
+                inner.extract::<PyTensor>()?
+            }
+        };
         tensors.push(py_tensor.tensor().clone());
     }
 
