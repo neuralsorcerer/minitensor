@@ -2,6 +2,12 @@
 
 A lightweight, high-performance deep learning library inspired by [PyTorch](https://github.com/pytorch/pytorch) with Rust backend and Python bindings.
 
+[![Python 3](https://img.shields.io/badge/python-3-blue.svg)](https://www.python.org/downloads/)
+[![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
+[![Test Windows](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml?query=branch%3Amain)
+[![Test MacOS](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml?query=branch%3Amain)
+[![license](https://img.shields.io/badge/license-Apache-lightgrey.svg)](./LICENSE)
+
 > [!CAUTION]
 > This library is in active development stage. APIs may change or break often. Use carefully.
 
