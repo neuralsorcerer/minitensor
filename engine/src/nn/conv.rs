@@ -10,10 +10,10 @@ use super::{
 };
 use crate::{
     device::Device,
-    error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    error::Result,
+    tensor::{DataType, Shape, Tensor},
 };
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 /// 2D Convolutional layer
 ///
@@ -195,120 +195,14 @@ impl Conv2d {
 
 impl Layer for Conv2d {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Validate input dimensions - expect 4D tensor [N, C, H, W]
-        if input.ndim() != 4 {
-            return Err(MinitensorError::invalid_operation(
-                "Conv2d expects 4D input tensor with shape [batch_size, channels, height, width]",
-            ));
-        }
-
-        let batch_size = input.size(0)?;
-        let input_channels = input.size(1)?;
-        let input_height = input.size(2)?;
-        let input_width = input.size(3)?;
-
-        // Validate input channels
-        if input_channels != self.in_channels {
-            return Err(MinitensorError::shape_mismatch(
-                vec![self.in_channels],
-                vec![input_channels],
-            ));
-        }
-
-        // Calculate output dimensions
-        let (output_height, output_width) = self.output_size(input_height, input_width);
-
-        let output_shape = Shape::new(vec![
-            batch_size,
-            self.out_channels,
-            output_height,
-            output_width,
-        ]);
-
-        match (input.dtype(), input.device().is_cpu()) {
-            (DataType::Float32, true) => {
-                let input_data = input
-                    .data()
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::invalid_operation("Expected f32 input data"))?;
-                let weight_data = self.weight.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation("Expected f32 weight data")
-                })?;
-                let bias_data = if let Some(ref bias) = self.bias {
-                    Some(bias.data().as_f32_slice().ok_or_else(|| {
-                        MinitensorError::invalid_operation("Expected f32 bias data")
-                    })?)
-                } else {
-                    None
-                };
-
-                let mut output_vec =
-                    vec![0f32; batch_size * self.out_channels * output_height * output_width];
-
-                for n in 0..batch_size {
-                    for oc in 0..self.out_channels {
-                        for oh in 0..output_height {
-                            for ow in 0..output_width {
-                                let mut sum = 0f32;
-                                for ic in 0..self.in_channels {
-                                    for kh in 0..self.kernel_size.0 {
-                                        for kw in 0..self.kernel_size.1 {
-                                            let h_in = oh * self.stride.0 + kh;
-                                            let w_in = ow * self.stride.1 + kw;
-                                            if h_in < self.padding.0
-                                                || w_in < self.padding.1
-                                                || h_in >= input_height + self.padding.0
-                                                || w_in >= input_width + self.padding.1
-                                            {
-                                                continue;
-                                            }
-                                            let ih = h_in - self.padding.0;
-                                            let iw = w_in - self.padding.1;
-                                            if ih < input_height && iw < input_width {
-                                                let input_idx = ((n * self.in_channels + ic)
-                                                    * input_height
-                                                    + ih)
-                                                    * input_width
-                                                    + iw;
-                                                let weight_idx = ((oc * self.in_channels + ic)
-                                                    * self.kernel_size.0
-                                                    + kh)
-                                                    * self.kernel_size.1
-                                                    + kw;
-                                                sum +=
-                                                    input_data[input_idx] * weight_data[weight_idx];
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(bias) = bias_data {
-                                    sum += bias[oc];
-                                }
-                                let out_idx = ((n * self.out_channels + oc) * output_height + oh)
-                                    * output_width
-                                    + ow;
-                                output_vec[out_idx] = sum;
-                            }
-                        }
-                    }
-                }
-
-                let requires_grad = input.requires_grad()
-                    || self.weight.requires_grad()
-                    || self.bias.as_ref().map_or(false, |b| b.requires_grad());
-                let output_data = TensorData::from_vec_f32(output_vec, input.device());
-                Ok(Tensor::new(
-                    Arc::new(output_data),
-                    output_shape,
-                    DataType::Float32,
-                    input.device(),
-                    requires_grad,
-                ))
-            }
-            _ => Err(MinitensorError::invalid_operation(
-                "Conv2d forward is implemented only for Float32 CPU tensors",
-            )),
-        }
+        // Delegate actual computation to operations::conv::conv2d
+        crate::operations::conv2d(
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+        )
     }
 
     fn parameters(&self) -> Vec<&Tensor> {

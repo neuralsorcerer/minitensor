@@ -16,11 +16,35 @@ use engine::nn::{
     normalization::{BatchNorm1d, BatchNorm2d},
     DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
 };
+use engine::operations::conv2d as conv2d_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use engine::tensor::DataType;
 use engine::Device;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule as Pyo3Module};
+
+#[pyfunction]
+#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None))]
+fn conv2d(
+    input: &PyTensor,
+    weight: &PyTensor,
+    bias: Option<&PyTensor>,
+    stride: Option<(usize, usize)>,
+    padding: Option<(usize, usize)>,
+) -> PyResult<PyTensor> {
+    let stride = stride.unwrap_or((1, 1));
+    let padding = padding.unwrap_or((0, 0));
+    let bias_tensor = bias.map(|b| b.tensor());
+    let result = conv2d_op(
+        input.tensor(),
+        weight.tensor(),
+        bias_tensor,
+        stride,
+        padding,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
 
 /// Base class for neural network modules
 #[pyclass(name = "Module", subclass)]
@@ -1106,6 +1130,9 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PyBatchNorm1d>()?;
     nn_module.add_class::<PyBatchNorm2d>()?;
     nn_module.add_class::<PySequential>()?;
+
+    // Add functional APIs
+    nn_module.add_function(wrap_pyfunction!(conv2d, nn_module)?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;

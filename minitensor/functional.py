@@ -124,18 +124,24 @@ def conv2d(
         input: Input tensor of shape ``(N, C_in, H, W)``.
         weight: Convolution filters of shape ``(C_out, C_in, kH, kW)``.
         bias: Optional bias tensor of shape ``(C_out)``.
-        stride: Stride of the convolution.
-        padding: Implicit zero padding on both sides.
+        stride: Stride of the convolution (int or tuple of two ints).
+        padding: Implicit zero padding on both sides (int or tuple of two ints).
 
     Returns:
         Tensor: Result of the convolution.
-
-    Note:
-        This function is a placeholder. The actual implementation lives in the
-        Rust backend and is not yet exposed to Python.
     """
-    # This would need to be implemented in the Rust backend
-    raise NotImplementedError("Functional conv2d not yet implemented")
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    if isinstance(padding, int):
+        padding = (padding, padding)
+
+    bias_tensor = None if bias is None else bias._tensor
+    result = _minitensor_core.nn.conv2d(
+        input._tensor, weight._tensor, bias_tensor, stride, padding
+    )
+    tensor = Tensor.__new__(Tensor)
+    tensor._tensor = result
+    return tensor
 
 
 def batch_norm(

@@ -196,7 +196,7 @@ Minitensor is designed for performance:
 If you use minitensor in your work and wish to refer to it, please use the following BibTeX entry.
 
 ```bibtex
-@software{minitensor,
+@software{minitensor2025,
   author = {Soumyadip Sarkar},
   title = {MiniTensor: A lightweight, high-performance deep learning library.},
   url = {http://github.com/neuralsorcerer/minitensor},
