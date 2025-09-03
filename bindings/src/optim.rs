@@ -177,15 +177,22 @@ pub struct PyAdam;
 impl PyAdam {
     /// Create a new Adam optimizer
     #[new]
+    #[pyo3(signature=(learning_rate, betas=None, beta1=None, beta2=None, epsilon=None, weight_decay=None))]
     fn new(
         learning_rate: f64,
+        betas: Option<(f64, f64)>,
         beta1: Option<f64>,
         beta2: Option<f64>,
         epsilon: Option<f64>,
         weight_decay: Option<f64>,
     ) -> PyResult<(Self, PyOptimizer)> {
-        let beta1 = beta1.unwrap_or(0.9);
-        let beta2 = beta2.unwrap_or(0.999);
+        let (beta1, beta2) = match (betas, beta1, beta2) {
+            (Some((b1, b2)), _, _) => (b1, b2),
+            (None, Some(b1), Some(b2)) => (b1, b2),
+            (None, Some(b1), None) => (b1, 0.999),
+            (None, None, Some(b2)) => (0.9, b2),
+            _ => (0.9, 0.999),
+        };
         let epsilon = epsilon.unwrap_or(1e-8);
         let weight_decay = weight_decay.unwrap_or(0.0);
 

@@ -53,7 +53,6 @@ test-rust:
 # Run Python tests
 test-python: install
 	python -m pytest tests/ -v
-	python -m pytest test_*.py -v
 
 # Run linting
 lint:

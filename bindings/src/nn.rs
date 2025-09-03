@@ -20,7 +20,7 @@ use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat,
 use engine::tensor::DataType;
 use engine::Device;
 use pyo3::prelude::*;
-use pyo3::types::PyModule as Pyo3Module;
+use pyo3::types::{PyAny, PyModule as Pyo3Module};
 
 /// Base class for neural network modules
 #[pyclass(name = "Module", subclass)]
@@ -622,15 +622,22 @@ impl PyConv2d {
     fn new(
         in_channels: usize,
         out_channels: usize,
-        kernel_size: (usize, usize),
-        stride: Option<(usize, usize)>,
-        padding: Option<(usize, usize)>,
+        kernel_size: &PyAny,
+        stride: Option<&PyAny>,
+        padding: Option<&PyAny>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<(Self, PyModule)> {
-        let stride = stride.unwrap_or((1, 1));
-        let padding = padding.unwrap_or((0, 0));
+        let kernel_size = parse_tuple2(kernel_size)?;
+        let stride = match stride {
+            Some(s) => parse_tuple2(s)?,
+            None => (1, 1),
+        };
+        let padding = match padding {
+            Some(p) => parse_tuple2(p)?,
+            None => (0, 0),
+        };
         let bias = bias.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
         let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
@@ -800,6 +807,14 @@ impl PySequential {
 }
 
 /// Helper function to parse data type string
+fn parse_tuple2(obj: &PyAny) -> PyResult<(usize, usize)> {
+    if let Ok(val) = obj.extract::<usize>() {
+        Ok((val, val))
+    } else {
+        obj.extract::<(usize, usize)>()
+    }
+}
+
 fn parse_dtype(dtype_str: &str) -> PyResult<DataType> {
     match dtype_str {
         "float32" | "f32" => Ok(DataType::Float32),

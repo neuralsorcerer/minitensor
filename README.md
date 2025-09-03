@@ -3,7 +3,7 @@
 A lightweight, high-performance deep learning library inspired by [PyTorch](https://github.com/pytorch/pytorch) with Rust backend and Python bindings.
 
 > [!CAUTION]
-> This library is in active development stage. Things may break often. Use carefully.
+> This library is in active development stage. APIs may change or break often. Use carefully.
 
 ## Features
 
@@ -66,16 +66,18 @@ print(f"Input shape: {x.shape}")
 
 ```python
 import minitensor as mt
+import numpy as np
 
 # Create tensors
 x = mt.zeros(3, 4)          # Zeros
-y = mt.ones(2, 3)           # Ones
+y = mt.ones(3, 4)           # Ones
 z = mt.randn(2, 2)          # Random normal
+np_array = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)
 w = mt.from_numpy(np_array) # From NumPy
 
 # Operations
 result = x + y              # Element-wise addition
-product = x.matmul(y)       # Matrix multiplication
+product = x.matmul(y.T)     # Matrix multiplication
 mean_val = x.mean()         # Reduction operations
 ```
 
@@ -142,22 +144,15 @@ import minitensor as mt
 from minitensor import nn, optim
 
 # Create a simple classifier
-class SimpleNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.DenseLayer(784, 128)
-        self.fc2 = nn.DenseLayer(128, 10)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+model = nn.Sequential([
+    nn.DenseLayer(784, 128),
+    nn.ReLU(),
+    nn.DenseLayer(128, 10),
+])
 
 # Initialize model
-model = SimpleNet()
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001)
+optimizer = optim.Adam(0.001, betas=(0.9, 0.999))
 ```
 
 ### Training Loop (Conceptual)
