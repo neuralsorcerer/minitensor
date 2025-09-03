@@ -166,6 +166,9 @@ class Tensor:
 
     def tolist(self) -> List:
         """Convert to Python list."""
+        bool_data = getattr(self, "_bool_data", None)
+        if bool_data is not None:
+            return bool_data.tolist()
         return self._tensor.tolist()
 
     def item(self) -> Union[float, int, bool]:
@@ -618,12 +621,16 @@ class Tensor:
         """Test if all elements evaluate to True."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.all(dim, keepdim)
+        if result.dtype == "bool":
+            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
         return result
 
     def any(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if any element evaluates to True."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.any(dim, keepdim)
+        if result.dtype == "bool":
+            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
         return result
 
     def clamp(
