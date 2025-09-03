@@ -15,3 +15,5 @@ engine = { path = "../../engine" }
 
 [features]
 default = []
+
+[workspace]

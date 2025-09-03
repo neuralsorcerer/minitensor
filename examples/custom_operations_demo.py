@@ -87,7 +87,7 @@ def demo_power_operation():
         mt.execute_custom_op_py("power", [base, incompatible_exp])
         print("ERROR: Should have failed with shape mismatch!")
     except Exception as e:
-        print(f"✓ Correctly caught shape mismatch: {type(e).__name__}")
+        print(f"Correctly caught shape mismatch: {type(e).__name__}")
 
 
 def demo_layer_normalization():
@@ -120,7 +120,7 @@ def demo_layer_normalization():
         mt.execute_custom_op_py("layer_norm", [input_tensor, wrong_weight, bias])
         print("ERROR: Should have failed with size mismatch!")
     except Exception as e:
-        print(f"✓ Correctly caught size mismatch: {type(e).__name__}")
+        print(f"Correctly caught size mismatch: {type(e).__name__}")
 
 
 def demo_automatic_differentiation():
@@ -146,15 +146,15 @@ def demo_automatic_differentiation():
     # Backward pass
     try:
         loss.backward()
-        print("✓ Backward pass completed")
+        print("Backward pass completed")
 
         # Check gradients
         if x.grad is not None:
             print(f"Input gradients: {x.grad}")
-            print("✓ Automatic differentiation working with custom operations!")
+            print("Automatic differentiation working with custom operations!")
         else:
             print(
-                "✗ No gradients computed - this may be expected for simplified custom ops"
+                "No gradients computed - this may be expected for simplified custom ops"
             )
     except Exception as e:
         print(f"Backward pass failed: {e}")
@@ -176,7 +176,7 @@ def demo_error_handling():
         mt.execute_custom_op_py("nonexistent_op", [x])
         print("ERROR: Should have failed!")
     except Exception as e:
-        print(f"✓ Correctly handled unregistered operation: {type(e).__name__}")
+        print(f"Correctly handled unregistered operation: {type(e).__name__}")
 
     # Test wrong number of inputs
     print("\n--- Testing Wrong Input Count ---")
@@ -185,7 +185,7 @@ def demo_error_handling():
         mt.execute_custom_op_py("power", [x])  # Power needs 2 inputs
         print("ERROR: Should have failed!")
     except Exception as e:
-        print(f"✓ Correctly handled wrong input count: {type(e).__name__}")
+        print(f"Correctly handled wrong input count: {type(e).__name__}")
 
 
 def demo_operation_management():
@@ -213,7 +213,7 @@ def demo_operation_management():
             mt.execute_custom_op_py("swish", [x])
             print("ERROR: Should have failed!")
         except Exception as e:
-            print(f"✓ Correctly handled unregistered operation: {type(e).__name__}")
+            print(f"Correctly handled unregistered operation: {type(e).__name__}")
 
         # Re-register for other demos
         print("\nRe-registering example operations...")
@@ -276,19 +276,19 @@ def main():
         benchmark_custom_operations()
 
         print("\n" + "=" * 60)
-        print("🎉 ALL DEMOS COMPLETED SUCCESSFULLY!")
+        print("ALL DEMOS COMPLETED SUCCESSFULLY!")
         print("=" * 60)
         print("\nThe custom operations system provides:")
-        print("✓ Easy registration and management of custom operations")
-        print("✓ Full automatic differentiation support")
-        print("✓ Comprehensive input validation")
-        print("✓ Robust error handling")
-        print("✓ Performance optimization opportunities")
+        print("Easy registration and management of custom operations")
+        print("Full automatic differentiation support")
+        print("Comprehensive input validation")
+        print("Robust error handling")
+        print("Performance optimization opportunities")
         print("\nYou can now create your own custom operations using the")
         print("CustomOpBuilder pattern in Rust or extend the Python API!")
 
     except Exception as e:
-        print(f"\n❌ Demo failed with error: {e}")
+        print(f"\nDemo failed with error: {e}")
         import traceback
 
         traceback.print_exc()

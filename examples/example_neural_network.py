@@ -28,7 +28,7 @@ def create_simple_network():
 
         dense3 = nn.DenseLayer(64, 10)  # Output layer: 64 -> 10
 
-        print("✓ Created network layers:")
+        print("Created network layers:")
         print(f"  - {dense1}")
         print(f"  - {relu1}")
         print(f"  - {dense2}")
@@ -37,8 +37,8 @@ def create_simple_network():
 
         return True
     except Exception as e:
-        print(f"✗ Failed to create network: {e}")
-        print("  Make sure to build the extension with: maturin develop --release")
+        print(f"Failed to create network: {e}")
+        print("Make sure to build the extension with: maturin develop --release")
         return False
 
 
@@ -51,15 +51,15 @@ def create_loss_and_optimizer():
 
         # Create loss function
         criterion = nn.CrossEntropyLoss()
-        print(f"✓ Created loss function: {criterion}")
+        print(f"Created loss function: {criterion}")
 
         # Create optimizer (placeholder - would normally pass model parameters)
         optimizer = optim.Adam(learning_rate=0.001)
-        print(f"✓ Created optimizer: {optimizer}")
+        print(f"Created optimizer: {optimizer}")
 
         return True
     except Exception as e:
-        print(f"✗ Failed to create loss/optimizer: {e}")
+        print(f"Failed to create loss/optimizer: {e}")
         return False
 
 
@@ -72,18 +72,18 @@ def demonstrate_tensor_operations():
 
         # Create tensors
         x = mt.randn(32, 784)  # Batch of 32 samples, 784 features each
-        print(f"✓ Created input tensor: shape {x.shape}")
+        print(f"Created input tensor: shape {x.shape}")
 
         # Create target tensor
         y = mt.zeros(32, dtype="int64")  # 32 class labels
-        print(f"✓ Created target tensor: shape {y.shape}")
+        print(f"Created target tensor: shape {y.shape}")
 
         # Demonstrate tensor operations
         x_mean = x.mean()
-        print(f"✓ Computed mean: {x_mean}")
+        print(f"Computed mean: {x_mean}")
 
         x_sum = x.sum()
-        print(f"✓ Computed sum: {x_sum}")
+        print(f"Computed sum: {x_sum}")
 
         return True
     except Exception as e:
@@ -114,11 +114,11 @@ def demonstrate_activation_functions():
         ]
 
         for name, activation in activations:
-            print(f"✓ Created {name} activation: {activation}")
+            print(f"Created {name} activation: {activation}")
 
         return True
     except Exception as e:
-        print(f"✗ Failed activation demo: {e}")
+        print(f"Failed activation demo: {e}")
         return False
 
 
@@ -148,11 +148,11 @@ def demonstrate_loss_functions():
         ]
 
         for name, loss_fn in losses:
-            print(f"✓ Created {name} loss: {loss_fn}")
+            print(f"Created {name} loss: {loss_fn}")
 
         return True
     except Exception as e:
-        print(f"✗ Failed loss demo: {e}")
+        print(f"Failed loss demo: {e}")
         return False
 
 
@@ -176,24 +176,24 @@ def main():
         try:
             if example_func():
                 success_count += 1
-                print(f"✅ {example_name} completed successfully")
+                print(f"{example_name} completed successfully")
             else:
-                print(f"❌ {example_name} failed")
+                print(f"{example_name} failed")
         except Exception as e:
-            print(f"❌ {example_name} failed with exception: {e}")
+            print(f"{example_name} failed with exception: {e}")
 
     print(f"\n{'='*40}")
     print(f"Completed {success_count}/{len(examples)} examples successfully")
 
     if success_count == len(examples):
-        print("🎉 All examples completed successfully!")
+        print("All examples completed successfully!")
         print("\nNext steps:")
         print("- Build the Rust extension with: maturin develop")
         print("- Run this example to test the actual implementation")
         print("- Implement the remaining tasks for full functionality")
     else:
         print(
-            "⚠️  Some examples failed - this is expected until the Rust extension is built"
+            "Some examples failed - this is expected until the Rust extension is built"
         )
 
 
