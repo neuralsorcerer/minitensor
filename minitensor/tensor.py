@@ -276,8 +276,7 @@ class Tensor:
                 result._tensor = self._tensor.to(device_or_dtype)
                 return result
             else:
-                # Dtype conversion - would need engine support
-                raise NotImplementedError("Dtype conversion not yet implemented")
+                return self.astype(device_or_dtype)
         else:
             raise TypeError("to() expects device string or dtype")
 
@@ -291,6 +290,15 @@ class Tensor:
         """Move tensor to CUDA device."""
         # Simplified - would need proper CUDA device handling
         return self.to("cuda")
+
+    def astype(self, dtype: str) -> "Tensor":
+        """Convert tensor to a different data type."""
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.astype(dtype)
+        result._bool_data = None
+        if dtype == "bool":
+            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
+        return result
 
     # Gradient operations
     def backward(

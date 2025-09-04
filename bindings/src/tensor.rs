@@ -213,6 +213,12 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    fn astype(&self, dtype: &str) -> PyResult<Self> {
+        let dtype = parse_dtype(dtype)?;
+        let result = self.inner.astype(dtype).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     // Gradient operations
     fn backward(&self, gradient: Option<&PyTensor>) -> PyResult<()> {
         let grad = gradient.map(|g| g.inner.clone());
