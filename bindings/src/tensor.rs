@@ -814,49 +814,49 @@ fn convert_python_data_to_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    // Handle NumPy arrays
-    if let Ok(array) = data.downcast::<PyArrayDyn<f32>>() {
-        let readonly = array.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<f32> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(data_vec, dtype, device));
-        return Ok(Tensor::new(
-            tensor_data,
-            shape,
-            dtype,
-            device,
-            requires_grad,
-        ));
+    // First try NumPy array conversion for any supported dtype
+    if let Ok(tensor) = convert_numpy_to_tensor(data, requires_grad) {
+        let tensor = if tensor.dtype() != dtype {
+            tensor.astype(dtype).map_err(_convert_error)?
+        } else {
+            tensor
+        };
+        return Ok(tensor);
     }
 
-    // Handle Python lists and tuples
+    // Handle Python lists and tuples by flattening to float32 then casting
     if let Ok(list) = data.downcast::<PyList>() {
         let (shape, flat_data) = flatten_python_data(list)?;
-        let tensor_data = Arc::new(TensorData::from_vec(flat_data, dtype, device));
-        return Ok(Tensor::new(
-            tensor_data,
+        let base_data = Arc::new(TensorData::from_vec(flat_data, DataType::Float32, device));
+        let mut tensor = Tensor::new(
+            base_data,
             Shape::new(shape),
-            dtype,
+            DataType::Float32,
             device,
             requires_grad,
-        ));
+        );
+        if dtype != DataType::Float32 {
+            tensor = tensor.astype(dtype).map_err(_convert_error)?;
+        }
+        return Ok(tensor);
     }
 
     // Handle scalars
     if let Ok(val) = data.extract::<f64>() {
         let shape = Shape::new(vec![]);
-        let data_vec = vec![val as f32];
-        let tensor_data = Arc::new(TensorData::from_vec(data_vec, dtype, device));
-        return Ok(Tensor::new(
-            tensor_data,
-            shape,
-            dtype,
+        let base_data = Arc::new(TensorData::from_vec(
+            vec![val as f32],
+            DataType::Float32,
             device,
-            requires_grad,
         ));
+        let mut tensor = Tensor::new(base_data, shape, DataType::Float32, device, requires_grad);
+        if dtype != DataType::Float32 {
+            tensor = tensor.astype(dtype).map_err(_convert_error)?;
+        }
+        return Ok(tensor);
     }
 
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+    Err(PyErr::new::<PyTypeError, _>(
         "Unsupported data type for tensor creation",
     ))
 }
@@ -991,6 +991,54 @@ fn convert_numpy_to_tensor(array: &PyAny, requires_grad: bool) -> PyResult<Tenso
             tensor_data,
             shape,
             DataType::Float64,
+            Device::cpu(),
+            requires_grad,
+        ))
+    } else if let Ok(array_i32) = array.downcast::<PyArrayDyn<i32>>() {
+        let readonly = array_i32.readonly();
+        let shape = Shape::new(readonly.shape().to_vec());
+        let data_vec: Vec<i32> = readonly.as_slice()?.to_vec();
+        let tensor_data = Arc::new(TensorData::from_vec(
+            data_vec,
+            DataType::Int32,
+            Device::cpu(),
+        ));
+        Ok(Tensor::new(
+            tensor_data,
+            shape,
+            DataType::Int32,
+            Device::cpu(),
+            requires_grad,
+        ))
+    } else if let Ok(array_i64) = array.downcast::<PyArrayDyn<i64>>() {
+        let readonly = array_i64.readonly();
+        let shape = Shape::new(readonly.shape().to_vec());
+        let data_vec: Vec<i64> = readonly.as_slice()?.to_vec();
+        let tensor_data = Arc::new(TensorData::from_vec(
+            data_vec,
+            DataType::Int64,
+            Device::cpu(),
+        ));
+        Ok(Tensor::new(
+            tensor_data,
+            shape,
+            DataType::Int64,
+            Device::cpu(),
+            requires_grad,
+        ))
+    } else if let Ok(array_bool) = array.downcast::<PyArrayDyn<bool>>() {
+        let readonly = array_bool.readonly();
+        let shape = Shape::new(readonly.shape().to_vec());
+        let data_vec: Vec<bool> = readonly.as_slice()?.to_vec();
+        let tensor_data = Arc::new(TensorData::from_vec(
+            data_vec,
+            DataType::Bool,
+            Device::cpu(),
+        ));
+        Ok(Tensor::new(
+            tensor_data,
+            shape,
+            DataType::Bool,
             Device::cpu(),
             requires_grad,
         ))
@@ -1157,10 +1205,48 @@ fn create_random_tensor(
                 }
             }
         }
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "Random tensor generation only supported for float types",
-            ))
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                if normal {
+                    use rand_distr::{Distribution, Normal};
+                    let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
+                    for val in slice.iter_mut() {
+                        *val = normal_dist.sample(&mut rng) as i32;
+                    }
+                } else {
+                    for val in slice.iter_mut() {
+                        *val = rng.gen::<i32>();
+                    }
+                }
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                if normal {
+                    use rand_distr::{Distribution, Normal};
+                    let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
+                    for val in slice.iter_mut() {
+                        *val = normal_dist.sample(&mut rng) as i64;
+                    }
+                } else {
+                    for val in slice.iter_mut() {
+                        *val = rng.gen::<i64>();
+                    }
+                }
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                for val in slice.iter_mut() {
+                    *val = rng.gen::<bool>();
+                }
+            }
         }
     }
 
@@ -1198,10 +1284,26 @@ fn create_eye_tensor(
                 }
             }
         }
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "Eye tensor not supported for this data type",
-            ))
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                for i in 0..n.min(m) {
+                    slice[i * m + i] = 1;
+                }
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                for i in 0..n.min(m) {
+                    slice[i * m + i] = 1;
+                }
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                for i in 0..n.min(m) {
+                    slice[i * m + i] = true;
+                }
+            }
         }
     }
 
@@ -1235,10 +1337,20 @@ fn create_full_tensor(
                 slice.fill(fill_value);
             }
         }
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "Full tensor not supported for this data type",
-            ))
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                slice.fill(fill_value as i32);
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                slice.fill(fill_value as i64);
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                slice.fill(fill_value != 0.0);
+            }
         }
     }
 
@@ -1284,10 +1396,26 @@ fn create_arange_tensor(
                 }
             }
         }
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "Arange not supported for this data type",
-            ))
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    *val = (start + i as f64 * step) as i32;
+                }
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    *val = (start + i as f64 * step) as i64;
+                }
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    *val = (start + i as f64 * step) != 0.0;
+                }
+            }
         }
     }
 

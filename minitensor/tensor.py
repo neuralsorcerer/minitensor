@@ -23,6 +23,18 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 
+# Mapping between NumPy dtypes and Tensor dtype strings
+_TENSOR_TO_NP_DTYPE = {
+    "float32": np.dtype(np.float32),
+    "float64": np.dtype(np.float64),
+    "int32": np.dtype(np.int32),
+    "int64": np.dtype(np.int64),
+    "bool": np.dtype(np.bool_),
+}
+
+_NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
+
+
 class Tensor:
     """
     A multi-dimensional array with automatic differentiation support and NumPy compatibility.
@@ -30,6 +42,34 @@ class Tensor:
     This tensor class provides a PyTorch-like interface with comprehensive NumPy compatibility,
     making it easy to migrate from NumPy-based code while gaining automatic differentiation.
     """
+
+    # Ensure NumPy treats Tensor as having higher priority in operations
+    # so that dispatch prefers Tensor's implementations over NumPy's defaults.
+    __array_priority__ = 1000
+
+    # Mapping of NumPy ufuncs to Tensor operations. These lambdas ensure that
+    # all computations are executed by the Rust backend by leveraging the
+    # Tensor's arithmetic and math methods.
+    _UFUNC_BINARY_MAP = {
+        np.add: lambda a, b: a + b,
+        np.subtract: lambda a, b: a - b,
+        np.multiply: lambda a, b: a * b,
+        np.true_divide: lambda a, b: a / b,
+        np.power: lambda a, b: a.pow(b),
+        np.maximum: lambda a, b: a.maximum(b),
+        np.minimum: lambda a, b: a.minimum(b),
+    }
+
+    _UFUNC_UNARY_MAP = {
+        np.negative: lambda a: -a,
+        np.exp: lambda a: a.exp(),
+        np.log: lambda a: a.log(),
+        np.sqrt: lambda a: a.sqrt(),
+        np.abs: lambda a: a.abs(),
+        np.sin: lambda a: a.sin(),
+        np.cos: lambda a: a.cos(),
+        np.tan: lambda a: a.tan(),
+    }
 
     def __init__(
         self,
@@ -55,11 +95,9 @@ class Tensor:
         if isinstance(data, Tensor):
             # Copy constructor
             self._tensor = data._tensor.clone()
-            self._bool_data = getattr(data, "_bool_data", None)
         else:
             # Create new tensor from data
             self._tensor = _minitensor_core.Tensor(data, dtype, device, requires_grad)
-            self._bool_data = np.array(data, dtype=bool) if dtype == "bool" else None
 
     # Core properties
     @property
@@ -143,32 +181,63 @@ class Tensor:
     # Data conversion methods
     def numpy(self) -> np.ndarray:
         """Convert to numpy array with zero-copy when possible."""
-        bool_data = getattr(self, "_bool_data", None)
-        if bool_data is not None:
-            return bool_data.copy()
         try:
             return self._tensor.numpy()
         except NotImplementedError:
-            try:
-                return self._tensor.numpy_copy()
-            except NotImplementedError:
-                dtype_map = {
-                    "int64": np.int64,
-                    "int32": np.int32,
-                }
-                np_dtype = dtype_map.get(self.dtype, np.float32)
-                float_array = self._tensor.to("float32").numpy_copy()
-                return float_array.astype(np_dtype)
+            return self._tensor.numpy_copy()
 
     def numpy_copy(self) -> np.ndarray:
         """Convert to numpy array with explicit copy."""
         return self._tensor.numpy_copy()
 
+    def __array__(self, dtype: Optional[np.dtype] = None) -> np.ndarray:
+        """Support NumPy's array protocol for seamless interoperability."""
+        array = self.numpy()
+        if dtype is not None:
+            return array.astype(dtype, copy=False)
+        return array
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """Dispatch NumPy ufuncs to Tensor operations executed in Rust."""
+        if method != "__call__" or kwargs.get("out") is not None:
+            return NotImplemented
+
+        np_dtypes = []
+        tensor_inputs = []
+
+        for x in inputs:
+            if isinstance(x, Tensor):
+                tensor_inputs.append(x)
+                np_dtypes.append(_TENSOR_TO_NP_DTYPE[x.dtype])
+            elif isinstance(x, np.ndarray):
+                if x.dtype in _NP_TO_TENSOR_DTYPE:
+                    arr_tensor = Tensor.from_numpy(x)
+                else:
+                    arr_tensor = Tensor(x.tolist())
+                tensor_inputs.append(arr_tensor)
+                np_dtypes.append(x.dtype)
+            else:
+                arr_tensor = Tensor(x)
+                tensor_inputs.append(arr_tensor)
+                np_dtypes.append(np.array(x).dtype)
+
+        result_np_dtype = np.result_type(*np_dtypes)
+        target_dtype = _NP_TO_TENSOR_DTYPE.get(np.dtype(result_np_dtype), "float32")
+        tensor_inputs = [
+            t if t.dtype == target_dtype else t.astype(target_dtype)
+            for t in tensor_inputs
+        ]
+
+        if ufunc in self._UFUNC_BINARY_MAP and len(tensor_inputs) == 2:
+            return self._UFUNC_BINARY_MAP[ufunc](tensor_inputs[0], tensor_inputs[1])
+
+        if ufunc in self._UFUNC_UNARY_MAP and len(tensor_inputs) == 1:
+            return self._UFUNC_UNARY_MAP[ufunc](tensor_inputs[0])
+
+        return NotImplemented
+
     def tolist(self) -> List:
         """Convert to Python list."""
-        bool_data = getattr(self, "_bool_data", None)
-        if bool_data is not None:
-            return bool_data.tolist()
         return self._tensor.tolist()
 
     def item(self) -> Union[float, int, bool]:
@@ -295,9 +364,6 @@ class Tensor:
         """Convert tensor to a different data type."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.astype(dtype)
-        result._bool_data = None
-        if dtype == "bool":
-            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
         return result
 
     # Gradient operations
@@ -323,6 +389,10 @@ class Tensor:
         self._tensor.zero_grad()
 
     # Arithmetic operations with broadcasting support
+    def __neg__(self) -> "Tensor":
+        """Unary negation returning a Tensor."""
+        return self.__mul__(-1)
+    
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if isinstance(other, Tensor):
             result = Tensor.__new__(Tensor)
@@ -601,6 +671,38 @@ class Tensor:
         result._tensor = self._tensor.ge(other._tensor)
         return result
 
+    def maximum(self, other: "Tensor") -> "Tensor":
+        """Element-wise maximum computed via Rust-backed operations."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            other = other.astype(self.dtype)
+
+        if self.dtype == "bool" and other.dtype == "bool":
+            return (
+                self.astype("int32").maximum(other.astype("int32")).astype("bool")
+            )
+
+        mask = self.ge(other).astype(self.dtype)
+        one = Tensor(1, dtype=self.dtype)
+        return mask * self + (one - mask) * other
+
+    def minimum(self, other: "Tensor") -> "Tensor":
+        """Element-wise minimum computed via Rust-backed operations."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            other = other.astype(self.dtype)
+
+        if self.dtype == "bool" and other.dtype == "bool":
+            return (
+                self.astype("int32").minimum(other.astype("int32")).astype("bool")
+            )
+
+        mask = self.le(other).astype(self.dtype)
+        one = Tensor(1, dtype=self.dtype)
+        return mask * self + (one - mask) * other
+
     # Python special methods for comparisons
     def __eq__(self, other: object) -> "Tensor":
         if not isinstance(other, Tensor):
@@ -627,30 +729,14 @@ class Tensor:
     # Utility methods
     def all(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if all elements evaluate to True."""
-        bool_data = getattr(self, "_bool_data", None)
-        if bool_data is not None:
-            reduced = bool_data.all(axis=dim, keepdims=keepdim)
-            if isinstance(reduced, np.ndarray):
-                reduced = reduced.tolist()
-            return Tensor(reduced, dtype="bool")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.all(dim, keepdim)
-        if result.dtype == "bool":
-            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
         return result
 
     def any(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if any element evaluates to True."""
-        bool_data = getattr(self, "_bool_data", None)
-        if bool_data is not None:
-            reduced = bool_data.any(axis=dim, keepdims=keepdim)
-            if isinstance(reduced, np.ndarray):
-                reduced = reduced.tolist()
-            return Tensor(reduced, dtype="bool")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.any(dim, keepdim)
-        if result.dtype == "bool":
-            result._bool_data = np.array(result._tensor.tolist(), dtype=bool)
         return result
 
     def clamp(
@@ -711,17 +797,16 @@ class Tensor:
     # Indexing and slicing (simplified)
     def __getitem__(self, key):
         """Tensor indexing and slicing."""
-        result_np = self.numpy()[key]
-        return Tensor(np.array(result_np, dtype=np.float32))
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__getitem__(key)
+        return result
 
     def __setitem__(self, key, value):
         """Tensor item assignment."""
-        array = self.numpy_copy()
         if isinstance(value, Tensor):
-            array[key] = value.numpy()
+            self._tensor.__setitem__(key, value._tensor)
         else:
-            array[key] = value
-        self._tensor = _minitensor_core.Tensor.from_numpy(array, self.requires_grad)
+            self._tensor.__setitem__(key, value)
 
     # Static tensor creation methods
     @staticmethod

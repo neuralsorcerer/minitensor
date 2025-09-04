@@ -1,15 +1,22 @@
-# Minitensor
+<h1 align="center">
+MiniTensor
+</h1>
+<h3 align="center">
+A lightweight, high-performance deep learning library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend and Python bindings.
+</h3>
 
-A lightweight, high-performance deep learning library inspired by [PyTorch](https://github.com/pytorch/pytorch) with Rust backend and Python bindings.
+<div align="center">
 
-[![Python 3](https://img.shields.io/badge/python-3-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-fcbc2c.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml?query=branch%3Amain)
 [![Test MacOS](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml?query=branch%3Amain)
-[![license](https://img.shields.io/badge/license-Apache-lightgrey.svg)](./LICENSE)
+[![license](https://img.shields.io/badge/License-Apache%202.0-3c60b1.svg?logo=opensourceinitiative&logoColor=white&style=flat-square)](./LICENSE)
+
+</div>
 
 > [!CAUTION]
-> This library is in active development stage. APIs may change or break often. Use carefully.
+> This library is in active development stage. APIs may change or break. Use carefully.
 
 ## Features
 
@@ -204,7 +211,7 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 ```bibtex
 @software{minitensor2025,
   author = {Soumyadip Sarkar},
-  title = {MiniTensor: A lightweight, high-performance deep learning library.},
+  title = {MiniTensor: A lightweight, high-performance deep learning library},
   url = {http://github.com/neuralsorcerer/minitensor},
   year = {2025},
 }
