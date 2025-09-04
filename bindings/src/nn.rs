@@ -18,10 +18,12 @@ use engine::nn::{
 };
 use engine::operations::batch_norm as batch_norm_op;
 use engine::operations::conv2d as conv2d_op;
+use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use engine::tensor::DataType;
 use engine::Device;
 use pyo3::prelude::*;
+use pyo3::exceptions::PyIndexError;
 use pyo3::types::{PyAny, PyModule as Pyo3Module};
 
 #[pyfunction]
@@ -72,6 +74,29 @@ fn batch_norm(
         training,
         momentum,
         eps,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, target, reduction="mean", dim=1))]
+fn cross_entropy(
+    input: &PyTensor,
+    target: &PyTensor,
+    reduction: &str,
+    dim: isize,
+) -> PyResult<PyTensor> {
+    let ndim = input.tensor().ndim() as isize;
+    let axis = if dim < 0 { ndim + dim } else { dim };
+    if axis < 0 || axis as usize >= ndim as usize {
+        return Err(PyIndexError::new_err("dim out of range"));
+    }
+    let result = cross_entropy_op(
+        input.tensor(),
+        target.tensor(),
+        reduction,
+        axis as usize,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -1165,6 +1190,7 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     // Add functional APIs
     nn_module.add_function(wrap_pyfunction!(conv2d, nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(batch_norm, nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(cross_entropy, nn_module)?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;

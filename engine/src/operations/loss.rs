@@ -181,19 +181,20 @@ pub fn cross_entropy_loss(
     // Apply softmax to predictions for numerical stability
     let softmax_predictions = softmax(predictions)?;
 
-    // Compute negative log likelihood
+    // Compute negative log likelihood summed over classes
     let log_predictions = log(&softmax_predictions)?;
     let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
+    let per_sample = sum(&nll, Some(vec![1]), false)?;
 
     // Apply reduction
     let loss = match reduction {
         "mean" => {
-            let sum = sum_all_elements(&nll)?;
-            let batch = targets.shape().dims().first().copied().unwrap_or(1) as f64;
+            let sum = sum_all_elements(&per_sample)?;
+            let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
             divide_by_scalar(&sum, batch)?
         }
-        "sum" => sum_all_elements(&nll)?,
-        "none" => nll,
+        "sum" => sum_all_elements(&per_sample)?,
+        "none" => per_sample,
         _ => {
             return Err(MinitensorError::invalid_operation(&format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
@@ -220,6 +221,68 @@ pub fn cross_entropy_loss(
         add_to_graph(&loss_with_grad, Some(grad_fn))?;
 
         Ok(loss_with_grad)
+    } else {
+        Ok(loss)
+    }
+}
+
+/// Cross entropy loss for tensors with arbitrary shapes and class dimension.
+///
+/// This wrapper permutes and flattens the input so that the core
+/// `cross_entropy_loss` implementation can operate on ``[N, C]`` shaped
+/// tensors entirely in Rust.
+pub fn cross_entropy(
+    input: &Tensor,
+    target: &Tensor,
+    reduction: &str,
+    dim: usize,
+) -> Result<Tensor> {
+    let ndim = input.ndim();
+    if dim >= ndim {
+        return Err(MinitensorError::invalid_operation(
+            "dim out of range in cross_entropy",
+        ));
+    }
+
+    // Move class dimension to the end using successive transposes
+    let mut pred = input.clone();
+    let mut tgt = target.clone();
+    if dim != ndim - 1 {
+        for i in dim..(ndim - 1) {
+            pred = pred.transpose(i, i + 1)?;
+            if target.ndim() == ndim {
+                tgt = tgt.transpose(i, i + 1)?;
+            }
+        }
+    }
+
+    // Flatten all but the class dimension
+    let flat_size: usize = pred
+        .shape()
+        .dims()
+        .iter()
+        .take(ndim - 1)
+        .product();
+    let classes = pred.shape().dims()[ndim - 1];
+    let pred_2d = pred.reshape(Shape::new(vec![flat_size, classes]))?;
+    let tgt_flat = if tgt.ndim() == ndim {
+        tgt.reshape(Shape::new(vec![flat_size, classes]))?
+    } else {
+        tgt.reshape(Shape::new(vec![flat_size]))?
+    };
+
+    let loss = cross_entropy_loss(&pred_2d, &tgt_flat, reduction)?;
+
+    if reduction == "none" {
+        // Restore the original shape without the class dimension
+        let out_shape: Vec<usize> = input
+            .shape()
+            .dims()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &d)| if i != dim { Some(d) } else { None })
+            .collect();
+        loss.reshape(Shape::new(out_shape))
     } else {
         Ok(loss)
     }

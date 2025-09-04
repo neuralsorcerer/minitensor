@@ -241,57 +241,28 @@ def cross_entropy(
 ) -> Tensor:
     """Cross entropy loss.
 
-    The input is interpreted as raw logits and the target can be either class
-    indices or one-hot encoded probabilities. The class dimension can be
-    specified via ``dim``; internally the tensor is permuted so the class
-    dimension is last before calling the Rust ``CrossEntropyLoss`` layer.
+    The input is treated as raw logits and the target may contain class indices
+    or one-hot encoded probabilities. All dimension handling and reduction
+    computations are delegated to the Rust backend.
 
     Args:
         input: Predicted logit values.
         target: Target class indices or one-hot vectors matching ``input``.
         reduction: Specifies the reduction to apply to the output. One of
             ``"mean"``, ``"sum"`` or ``"none"``.
-        dim: Dimension that represents the class probabilities. Defaults to
-            ``1``.
+        dim: Dimension representing the classes. Negative values are supported
+            to index from the end.
 
     Returns:
         Tensor: Loss tensor. A scalar for ``"mean"``/``"sum"`` reductions or a
         tensor with ``input.shape`` excluding ``dim`` when ``reduction="none"``.
     """
 
-    axis = dim if dim >= 0 else input.ndim + dim
-    if axis < 0 or axis >= input.ndim:
-        raise IndexError("dim out of range")
-
-    original_shape = input.shape
-
-    # Move class dimension to last to match Rust's expectation
-    if axis != input.ndim - 1:
-        perm = [i for i in range(input.ndim) if i != axis] + [axis]
-        input = input.permute(*perm)
-        if target.ndim == len(original_shape):
-            target = target.permute(*perm)
-
-    # Flatten all but the class dimension so the Rust kernel can operate on 2D
-    flat_size = math.prod(input.shape[:-1])
-    input_flat = input.reshape(flat_size, input.shape[-1])
-    if target.ndim == len(original_shape):
-        target_flat = target.reshape(flat_size, target.shape[-1])
-    else:
-        target_flat = target.reshape(flat_size)
-
-    loss_fn = _minitensor_core.nn.CrossEntropyLoss(
-        reduction if reduction != "none" else "none"
+    result = _minitensor_core.nn.cross_entropy(
+        input._tensor, target._tensor, reduction, dim
     )
-    result = loss_fn.forward(input_flat._tensor, target_flat._tensor)
     tensor = Tensor.__new__(Tensor)
     tensor._tensor = result
-
-    if reduction == "none":
-        tensor = tensor.reshape(flat_size, input.shape[-1]).sum(dim=1)
-        out_shape = [original_shape[i] for i in range(len(original_shape)) if i != axis]
-        tensor = tensor.reshape(out_shape)
-
     return tensor
 
 

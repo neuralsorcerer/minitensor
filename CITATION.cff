@@ -1,0 +1,6 @@
+@software{minitensor2025,
+  author = {Soumyadip Sarkar},
+  title = {MiniTensor: A lightweight, high-performance deep learning library.},
+  url = {http://github.com/neuralsorcerer/minitensor},
+  year = {2025},
+}
