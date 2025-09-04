@@ -71,3 +71,27 @@ def test_cross_entropy_invalid_dim_raises():
         pass
     else:
         assert False, "Expected IndexError for invalid dim"
+
+
+def test_cross_entropy_no_reduction_shape_and_values():
+    x_np = np.array(
+        [
+            [[1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]],
+            [[2.0, 1.0, 0.0, -1.0], [2.0, 1.0, 0.0, -1.0], [2.0, 1.0, 0.0, -1.0]],
+        ],
+        dtype=np.float32,
+    )
+    target_np = np.array([[0, 1, 2, 1], [2, 0, 1, 2]], dtype=np.int64)
+    x = mt.Tensor(x_np.tolist())
+    target = mt.Tensor(target_np.tolist())
+
+    loss = F.cross_entropy(x, target, reduction="none", dim=1)
+
+    shifted = x_np - x_np.max(axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    softmax = exp / exp.sum(axis=1, keepdims=True)
+    gathered = np.take_along_axis(softmax, target_np[:, None, :], axis=1).squeeze(1)
+    expected = -np.log(gathered)
+
+    assert loss.shape == expected.shape
+    assert np.allclose(loss.numpy(), expected)

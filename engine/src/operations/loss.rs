@@ -173,14 +173,17 @@ pub fn cross_entropy_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     // Validate inputs
-    validate_classification_inputs(predictions, targets)?;
+    validate_classification_inputs(predictions, targets, false)?;
+
+    // Convert class indices to one-hot encoding if needed
+    let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
     // Apply softmax to predictions for numerical stability
     let softmax_predictions = softmax(predictions)?;
 
     // Compute negative log likelihood
     let log_predictions = log(&softmax_predictions)?;
-    let nll = negative_log_likelihood(&log_predictions, targets)?;
+    let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
 
     // Apply reduction
     let loss = match reduction {
@@ -203,11 +206,11 @@ pub fn cross_entropy_loss(
     if loss.requires_grad() {
         let grad_fn = Arc::new(CrossEntropyLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets.shape().dims().to_vec(),
+            targets_shape: targets_one_hot.shape().dims().to_vec(),
             input_ids: [predictions.id(), targets.id()],
             reduction: reduction.to_string(),
             softmax_predictions: softmax_predictions.clone().detach(),
-            targets: targets.clone().detach(),
+            targets: targets_one_hot.clone().detach(),
         });
 
         let mut loss_with_grad = loss;
@@ -376,7 +379,9 @@ pub fn focal_loss(
     reduction: &str,
 ) -> Result<Tensor> {
     // Validate inputs
-    validate_classification_inputs(predictions, targets)?;
+    validate_classification_inputs(predictions, targets, false)?;
+
+    let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
     if alpha <= 0.0 || alpha >= 1.0 {
         return Err(MinitensorError::invalid_operation(
@@ -400,7 +405,7 @@ pub fn focal_loss(
     let focal_weight = power(&one_minus_p, gamma)?;
 
     // Compute negative log likelihood with focal weighting
-    let nll = negative_log_likelihood(&log_predictions, targets)?;
+    let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
     let alpha_tensor = create_scalar_tensor(alpha, predictions.dtype(), predictions.device())?;
     let weighted_nll = mul(&nll, &focal_weight)?;
     let focal_values = mul(&weighted_nll, &alpha_tensor)?;
@@ -426,13 +431,13 @@ pub fn focal_loss(
     if loss.requires_grad() {
         let grad_fn = Arc::new(FocalLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets.shape().dims().to_vec(),
+            targets_shape: targets_one_hot.shape().dims().to_vec(),
             input_ids: [predictions.id(), targets.id()],
             alpha,
             gamma,
             reduction: reduction.to_string(),
             softmax_predictions: softmax_for_grad,
-            targets: targets.clone().detach(),
+            targets: targets_one_hot.clone().detach(),
         });
 
         let mut loss_with_grad = loss;
@@ -569,7 +574,11 @@ fn validate_loss_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {
 }
 
 /// Validate that classification loss function inputs are compatible
-fn validate_classification_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {
+fn validate_classification_inputs(
+    predictions: &Tensor,
+    targets: &Tensor,
+    require_same_dtype: bool,
+) -> Result<()> {
     // Check device compatibility
     if predictions.device() != targets.device() {
         return Err(MinitensorError::device_mismatch(
@@ -578,23 +587,22 @@ fn validate_classification_inputs(predictions: &Tensor, targets: &Tensor) -> Res
         ));
     }
 
-    // Check data type compatibility
-    if predictions.dtype() != targets.dtype() {
+    // Optionally enforce data type equality
+    if require_same_dtype && predictions.dtype() != targets.dtype() {
         return Err(MinitensorError::type_mismatch(
             format!("{:?}", predictions.dtype()),
             format!("{:?}", targets.dtype()),
         ));
     }
 
-    // For classification, predictions should be 2D (batch_size, num_classes)
-    // and targets should be 1D (batch_size) for class indices or 2D for one-hot
+    // Predictions must be at least 2D (batch_size, num_classes)
     if predictions.ndim() < 2 {
         return Err(MinitensorError::invalid_operation(
             "Classification predictions must be at least 2D (batch_size, num_classes)",
         ));
     }
 
-    // Check that tensors contain floating point data
+    // Predictions must be floating point
     match predictions.dtype() {
         DataType::Float32 | DataType::Float64 => {}
         _ => {
@@ -605,6 +613,104 @@ fn validate_classification_inputs(predictions: &Tensor, targets: &Tensor) -> Res
     }
 
     Ok(())
+}
+
+fn prepare_classification_targets(
+    predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<Tensor> {
+    if targets.ndim() + 1 == predictions.ndim() {
+        let num_classes = predictions.size(predictions.ndim() - 1)? as usize;
+        let total = targets.numel();
+        let mut data = TensorData::zeros_on_device(
+            total * num_classes,
+            predictions.dtype(),
+            predictions.device(),
+        );
+        match (targets.dtype(), predictions.dtype()) {
+            (DataType::Int32, DataType::Float32) => {
+                let idx = targets.data().as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from targets")
+                })?;
+                let out = data.as_f32_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            (DataType::Int64, DataType::Float32) => {
+                let idx = targets.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from targets")
+                })?;
+                let out = data.as_f32_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            (DataType::Int32, DataType::Float64) => {
+                let idx = targets.data().as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from targets")
+                })?;
+                let out = data.as_f64_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            (DataType::Int64, DataType::Float64) => {
+                let idx = targets.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from targets")
+                })?;
+                let out = data.as_f64_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            (DataType::Float32, DataType::Float32) => {
+                let idx = targets.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from targets")
+                })?;
+                let out = data.as_f32_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            (DataType::Float64, DataType::Float64) => {
+                let idx = targets.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from targets")
+                })?;
+                let out = data.as_f64_slice_mut().unwrap();
+                for (i, &val) in idx.iter().enumerate() {
+                    out[i * num_classes + val as usize] = 1.0;
+                }
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "Unsupported target dtype for classification loss",
+                ))
+            }
+        }
+        let mut dims = targets.shape().dims().to_vec();
+        dims.push(num_classes);
+        Ok(Tensor::new(
+            Arc::new(data),
+            Shape::new(dims),
+            predictions.dtype(),
+            predictions.device(),
+            false,
+        ))
+    } else if targets.ndim() == predictions.ndim() {
+        if targets.shape().dims() != predictions.shape().dims() {
+            return Err(MinitensorError::shape_mismatch(
+                predictions.shape().dims().to_vec(),
+                targets.shape().dims().to_vec(),
+            ));
+        }
+        Ok(targets.clone())
+    } else {
+        Err(MinitensorError::shape_mismatch(
+            predictions.shape().dims().to_vec(),
+            targets.shape().dims().to_vec(),
+        ))
+    }
 }
 
 /// Compute absolute value of tensor elements

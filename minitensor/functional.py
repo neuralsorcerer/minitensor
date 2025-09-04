@@ -20,6 +20,7 @@ except ImportError as e:
     ) from e
 
 from typing import Optional, Union
+import math
 
 from .tensor import Tensor
 
@@ -134,7 +135,6 @@ def conv2d(
         stride = (stride, stride)
     if isinstance(padding, int):
         padding = (padding, padding)
-
     bias_tensor = None if bias is None else bias._tensor
     result = _minitensor_core.nn.conv2d(
         input._tensor, weight._tensor, bias_tensor, stride, padding
@@ -169,12 +169,16 @@ def batch_norm(
     Returns:
         Tensor: Normalized tensor.
     """
+    rm_tensor = None if running_mean is None else running_mean._tensor
+    rv_tensor = None if running_var is None else running_var._tensor
+    weight_tensor = None if weight is None else weight._tensor
+    bias_tensor = None if bias is None else bias._tensor
     result = _minitensor_core.nn.batch_norm(
         input._tensor,
-        None if running_mean is None else running_mean._tensor,
-        None if running_var is None else running_var._tensor,
-        None if weight is None else weight._tensor,
-        None if bias is None else bias._tensor,
+        rm_tensor,
+        rv_tensor,
+        weight_tensor,
+        bias_tensor,
         training,
         momentum,
         eps,
@@ -237,11 +241,10 @@ def cross_entropy(
 ) -> Tensor:
     """Cross entropy loss.
 
-    This implementation matches NumPy/PyTorch semantics. The input is
-    interpreted as raw logits and the target can either be a 1D tensor of
-    class indices or a tensor of one-hot encoded probabilities. Unlike the
-    previous implementation, the class dimension can now be specified via
-    ``dim``.
+    The input is interpreted as raw logits and the target can be either class
+    indices or one-hot encoded probabilities. The class dimension can be
+    specified via ``dim``; internally the tensor is permuted so the class
+    dimension is last before calling the Rust ``CrossEntropyLoss`` layer.
 
     Args:
         input: Predicted logit values.
@@ -256,39 +259,40 @@ def cross_entropy(
         tensor with ``input.shape`` excluding ``dim`` when ``reduction="none"``.
     """
 
-    import numpy as np
-
     axis = dim if dim >= 0 else input.ndim + dim
     if axis < 0 or axis >= input.ndim:
         raise IndexError("dim out of range")
 
-    # Compute log probabilities with a numerically stable log-softmax
-    log_probs = input.log_softmax(dim=axis)
+    original_shape = input.shape
 
-    # Convert class indices to one-hot encoding if necessary
-    if target.ndim == log_probs.ndim - 1:
-        num_classes = input.shape[axis]
-        target_np = np.zeros(log_probs.shape, dtype=np.float32)
-        indices = np.expand_dims(target.numpy().astype(int), axis=axis)
-        np.put_along_axis(target_np, indices, 1.0, axis=axis)
-        target = Tensor(target_np, dtype="float32")
-    elif target.shape != log_probs.shape:
-        raise ValueError(
-            "target must be class indices or one-hot vectors matching input shape"
-        )
+    # Move class dimension to last to match Rust's expectation
+    if axis != input.ndim - 1:
+        perm = [i for i in range(input.ndim) if i != axis] + [axis]
+        input = input.permute(*perm)
+        if target.ndim == len(original_shape):
+            target = target.permute(*perm)
 
-    # Negative log likelihood for the correct classes
-    nll = (target * log_probs).sum(dim=axis) * -1
-
-    # Apply reduction
-    if reduction == "mean":
-        return nll.mean()
-    elif reduction == "sum":
-        return nll.sum()
-    elif reduction == "none":
-        return nll
+    # Flatten all but the class dimension so the Rust kernel can operate on 2D
+    flat_size = math.prod(input.shape[:-1])
+    input_flat = input.reshape(flat_size, input.shape[-1])
+    if target.ndim == len(original_shape):
+        target_flat = target.reshape(flat_size, target.shape[-1])
     else:
-        raise ValueError("Invalid reduction: {}".format(reduction))
+        target_flat = target.reshape(flat_size)
+
+    loss_fn = _minitensor_core.nn.CrossEntropyLoss(
+        reduction if reduction != "none" else "none"
+    )
+    result = loss_fn.forward(input_flat._tensor, target_flat._tensor)
+    tensor = Tensor.__new__(Tensor)
+    tensor._tensor = result
+
+    if reduction == "none":
+        tensor = tensor.reshape(flat_size, input.shape[-1]).sum(dim=1)
+        out_shape = [original_shape[i] for i in range(len(original_shape)) if i != axis]
+        tensor = tensor.reshape(out_shape)
+
+    return tensor
 
 
 def binary_cross_entropy(
