@@ -8,6 +8,7 @@ use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::operations::arithmetic::{mul, sub};
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
+use engine::tensor::shape::Shape;
 use engine::TensorIndex;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -147,19 +148,65 @@ fn matmul(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
     a.matmul(b)
 }
 
-/// Cross product of two tensors
+/// Cross product of two tensors along a given axis
 #[pyfunction]
-fn cross(a: &PyTensor, b: &PyTensor, _axis: Option<i32>) -> PyResult<PyTensor> {
-    if a.shape().len() != 1 || b.shape().len() != 1 {
-        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Cross product currently only supports 1D tensors",
-        ));
+#[pyo3(signature = (a, b, axis=None))]
+fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
+    // Determine axes for each tensor separately (allow different ranks)
+    let shape_a = a.shape();
+    let shape_b = b.shape();
+    let ndim_a = shape_a.len();
+    let ndim_b = shape_b.len();
+    let mut axis_i32 = axis.unwrap_or(-1);
+
+    let mut axis_a = axis_i32;
+    if axis_a < 0 {
+        axis_a += ndim_a as i32;
     }
-    if a.shape()[0] != 3 || b.shape()[0] != 3 {
+    if axis_a < 0 || axis_a as usize >= ndim_a {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Cross product requires 3D vectors",
+            "Invalid axis for cross product",
         ));
     }
+
+    let mut axis_b = axis_i32;
+    if axis_b < 0 {
+        axis_b += ndim_b as i32;
+    }
+    if axis_b < 0 || axis_b as usize >= ndim_b {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Invalid axis for cross product",
+        ));
+    }
+
+    let axis_a = axis_a as usize;
+    let axis_b = axis_b as usize;
+
+    if shape_a[axis_a] != 3 || shape_b[axis_b] != 3 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Cross product requires dimension of size 3 along the specified axis",
+        ));
+    }
+
+    // Ensure shapes are broadcastable (excluding dtype/device checks)
+    let shape_a_obj: Shape = shape_a.clone().into();
+    let shape_b_obj: Shape = shape_b.clone().into();
+    let broadcasted_shape = shape_a_obj
+        .broadcast_with(&shape_b_obj)
+        .map_err(_convert_error)?;
+
+    // Determine axis position in broadcasted result for concatenation
+    let broadcast_ndim = broadcasted_shape.ndim();
+    if axis_i32 < 0 {
+        axis_i32 += broadcast_ndim as i32;
+    }
+    if axis_i32 < 0 || axis_i32 as usize >= broadcast_ndim {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Invalid axis for cross product",
+        ));
+    }
+    let axis_out = axis_i32 as usize;
+
     if a.tensor().dtype() != b.tensor().dtype() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Cross product requires tensors of the same dtype",
@@ -171,54 +218,53 @@ fn cross(a: &PyTensor, b: &PyTensor, _axis: Option<i32>) -> PyResult<PyTensor> {
         ));
     }
 
-    let a0 = a
-        .tensor()
-        .index(&[TensorIndex::Index(0)])
-        .map_err(_convert_error)?;
-    let a1 = a
-        .tensor()
-        .index(&[TensorIndex::Index(1)])
-        .map_err(_convert_error)?;
-    let a2 = a
-        .tensor()
-        .index(&[TensorIndex::Index(2)])
-        .map_err(_convert_error)?;
-    let b0 = b
-        .tensor()
-        .index(&[TensorIndex::Index(0)])
-        .map_err(_convert_error)?;
-    let b1 = b
-        .tensor()
-        .index(&[TensorIndex::Index(1)])
-        .map_err(_convert_error)?;
-    let b2 = b
-        .tensor()
-        .index(&[TensorIndex::Index(2)])
-        .map_err(_convert_error)?;
+    // Helper to extract a component along a given axis
+    let extract = |t: &PyTensor, axis: usize, idx: usize| -> PyResult<engine::tensor::Tensor> {
+        let mut indices = Vec::with_capacity(t.shape().len());
+        for (dim, &size) in t.shape().iter().enumerate() {
+            if dim == axis {
+                indices.push(TensorIndex::Index(idx));
+            } else {
+                indices.push(TensorIndex::Slice {
+                    start: 0,
+                    end: size,
+                    step: 1,
+                });
+            }
+        }
+        t.tensor().index(&indices).map_err(_convert_error)
+    };
+
+    let a0 = extract(a, axis_a, 0)?;
+    let a1 = extract(a, axis_a, 1)?;
+    let a2 = extract(a, axis_a, 2)?;
+    let b0 = extract(b, axis_b, 0)?;
+    let b1 = extract(b, axis_b, 1)?;
+    let b2 = extract(b, axis_b, 2)?;
 
     let c0 = sub(
         &mul(&a1, &b2).map_err(_convert_error)?,
         &mul(&a2, &b1).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(0)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
     let c1 = sub(
         &mul(&a2, &b0).map_err(_convert_error)?,
         &mul(&a0, &b2).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(0)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
     let c2 = sub(
         &mul(&a0, &b1).map_err(_convert_error)?,
         &mul(&a1, &b0).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(0)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
 
-    let result = tensor_concatenate(&[&c0, &c1, &c2], 0).map_err(_convert_error)?;
+    let result = tensor_concatenate(&[&c0, &c1, &c2], axis_out).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
