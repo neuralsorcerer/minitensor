@@ -282,6 +282,42 @@ mod tests {
         )
     }
 
+    fn tensor_from_vec_f32_shape(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        let data = TensorData::from_vec_f32(data, Device::cpu());
+        Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn tensor_from_vec_i32(data: Vec<i32>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        let data = TensorData::from_vec_i32(data, Device::cpu());
+        Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Int32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn tensor_from_vec_bool(data: Vec<bool>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        let data = TensorData::from_vec_bool(data, Device::cpu());
+        Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        )
+    }
+
     #[test]
     fn test_eq_basic() {
         let a = tensor_from_vec_f32(vec![1.0, 2.0, 3.0]);
@@ -289,5 +325,36 @@ mod tests {
         let result = eq(&a, &b).unwrap();
         let slice = result.data().as_bool_slice().unwrap();
         assert_eq!(slice, &[true, false, true]);
+    }
+
+    #[test]
+    fn test_eq_broadcasting() {
+        let a = tensor_from_vec_f32_shape(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let b = tensor_from_vec_f32_shape(vec![1.0, 4.0], vec![1, 2]);
+        let result = eq(&a, &b).unwrap();
+        let slice = result.data().as_bool_slice().unwrap();
+        assert_eq!(slice, &[true, false, false, true]);
+        assert_eq!(result.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_lt_bool_error() {
+        let a = tensor_from_vec_bool(vec![true, false]);
+        let b = tensor_from_vec_bool(vec![false, true]);
+        assert!(lt(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_gt_shape_mismatch_error() {
+        let a = tensor_from_vec_f32(vec![1.0, 2.0, 3.0]);
+        let b = tensor_from_vec_f32(vec![1.0, 2.0]);
+        assert!(gt(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_eq_type_mismatch_error() {
+        let a = tensor_from_vec_f32(vec![1.0]);
+        let b = tensor_from_vec_i32(vec![1]);
+        assert!(eq(&a, &b).is_err());
     }
 }

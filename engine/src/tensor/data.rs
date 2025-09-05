@@ -573,4 +573,49 @@ mod tests {
         let slice_bool = data_bool.as_bool_slice().unwrap();
         assert_eq!(slice_bool, &[true; 3]);
     }
+
+    #[test]
+    fn test_zeros_different_types() {
+        // Test f64
+        let data_f64 = TensorData::zeros(2, DataType::Float64);
+        assert_eq!(data_f64.as_f64_slice().unwrap(), &[0.0; 2]);
+
+        // Test i32
+        let data_i32 = TensorData::zeros(2, DataType::Int32);
+        assert_eq!(data_i32.as_i32_slice().unwrap(), &[0; 2]);
+
+        // Test i64
+        let data_i64 = TensorData::zeros(2, DataType::Int64);
+        assert_eq!(data_i64.as_i64_slice().unwrap(), &[0; 2]);
+
+        // Test bool
+        let data_bool = TensorData::zeros(2, DataType::Bool);
+        assert_eq!(data_bool.as_bool_slice().unwrap(), &[false; 2]);
+    }
+
+    #[test]
+    fn test_from_vec_and_bytes_roundtrip() {
+        let values = vec![1.0f32, 2.0, 3.0];
+        let data = TensorData::from_vec_f32(values.clone(), Device::cpu());
+        assert_eq!(data.numel(), 3);
+        assert_eq!(data.dtype(), DataType::Float32);
+        assert_eq!(data.as_f32_slice().unwrap(), values.as_slice());
+        let bytes = data.as_bytes().unwrap();
+        assert_eq!(bytes.len(), 3 * 4);
+    }
+
+    #[test]
+    fn test_clone_data_independence() {
+        let original = TensorData::ones(3, DataType::Float32);
+        let mut cloned = original.clone_data();
+
+        // modify the clone and ensure original remains unchanged
+        {
+            let slice = cloned.as_f32_slice_mut().unwrap();
+            slice[0] = 5.0;
+        }
+
+        assert_eq!(original.as_f32_slice().unwrap(), &[1.0; 3]);
+        assert_eq!(cloned.as_f32_slice().unwrap()[0], 5.0);
+    }
 }

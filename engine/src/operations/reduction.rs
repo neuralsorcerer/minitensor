@@ -2007,4 +2007,49 @@ mod tests {
         let res = all(&t, Some(1), false).unwrap();
         assert_eq!(res.data().as_bool_slice().unwrap(), &[false, true]);
     }
+
+    #[test]
+    fn test_sum_global_and_keepdim() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let s = sum(&t, None, false).unwrap();
+        assert_eq!(s.shape().dims(), &[] as &[usize]);
+        assert_eq!(s.data().as_f32_slice().unwrap()[0], 10.0);
+        let s_keep = sum(&t, None, true).unwrap();
+        assert_eq!(s_keep.shape().dims(), &[1, 1]);
+        assert_eq!(s_keep.data().as_f32_slice().unwrap()[0], 10.0);
+    }
+
+    #[test]
+    fn test_sum_along_dim() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let res = sum(&t, Some(vec![0]), false).unwrap();
+        assert_eq!(res.shape().dims(), &[2]);
+        assert_eq!(res.data().as_f32_slice().unwrap(), &[4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_sum_bool_error() {
+        let t = create_tensor_bool(vec![true, false, true, true], vec![2, 2]);
+        assert!(sum(&t, Some(vec![0]), false).is_err());
+    }
+
+    #[test]
+    fn test_sum_multi_dim_error() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        assert!(sum(&t, Some(vec![0, 1]), false).is_err());
+    }
+
+    #[test]
+    fn test_mean_along_dim() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let res = mean(&t, Some(vec![1]), true).unwrap();
+        assert_eq!(res.shape().dims(), &[2, 1]);
+        assert_eq!(res.data().as_f32_slice().unwrap(), &[1.5, 3.5]);
+    }
+
+    #[test]
+    fn test_mean_int_error() {
+        let t = create_tensor_i32(vec![1, 2, 3, 4], vec![2, 2]);
+        assert!(mean(&t, Some(vec![0]), false).is_err());
+    }
 }

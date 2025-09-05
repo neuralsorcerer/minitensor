@@ -514,6 +514,61 @@ mod tests {
         )
     }
 
+    fn create_test_tensor_f64(data: Vec<f64>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
+        let shape_obj = Shape::new(shape);
+        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float64);
+
+        if let Some(slice) = tensor_data.as_f64_slice_mut() {
+            slice.copy_from_slice(&data);
+        }
+
+        Tensor::new(
+            Arc::new(tensor_data),
+            shape_obj,
+            DataType::Float64,
+            Device::cpu(),
+            requires_grad,
+        )
+    }
+
+    fn create_test_tensor_bool(data: Vec<bool>, shape: Vec<usize>) -> Tensor {
+        let shape_obj = Shape::new(shape);
+        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Bool);
+
+        if let Some(slice) = tensor_data.as_bool_slice_mut() {
+            slice.copy_from_slice(&data);
+        }
+
+        Tensor::new(
+            Arc::new(tensor_data),
+            shape_obj,
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn create_test_tensor_f32_on_device(
+        data: Vec<f32>,
+        shape: Vec<usize>,
+        device: Device,
+    ) -> Tensor {
+        let shape_obj = Shape::new(shape);
+        let mut tensor_data = TensorData::zeros_on_device(shape_obj.numel(), DataType::Float32, device);
+
+        if let Some(slice) = tensor_data.as_f32_slice_mut() {
+            slice.copy_from_slice(&data);
+        }
+
+        Tensor::new(
+            Arc::new(tensor_data),
+            shape_obj,
+            DataType::Float32,
+            device,
+            false,
+        )
+    }
+
     #[test]
     fn test_matmul_basic() {
         // 2x3 * 3x2 = 2x2
@@ -572,5 +627,42 @@ mod tests {
 
         assert!(result.requires_grad());
         assert!(result.grad_fn().is_some());
+    }
+
+    #[test]
+    fn test_matmul_dtype_mismatch() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let b = create_test_tensor_f64(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2], false);
+
+        let result = matmul(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_matmul_device_mismatch() {
+        let a = create_test_tensor_f32_on_device(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], Device::cpu());
+        let b =
+            create_test_tensor_f32_on_device(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2], Device::cuda(None));
+
+        let result = matmul(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_matmul_bool_error() {
+        let a = create_test_tensor_bool(vec![true, false, true, false], vec![2, 2]);
+        let b = create_test_tensor_bool(vec![true, true, false, false], vec![2, 2]);
+
+        let result = matmul(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_matmul_requires_2d_inputs() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
+
+        let result = matmul(&a, &b);
+        assert!(result.is_err());
     }
 }

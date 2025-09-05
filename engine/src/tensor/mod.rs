@@ -1542,6 +1542,13 @@ mod tests {
     }
 
     #[test]
+    fn test_backward_non_scalar_error() {
+        let tensor = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let result = tensor.backward(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_isnan_isinf_isfinite() {
         let data = vec![0.0f32, f32::NAN, f32::INFINITY, -5.0];
         let shape = Shape::new(vec![4]);
@@ -1606,5 +1613,72 @@ mod tests {
         let casted_int_data = casted_int.data().as_i32_slice().unwrap();
         assert_eq!(casted_int_data, &[1, -2]);
         assert_eq!(casted_int.shape(), &shape);
+    }
+
+    #[test]
+    fn test_add_scalar_broadcasting() {
+        let a = Tensor::ones(Shape::new(vec![2, 3]), DataType::Float32, Device::cpu(), false);
+        let scalar = Tensor::ones(Shape::scalar(), DataType::Float32, Device::cpu(), false);
+        let result = a.add(&scalar).unwrap();
+        assert_eq!(result.data().as_f32_slice().unwrap(), &[2.0; 6]);
+        assert_eq!(result.shape(), &Shape::new(vec![2, 3]));
+    }
+
+    #[test]
+    fn test_add_incompatible_shapes_error() {
+        let a = Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
+        let b = Tensor::ones(Shape::new(vec![3, 1]), DataType::Float32, Device::cpu(), false);
+        assert!(a.add(&b).is_err());
+    }
+
+    #[test]
+    fn test_view_shape_mismatch_error() {
+        let shape = Shape::new(vec![2, 2]);
+        let data = Arc::new(TensorData::zeros(shape.numel(), DataType::Float32));
+        let tensor = Tensor::new(data, shape, DataType::Float32, Device::cpu(), false);
+        let bad_shape = Shape::new(vec![3, 1]);
+        assert!(tensor.view(bad_shape).is_err());
+    }
+
+    #[test]
+    fn test_reshape_scalar_to_vector() {
+        let scalar = Tensor::ones(Shape::scalar(), DataType::Float32, Device::cpu(), false);
+        let reshaped = scalar.reshape(Shape::new(vec![1])).unwrap();
+        assert_eq!(reshaped.shape().dims(), &[1]);
+        assert_eq!(reshaped.data().as_f32_slice().unwrap(), &[1.0]);
+    }
+
+    #[test]
+    fn test_transpose_basic() {
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let transposed = tensor.transpose(0, 1).unwrap();
+        assert_eq!(transposed.shape().dims(), &[3, 2]);
+        assert_eq!(
+            transposed.data().as_f32_slice().unwrap(),
+            &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_transpose_out_of_bounds() {
+        let tensor =
+            Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
+        assert!(tensor.transpose(0, 2).is_err());
+    }
+
+    #[test]
+    fn test_transpose_same_dim_noop() {
+        let tensor =
+            Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
+        let transposed = tensor.transpose(1, 1).unwrap();
+        assert_eq!(transposed.data().as_f32_slice().unwrap(), &[1.0; 4]);
+        assert_eq!(transposed.shape().dims(), &[2, 2]);
     }
 }

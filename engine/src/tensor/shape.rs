@@ -235,4 +235,54 @@ mod tests {
         let linear_idx = strides.linear_index(&[1, 2, 3]);
         assert_eq!(linear_idx, 1 * 12 + 2 * 4 + 3 * 1);
     }
+
+    #[test]
+    fn test_broadcasting_incompatible() {
+        let shape1 = Shape::new(vec![2, 3]);
+        let shape2 = Shape::new(vec![3, 4]);
+        assert!(!shape1.is_broadcastable_with(&shape2));
+        assert!(shape1.broadcast_with(&shape2).is_err());
+    }
+
+    #[test]
+    fn test_size_out_of_bounds() {
+        let shape = Shape::new(vec![2, 3]);
+        assert!(shape.size(2).is_err());
+    }
+
+    #[test]
+    fn test_non_contiguous_and_mismatched_strides() {
+        let shape = Shape::new(vec![2, 3]);
+        let bad = Strides::new(vec![2, 1]);
+        assert!(!bad.is_contiguous(&shape));
+        let mismatched = Strides::new(vec![1]);
+        assert!(!mismatched.is_contiguous(&shape));
+    }
+
+    #[test]
+    fn test_scalar_strides_behavior() {
+        let shape = Shape::scalar();
+        let strides = Strides::from_shape(&shape);
+        assert!(strides.as_slice().is_empty());
+        assert!(strides.is_contiguous(&shape));
+        assert_eq!(strides.linear_index(&[]), 0);
+    }
+
+    #[test]
+    fn test_broadcast_with_scalar_shape() {
+        let scalar = Shape::scalar();
+        let other = Shape::new(vec![2, 3]);
+        assert!(scalar.is_broadcastable_with(&other));
+        let broadcasted = scalar.broadcast_with(&other).unwrap();
+        assert_eq!(broadcasted.dims(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_broadcast_different_dimensions() {
+        let shape1 = Shape::new(vec![1, 2, 3]);
+        let shape2 = Shape::new(vec![3]);
+        assert!(shape1.is_broadcastable_with(&shape2));
+        let broadcasted = shape1.broadcast_with(&shape2).unwrap();
+        assert_eq!(broadcasted.dims(), &[1, 2, 3]);
+    }
 }

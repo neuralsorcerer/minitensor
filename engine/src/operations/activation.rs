@@ -1566,6 +1566,14 @@ mod tests {
     }
 
     #[test]
+    fn test_exp_invalid_dtype() {
+        let shape = Shape::new(vec![3]);
+        let data = TensorData::from_vec_i32(vec![1, 2, 3], Device::cpu());
+        let tensor = Tensor::new(Arc::new(data), shape, DataType::Int32, Device::cpu(), false);
+        assert!(exp(&tensor).is_err());
+    }
+
+    #[test]
     fn test_log() {
         let tensor = create_test_tensor_f32(
             vec![
@@ -1706,6 +1714,37 @@ mod tests {
         assert!((data[0] - 2.0).abs() < 1e-6);
         assert!((data[1] - 9.0).abs() < 1e-6);
         assert!((data[2] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pow_shape_mismatch_error() {
+        let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let exp = create_test_tensor_f32(vec![3.0], vec![1], false);
+        assert!(pow(&base, &exp).is_err());
+    }
+
+    #[test]
+    fn test_pow_dtype_mismatch_error() {
+        let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let shape = Shape::new(vec![2]);
+        let data = TensorData::from_vec_f64(vec![1.0, 2.0], Device::cpu());
+        let exp = Tensor::new(Arc::new(data), shape, DataType::Float64, Device::cpu(), false);
+        assert!(pow(&base, &exp).is_err());
+    }
+
+    #[test]
+    fn test_pow_device_mismatch_error() {
+        let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let shape = Shape::new(vec![2]);
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0], Device::cuda(Some(0)));
+        let exp = Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Float32,
+            Device::cuda(Some(0)),
+            false,
+        );
+        assert!(pow(&base, &exp).is_err());
     }
 
     #[test]

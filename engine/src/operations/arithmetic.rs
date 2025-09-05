@@ -1030,4 +1030,73 @@ mod tests {
         let result = add(&a, &b);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_sub_broadcasting_2d() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let b = create_test_tensor_f32(vec![1.0, 2.0], vec![1, 2], false);
+        let result = sub(&a, &b).unwrap();
+        let expected = vec![0.0, 0.0, 2.0, 2.0];
+        assert_eq!(result.data().as_f32_slice().unwrap(), expected.as_slice());
+        assert_eq!(result.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_mul_broadcasting_2d() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let b = create_test_tensor_f32(vec![2.0], vec![1, 1], false);
+        let result = mul(&a, &b).unwrap();
+        assert_eq!(result.data().as_f32_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(result.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_div_broadcasting_2d() {
+        let a = create_test_tensor_f32(vec![2.0, 4.0, 6.0, 8.0], vec![2, 2], false);
+        let b = create_test_tensor_f32(vec![2.0], vec![1, 1], false);
+        let result = div(&a, &b).unwrap();
+        assert_eq!(result.data().as_f32_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(result.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_bool_arithmetic_error() {
+        // Create boolean tensors
+        let shape_obj = Shape::new(vec![2]);
+        let mut data_a = TensorData::zeros(shape_obj.numel(), DataType::Bool);
+        if let Some(slice) = data_a.as_bool_slice_mut() {
+            slice.copy_from_slice(&[true, false]);
+        }
+        let a = Tensor::new(Arc::new(data_a), shape_obj.clone(), DataType::Bool, Device::cpu(), false);
+
+        let mut data_b = TensorData::zeros(shape_obj.numel(), DataType::Bool);
+        if let Some(slice) = data_b.as_bool_slice_mut() {
+            slice.copy_from_slice(&[false, true]);
+        }
+        let b = Tensor::new(Arc::new(data_b), shape_obj, DataType::Bool, Device::cpu(), false);
+
+        assert!(add(&a, &b).is_err());
+        assert!(sub(&a, &b).is_err());
+        assert!(mul(&a, &b).is_err());
+        assert!(div(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_incompatible_shapes_error() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        let b = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        assert!(sub(&a, &b).is_err());
+        assert!(mul(&a, &b).is_err());
+        assert!(div(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_division_by_zero_returns_inf() {
+        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let b = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let result = div(&a, &b).unwrap();
+        let result_data = result.data().as_f32_slice().unwrap();
+        assert!(result_data[0].is_infinite());
+        assert_eq!(result_data[1], 2.0);
+    }
 }

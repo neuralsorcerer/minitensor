@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+import pytest
 
 from minitensor.tensor import Tensor
 
@@ -21,3 +22,17 @@ def test_tensor_pow_tensor():
     y = base**exp
     expected = np.array([2.0, 9.0, np.sqrt(4.0)], dtype=np.float32)
     assert np.allclose(y.numpy(), expected)
+
+
+def test_tensor_pow_shape_mismatch_error():
+    base = Tensor([1.0, 2.0], dtype="float32")
+    exp = Tensor([3.0, 4.0, 5.0], dtype="float32")
+    with pytest.raises(ValueError):
+        _ = base**exp
+
+
+def test_tensor_pow_dtype_mismatch_error():
+    base = Tensor([1.0, 2.0], dtype="float32")
+    exp = Tensor([1.0, 2.0], dtype="float64")
+    with pytest.raises(TypeError):
+        _ = base**exp
