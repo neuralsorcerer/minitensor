@@ -7,6 +7,8 @@ A lightweight, high-performance deep learning library inspired by <a href="https
 
 ---
 
+<div align="center">
+
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-fcbc2c.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![rustc 1.85+](https://img.shields.io/badge/rustc-1.85+-blue.svg?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
 [![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
@@ -14,6 +16,7 @@ A lightweight, high-performance deep learning library inspired by <a href="https
 [![Test MacOS](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml?query=branch%3Amain)
 [![license](https://img.shields.io/badge/License-Apache%202.0-3c60b1.svg?logo=opensourceinitiative&logoColor=white&style=flat-square)](./LICENSE)
 
+</div>
 
 > [!CAUTION]
 > This library is in active development stage. APIs may change or break. Use carefully.
