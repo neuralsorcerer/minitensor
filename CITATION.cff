@@ -4,6 +4,6 @@ authors:
 - family-names: Sarkar
   given-names: Soumyadip
   orcid: https://orcid.org/0000-0002-2377-9147
-title: "MiniTensor: A lightweight, high-performance deep learning library"
+title: "MiniTensor: A lightweight, high-performance tensor operations library"
 date-released: 2025-09-03
 url: "https://github.com/neuralsorcerer/minitensor"

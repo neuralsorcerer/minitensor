@@ -8,7 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "minitensor"
-description = "A lightweight, high-performance deep learning library built with Rust backend."
+description = "A lightweight, high-performance tensor operations library built with Rust backend."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
@@ -19,7 +19,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",

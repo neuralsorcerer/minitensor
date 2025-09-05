@@ -4,7 +4,7 @@
 
 </div>
 <h3 align="center">
-A lightweight, high-performance deep learning library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
+A lightweight, high-performance tensor operations library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
 </h3>
 
 ---
@@ -33,6 +33,12 @@ A lightweight, high-performance deep learning library inspired by <a href="https
 
 ### Installation
 
+**From PyPI:** *(Coming Soon)*
+
+```bash
+pip install minitensor
+```
+
 **From Source:**
 
 ```bash
@@ -46,7 +52,11 @@ make install
 # Or manually with maturin
 pip install maturin[patchelf]
 maturin develop --release
+
+# Optional: editable install with pip (debug build by default)
+pip install -e .
 ```
+> *Note:* `pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
 
 ### Basic Usage
 
@@ -213,7 +223,7 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 ```bibtex
 @software{minitensor2025,
   author = {Soumyadip Sarkar},
-  title = {MiniTensor: A lightweight, high-performance deep learning library},
+  title = {MiniTensor: A lightweight, high-performance tensor operations library},
   url = {http://github.com/neuralsorcerer/minitensor},
   year = {2025},
 }
