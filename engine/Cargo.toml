@@ -25,6 +25,7 @@ parking_lot = { workspace = true }
 # SIMD and performance
 rayon = { workspace = true }
 wide = { workspace = true }
+matrixmultiply = { workspace = true }
 
 # System information
 num_cpus = { workspace = true }

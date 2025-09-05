@@ -9,6 +9,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Reshape operation with gradient support
@@ -190,27 +191,29 @@ pub fn concatenate(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
 
     let dims = first_tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
-    let outer: usize = dims[..dim].iter().product();
+    let _outer: usize = dims[..dim].iter().product();
 
     macro_rules! concat_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            for o in 0..outer {
-                let mut dst_offset = o * output_shape_vec[dim] * inner;
-                for t in tensors {
-                    let t_dims = t.shape().dims();
-                    let src_start = o * t_dims[dim] * inner;
-                    let src_len = t_dims[dim] * inner;
-                    let src = t.data().$slice().ok_or_else(|| {
-                        MinitensorError::invalid_operation(
-                            "Tensor data access failed for concatenate",
-                        )
-                    })?;
-                    out[dst_offset..dst_offset + src_len]
-                        .copy_from_slice(&src[src_start..src_start + src_len]);
-                    dst_offset += src_len;
-                }
-            }
+            out.par_chunks_mut(output_shape_vec[dim] * inner)
+                .enumerate()
+                .for_each(|(o, out_chunk)| {
+                    let mut dst_offset = 0;
+                    for t in tensors {
+                        let t_dims = t.shape().dims();
+                        let src_start = o * t_dims[dim] * inner;
+                        let src_len = t_dims[dim] * inner;
+                        let src = t.data().$slice().ok_or_else(|| {
+                            MinitensorError::invalid_operation(
+                                "Tensor data access failed for concatenate",
+                            )
+                        }).unwrap();
+                        out_chunk[dst_offset..dst_offset + src_len]
+                            .copy_from_slice(&src[src_start..src_start + src_len]);
+                        dst_offset += src_len;
+                    }
+                });
             TensorData::$from_vec(out, device)
         }};
     }
@@ -265,7 +268,7 @@ pub fn index_select(tensor: &Tensor, dim: usize, indices: &[usize]) -> Result<Te
 
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
-    let outer: usize = dims[..dim].iter().product();
+    let _outer: usize = dims[..dim].iter().product();
 
     macro_rules! index_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -273,14 +276,16 @@ pub fn index_select(tensor: &Tensor, dim: usize, indices: &[usize]) -> Result<Te
                 MinitensorError::invalid_operation("Tensor data access failed for index_select")
             })?;
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            for o in 0..outer {
-                for (i, &idx) in indices.iter().enumerate() {
-                    let src_start = o * dims[dim] * inner + idx * inner;
-                    let dst_start = o * output_shape_vec[dim] * inner + i * inner;
-                    out[dst_start..dst_start + inner]
-                        .copy_from_slice(&src[src_start..src_start + inner]);
-                }
-            }
+            out.par_chunks_mut(output_shape_vec[dim] * inner)
+                .enumerate()
+                .for_each(|(o, out_chunk)| {
+                    for (i, &idx) in indices.iter().enumerate() {
+                        let src_start = o * dims[dim] * inner + idx * inner;
+                        let dst_start = i * inner;
+                        out_chunk[dst_start..dst_start + inner]
+                            .copy_from_slice(&src[src_start..src_start + inner]);
+                    }
+                });
             TensorData::$from_vec(out, device)
         }};
     }
@@ -341,7 +346,7 @@ pub fn slice(tensor: &Tensor, dim: usize, start: usize, end: usize, step: usize)
 
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
-    let outer: usize = dims[..dim].iter().product();
+    let _outer: usize = dims[..dim].iter().product();
     let count = output_shape_vec[dim];
 
     macro_rules! slice_impl {
@@ -350,15 +355,17 @@ pub fn slice(tensor: &Tensor, dim: usize, start: usize, end: usize, step: usize)
                 MinitensorError::invalid_operation("Tensor data access failed for slice")
             })?;
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            for o in 0..outer {
-                for i in 0..count {
-                    let src_idx = start + i * step;
-                    let src_start = o * dims[dim] * inner + src_idx * inner;
-                    let dst_start = o * count * inner + i * inner;
-                    out[dst_start..dst_start + inner]
-                        .copy_from_slice(&src[src_start..src_start + inner]);
-                }
-            }
+            out.par_chunks_mut(count * inner)
+                .enumerate()
+                .for_each(|(o, out_chunk)| {
+                    for i in 0..count {
+                        let src_idx = start + i * step;
+                        let src_start = o * dims[dim] * inner + src_idx * inner;
+                        let dst_start = i * inner;
+                        out_chunk[dst_start..dst_start + inner]
+                            .copy_from_slice(&src[src_start..src_start + inner]);
+                    }
+                });
             TensorData::$from_vec(out, device)
         }};
     }

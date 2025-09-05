@@ -9,6 +9,8 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
+use matrixmultiply::{dgemm, sgemm};
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Matrix multiplication with gradient support
@@ -38,6 +40,14 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     let lhs_shape = lhs.shape().dims();
     let rhs_shape = rhs.shape().dims();
+
+    // Ensure batch dimensions match
+    if lhs_shape[..lhs_shape.len() - 2] != rhs_shape[..rhs_shape.len() - 2] {
+        return Err(MinitensorError::shape_mismatch(
+            lhs_shape.to_vec(),
+            rhs_shape.to_vec(),
+        ));
+    }
 
     // Get the last two dimensions for matrix multiplication
     let lhs_rows = lhs_shape[lhs_shape.len() - 2];
@@ -177,7 +187,7 @@ fn matmul_f32(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
-    output_shape: &Shape,
+    _output_shape: &Shape,
 ) -> Result<()> {
     let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
@@ -190,21 +200,14 @@ fn matmul_f32(
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
 
-    naive_matmul(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-    )
+    optimized_matmul_f32(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
 fn matmul_f64(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
-    output_shape: &Shape,
+    _output_shape: &Shape,
 ) -> Result<()> {
     let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
@@ -217,14 +220,7 @@ fn matmul_f64(
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
 
-    naive_matmul(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-    )
+    optimized_matmul_f64(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
 fn matmul_i32(
@@ -281,7 +277,7 @@ fn matmul_i64(
     )
 }
 
-/// Naive matrix multiplication implementation (O(n^3))
+/// Naive matrix multiplication implementation (O(n^3)) with batch support
 fn naive_matmul<T>(
     lhs_data: &[T],
     rhs_data: &[T],
@@ -291,36 +287,153 @@ fn naive_matmul<T>(
     _output_shape: &Shape,
 ) -> Result<()>
 where
-    T: Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + Default,
+    T: Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + Default + Send + Sync,
 {
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
 
-    let m = lhs_dims[lhs_dims.len() - 2]; // rows of lhs
-    let k = lhs_dims[lhs_dims.len() - 1]; // cols of lhs / rows of rhs
-    let n = rhs_dims[rhs_dims.len() - 1]; // cols of rhs
+    let m = lhs_dims[lhs_dims.len() - 2];
+    let k = lhs_dims[lhs_dims.len() - 1];
+    let n = rhs_dims[rhs_dims.len() - 1];
 
-    // For simplicity, we'll handle 2D matrices first
-    if lhs_shape.ndim() == 2 && rhs_shape.ndim() == 2 {
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = T::default();
-                for l in 0..k {
-                    let lhs_idx = i * k + l;
-                    let rhs_idx = l * n + j;
-                    sum = sum + lhs_data[lhs_idx] * rhs_data[rhs_idx];
+    output_data
+        .par_chunks_mut(m * n)
+        .enumerate()
+        .for_each(|(b, chunk)| {
+            let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
+            let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
+            chunk.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                for j in 0..n {
+                    let mut sum = T::default();
+                    for l in 0..k {
+                        let lhs_idx = i * k + l;
+                        let rhs_idx = l * n + j;
+                        sum = sum + lhs_batch[lhs_idx] * rhs_batch[rhs_idx];
+                    }
+                    row[j] = sum;
                 }
-                let output_idx = i * n + j;
-                output_data[output_idx] = sum;
-            }
-        }
-    } else {
-        // For higher-dimensional tensors, we need to handle batch dimensions
-        // For now, we'll return an error for non-2D matrices
-        return Err(MinitensorError::invalid_operation(
-            "Batched matrix multiplication not yet implemented",
-        ));
-    }
+                });
+        });
+
+    Ok(())
+}
+
+fn optimized_matmul_f32(
+    lhs_data: &[f32],
+    rhs_data: &[f32],
+    output_data: &mut [f32],
+    lhs_shape: &Shape,
+    rhs_shape: &Shape,
+) -> Result<()> {
+    let lhs_dims = lhs_shape.dims();
+    let rhs_dims = rhs_shape.dims();
+    let m = lhs_dims[lhs_dims.len() - 2];
+    let k = lhs_dims[lhs_dims.len() - 1];
+    let n = rhs_dims[rhs_dims.len() - 1];
+
+    output_data
+        .par_chunks_mut(m * n)
+        .enumerate()
+        .for_each(|(b, chunk)| {
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+
+            let a_ptr = a.as_ptr() as usize;
+            let r_ptr = r.as_ptr() as usize;
+            let c_ptr = chunk.as_mut_ptr() as usize;
+
+            let threads = rayon::current_num_threads();
+            let rows_per_thread = (m + threads - 1) / threads;
+
+            (0..threads).into_par_iter().for_each(move |t| {
+                let row_start = t * rows_per_thread;
+                if row_start >= m {
+                    return;
+                }
+                let rows = rows_per_thread.min(m - row_start);
+                let a_ptr = a_ptr as *const f32;
+                let r_ptr = r_ptr as *const f32;
+                let c_ptr = c_ptr as *mut f32;
+                unsafe {
+                    sgemm(
+                        rows,
+                        k,
+                        n,
+                        1.0,
+                        a_ptr.add(row_start * k),
+                        k as isize,
+                        1,
+                        r_ptr,
+                        n as isize,
+                        1,
+                        0.0,
+                        c_ptr.add(row_start * n),
+                        n as isize,
+                        1,
+                    );
+                }
+            });
+        });
+
+    Ok(())
+}
+
+fn optimized_matmul_f64(
+    lhs_data: &[f64],
+    rhs_data: &[f64],
+    output_data: &mut [f64],
+    lhs_shape: &Shape,
+    rhs_shape: &Shape,
+) -> Result<()> {
+    let lhs_dims = lhs_shape.dims();
+    let rhs_dims = rhs_shape.dims();
+    let m = lhs_dims[lhs_dims.len() - 2];
+    let k = lhs_dims[lhs_dims.len() - 1];
+    let n = rhs_dims[rhs_dims.len() - 1];
+
+    output_data
+        .par_chunks_mut(m * n)
+        .enumerate()
+        .for_each(|(b, chunk)| {
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+
+            let a_ptr = a.as_ptr() as usize;
+            let r_ptr = r.as_ptr() as usize;
+            let c_ptr = chunk.as_mut_ptr() as usize;
+
+            let threads = rayon::current_num_threads();
+            let rows_per_thread = (m + threads - 1) / threads;
+
+            (0..threads).into_par_iter().for_each(move |t| {
+                let row_start = t * rows_per_thread;
+                if row_start >= m {
+                    return;
+                }
+                let rows = rows_per_thread.min(m - row_start);
+                let a_ptr = a_ptr as *const f64;
+                let r_ptr = r_ptr as *const f64;
+                let c_ptr = c_ptr as *mut f64;
+                unsafe {
+                    dgemm(
+                        rows,
+                        k,
+                        n,
+                        1.0,
+                        a_ptr.add(row_start * k),
+                        k as isize,
+                        1,
+                        r_ptr,
+                        n as isize,
+                        1,
+                        0.0,
+                        c_ptr.add(row_start * n),
+                        n as isize,
+                        1,
+                    );
+                }
+            });
+        });
 
     Ok(())
 }
@@ -453,7 +566,7 @@ fn transpose_bool(
 }
 
 /// Generic transpose implementation
-fn transpose_generic<T: Copy>(
+fn transpose_generic<T: Copy + Send + Sync>(
     input_data: &[T],
     output_data: &mut [T],
     input_shape: &Shape,
@@ -462,32 +575,32 @@ fn transpose_generic<T: Copy>(
     dim1: usize,
 ) -> Result<()> {
     let input_strides = Strides::from_shape(input_shape);
+    let output_strides = Strides::from_shape(output_shape);
+    let in_strides = input_strides.as_slice().to_vec();
+    let out_strides = output_strides.as_slice().to_vec();
+    let out_dims = output_shape.dims().to_vec();
 
-    // For each element in the output tensor
-    for i in 0..output_shape.numel() {
-        // Convert linear index to multi-dimensional indices for output
-        let mut output_indices = vec![0; output_shape.ndim()];
-        let mut remaining = i;
-        for dim_idx in 0..output_shape.ndim() {
-            let stride = if dim_idx + 1 < output_shape.ndim() {
-                output_shape.dims()[dim_idx + 1..].iter().product::<usize>()
-            } else {
-                1
-            };
-            output_indices[dim_idx] = remaining / stride;
-            remaining %= stride;
-        }
-
-        // Create corresponding input indices by swapping the transposed dimensions
-        let mut input_indices = output_indices.clone();
-        input_indices.swap(dim0, dim1);
-
-        // Compute linear indices
-        let input_linear = input_strides.linear_index(&input_indices);
-
-        // Copy the data
-        output_data[i] = input_data[input_linear];
-    }
+    output_data
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let mut remaining = idx;
+            let mut input_linear = 0;
+            for dim in 0..out_dims.len() {
+                let stride = out_strides[dim];
+                let coord = remaining / stride;
+                remaining %= stride;
+                let in_dim = if dim == dim0 {
+                    dim1
+                } else if dim == dim1 {
+                    dim0
+                } else {
+                    dim
+                };
+                input_linear += coord * in_strides[in_dim];
+            }
+            *out = input_data[input_linear];
+        });
 
     Ok(())
 }
@@ -554,7 +667,8 @@ mod tests {
         device: Device,
     ) -> Tensor {
         let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros_on_device(shape_obj.numel(), DataType::Float32, device);
+        let mut tensor_data =
+            TensorData::zeros_on_device(shape_obj.numel(), DataType::Float32, device);
 
         if let Some(slice) = tensor_data.as_f32_slice_mut() {
             slice.copy_from_slice(&data);
@@ -640,9 +754,13 @@ mod tests {
 
     #[test]
     fn test_matmul_device_mismatch() {
-        let a = create_test_tensor_f32_on_device(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], Device::cpu());
-        let b =
-            create_test_tensor_f32_on_device(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2], Device::cuda(None));
+        let a =
+            create_test_tensor_f32_on_device(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], Device::cpu());
+        let b = create_test_tensor_f32_on_device(
+            vec![5.0, 6.0, 7.0, 8.0],
+            vec![2, 2],
+            Device::cuda(None),
+        );
 
         let result = matmul(&a, &b);
         assert!(result.is_err());

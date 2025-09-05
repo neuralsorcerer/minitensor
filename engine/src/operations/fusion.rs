@@ -9,6 +9,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -152,9 +153,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] + second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] + second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Add operation requires two inputs",
@@ -166,9 +168,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] - second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] - second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Sub operation requires two inputs",
@@ -180,9 +183,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] * second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] * second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Mul operation requires two inputs",
@@ -194,13 +198,17 @@ impl FusionSequence {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = if second_slice[i] == 0.0 {
-                            f32::INFINITY
-                        } else {
-                            input_slice[i] / second_slice[i]
-                        };
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let denom = second_slice[i];
+                            *out = if denom == 0.0 {
+                                f32::INFINITY
+                            } else {
+                                input_slice[i] / denom
+                            };
+                        });
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Div operation requires two inputs",
@@ -208,29 +216,36 @@ impl FusionSequence {
                 }
             }
             FusedOp::ReLU => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].max(0.0);
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].max(0.0));
             }
             FusedOp::Sigmoid => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = 1.0 / (1.0 + (-input_slice[i]).exp());
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| {
+                        *out = 1.0 / (1.0 + (-input_slice[i]).exp());
+                    });
             }
             FusedOp::Tanh => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].tanh();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].tanh());
             }
             FusedOp::Exp => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].exp();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].exp());
             }
             FusedOp::Log => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].ln();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].ln());
             }
         }
 
@@ -259,9 +274,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] + second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] + second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Add operation requires two inputs",
@@ -273,9 +289,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] - second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] - second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Sub operation requires two inputs",
@@ -287,9 +304,10 @@ impl FusionSequence {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = input_slice[i] * second_slice[i];
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| *out = input_slice[i] * second_slice[i]);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Mul operation requires two inputs",
@@ -301,13 +319,17 @@ impl FusionSequence {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
-                    for i in 0..input_slice.len() {
-                        output_slice[i] = if second_slice[i] == 0.0 {
-                            f64::INFINITY
-                        } else {
-                            input_slice[i] / second_slice[i]
-                        };
-                    }
+                    output_slice
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let denom = second_slice[i];
+                            *out = if denom == 0.0 {
+                                f64::INFINITY
+                            } else {
+                                input_slice[i] / denom
+                            };
+                        });
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Div operation requires two inputs",
@@ -315,29 +337,36 @@ impl FusionSequence {
                 }
             }
             FusedOp::ReLU => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].max(0.0);
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].max(0.0));
             }
             FusedOp::Sigmoid => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = 1.0 / (1.0 + (-input_slice[i]).exp());
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| {
+                        *out = 1.0 / (1.0 + (-input_slice[i]).exp());
+                    });
             }
             FusedOp::Tanh => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].tanh();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].tanh());
             }
             FusedOp::Exp => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].exp();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].exp());
             }
             FusedOp::Log => {
-                for i in 0..input_slice.len() {
-                    output_slice[i] = input_slice[i].ln();
-                }
+                output_slice
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, out)| *out = input_slice[i].ln());
             }
         }
 

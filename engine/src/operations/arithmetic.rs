@@ -14,6 +14,7 @@ use crate::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
+use rayon::prelude::*;
 
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -796,83 +797,83 @@ fn div_i64_direct(
 }
 
 /// Generic broadcasting binary operation
-fn broadcast_binary_op<T: Copy>(
+fn broadcast_binary_op<T, F>(
     lhs_data: &[T],
     rhs_data: &[T],
     output_data: &mut [T],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     output_shape: &Shape,
-    op: impl Fn(T, T) -> T,
-) -> Result<()> {
-    let output_dims = output_shape.dims();
-    let lhs_dims = lhs_shape.dims();
-    let rhs_dims = rhs_shape.dims();
+    op: F,
+) -> Result<()>
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> T + Send + Sync,
+{
+    let output_dims = output_shape.dims().to_vec();
+    let lhs_dims = lhs_shape.dims().to_vec();
+    let rhs_dims = rhs_shape.dims().to_vec();
 
-    // Use a simpler approach: iterate through each output element
-    // and compute the corresponding input indices directly
-    for output_idx in 0..output_shape.numel() {
-        // Convert linear output index to multi-dimensional coordinates
-        let mut output_coords = vec![0; output_dims.len()];
-        let mut temp_idx = output_idx;
+    output_data
+        .par_iter_mut()
+        .enumerate()
+        .try_for_each(|(output_idx, out)| -> Result<()> {
+            // Convert linear output index to multi-dimensional coordinates
+            let mut output_coords = vec![0; output_dims.len()];
+            let mut temp_idx = output_idx;
 
-        // Calculate coordinates from right to left (row-major order)
-        for i in (0..output_dims.len()).rev() {
-            output_coords[i] = temp_idx % output_dims[i];
-            temp_idx /= output_dims[i];
-        }
-
-        // Map output coordinates to lhs coordinates (with broadcasting)
-        let mut lhs_idx = 0;
-        let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
-
-        for i in 0..lhs_dims.len() {
-            let output_coord_idx = i + lhs_offset;
-            let coord = if lhs_dims[i] == 1 {
-                0 // Broadcast this dimension
-            } else {
-                output_coords[output_coord_idx]
-            };
-
-            // Calculate linear index using row-major order
-            let mut stride = 1;
-            for j in (i + 1)..lhs_dims.len() {
-                stride *= lhs_dims[j];
+            for i in (0..output_dims.len()).rev() {
+                output_coords[i] = temp_idx % output_dims[i];
+                temp_idx /= output_dims[i];
             }
-            lhs_idx += coord * stride;
-        }
 
-        // Map output coordinates to rhs coordinates (with broadcasting)
-        let mut rhs_idx = 0;
-        let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
+            // Map output coordinates to lhs coordinates (with broadcasting)
+            let mut lhs_idx = 0;
+            let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
 
-        for i in 0..rhs_dims.len() {
-            let output_coord_idx = i + rhs_offset;
-            let coord = if rhs_dims[i] == 1 {
-                0 // Broadcast this dimension
-            } else {
-                output_coords[output_coord_idx]
-            };
+            for i in 0..lhs_dims.len() {
+                let output_coord_idx = i + lhs_offset;
+                let coord = if lhs_dims[i] == 1 {
+                    0
+                } else {
+                    output_coords[output_coord_idx]
+                };
 
-            // Calculate linear index using row-major order
-            let mut stride = 1;
-            for j in (i + 1)..rhs_dims.len() {
-                stride *= rhs_dims[j];
+                let mut stride = 1;
+                for j in (i + 1)..lhs_dims.len() {
+                    stride *= lhs_dims[j];
+                }
+                lhs_idx += coord * stride;
             }
-            rhs_idx += coord * stride;
-        }
 
-        // Bounds check
-        if lhs_idx >= lhs_data.len() || rhs_idx >= rhs_data.len() {
-            return Err(crate::error::MinitensorError::invalid_operation(
-                &format!("Index out of bounds in broadcasting: lhs_idx={}, rhs_idx={}, lhs_len={}, rhs_len={}, output_coords={:?}", 
-                    lhs_idx, rhs_idx, lhs_data.len(), rhs_data.len(), output_coords)
-            ));
-        }
+            // Map output coordinates to rhs coordinates (with broadcasting)
+            let mut rhs_idx = 0;
+            let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
 
-        // Perform the operation
-        output_data[output_idx] = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
-    }
+            for i in 0..rhs_dims.len() {
+                let output_coord_idx = i + rhs_offset;
+                let coord = if rhs_dims[i] == 1 {
+                    0
+                } else {
+                    output_coords[output_coord_idx]
+                };
+
+                let mut stride = 1;
+                for j in (i + 1)..rhs_dims.len() {
+                    stride *= rhs_dims[j];
+                }
+                rhs_idx += coord * stride;
+            }
+
+            if lhs_idx >= lhs_data.len() || rhs_idx >= rhs_data.len() {
+                return Err(MinitensorError::invalid_operation(
+                    "Index out of bounds in broadcasting",
+                ));
+            }
+
+            *out = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
+            Ok(())
+        })?;
 
     Ok(())
 }

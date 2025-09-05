@@ -8,6 +8,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Perform 2D convolution on the input tensor.
@@ -108,8 +109,12 @@ pub fn conv2d(
             let mut output_vec =
                 vec![0f32; batch_size * out_channels * output_height * output_width];
 
-            for n in 0..batch_size {
-                for oc in 0..out_channels {
+            output_vec
+                .par_chunks_mut(output_height * output_width)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let n = chunk_idx / out_channels;
+                    let oc = chunk_idx % out_channels;
                     for oh in 0..output_height {
                         for ow in 0..output_width {
                             let mut sum = 0f32;
@@ -144,13 +149,10 @@ pub fn conv2d(
                             if let Some(bias) = bias_data {
                                 sum += bias[oc];
                             }
-                            let out_idx =
-                                ((n * out_channels + oc) * output_height + oh) * output_width + ow;
-                            output_vec[out_idx] = sum;
+                            out_chunk[oh * output_width + ow] = sum;
                         }
                     }
-                }
-            }
+                });
 
             let requires_grad = input.requires_grad()
                 || weight.requires_grad()

@@ -9,6 +9,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Sum reduction along specified dimensions
@@ -162,31 +163,31 @@ fn all_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
             .data()
             .as_f32_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?
-            .iter()
+            .par_iter()
             .all(|&x| x != 0.0),
         DataType::Float64 => tensor
             .data()
             .as_f64_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?
-            .iter()
+            .par_iter()
             .all(|&x| x != 0.0),
         DataType::Int32 => tensor
             .data()
             .as_i32_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?
-            .iter()
+            .par_iter()
             .all(|&x| x != 0),
         DataType::Int64 => tensor
             .data()
             .as_i64_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?
-            .iter()
+            .par_iter()
             .all(|&x| x != 0),
         DataType::Bool => tensor
             .data()
             .as_bool_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected bool data"))?
-            .iter()
+            .par_iter()
             .all(|&x| x),
     };
     out_slice[0] = all_true;
@@ -214,31 +215,31 @@ fn any_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
             .data()
             .as_f32_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?
-            .iter()
+            .par_iter()
             .any(|&x| x != 0.0),
         DataType::Float64 => tensor
             .data()
             .as_f64_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?
-            .iter()
+            .par_iter()
             .any(|&x| x != 0.0),
         DataType::Int32 => tensor
             .data()
             .as_i32_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?
-            .iter()
+            .par_iter()
             .any(|&x| x != 0),
         DataType::Int64 => tensor
             .data()
             .as_i64_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?
-            .iter()
+            .par_iter()
             .any(|&x| x != 0),
         DataType::Bool => tensor
             .data()
             .as_bool_slice()
             .ok_or_else(|| MinitensorError::internal_error("Expected bool data"))?
-            .iter()
+            .par_iter()
             .any(|&x| x),
     };
     out_slice[0] = any_true;
@@ -268,7 +269,7 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
         TensorData::zeros_on_device(output_shape_obj.numel(), DataType::Bool, tensor.device());
 
     let dim_size = input_shape[dim];
-    let outer = input_shape[..dim].iter().product::<usize>();
+    let _outer = input_shape[..dim].iter().product::<usize>();
     let inner = input_shape[dim + 1..].iter().product::<usize>();
     let outer_stride = dim_size * inner;
 
@@ -281,19 +282,19 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = true;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] == 0.0 {
-                            val = false;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = true;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] == 0.0 {
+                        val = false;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Float64 => {
             let input = tensor
@@ -303,19 +304,19 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = true;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] == 0.0 {
-                            val = false;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = true;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] == 0.0 {
+                        val = false;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Int32 => {
             let input = tensor
@@ -325,19 +326,19 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = true;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] == 0 {
-                            val = false;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = true;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] == 0 {
+                        val = false;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Int64 => {
             let input = tensor
@@ -347,19 +348,19 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = true;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] == 0 {
-                            val = false;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = true;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] == 0 {
+                        val = false;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Bool => {
             let input = tensor
@@ -369,19 +370,19 @@ fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = true;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if !input[idx] {
-                            val = false;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = true;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if !input[in_idx] {
+                        val = false;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
     }
 
@@ -411,7 +412,7 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
         TensorData::zeros_on_device(output_shape_obj.numel(), DataType::Bool, tensor.device());
 
     let dim_size = input_shape[dim];
-    let outer = input_shape[..dim].iter().product::<usize>();
+    let _outer = input_shape[..dim].iter().product::<usize>();
     let inner = input_shape[dim + 1..].iter().product::<usize>();
     let outer_stride = dim_size * inner;
 
@@ -424,19 +425,19 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] != 0.0 {
-                            val = true;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = false;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] != 0.0 {
+                        val = true;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Float64 => {
             let input = tensor
@@ -446,19 +447,19 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] != 0.0 {
-                            val = true;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = false;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] != 0.0 {
+                        val = true;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Int32 => {
             let input = tensor
@@ -468,19 +469,19 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] != 0 {
-                            val = true;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = false;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] != 0 {
+                        val = true;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Int64 => {
             let input = tensor
@@ -490,19 +491,19 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] != 0 {
-                            val = true;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = false;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] != 0 {
+                        val = true;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
         DataType::Bool => {
             let input = tensor
@@ -512,19 +513,19 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..outer {
-                for r in 0..inner {
-                    let mut val = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        if input[idx] {
-                            val = true;
-                            break;
-                        }
+            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut val = false;
+                for d in 0..dim_size {
+                    let in_idx = o * outer_stride + d * inner + r;
+                    if input[in_idx] {
+                        val = true;
+                        break;
                     }
-                    output[o * inner + r] = val;
                 }
-            }
+                *out = val;
+            });
         }
     }
 
@@ -702,7 +703,7 @@ fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let sum: f32 = data.iter().sum();
+    let sum: f32 = data.par_iter().sum();
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -718,7 +719,7 @@ fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let sum: f64 = data.iter().sum();
+    let sum: f64 = data.par_iter().sum();
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -734,7 +735,7 @@ fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let sum: i32 = data.iter().sum();
+    let sum: i32 = data.par_iter().sum();
 
     let result_slice = result_data
         .as_i32_slice_mut()
@@ -750,7 +751,7 @@ fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let sum: i64 = data.iter().sum();
+    let sum: i64 = data.par_iter().sum();
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -979,7 +980,10 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let max_val = data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let max_val = data
+        .par_iter()
+        .cloned()
+        .reduce(|| f32::NEG_INFINITY, |a, b| a.max(b));
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -995,7 +999,10 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let max_val = data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let max_val = data
+        .par_iter()
+        .cloned()
+        .reduce(|| f64::NEG_INFINITY, |a, b| a.max(b));
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -1011,7 +1018,7 @@ fn max_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let max_val = *data.iter().max().unwrap_or(&i32::MIN);
+    let max_val = data.par_iter().copied().max().unwrap_or(i32::MIN);
 
     let result_slice = result_data
         .as_i32_slice_mut()
@@ -1027,7 +1034,7 @@ fn max_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let max_val = *data.iter().max().unwrap_or(&i64::MIN);
+    let max_val = data.par_iter().copied().max().unwrap_or(i64::MIN);
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1043,7 +1050,7 @@ fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let max_val = data.iter().any(|&x| x);
+    let max_val = data.par_iter().any(|&x| x);
 
     let result_slice = result_data
         .as_bool_slice_mut()
@@ -1060,7 +1067,10 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let min_val = data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+    let min_val = data
+        .par_iter()
+        .cloned()
+        .reduce(|| f32::INFINITY, |a, b| a.min(b));
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -1076,7 +1086,10 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let min_val = data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let min_val = data
+        .par_iter()
+        .cloned()
+        .reduce(|| f64::INFINITY, |a, b| a.min(b));
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -1092,7 +1105,7 @@ fn min_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let min_val = *data.iter().min().unwrap_or(&i32::MAX);
+    let min_val = data.par_iter().copied().min().unwrap_or(i32::MAX);
 
     let result_slice = result_data
         .as_i32_slice_mut()
@@ -1108,7 +1121,7 @@ fn min_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let min_val = *data.iter().min().unwrap_or(&i64::MAX);
+    let min_val = data.par_iter().copied().min().unwrap_or(i64::MAX);
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1124,7 +1137,7 @@ fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let min_val = data.iter().all(|&x| x);
+    let min_val = data.par_iter().all(|&x| x);
 
     let result_slice = result_data
         .as_bool_slice_mut()
@@ -1141,16 +1154,16 @@ fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let (argmax_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, f32::NEG_INFINITY), |(max_idx, max_val), (idx, &val)| {
-                if val > max_val {
-                    (idx, val)
-                } else {
-                    (max_idx, max_val)
-                }
-            });
+    let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, f32::NEG_INFINITY),
+        |(i1, v1), (i2, v2)| {
+            if v1 >= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1166,16 +1179,16 @@ fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let (argmax_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, f64::NEG_INFINITY), |(max_idx, max_val), (idx, &val)| {
-                if val > max_val {
-                    (idx, val)
-                } else {
-                    (max_idx, max_val)
-                }
-            });
+    let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, f64::NEG_INFINITY),
+        |(i1, v1), (i2, v2)| {
+            if v1 >= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1191,16 +1204,16 @@ fn argmax_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let (argmax_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, i32::MIN), |(max_idx, max_val), (idx, &val)| {
-                if val > max_val {
-                    (idx, val)
-                } else {
-                    (max_idx, max_val)
-                }
-            });
+    let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, i32::MIN),
+        |(i1, v1), (i2, v2)| {
+            if v1 >= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1216,16 +1229,16 @@ fn argmax_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let (argmax_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, i64::MIN), |(max_idx, max_val), (idx, &val)| {
-                if val > max_val {
-                    (idx, val)
-                } else {
-                    (max_idx, max_val)
-                }
-            });
+    let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, i64::MIN),
+        |(i1, v1), (i2, v2)| {
+            if v1 >= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1258,16 +1271,16 @@ fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let (argmin_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, f32::INFINITY), |(min_idx, min_val), (idx, &val)| {
-                if val < min_val {
-                    (idx, val)
-                } else {
-                    (min_idx, min_val)
-                }
-            });
+    let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, f32::INFINITY),
+        |(i1, v1), (i2, v2)| {
+            if v1 <= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1283,16 +1296,16 @@ fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let (argmin_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, f64::INFINITY), |(min_idx, min_val), (idx, &val)| {
-                if val < min_val {
-                    (idx, val)
-                } else {
-                    (min_idx, min_val)
-                }
-            });
+    let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, f64::INFINITY),
+        |(i1, v1), (i2, v2)| {
+            if v1 <= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1308,16 +1321,16 @@ fn argmin_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let (argmin_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, i32::MAX), |(min_idx, min_val), (idx, &val)| {
-                if val < min_val {
-                    (idx, val)
-                } else {
-                    (min_idx, min_val)
-                }
-            });
+    let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, i32::MAX),
+        |(i1, v1), (i2, v2)| {
+            if v1 <= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1333,16 +1346,16 @@ fn argmin_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let (argmin_idx, _) =
-        data.iter()
-            .enumerate()
-            .fold((0, i64::MAX), |(min_idx, min_val), (idx, &val)| {
-                if val < min_val {
-                    (idx, val)
-                } else {
-                    (min_idx, min_val)
-                }
-            });
+    let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
+        || (0, i64::MAX),
+        |(i1, v1), (i2, v2)| {
+            if v1 <= v2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
+        },
+    );
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -1358,7 +1371,7 @@ fn argmin_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> 
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let argmin_idx = data.iter().position(|&x| !x).unwrap_or(0);
+    let argmin_idx = data.par_iter().position_first(|&x| !x).unwrap_or(0);
 
     let result_slice = result_data
         .as_i64_slice_mut()

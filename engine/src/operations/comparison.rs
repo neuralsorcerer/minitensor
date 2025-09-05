@@ -8,64 +8,73 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
-fn broadcast_compare_op<T: Copy>(
+fn compute_strides(dims: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1; dims.len()];
+    for i in (0..dims.len()).rev() {
+        if i + 1 < dims.len() {
+            strides[i] = strides[i + 1] * dims[i + 1];
+        }
+    }
+    strides
+}
+
+fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send>(
     lhs_data: &[T],
     rhs_data: &[T],
     output_data: &mut [bool],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     output_shape: &Shape,
-    op: impl Fn(T, T) -> bool,
+    op: F,
 ) -> Result<()> {
-    let output_dims = output_shape.dims();
-    let lhs_dims = lhs_shape.dims();
-    let rhs_dims = rhs_shape.dims();
+    let output_dims = output_shape.dims().to_vec();
+    let lhs_dims = lhs_shape.dims().to_vec();
+    let rhs_dims = rhs_shape.dims().to_vec();
 
-    for output_idx in 0..output_shape.numel() {
-        // Convert linear index to coordinates
-        let mut output_coords = vec![0; output_dims.len()];
-        let mut tmp = output_idx;
-        for i in (0..output_dims.len()).rev() {
-            output_coords[i] = tmp % output_dims[i];
-            tmp /= output_dims[i];
-        }
+    let lhs_strides = compute_strides(&lhs_dims);
+    let rhs_strides = compute_strides(&rhs_dims);
+    let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
+    let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
 
-        // Map to lhs index
-        let mut lhs_idx = 0;
-        let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
-        for i in 0..lhs_dims.len() {
-            let coord = if lhs_dims[i] == 1 {
-                0
-            } else {
-                output_coords[i + lhs_offset]
-            };
-            let mut stride = 1;
-            for j in (i + 1)..lhs_dims.len() {
-                stride *= lhs_dims[j];
+    output_data
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(output_idx, out)| {
+            // Convert linear index to coordinates
+            let mut coords = vec![0; output_dims.len()];
+            let mut tmp = output_idx;
+            for i in (0..output_dims.len()).rev() {
+                coords[i] = tmp % output_dims[i];
+                tmp /= output_dims[i];
             }
-            lhs_idx += coord * stride;
-        }
 
-        // Map to rhs index
-        let mut rhs_idx = 0;
-        let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
-        for i in 0..rhs_dims.len() {
-            let coord = if rhs_dims[i] == 1 {
-                0
-            } else {
-                output_coords[i + rhs_offset]
-            };
-            let mut stride = 1;
-            for j in (i + 1)..rhs_dims.len() {
-                stride *= rhs_dims[j];
+            // Map to lhs index
+            let mut lhs_idx = 0;
+            for i in 0..lhs_dims.len() {
+                let coord = if lhs_dims[i] == 1 {
+                    0
+                } else {
+                    coords[i + lhs_offset]
+                };
+                lhs_idx += coord * lhs_strides[i];
             }
-            rhs_idx += coord * stride;
-        }
 
-        output_data[output_idx] = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
-    }
+            // Map to rhs index
+            let mut rhs_idx = 0;
+            for i in 0..rhs_dims.len() {
+                let coord = if rhs_dims[i] == 1 {
+                    0
+                } else {
+                    coords[i + rhs_offset]
+                };
+                rhs_idx += coord * rhs_strides[i];
+            }
+
+            *out = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
+        });
 
     Ok(())
 }
@@ -75,7 +84,7 @@ fn cmp_f32(
     rhs: &Tensor,
     output_data: &mut TensorData,
     output_shape: &Shape,
-    op: impl Fn(f32, f32) -> bool,
+    op: impl Fn(f32, f32) -> bool + Sync + Send,
 ) -> Result<()> {
     let lhs_slice = lhs.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
@@ -102,7 +111,7 @@ fn cmp_f64(
     rhs: &Tensor,
     output_data: &mut TensorData,
     output_shape: &Shape,
-    op: impl Fn(f64, f64) -> bool,
+    op: impl Fn(f64, f64) -> bool + Sync + Send,
 ) -> Result<()> {
     let lhs_slice = lhs.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
@@ -129,7 +138,7 @@ fn cmp_i32(
     rhs: &Tensor,
     output_data: &mut TensorData,
     output_shape: &Shape,
-    op: impl Fn(i32, i32) -> bool,
+    op: impl Fn(i32, i32) -> bool + Sync + Send,
 ) -> Result<()> {
     let lhs_slice = lhs.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
@@ -156,7 +165,7 @@ fn cmp_i64(
     rhs: &Tensor,
     output_data: &mut TensorData,
     output_shape: &Shape,
-    op: impl Fn(i64, i64) -> bool,
+    op: impl Fn(i64, i64) -> bool + Sync + Send,
 ) -> Result<()> {
     let lhs_slice = lhs.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
@@ -183,7 +192,7 @@ fn cmp_bool(
     rhs: &Tensor,
     output_data: &mut TensorData,
     output_shape: &Shape,
-    op: impl Fn(bool, bool) -> bool,
+    op: impl Fn(bool, bool) -> bool + Sync + Send,
 ) -> Result<()> {
     let lhs_slice = lhs.data().as_bool_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
