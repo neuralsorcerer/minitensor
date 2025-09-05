@@ -1,9 +1,11 @@
-<h1 align="center">
-MiniTensor
-</h1>
-<h4 align="center">
+<div align="center">
+
+![MiniTensor Logo](docs/_static/img/minitensor-dark-small.png)
+
+</div>
+<h3 align="center">
 A lightweight, high-performance deep learning library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
-</h4>
+</h3>
 
 ---
 
