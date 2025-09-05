@@ -18,9 +18,6 @@ A lightweight, high-performance deep learning library inspired by <a href="https
 
 </div>
 
-> [!CAUTION]
-> This library is in active development stage. APIs may change or break. Use carefully.
-
 ## Features
 
 - **High Performance**: Rust backend for maximum speed and memory efficiency
