@@ -337,42 +337,24 @@ fn optimized_matmul_f32(
         .for_each(|(b, chunk)| {
             let a = &lhs_data[b * m * k..(b + 1) * m * k];
             let r = &rhs_data[b * k * n..(b + 1) * k * n];
-
-            let a_ptr = a.as_ptr() as usize;
-            let r_ptr = r.as_ptr() as usize;
-            let c_ptr = chunk.as_mut_ptr() as usize;
-
-            let threads = rayon::current_num_threads();
-            let rows_per_thread = (m + threads - 1) / threads;
-
-            (0..threads).into_par_iter().for_each(move |t| {
-                let row_start = t * rows_per_thread;
-                if row_start >= m {
-                    return;
-                }
-                let rows = rows_per_thread.min(m - row_start);
-                let a_ptr = a_ptr as *const f32;
-                let r_ptr = r_ptr as *const f32;
-                let c_ptr = c_ptr as *mut f32;
-                unsafe {
-                    sgemm(
-                        rows,
-                        k,
-                        n,
-                        1.0,
-                        a_ptr.add(row_start * k),
-                        k as isize,
-                        1,
-                        r_ptr,
-                        n as isize,
-                        1,
-                        0.0,
-                        c_ptr.add(row_start * n),
-                        n as isize,
-                        1,
-                    );
-                }
-            });
+            unsafe {
+                sgemm(
+                    m,
+                    k,
+                    n,
+                    1.0,
+                    a.as_ptr(),
+                    k as isize,
+                    1,
+                    r.as_ptr(),
+                    n as isize,
+                    1,
+                    0.0,
+                    chunk.as_mut_ptr(),
+                    n as isize,
+                    1,
+                );
+            }
         });
 
     Ok(())
@@ -397,42 +379,24 @@ fn optimized_matmul_f64(
         .for_each(|(b, chunk)| {
             let a = &lhs_data[b * m * k..(b + 1) * m * k];
             let r = &rhs_data[b * k * n..(b + 1) * k * n];
-
-            let a_ptr = a.as_ptr() as usize;
-            let r_ptr = r.as_ptr() as usize;
-            let c_ptr = chunk.as_mut_ptr() as usize;
-
-            let threads = rayon::current_num_threads();
-            let rows_per_thread = (m + threads - 1) / threads;
-
-            (0..threads).into_par_iter().for_each(move |t| {
-                let row_start = t * rows_per_thread;
-                if row_start >= m {
-                    return;
-                }
-                let rows = rows_per_thread.min(m - row_start);
-                let a_ptr = a_ptr as *const f64;
-                let r_ptr = r_ptr as *const f64;
-                let c_ptr = c_ptr as *mut f64;
-                unsafe {
-                    dgemm(
-                        rows,
-                        k,
-                        n,
-                        1.0,
-                        a_ptr.add(row_start * k),
-                        k as isize,
-                        1,
-                        r_ptr,
-                        n as isize,
-                        1,
-                        0.0,
-                        c_ptr.add(row_start * n),
-                        n as isize,
-                        1,
-                    );
-                }
-            });
+            unsafe {
+                dgemm(
+                    m,
+                    k,
+                    n,
+                    1.0,
+                    a.as_ptr(),
+                    k as isize,
+                    1,
+                    r.as_ptr(),
+                    n as isize,
+                    1,
+                    0.0,
+                    chunk.as_mut_ptr(),
+                    n as isize,
+                    1,
+                );
+            }
         });
 
     Ok(())

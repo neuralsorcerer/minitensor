@@ -6,20 +6,10 @@
 
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use std::sync::Arc;
-
-fn compute_strides(dims: &[usize]) -> Vec<usize> {
-    let mut strides = vec![1; dims.len()];
-    for i in (0..dims.len()).rev() {
-        if i + 1 < dims.len() {
-            strides[i] = strides[i + 1] * dims[i + 1];
-        }
-    }
-    strides
-}
 
 fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send>(
     lhs_data: &[T],
@@ -30,50 +20,67 @@ fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send
     output_shape: &Shape,
     op: F,
 ) -> Result<()> {
-    let output_dims = output_shape.dims().to_vec();
-    let lhs_dims = lhs_shape.dims().to_vec();
-    let rhs_dims = rhs_shape.dims().to_vec();
+    let output_dims = output_shape.dims();
+    let lhs_dims = lhs_shape.dims();
+    let rhs_dims = rhs_shape.dims();
+    let rank = output_dims.len();
 
-    let lhs_strides = compute_strides(&lhs_dims);
-    let rhs_strides = compute_strides(&rhs_dims);
-    let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
-    let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
+    let lhs_contiguous = Strides::from_shape(lhs_shape);
+    let rhs_contiguous = Strides::from_shape(rhs_shape);
+    let lhs_strides = lhs_contiguous.as_slice();
+    let rhs_strides = rhs_contiguous.as_slice();
 
+    let mut lhs_aligned = vec![0usize; rank];
+    let mut rhs_aligned = vec![0usize; rank];
+
+    let lhs_offset = rank.saturating_sub(lhs_dims.len());
+    for (i, &dim) in lhs_dims.iter().enumerate() {
+        lhs_aligned[lhs_offset + i] = if dim == 1 { 0 } else { lhs_strides[i] };
+    }
+
+    let rhs_offset = rank.saturating_sub(rhs_dims.len());
+    for (i, &dim) in rhs_dims.iter().enumerate() {
+        rhs_aligned[rhs_offset + i] = if dim == 1 { 0 } else { rhs_strides[i] };
+    }
+
+    const CHUNK: usize = 1024;
     output_data
-        .par_iter_mut()
+        .par_chunks_mut(CHUNK)
         .enumerate()
-        .for_each(|(output_idx, out)| {
-            // Convert linear index to coordinates
-            let mut coords = vec![0; output_dims.len()];
-            let mut tmp = output_idx;
-            for i in (0..output_dims.len()).rev() {
-                coords[i] = tmp % output_dims[i];
+        .for_each(|(chunk_idx, out_chunk)| {
+            let start = chunk_idx * CHUNK;
+            let mut coord = vec![0usize; rank];
+            let mut tmp = start;
+            for i in (0..rank).rev() {
+                coord[i] = tmp % output_dims[i];
                 tmp /= output_dims[i];
             }
 
-            // Map to lhs index
-            let mut lhs_idx = 0;
-            for i in 0..lhs_dims.len() {
-                let coord = if lhs_dims[i] == 1 {
-                    0
-                } else {
-                    coords[i + lhs_offset]
-                };
-                lhs_idx += coord * lhs_strides[i];
+            let mut lhs_idx = 0usize;
+            let mut rhs_idx = 0usize;
+            for i in 0..rank {
+                lhs_idx += coord[i] * lhs_aligned[i];
+                rhs_idx += coord[i] * rhs_aligned[i];
             }
 
-            // Map to rhs index
-            let mut rhs_idx = 0;
-            for i in 0..rhs_dims.len() {
-                let coord = if rhs_dims[i] == 1 {
-                    0
-                } else {
-                    coords[i + rhs_offset]
-                };
-                rhs_idx += coord * rhs_strides[i];
+            let lhs_ptr = lhs_data.as_ptr();
+            let rhs_ptr = rhs_data.as_ptr();
+            for out in out_chunk.iter_mut() {
+                unsafe {
+                    *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
+                }
+                for i in (0..rank).rev() {
+                    coord[i] += 1;
+                    lhs_idx += lhs_aligned[i];
+                    rhs_idx += rhs_aligned[i];
+                    if coord[i] < output_dims[i] {
+                        break;
+                    }
+                    coord[i] = 0;
+                    lhs_idx -= lhs_aligned[i] * output_dims[i];
+                    rhs_idx -= rhs_aligned[i] * output_dims[i];
+                }
             }
-
-            *out = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
         });
 
     Ok(())
@@ -306,25 +313,13 @@ mod tests {
     fn tensor_from_vec_i32(data: Vec<i32>) -> Tensor {
         let shape = Shape::new(vec![data.len()]);
         let data = TensorData::from_vec_i32(data, Device::cpu());
-        Tensor::new(
-            Arc::new(data),
-            shape,
-            DataType::Int32,
-            Device::cpu(),
-            false,
-        )
+        Tensor::new(Arc::new(data), shape, DataType::Int32, Device::cpu(), false)
     }
 
     fn tensor_from_vec_bool(data: Vec<bool>) -> Tensor {
         let shape = Shape::new(vec![data.len()]);
         let data = TensorData::from_vec_bool(data, Device::cpu());
-        Tensor::new(
-            Arc::new(data),
-            shape,
-            DataType::Bool,
-            Device::cpu(),
-            false,
-        )
+        Tensor::new(Arc::new(data), shape, DataType::Bool, Device::cpu(), false)
     }
 
     #[test]

@@ -813,31 +813,34 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     let input_shape = tensor.shape().dims();
     let _dim_size = input_shape[dim];
 
-    // Simple implementation for 2D case
     if tensor.ndim() == 2 {
         let rows = input_shape[0];
         let cols = input_shape[1];
         if dim == 0 {
-            // Sum along rows (result has shape [cols])
-            for j in 0..cols {
-                let mut sum = 0.0;
-                for i in 0..rows {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[j] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(j, out)| {
+                    let mut acc = 0.0f32;
+                    for i in 0..rows {
+                        unsafe { acc += *input_data.get_unchecked(i * cols + j); }
+                    }
+                    *out = acc;
+                });
         } else {
-            // Sum along columns (result has shape [rows])
-            for i in 0..rows {
-                let mut sum = 0.0;
-                for j in 0..cols {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[i] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(i, out)| {
+                    let mut acc = 0.0f32;
+                    let start = i * cols;
+                    for j in 0..cols {
+                        unsafe { acc += *input_data.get_unchecked(start + j); }
+                    }
+                    *out = acc;
+                });
         }
     } else {
-        // For higher dimensions, use a more general approach
         return Err(MinitensorError::not_implemented(
             "Sum along dimension for >2D tensors not yet implemented",
         ));
@@ -859,26 +862,32 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     let input_shape = tensor.shape().dims();
     let _dim_size = input_shape[dim];
 
-    // Simple implementation for 2D case
     if tensor.ndim() == 2 {
         let rows = input_shape[0];
         let cols = input_shape[1];
         if dim == 0 {
-            for j in 0..cols {
-                let mut sum = 0.0;
-                for i in 0..rows {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[j] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(j, out)| {
+                    let mut acc = 0.0f64;
+                    for i in 0..rows {
+                        unsafe { acc += *input_data.get_unchecked(i * cols + j); }
+                    }
+                    *out = acc;
+                });
         } else {
-            for i in 0..rows {
-                let mut sum = 0.0;
-                for j in 0..cols {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[i] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(i, out)| {
+                    let mut acc = 0.0f64;
+                    let start = i * cols;
+                    for j in 0..cols {
+                        unsafe { acc += *input_data.get_unchecked(start + j); }
+                    }
+                    *out = acc;
+                });
         }
     } else {
         return Err(MinitensorError::not_implemented(
@@ -906,21 +915,28 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         let rows = input_shape[0];
         let cols = input_shape[1];
         if dim == 0 {
-            for j in 0..cols {
-                let mut sum = 0;
-                for i in 0..rows {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[j] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(j, out)| {
+                    let mut acc = 0i32;
+                    for i in 0..rows {
+                        unsafe { acc += *input_data.get_unchecked(i * cols + j); }
+                    }
+                    *out = acc;
+                });
         } else {
-            for i in 0..rows {
-                let mut sum = 0;
-                for j in 0..cols {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[i] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(i, out)| {
+                    let mut acc = 0i32;
+                    let start = i * cols;
+                    for j in 0..cols {
+                        unsafe { acc += *input_data.get_unchecked(start + j); }
+                    }
+                    *out = acc;
+                });
         }
     } else {
         return Err(MinitensorError::not_implemented(
@@ -948,21 +964,28 @@ fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         let rows = input_shape[0];
         let cols = input_shape[1];
         if dim == 0 {
-            for j in 0..cols {
-                let mut sum = 0;
-                for i in 0..rows {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[j] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(j, out)| {
+                    let mut acc = 0i64;
+                    for i in 0..rows {
+                        unsafe { acc += *input_data.get_unchecked(i * cols + j); }
+                    }
+                    *out = acc;
+                });
         } else {
-            for i in 0..rows {
-                let mut sum = 0;
-                for j in 0..cols {
-                    sum += input_data[i * cols + j];
-                }
-                result_slice[i] = sum;
-            }
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(move |(i, out)| {
+                    let mut acc = 0i64;
+                    let start = i * cols;
+                    for j in 0..cols {
+                        unsafe { acc += *input_data.get_unchecked(start + j); }
+                    }
+                    *out = acc;
+                })
         }
     } else {
         return Err(MinitensorError::not_implemented(

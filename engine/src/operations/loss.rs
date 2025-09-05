@@ -16,7 +16,10 @@ use crate::{
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
+
+const CHUNK: usize = 1024;
 
 /// Mean Squared Error (MSE) loss function
 ///
@@ -257,12 +260,7 @@ pub fn cross_entropy(
     }
 
     // Flatten all but the class dimension
-    let flat_size: usize = pred
-        .shape()
-        .dims()
-        .iter()
-        .take(ndim - 1)
-        .product();
+    let flat_size: usize = pred.shape().dims().iter().take(ndim - 1).product();
     let classes = pred.shape().dims()[ndim - 1];
     let pred_2d = pred.reshape(Shape::new(vec![flat_size, classes]))?;
     let tgt_flat = if tgt.ndim() == ndim {
@@ -678,10 +676,7 @@ fn validate_classification_inputs(
     Ok(())
 }
 
-fn prepare_classification_targets(
-    predictions: &Tensor,
-    targets: &Tensor,
-) -> Result<Tensor> {
+fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
     if targets.ndim() + 1 == predictions.ndim() {
         let num_classes = predictions.size(predictions.ndim() - 1)? as usize;
         let total = targets.numel();
@@ -836,15 +831,23 @@ fn sign(tensor: &Tensor) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f32 slice from output")
             })?;
 
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = if val > 0.0 {
-                    1.0
-                } else if val < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(input_data.par_chunks(CHUNK))
+                .for_each(|(out, inp)| unsafe {
+                    let in_ptr = inp.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        let v = *in_ptr.add(i);
+                        *out_ptr.add(i) = if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                });
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
@@ -854,15 +857,23 @@ fn sign(tensor: &Tensor) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
 
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = if val > 0.0 {
-                    1.0
-                } else if val < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(input_data.par_chunks(CHUNK))
+                .for_each(|(out, inp)| unsafe {
+                    let in_ptr = inp.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        let v = *in_ptr.add(i);
+                        *out_ptr.add(i) = if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                });
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
@@ -894,7 +905,17 @@ fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f32 slice from output")
             })?;
 
-            let sum: f32 = input_data.iter().sum();
+            let sum: f32 = input_data
+                .par_chunks(CHUNK)
+                .map(|chunk| unsafe {
+                    let mut acc = 0f32;
+                    let ptr = chunk.as_ptr();
+                    for i in 0..chunk.len() {
+                        acc += *ptr.add(i);
+                    }
+                    acc
+                })
+                .sum();
             output_slice[0] = sum;
         }
         DataType::Float64 => {
@@ -905,7 +926,17 @@ fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
 
-            let sum: f64 = input_data.iter().sum();
+            let sum: f64 = input_data
+                .par_chunks(CHUNK)
+                .map(|chunk| unsafe {
+                    let mut acc = 0f64;
+                    let ptr = chunk.as_ptr();
+                    for i in 0..chunk.len() {
+                        acc += *ptr.add(i);
+                    }
+                    acc
+                })
+                .sum();
             output_slice[0] = sum;
         }
         _ => {
@@ -939,9 +970,16 @@ fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
             })?;
 
             let scalar_f32 = scalar as f32;
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val / scalar_f32;
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(input_data.par_chunks(CHUNK))
+                .for_each(|(out, inp)| unsafe {
+                    let in_ptr = inp.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        *out_ptr.add(i) = *in_ptr.add(i) / scalar_f32;
+                    }
+                });
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
@@ -951,9 +989,16 @@ fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
 
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val / scalar;
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(input_data.par_chunks(CHUNK))
+                .for_each(|(out, inp)| unsafe {
+                    let in_ptr = inp.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        *out_ptr.add(i) = *in_ptr.add(i) / scalar;
+                    }
+                });
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
@@ -1032,16 +1077,22 @@ fn compute_huber_elementwise(
             })?;
 
             let delta_f32 = delta as f32;
-            for i in 0..abs_data.len() {
-                let abs_val = abs_data[i];
-                if abs_val <= delta_f32 {
-                    // Quadratic region: 0.5 * x²
-                    output_slice[i] = 0.5 * diff_data[i] * diff_data[i];
-                } else {
-                    // Linear region: delta * (|x| - 0.5 * delta)
-                    output_slice[i] = delta_f32 * (abs_val - 0.5 * delta_f32);
-                }
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(abs_data.par_chunks(CHUNK).zip(diff_data.par_chunks(CHUNK)))
+                .for_each(|(out, (abs_chunk, diff_chunk))| unsafe {
+                    let abs_ptr = abs_chunk.as_ptr();
+                    let diff_ptr = diff_chunk.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        let abs_val = *abs_ptr.add(i);
+                        *out_ptr.add(i) = if abs_val <= delta_f32 {
+                            0.5 * *diff_ptr.add(i) * *diff_ptr.add(i)
+                        } else {
+                            delta_f32 * (abs_val - 0.5 * delta_f32)
+                        };
+                    }
+                });
         }
         DataType::Float64 => {
             let abs_data = abs_diff.data().as_f64_slice().ok_or_else(|| {
@@ -1054,16 +1105,22 @@ fn compute_huber_elementwise(
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
 
-            for i in 0..abs_data.len() {
-                let abs_val = abs_data[i];
-                if abs_val <= delta {
-                    // Quadratic region: 0.5 * x²
-                    output_slice[i] = 0.5 * diff_data[i] * diff_data[i];
-                } else {
-                    // Linear region: delta * (|x| - 0.5 * delta)
-                    output_slice[i] = delta * (abs_val - 0.5 * delta);
-                }
-            }
+            output_slice
+                .par_chunks_mut(CHUNK)
+                .zip(abs_data.par_chunks(CHUNK).zip(diff_data.par_chunks(CHUNK)))
+                .for_each(|(out, (abs_chunk, diff_chunk))| unsafe {
+                    let abs_ptr = abs_chunk.as_ptr();
+                    let diff_ptr = diff_chunk.as_ptr();
+                    let out_ptr = out.as_mut_ptr();
+                    for i in 0..out.len() {
+                        let abs_val = *abs_ptr.add(i);
+                        *out_ptr.add(i) = if abs_val <= delta {
+                            0.5 * *diff_ptr.add(i) * *diff_ptr.add(i)
+                        } else {
+                            delta * (abs_val - 0.5 * delta)
+                        };
+                    }
+                });
         }
         _ => {
             return Err(MinitensorError::invalid_operation(

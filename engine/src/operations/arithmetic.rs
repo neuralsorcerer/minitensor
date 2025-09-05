@@ -11,10 +11,10 @@ use crate::{
         can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
         simd_mul_f32, simd_mul_f64, simd_sub_f32, simd_sub_f64,
     },
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use std::sync::Arc;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -810,70 +810,68 @@ where
     T: Copy + Send + Sync,
     F: Fn(T, T) -> T + Send + Sync,
 {
-    let output_dims = output_shape.dims().to_vec();
-    let lhs_dims = lhs_shape.dims().to_vec();
-    let rhs_dims = rhs_shape.dims().to_vec();
+    let output_dims = output_shape.dims();
+    let lhs_dims = lhs_shape.dims();
+    let rhs_dims = rhs_shape.dims();
+    let rank = output_dims.len();
 
+    let lhs_contiguous = Strides::from_shape(lhs_shape);
+    let rhs_contiguous = Strides::from_shape(rhs_shape);
+    let lhs_strides = lhs_contiguous.as_slice();
+    let rhs_strides = rhs_contiguous.as_slice();
+
+    let mut lhs_aligned = vec![0usize; rank];
+    let mut rhs_aligned = vec![0usize; rank];
+
+    let lhs_offset = rank.saturating_sub(lhs_dims.len());
+    for (i, &dim) in lhs_dims.iter().enumerate() {
+        lhs_aligned[lhs_offset + i] = if dim == 1 { 0 } else { lhs_strides[i] };
+    }
+
+    let rhs_offset = rank.saturating_sub(rhs_dims.len());
+    for (i, &dim) in rhs_dims.iter().enumerate() {
+        rhs_aligned[rhs_offset + i] = if dim == 1 { 0 } else { rhs_strides[i] };
+    }
+
+    const CHUNK: usize = 1024;
     output_data
-        .par_iter_mut()
+        .par_chunks_mut(CHUNK)
         .enumerate()
-        .try_for_each(|(output_idx, out)| -> Result<()> {
-            // Convert linear output index to multi-dimensional coordinates
-            let mut output_coords = vec![0; output_dims.len()];
-            let mut temp_idx = output_idx;
-
-            for i in (0..output_dims.len()).rev() {
-                output_coords[i] = temp_idx % output_dims[i];
-                temp_idx /= output_dims[i];
+        .for_each(|(chunk_idx, out_chunk)| {
+            let start = chunk_idx * CHUNK;
+            let mut coord = vec![0usize; rank];
+            let mut tmp = start;
+            for i in (0..rank).rev() {
+                coord[i] = tmp % output_dims[i];
+                tmp /= output_dims[i];
             }
 
-            // Map output coordinates to lhs coordinates (with broadcasting)
-            let mut lhs_idx = 0;
-            let lhs_offset = output_dims.len().saturating_sub(lhs_dims.len());
+            let mut lhs_idx = 0usize;
+            let mut rhs_idx = 0usize;
+            for i in 0..rank {
+                lhs_idx += coord[i] * lhs_aligned[i];
+                rhs_idx += coord[i] * rhs_aligned[i];
+            }
 
-            for i in 0..lhs_dims.len() {
-                let output_coord_idx = i + lhs_offset;
-                let coord = if lhs_dims[i] == 1 {
-                    0
-                } else {
-                    output_coords[output_coord_idx]
-                };
-
-                let mut stride = 1;
-                for j in (i + 1)..lhs_dims.len() {
-                    stride *= lhs_dims[j];
+            let lhs_ptr = lhs_data.as_ptr();
+            let rhs_ptr = rhs_data.as_ptr();
+            for out in out_chunk.iter_mut() {
+                unsafe {
+                    *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
                 }
-                lhs_idx += coord * stride;
-            }
-
-            // Map output coordinates to rhs coordinates (with broadcasting)
-            let mut rhs_idx = 0;
-            let rhs_offset = output_dims.len().saturating_sub(rhs_dims.len());
-
-            for i in 0..rhs_dims.len() {
-                let output_coord_idx = i + rhs_offset;
-                let coord = if rhs_dims[i] == 1 {
-                    0
-                } else {
-                    output_coords[output_coord_idx]
-                };
-
-                let mut stride = 1;
-                for j in (i + 1)..rhs_dims.len() {
-                    stride *= rhs_dims[j];
+                for i in (0..rank).rev() {
+                    coord[i] += 1;
+                    lhs_idx += lhs_aligned[i];
+                    rhs_idx += rhs_aligned[i];
+                    if coord[i] < output_dims[i] {
+                        break;
+                    }
+                    coord[i] = 0;
+                    lhs_idx -= lhs_aligned[i] * output_dims[i];
+                    rhs_idx -= rhs_aligned[i] * output_dims[i];
                 }
-                rhs_idx += coord * stride;
             }
-
-            if lhs_idx >= lhs_data.len() || rhs_idx >= rhs_data.len() {
-                return Err(MinitensorError::invalid_operation(
-                    "Index out of bounds in broadcasting",
-                ));
-            }
-
-            *out = op(lhs_data[lhs_idx], rhs_data[rhs_idx]);
-            Ok(())
-        })?;
+        });
 
     Ok(())
 }
@@ -1068,13 +1066,25 @@ mod tests {
         if let Some(slice) = data_a.as_bool_slice_mut() {
             slice.copy_from_slice(&[true, false]);
         }
-        let a = Tensor::new(Arc::new(data_a), shape_obj.clone(), DataType::Bool, Device::cpu(), false);
+        let a = Tensor::new(
+            Arc::new(data_a),
+            shape_obj.clone(),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
 
         let mut data_b = TensorData::zeros(shape_obj.numel(), DataType::Bool);
         if let Some(slice) = data_b.as_bool_slice_mut() {
             slice.copy_from_slice(&[false, true]);
         }
-        let b = Tensor::new(Arc::new(data_b), shape_obj, DataType::Bool, Device::cpu(), false);
+        let b = Tensor::new(
+            Arc::new(data_b),
+            shape_obj,
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
 
         assert!(add(&a, &b).is_err());
         assert!(sub(&a, &b).is_err());

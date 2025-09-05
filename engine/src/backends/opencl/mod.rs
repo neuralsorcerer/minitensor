@@ -100,10 +100,10 @@ impl OpenCLBackend {
     pub fn build_program(&self, name: &str, source: &str) -> Result<()> {
         let program =
             Program::create_and_build_from_source(&self.context, source, "").map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Failed to build OpenCL program: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "OpenCL",
+                    format!("Failed to build OpenCL program: {}", e),
+                )
             })?;
 
         let mut programs = self.programs.lock().unwrap();
@@ -116,17 +116,17 @@ impl OpenCLBackend {
     pub fn create_kernel(&self, program_name: &str, kernel_name: &str) -> Result<()> {
         let programs = self.programs.lock().unwrap();
         let program = programs.get(program_name).ok_or_else(|| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Program '{}' not found",
-                program_name
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Program '{}' not found", program_name),
+            )
         })?;
 
         let kernel = Kernel::create(program, kernel_name).map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to create kernel '{}': {}",
-                kernel_name, e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to create kernel '{}': {}", kernel_name, e),
+            )
         })?;
 
         let mut kernels = self.kernels.lock().unwrap();
@@ -153,10 +153,10 @@ impl OpenCLBackend {
         local_work_size: Option<&[usize]>,
     ) -> Result<()> {
         let kernel = self.get_kernel(kernel_name).ok_or_else(|| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Kernel '{}' not found",
-                kernel_name
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Kernel '{}' not found", kernel_name),
+            )
         })?;
 
         let kernel_event = unsafe {
@@ -166,14 +166,17 @@ impl OpenCLBackend {
                 .enqueue_nd_range(&self.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!("Failed to execute kernel: {}", e))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute kernel: {}", e),
+            )
         })?;
 
         kernel_event.wait().map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for kernel completion: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for kernel completion: {}", e),
+            )
         })?;
 
         Ok(())
@@ -244,10 +247,10 @@ impl OpenCLBackend {
     /// Finish all operations in the command queue
     pub fn finish(&self) -> Result<()> {
         self.command_queue.finish().map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to finish OpenCL operations: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to finish OpenCL operations: {}", e),
+            )
         })
     }
 }
@@ -276,10 +279,10 @@ impl Backend for OpenCLBackend {
     fn initialize() -> Result<Self> {
         // Get the first available GPU device
         let platforms = get_platforms().map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to get OpenCL platforms: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to get OpenCL platforms: {}", e),
+            )
         })?;
 
         let mut all_devices = Vec::new();
@@ -294,6 +297,7 @@ impl Backend for OpenCLBackend {
 
         if devices.is_empty() {
             return Err(crate::error::MinitensorError::backend_error(
+                "OpenCL",
                 "No OpenCL GPU device found",
             ));
         }
@@ -303,18 +307,19 @@ impl Backend for OpenCLBackend {
 
         // Create context and command queue
         let context = Context::from_device(&opencl_device).map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to create OpenCL context: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to create OpenCL context: {}", e),
+            )
         })?;
 
+        #[allow(deprecated)]
         let command_queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)
             .map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Failed to create OpenCL command queue: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "OpenCL",
+                    format!("Failed to create OpenCL command queue: {}", e),
+                )
             })?;
 
         Ok(Self {
@@ -619,10 +624,9 @@ impl OpenCLOps {
         c: &Buffer<cl_float>,
         n: u32,
     ) -> Result<()> {
-        let kernel = self
-            .backend
-            .get_kernel("add_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Add kernel not found"))?;
+        let kernel = self.backend.get_kernel("add_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("OpenCL", "Add kernel not found")
+        })?;
 
         unsafe {
             ExecuteKernel::new(&kernel)
@@ -634,17 +638,17 @@ impl OpenCLOps {
                 .enqueue_nd_range(&self.backend.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to execute add kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute add kernel: {}", e),
+            )
         })?
         .wait()
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for add kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for add kernel: {}", e),
+            )
         })?;
 
         Ok(())
@@ -658,10 +662,9 @@ impl OpenCLOps {
         c: &Buffer<cl_float>,
         n: u32,
     ) -> Result<()> {
-        let kernel = self
-            .backend
-            .get_kernel("mul_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Mul kernel not found"))?;
+        let kernel = self.backend.get_kernel("mul_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("OpenCL", "Mul kernel not found")
+        })?;
 
         unsafe {
             ExecuteKernel::new(&kernel)
@@ -673,17 +676,17 @@ impl OpenCLOps {
                 .enqueue_nd_range(&self.backend.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to execute mul kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute mul kernel: {}", e),
+            )
         })?
         .wait()
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for mul kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for mul kernel: {}", e),
+            )
         })?;
 
         Ok(())
@@ -700,7 +703,7 @@ impl OpenCLOps {
         k: u32,
     ) -> Result<()> {
         let kernel = self.backend.get_kernel("matmul_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("Matmul kernel not found")
+            crate::error::MinitensorError::backend_error("OpenCL", "Matmul kernel not found")
         })?;
 
         unsafe {
@@ -715,17 +718,17 @@ impl OpenCLOps {
                 .enqueue_nd_range(&self.backend.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to execute matmul kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute matmul kernel: {}", e),
+            )
         })?
         .wait()
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for matmul kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for matmul kernel: {}", e),
+            )
         })?;
 
         Ok(())
@@ -733,10 +736,9 @@ impl OpenCLOps {
 
     /// ReLU activation on GPU
     pub fn relu(&self, input: &Buffer<cl_float>, output: &Buffer<cl_float>, n: u32) -> Result<()> {
-        let kernel = self
-            .backend
-            .get_kernel("relu_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("ReLU kernel not found"))?;
+        let kernel = self.backend.get_kernel("relu_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("OpenCL", "ReLU kernel not found")
+        })?;
 
         unsafe {
             ExecuteKernel::new(&kernel)
@@ -747,17 +749,17 @@ impl OpenCLOps {
                 .enqueue_nd_range(&self.backend.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to execute relu kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute relu kernel: {}", e),
+            )
         })?
         .wait()
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for relu kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for relu kernel: {}", e),
+            )
         })?;
 
         Ok(())
@@ -771,7 +773,7 @@ impl OpenCLOps {
         n: u32,
     ) -> Result<()> {
         let kernel = self.backend.get_kernel("sigmoid_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("Sigmoid kernel not found")
+            crate::error::MinitensorError::backend_error("OpenCL", "Sigmoid kernel not found")
         })?;
 
         unsafe {
@@ -783,17 +785,17 @@ impl OpenCLOps {
                 .enqueue_nd_range(&self.backend.command_queue)
         }
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to execute sigmoid kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to execute sigmoid kernel: {}", e),
+            )
         })?
         .wait()
         .map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to wait for sigmoid kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "OpenCL",
+                format!("Failed to wait for sigmoid kernel: {}", e),
+            )
         })?;
 
         Ok(())

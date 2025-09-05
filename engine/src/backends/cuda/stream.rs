@@ -34,10 +34,10 @@ impl CudaStreamPool {
         } else {
             // Create a new stream if we haven't reached the limit
             self.device.fork_default_stream().map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Failed to create CUDA stream: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "CUDA",
+                    format!("Failed to create CUDA stream: {}", e),
+                )
             })
         }
     }
@@ -64,10 +64,10 @@ impl CudaStreamPool {
 
         for stream in streams.iter() {
             stream.synchronize().map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Stream synchronization failed: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "CUDA",
+                    format!("Stream synchronization failed: {}", e),
+                )
             })?;
         }
 
@@ -140,10 +140,10 @@ impl CudaExecutionContext {
     pub fn synchronize(&self) -> Result<()> {
         if let Some(ref stream) = self.current_stream {
             stream.stream().synchronize().map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Stream synchronization failed: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "CUDA",
+                    format!("Stream synchronization failed: {}", e),
+                )
             })?;
         }
         Ok(())

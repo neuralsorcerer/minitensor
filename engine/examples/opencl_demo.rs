@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use engine::backends::opencl::{OpenCLBackend, OpenCLOps};
     use engine::backends::Backend;
     use opencl3::memory::{CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
+    use std::sync::Arc;
 
     println!("OpenCL Backend Demo");
     println!("==================");
@@ -25,16 +26,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("✓ OpenCL is available");
+    println!("OpenCL is available");
 
     // Initialize the OpenCL backend
     let backend = Arc::new(OpenCLBackend::initialize()?);
-    println!("✓ OpenCL backend initialized");
+    println!("OpenCL backend initialized");
     println!("  Device: {}", backend.device());
 
     // Create OpenCL operations
     let ops = OpenCLOps::new(backend.clone())?;
-    println!("✓ OpenCL operations created");
+    println!("OpenCL operations created");
 
     // Demonstrate element-wise addition
     println!("\n--- Element-wise Addition ---");
@@ -60,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matrix_b = vec![5.0f32, 6.0, 7.0, 8.0]; // 2x2 matrix
 
     println!(
-        "Matrix A (2x2): [{}, {}]",
+        "Matrix A (2x2): [{}]",
         matrix_a[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -68,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         matrix_a[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -76,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "Matrix B (2x2): [{}, {}]",
+        "Matrix B (2x2): [{}]",
         matrix_b[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -84,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         matrix_b[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mat_result = vec![0.0f32; 4];
     backend.read_buffer(&c_mat_buffer, &mut mat_result)?;
     println!(
-        "Result (2x2):   [{}, {}]",
+        "Result (2x2):   [{}]",
         mat_result[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -109,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         mat_result[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -155,24 +156,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test backend memory allocation interface
     let ptr = backend.allocate(1024)?;
-    println!("✓ Allocated 1024 bytes at pointer: {:p}", ptr);
+    println!("Allocated 1024 bytes at pointer: {:p}", ptr);
 
     let test_data = vec![42u8; 1024];
     backend.copy_from_host(ptr, &test_data)?;
-    println!("✓ Copied data to device");
+    println!("Copied data to device");
 
     let mut read_back = vec![0u8; 1024];
     backend.copy_to_host(&mut read_back, ptr)?;
-    println!("✓ Copied data from device");
+    println!("Copied data from device");
 
     assert_eq!(test_data, read_back);
-    println!("✓ Data integrity verified");
+    println!("Data integrity verified");
 
     backend.deallocate(ptr, 1024)?;
-    println!("✓ Memory deallocated");
+    println!("Memory deallocated");
 
     backend.finish()?;
-    println!("\n✓ All operations completed successfully!");
+    println!("\nAll operations completed successfully!");
 
     Ok(())
 }

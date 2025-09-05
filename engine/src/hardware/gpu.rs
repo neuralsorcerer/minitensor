@@ -72,7 +72,8 @@ pub enum GpuType {
 impl GpuDevice {
     /// Detect all available GPU devices
     pub fn detect_all() -> Vec<Self> {
-        let devices = Vec::new();
+        #[allow(unused_mut)]
+        let mut devices = Vec::new();
 
         // Detect CUDA devices
         #[cfg(feature = "cuda")]

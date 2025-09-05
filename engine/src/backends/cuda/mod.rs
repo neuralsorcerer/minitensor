@@ -38,17 +38,17 @@ impl CudaBackend {
     pub fn load_kernel(&self, name: &str, ptx_src: &str) -> Result<()> {
         let ptx = Ptx::from_src(ptx_src);
         self.cuda_device.load_ptx(ptx, name, &[name]).map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to load CUDA kernel: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to load CUDA kernel: {}", e),
+            )
         })?;
 
         let function = self.cuda_device.get_func(name, name).map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to get CUDA function: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to get CUDA function: {}", e),
+            )
         })?;
 
         let mut kernels = self.kernels.lock().unwrap();
@@ -101,10 +101,10 @@ impl CudaBackend {
     /// Synchronize the device
     pub fn synchronize(&self) -> Result<()> {
         self.cuda_device.synchronize().map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "CUDA synchronization failed: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("CUDA synchronization failed: {}", e),
+            )
         })
     }
 }
@@ -121,10 +121,10 @@ impl Backend for CudaBackend {
     fn initialize() -> Result<Self> {
         let device_id = 0; // Default to device 0, could be configurable
         let cuda_device = CudaDevice::new(device_id).map_err(|e| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Failed to initialize CUDA device: {}",
-                e
-            ))
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to initialize CUDA device: {}", e),
+            )
         })?;
 
         let cuda_device = Arc::new(cuda_device);
@@ -308,10 +308,9 @@ impl CudaOps {
             ));
         }
 
-        let kernel = self
-            .backend
-            .get_kernel("add_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Add kernel not found"))?;
+        let kernel = self.backend.get_kernel("add_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("CUDA", "Add kernel not found")
+        })?;
 
         let block_size = 256;
         let grid_size = (n + block_size - 1) / block_size;
@@ -330,10 +329,10 @@ impl CudaOps {
                     ],
                 )
                 .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(format!(
-                        "Kernel launch failed: {}",
-                        e
-                    ))
+                    crate::error::MinitensorError::backend_error(
+                        "CUDA",
+                        format!("Kernel launch failed: {}", e),
+                    )
                 })?;
         }
 
@@ -354,10 +353,9 @@ impl CudaOps {
             ));
         }
 
-        let kernel = self
-            .backend
-            .get_kernel("mul_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("Mul kernel not found"))?;
+        let kernel = self.backend.get_kernel("mul_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("CUDA", "Mul kernel not found")
+        })?;
 
         let block_size = 256;
         let grid_size = (n + block_size - 1) / block_size;
@@ -376,10 +374,10 @@ impl CudaOps {
                     ],
                 )
                 .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(format!(
-                        "Kernel launch failed: {}",
-                        e
-                    ))
+                    crate::error::MinitensorError::backend_error(
+                        "CUDA",
+                        format!("Kernel launch failed: {}", e),
+                    )
                 })?;
         }
 
@@ -403,7 +401,7 @@ impl CudaOps {
         }
 
         let kernel = self.backend.get_kernel("matmul_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("Matmul kernel not found")
+            crate::error::MinitensorError::backend_error("CUDA", "Matmul kernel not found")
         })?;
 
         let block_size_x = 16;
@@ -427,10 +425,10 @@ impl CudaOps {
                     ],
                 )
                 .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(format!(
-                        "Kernel launch failed: {}",
-                        e
-                    ))
+                    crate::error::MinitensorError::backend_error(
+                        "CUDA",
+                        format!("Kernel launch failed: {}", e),
+                    )
                 })?;
         }
 
@@ -446,48 +444,8 @@ impl CudaOps {
             ));
         }
 
-        let kernel = self
-            .backend
-            .get_kernel("relu_kernel")
-            .ok_or_else(|| crate::error::MinitensorError::backend_error("ReLU kernel not found"))?;
-
-        let block_size = 256;
-        let grid_size = (n + block_size - 1) / block_size;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size as u32, 1, 1),
-                    (block_size as u32, 1, 1),
-                    0,
-                    &[
-                        input.device_ptr() as *const std::ffi::c_void,
-                        output.device_ptr() as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(format!(
-                        "Kernel launch failed: {}",
-                        e
-                    ))
-                })?;
-        }
-
-        Ok(())
-    }
-
-    /// Sigmoid activation on GPU
-    pub fn sigmoid(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
-        let n = input.len();
-        if output.len() != n {
-            return Err(crate::error::MinitensorError::shape_error(
-                "Input and output tensors must have the same size",
-            ));
-        }
-
-        let kernel = self.backend.get_kernel("sigmoid_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("Sigmoid kernel not found")
+        let kernel = self.backend.get_kernel("relu_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("CUDA", "ReLU kernel not found")
         })?;
 
         let block_size = 256;
@@ -506,10 +464,49 @@ impl CudaOps {
                     ],
                 )
                 .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(format!(
-                        "Kernel launch failed: {}",
-                        e
-                    ))
+                    crate::error::MinitensorError::backend_error(
+                        "CUDA",
+                        format!("Kernel launch failed: {}", e),
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
+    /// Sigmoid activation on GPU
+    pub fn sigmoid(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
+        let n = input.len();
+        if output.len() != n {
+            return Err(crate::error::MinitensorError::shape_error(
+                "Input and output tensors must have the same size",
+            ));
+        }
+
+        let kernel = self.backend.get_kernel("sigmoid_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error("CUDA", "Sigmoid kernel not found")
+        })?;
+
+        let block_size = 256;
+        let grid_size = (n + block_size - 1) / block_size;
+
+        unsafe {
+            kernel
+                .launch(
+                    (grid_size as u32, 1, 1),
+                    (block_size as u32, 1, 1),
+                    0,
+                    &[
+                        input.device_ptr() as *const std::ffi::c_void,
+                        output.device_ptr() as *const std::ffi::c_void,
+                        &(n as i32) as *const i32 as *const std::ffi::c_void,
+                    ],
+                )
+                .map_err(|e| {
+                    crate::error::MinitensorError::backend_error(
+                        "CUDA",
+                        format!("Kernel launch failed: {}", e),
+                    )
                 })?;
         }
 

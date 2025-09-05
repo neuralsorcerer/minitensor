@@ -15,6 +15,23 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+#[inline(always)]
+fn unary_apply<T, F>(input: &[T], output: &mut [T], op: F)
+where
+    T: Copy + Send + Sync,
+    F: Fn(T) -> T + Sync + Send,
+{
+    let len = input.len();
+    debug_assert_eq!(len, output.len());
+    let in_ptr = input.as_ptr() as usize;
+    let out_ptr = output.as_mut_ptr() as usize;
+    (0..len).into_par_iter().for_each(|i| unsafe {
+        let in_ptr = in_ptr as *const T;
+        let out_ptr = out_ptr as *mut T;
+        *out_ptr.add(i) = op(*in_ptr.add(i));
+    });
+}
+
 /// Exponential function with gradient support
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
@@ -651,11 +668,7 @@ fn exp_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.exp());
-
+    unary_apply(input_data, output_slice, f32::exp);
     Ok(())
 }
 
@@ -667,11 +680,7 @@ fn exp_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.exp());
-
+    unary_apply(input_data, output_slice, f64::exp);
     Ok(())
 }
 
@@ -683,17 +692,13 @@ fn log_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            *out = if val <= 0.0 {
-                f32::NEG_INFINITY
-            } else {
-                val.ln()
-            };
-        });
-
+    unary_apply(input_data, output_slice, |val: f32| {
+        if val <= 0.0 {
+            f32::NEG_INFINITY
+        } else {
+            val.ln()
+        }
+    });
     Ok(())
 }
 
@@ -705,17 +710,13 @@ fn log_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            *out = if val <= 0.0 {
-                f64::NEG_INFINITY
-            } else {
-                val.ln()
-            };
-        });
-
+    unary_apply(input_data, output_slice, |val: f64| {
+        if val <= 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            val.ln()
+        }
+    });
     Ok(())
 }
 
@@ -727,11 +728,7 @@ fn sin_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.sin());
-
+    unary_apply(input_data, output_slice, f32::sin);
     Ok(())
 }
 
@@ -743,11 +740,7 @@ fn sin_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.sin());
-
+    unary_apply(input_data, output_slice, f64::sin);
     Ok(())
 }
 
@@ -759,11 +752,7 @@ fn cos_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.cos());
-
+    unary_apply(input_data, output_slice, f32::cos);
     Ok(())
 }
 
@@ -775,11 +764,7 @@ fn cos_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.cos());
-
+    unary_apply(input_data, output_slice, f64::cos);
     Ok(())
 }
 
@@ -791,11 +776,7 @@ fn tan_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.tan());
-
+    unary_apply(input_data, output_slice, f32::tan);
     Ok(())
 }
 
@@ -807,11 +788,7 @@ fn tan_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.tan());
-
+    unary_apply(input_data, output_slice, f64::tan);
     Ok(())
 }
 
@@ -823,11 +800,7 @@ fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.tanh());
-
+    unary_apply(input_data, output_slice, f32::tanh);
     Ok(())
 }
 
@@ -839,11 +812,7 @@ fn tanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.tanh());
-
+    unary_apply(input_data, output_slice, f64::tanh);
     Ok(())
 }
 
@@ -855,11 +824,9 @@ fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = 1.0 / (1.0 + (-val).exp()));
-
+    unary_apply(input_data, output_slice, |val: f32| {
+        1.0 / (1.0 + (-val).exp())
+    });
     Ok(())
 }
 
@@ -871,11 +838,9 @@ fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = 1.0 / (1.0 + (-val).exp()));
-
+    unary_apply(input_data, output_slice, |val: f64| {
+        1.0 / (1.0 + (-val).exp())
+    });
     Ok(())
 }
 
@@ -887,11 +852,7 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.max(0.0));
-
+    unary_apply(input_data, output_slice, |v: f32| v.max(0.0));
     Ok(())
 }
 
@@ -903,11 +864,7 @@ fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.max(0.0));
-
+    unary_apply(input_data, output_slice, |v: f64| v.max(0.0));
     Ok(())
 }
 
@@ -919,11 +876,7 @@ fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.max(0));
-
+    unary_apply(input_data, output_slice, |v: i32| v.max(0));
     Ok(())
 }
 
@@ -935,11 +888,7 @@ fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.max(0));
-
+    unary_apply(input_data, output_slice, |v: i64| v.max(0));
     Ok(())
 }
 
@@ -956,19 +905,23 @@ fn leaky_relu_f32(
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
 
-    let mut mask = vec![false; input_data.len()];
-    mask.par_iter_mut()
-        .zip(input_data.par_iter())
-        .zip(output_slice.par_iter_mut())
-        .for_each(|((m, &val), out)| {
-            if val >= 0.0 {
-                *out = val;
-                *m = true;
-            } else {
-                *out = negative_slope * val;
-            }
-        });
-
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    let mask_ptr = mask.as_mut_ptr() as usize;
+    let in_ptr = input_data.as_ptr() as usize;
+    let out_ptr = output_slice.as_mut_ptr() as usize;
+    (0..len).into_par_iter().for_each(|i| unsafe {
+        let in_ptr = in_ptr as *const f32;
+        let out_ptr = out_ptr as *mut f32;
+        let mask_ptr = mask_ptr as *mut bool;
+        let val = *in_ptr.add(i);
+        if val >= 0.0 {
+            *out_ptr.add(i) = val;
+            *mask_ptr.add(i) = true;
+        } else {
+            *out_ptr.add(i) = negative_slope * val;
+        }
+    });
     Ok(mask)
 }
 
@@ -985,19 +938,23 @@ fn leaky_relu_f64(
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
 
-    let mut mask = vec![false; input_data.len()];
-    mask.par_iter_mut()
-        .zip(input_data.par_iter())
-        .zip(output_slice.par_iter_mut())
-        .for_each(|((m, &val), out)| {
-            if val >= 0.0 {
-                *out = val;
-                *m = true;
-            } else {
-                *out = negative_slope * val;
-            }
-        });
-
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    let mask_ptr = mask.as_mut_ptr() as usize;
+    let in_ptr = input_data.as_ptr() as usize;
+    let out_ptr = output_slice.as_mut_ptr() as usize;
+    (0..len).into_par_iter().for_each(|i| unsafe {
+        let in_ptr = in_ptr as *const f64;
+        let out_ptr = out_ptr as *mut f64;
+        let mask_ptr = mask_ptr as *mut bool;
+        let val = *in_ptr.add(i);
+        if val >= 0.0 {
+            *out_ptr.add(i) = val;
+            *mask_ptr.add(i) = true;
+        } else {
+            *out_ptr.add(i) = negative_slope * val;
+        }
+    });
     Ok(mask)
 }
 
@@ -1257,11 +1214,7 @@ fn abs_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
 
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.abs());
-
+    unary_apply(input_data, output_slice, |v: f32| v.abs());
     Ok(())
 }
 
@@ -1274,11 +1227,7 @@ fn abs_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
 
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.abs());
-
+    unary_apply(input_data, output_slice, |v: f64| v.abs());
     Ok(())
 }
 
@@ -1291,11 +1240,7 @@ fn abs_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
         MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
     })?;
 
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.abs());
-
+    unary_apply(input_data, output_slice, |v: i32| v.abs());
     Ok(())
 }
 
@@ -1308,11 +1253,7 @@ fn abs_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
         MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
     })?;
 
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.abs());
-
+    unary_apply(input_data, output_slice, |v: i64| v.abs());
     Ok(())
 }
 
@@ -1332,20 +1273,16 @@ fn clip_f32(
 
     let min_f32 = min_val.map(|v| v as f32);
     let max_f32 = max_val.map(|v| v as f32);
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            let mut clipped = val;
-            if let Some(min) = min_f32 {
-                clipped = clipped.max(min);
-            }
-            if let Some(max) = max_f32 {
-                clipped = clipped.min(max);
-            }
-            *out = clipped;
-        });
-
+    unary_apply(input_data, output_slice, |val: f32| {
+        let mut v = val;
+        if let Some(min) = min_f32 {
+            v = v.max(min);
+        }
+        if let Some(max) = max_f32 {
+            v = v.min(max);
+        }
+        v
+    });
     Ok(())
 }
 
@@ -1362,20 +1299,16 @@ fn clip_f64(
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            let mut clipped = val;
-            if let Some(min) = min_val {
-                clipped = clipped.max(min);
-            }
-            if let Some(max) = max_val {
-                clipped = clipped.min(max);
-            }
-            *out = clipped;
-        });
-
+    unary_apply(input_data, output_slice, |val: f64| {
+        let mut v = val;
+        if let Some(min) = min_val {
+            v = v.max(min);
+        }
+        if let Some(max) = max_val {
+            v = v.min(max);
+        }
+        v
+    });
     Ok(())
 }
 
@@ -1395,20 +1328,16 @@ fn clip_i32(
 
     let min_i32 = min_val.map(|v| v as i32);
     let max_i32 = max_val.map(|v| v as i32);
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            let mut clipped = val;
-            if let Some(min) = min_i32 {
-                clipped = clipped.max(min);
-            }
-            if let Some(max) = max_i32 {
-                clipped = clipped.min(max);
-            }
-            *out = clipped;
-        });
-
+    unary_apply(input_data, output_slice, |val: i32| {
+        let mut v = val;
+        if let Some(min) = min_i32 {
+            v = v.max(min);
+        }
+        if let Some(max) = max_i32 {
+            v = v.min(max);
+        }
+        v
+    });
     Ok(())
 }
 
@@ -1428,20 +1357,16 @@ fn clip_i64(
 
     let min_i64 = min_val.map(|v| v as i64);
     let max_i64 = max_val.map(|v| v as i64);
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| {
-            let mut clipped = val;
-            if let Some(min) = min_i64 {
-                clipped = clipped.max(min);
-            }
-            if let Some(max) = max_i64 {
-                clipped = clipped.min(max);
-            }
-            *out = clipped;
-        });
-
+    unary_apply(input_data, output_slice, |val: i64| {
+        let mut v = val;
+        if let Some(min) = min_i64 {
+            v = v.max(min);
+        }
+        if let Some(max) = max_i64 {
+            v = v.min(max);
+        }
+        v
+    });
     Ok(())
 }
 
@@ -1455,11 +1380,9 @@ fn round_f32(tensor: &Tensor, output_data: &mut TensorData, decimals: i32) -> Re
     })?;
 
     let multiplier = 10.0_f32.powi(decimals);
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = (val * multiplier).round() / multiplier);
-
+    unary_apply(input_data, output_slice, |val: f32| {
+        (val * multiplier).round() / multiplier
+    });
     Ok(())
 }
 
@@ -1473,11 +1396,9 @@ fn round_f64(tensor: &Tensor, output_data: &mut TensorData, decimals: i32) -> Re
     })?;
 
     let multiplier = 10.0_f64.powi(decimals);
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = (val * multiplier).round() / multiplier);
-
+     unary_apply(input_data, output_slice, |val: f64| {
+        (val * multiplier).round() / multiplier
+    });
     Ok(())
 }
 
@@ -1489,11 +1410,7 @@ fn floor_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.floor());
-
+    unary_apply(input_data, output_slice, f32::floor);
     Ok(())
 }
 
@@ -1505,11 +1422,7 @@ fn floor_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.floor());
-
+    unary_apply(input_data, output_slice, f64::floor);
     Ok(())
 }
 
@@ -1521,11 +1434,7 @@ fn ceil_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.ceil());
-
+    unary_apply(input_data, output_slice, f32::ceil);
     Ok(())
 }
 
@@ -1537,11 +1446,7 @@ fn ceil_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    input_data
-        .par_iter()
-        .zip(output_slice.par_iter_mut())
-        .for_each(|(&val, out)| *out = val.ceil());
-
+    unary_apply(input_data, output_slice, f64::ceil);
     Ok(())
 }
 
@@ -1745,7 +1650,13 @@ mod tests {
         let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
         let shape = Shape::new(vec![2]);
         let data = TensorData::from_vec_f64(vec![1.0, 2.0], Device::cpu());
-        let exp = Tensor::new(Arc::new(data), shape, DataType::Float64, Device::cpu(), false);
+        let exp = Tensor::new(
+            Arc::new(data),
+            shape,
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
         assert!(pow(&base, &exp).is_err());
     }
 

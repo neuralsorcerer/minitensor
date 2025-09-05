@@ -14,6 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use engine::backends::metal::{MetalBackend, MetalOps};
     use engine::backends::Backend;
 
+    use std::sync::Arc;
+
     println!("Metal Backend Demo");
     println!("==================");
 
@@ -24,11 +26,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("✓ Metal is available");
+    println!("Metal is available");
 
     // Initialize the Metal backend
     let backend = Arc::new(MetalBackend::initialize()?);
-    println!("✓ Metal backend initialized");
+    println!("Metal backend initialized");
     println!("  Device: {}", backend.device());
 
     // Get device information
@@ -42,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Metal operations
     let ops = MetalOps::new(backend.clone())?;
-    println!("✓ Metal operations created");
+    println!("Metal operations created");
 
     // Demonstrate element-wise addition
     println!("\n--- Element-wise Addition ---");
@@ -70,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matrix_b = vec![5.0f32, 6.0, 7.0, 8.0]; // 2x2 matrix
 
     println!(
-        "Matrix A (2x2): [{}, {}]",
+        "Matrix A (2x2): [{}]",
         matrix_a[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -78,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         matrix_a[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -86,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "Matrix B (2x2): [{}, {}]",
+        "Matrix B (2x2): [{}]",
         matrix_b[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -94,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         matrix_b[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -113,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mat_result = vec![0.0f32; 4];
     backend.copy_buffer_to_host(&c_mat_buffer, &mut mat_result)?;
     println!(
-        "Result (2x2):   [{}, {}]",
+        "Result (2x2):   [{}]",
         mat_result[0..2]
             .iter()
             .map(|x| x.to_string())
@@ -121,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(", ")
     );
     println!(
-        "                [{}, {}]",
+        "                [{}]",
         mat_result[2..4]
             .iter()
             .map(|x| x.to_string())
@@ -198,21 +200,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test backend memory allocation interface
     let ptr = backend.allocate(1024)?;
-    println!("✓ Allocated 1024 bytes at pointer: {:p}", ptr);
+    println!("Allocated 1024 bytes at pointer: {:p}", ptr);
 
     let test_data = vec![42u8; 1024];
     backend.copy_from_host(ptr, &test_data)?;
-    println!("✓ Copied data to device");
+    println!("Copied data to device");
 
     let mut read_back = vec![0u8; 1024];
     backend.copy_to_host(&mut read_back, ptr)?;
-    println!("✓ Copied data from device");
+    println!("Copied data from device");
 
     assert_eq!(test_data, read_back);
-    println!("✓ Data integrity verified");
+    println!("Data integrity verified");
 
     backend.deallocate(ptr, 1024)?;
-    println!("✓ Memory deallocated");
+    println!("Memory deallocated");
 
     // Apple Silicon specific features
     println!("\n--- Apple Silicon Features ---");
@@ -220,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Shared Memory Mode: Enabled");
     println!("Zero-copy operations: Supported");
 
-    println!("\n✓ All operations completed successfully!");
+    println!("\nAll operations completed successfully!");
     println!("Metal backend provides excellent performance on Apple Silicon!");
 
     Ok(())

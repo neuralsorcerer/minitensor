@@ -78,10 +78,10 @@ impl MetalBackend {
             .metal_device
             .new_library_with_source(source, &compile_options)
             .map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Failed to compile Metal library: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "Metal",
+                    format!("Failed to compile Metal library: {}", e),
+                )
             })?;
 
         let mut lib = self.library.lock().unwrap();
@@ -97,24 +97,24 @@ impl MetalBackend {
     ) -> Result<metal::ComputePipelineState> {
         let library = self.library.lock().unwrap();
         let library = library.as_ref().ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("No Metal library loaded")
+            crate::error::MinitensorError::backend_error("Metal", "No Metal library loaded")
         })?;
 
         let function = library.get_function(function_name, None).ok_or_else(|| {
-            crate::error::MinitensorError::backend_error(format!(
-                "Function '{}' not found in Metal library",
-                function_name
-            ))
+            crate::error::MinitensorError::backend_error(
+                "Metal",
+                format!("Function '{}' not found in Metal library", function_name),
+            )
         })?;
 
         let pipeline_state = self
             .metal_device
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|e| {
-                crate::error::MinitensorError::backend_error(format!(
-                    "Failed to create compute pipeline: {}",
-                    e
-                ))
+                crate::error::MinitensorError::backend_error(
+                    "Metal",
+                    format!("Failed to create compute pipeline: {}", e),
+                )
             })?;
 
         // Cache the pipeline state
@@ -266,7 +266,7 @@ impl Backend for MetalBackend {
         #[cfg(target_os = "macos")]
         {
             let metal_device = metal::Device::system_default().ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("No Metal device available")
+                crate::error::MinitensorError::backend_error("Metal", "No Metal device available")
             })?;
 
             let command_queue = metal_device.new_command_queue();
@@ -284,6 +284,7 @@ impl Backend for MetalBackend {
         #[cfg(not(target_os = "macos"))]
         {
             Err(crate::error::MinitensorError::backend_error(
+                "Metal",
                 "Metal backend is only available on macOS",
             ))
         }
@@ -558,7 +559,7 @@ impl MetalOps {
             .backend
             .get_compute_pipeline("add_kernel")
             .ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("Add pipeline not found")
+                crate::error::MinitensorError::backend_error("Metal", "Add pipeline not found")
             })?;
 
         self.backend.execute_compute_command(|encoder| {
@@ -594,7 +595,7 @@ impl MetalOps {
             .backend
             .get_compute_pipeline("mul_kernel")
             .ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("Mul pipeline not found")
+                crate::error::MinitensorError::backend_error("Metal", "Mul pipeline not found")
             })?;
 
         self.backend.execute_compute_command(|encoder| {
@@ -630,7 +631,7 @@ impl MetalOps {
             .backend
             .get_compute_pipeline("matmul_kernel")
             .ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("Matmul pipeline not found")
+                crate::error::MinitensorError::backend_error("Metal", "Matmul pipeline not found")
             })?;
 
         self.backend.execute_compute_command(|encoder| {
@@ -669,7 +670,7 @@ impl MetalOps {
             .backend
             .get_compute_pipeline("relu_kernel")
             .ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("ReLU pipeline not found")
+                crate::error::MinitensorError::backend_error("Metal", "ReLU pipeline not found")
             })?;
 
         self.backend.execute_compute_command(|encoder| {
@@ -696,7 +697,7 @@ impl MetalOps {
             .backend
             .get_compute_pipeline("sigmoid_kernel")
             .ok_or_else(|| {
-                crate::error::MinitensorError::backend_error("Sigmoid pipeline not found")
+                crate::error::MinitensorError::backend_error("Metal", "Sigmoid pipeline not found")
             })?;
 
         self.backend.execute_compute_command(|encoder| {
