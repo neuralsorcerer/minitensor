@@ -1,6 +1,6 @@
 <div align="center">
 
-![MiniTensor Logo](docs/_static/img/minitensor-dark-small.png)
+![MiniTensor Logo](docs/_static/img/minitensor-small.png)
 
 </div>
 <h3 align="center">
