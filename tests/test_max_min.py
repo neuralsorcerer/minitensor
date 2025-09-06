@@ -57,6 +57,19 @@ def test_max_min_empty_tensor_with_dim():
     assert np.array_equal(min_idx.numpy(), np.zeros(3, dtype=np.int64))
 
 
+def test_max_min_empty_tensor_with_dim_keepdim():
+    t = mt.Tensor(np.empty((0, 3), dtype=np.float32))
+    max_vals, max_idx = t.max(dim=0, keepdim=True)
+    assert max_vals.shape == (1, 3)
+    assert np.isneginf(max_vals.numpy()).all()
+    assert np.array_equal(max_idx.numpy(), np.zeros((1, 3), dtype=np.int64))
+
+    min_vals, min_idx = t.min(dim=0, keepdim=True)
+    assert min_vals.shape == (1, 3)
+    assert np.isposinf(min_vals.numpy()).all()
+    assert np.array_equal(min_idx.numpy(), np.zeros((1, 3), dtype=np.int64))
+
+
 def test_max_min_all_nan_with_dim_returns_extremes():
     t = mt.Tensor(np.array([[np.nan, np.nan], [np.nan, np.nan]], dtype=np.float32))
     max_vals, max_idx = t.max(dim=1)
@@ -65,4 +78,28 @@ def test_max_min_all_nan_with_dim_returns_extremes():
 
     min_vals, min_idx = t.min(dim=1)
     assert np.isposinf(min_vals.numpy()).all()
+    assert np.array_equal(min_idx.numpy(), np.zeros(2, dtype=np.int64))
+
+
+def test_max_min_all_nan_with_dim_keepdim():
+    t = mt.Tensor(np.array([[np.nan, np.nan], [np.nan, np.nan]], dtype=np.float32))
+    max_vals, max_idx = t.max(dim=1, keepdim=True)
+    assert max_vals.shape == (2, 1)
+    assert np.isneginf(max_vals.numpy()).all()
+    assert np.array_equal(max_idx.numpy(), np.zeros((2, 1), dtype=np.int64))
+
+    min_vals, min_idx = t.min(dim=1, keepdim=True)
+    assert min_vals.shape == (2, 1)
+    assert np.isposinf(min_vals.numpy()).all()
+    assert np.array_equal(min_idx.numpy(), np.zeros((2, 1), dtype=np.int64))
+
+
+def test_max_min_empty_int_tensor_with_dim():
+    t = mt.Tensor(np.empty((0, 2), dtype=np.int32), dtype="int32")
+    max_vals, max_idx = t.max(dim=0)
+    assert max_vals.numpy().tolist() == [np.iinfo(np.int32).min] * 2
+    assert np.array_equal(max_idx.numpy(), np.zeros(2, dtype=np.int64))
+
+    min_vals, min_idx = t.min(dim=0)
+    assert min_vals.numpy().tolist() == [np.iinfo(np.int32).max] * 2
     assert np.array_equal(min_idx.numpy(), np.zeros(2, dtype=np.int64))
