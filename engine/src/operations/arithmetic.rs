@@ -829,8 +829,10 @@ where
                     *out = op(*l, *r);
                 });
         } else {
-            for ((out, &l), &r) in
-                output_data.iter_mut().zip(lhs_data.iter()).zip(rhs_data.iter())
+            for ((out, &l), &r) in output_data
+                .iter_mut()
+                .zip(lhs_data.iter())
+                .zip(rhs_data.iter())
             {
                 *out = op(l, r);
             }
@@ -892,6 +894,29 @@ where
     let rhs_offset = rank.saturating_sub(rhs_dims.len());
     for (i, &dim) in rhs_dims.iter().enumerate() {
         rhs_aligned[rhs_offset + i] = if dim == 1 { 0 } else { rhs_strides[i] };
+    }
+
+    // For small tensors, a simple sequential loop is faster than spawning
+    // rayon tasks. We use the same index mapping logic but without parallel
+    // chunking to minimize overhead.
+    if output_data.len() < 1024 {
+        let lhs_ptr = lhs_data.as_ptr();
+        let rhs_ptr = rhs_data.as_ptr();
+        for (idx, out) in output_data.iter_mut().enumerate() {
+            let mut lhs_idx = 0usize;
+            let mut rhs_idx = 0usize;
+            let mut tmp = idx;
+            for i in (0..rank).rev() {
+                let coord = tmp % output_dims[i];
+                tmp /= output_dims[i];
+                lhs_idx += coord * lhs_aligned[i];
+                rhs_idx += coord * rhs_aligned[i];
+            }
+            unsafe {
+                *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
+            }
+        }
+        return Ok(());
     }
 
     const CHUNK: usize = 1024;

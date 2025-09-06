@@ -408,6 +408,11 @@ fn optimized_matmul_f32(
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
 
+    if m == 0 || k == 0 || n == 0 {
+        // Nothing to compute for zero-sized dimensions
+        return Ok(());
+    }
+
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
         // Avoid parallel overhead for single matrix multiplication
@@ -449,6 +454,10 @@ fn optimized_matmul_f64(
     let m = lhs_dims[lhs_dims.len() - 2];
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
+
+    if m == 0 || k == 0 || n == 0 {
+        return Ok(());
+    }
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
