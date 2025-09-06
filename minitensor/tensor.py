@@ -839,6 +839,22 @@ class Tensor:
     # Indexing and slicing (simplified)
     def __getitem__(self, key):
         """Tensor indexing and slicing."""
+        def _check_slice(k):
+            if isinstance(k, slice):
+                if k.step not in (None, 1):
+                    raise IndexError("slice step must be 1")
+            elif isinstance(k, tuple):
+                for item in k:
+                    _check_slice(item)
+
+        _check_slice(key)
+        np_view = self.numpy()[key]
+        if np_view.size == 0:
+            return Tensor(
+                np_view,
+                dtype=self.dtype,
+                requires_grad=self.requires_grad,
+            )
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__getitem__(key)
         return result
