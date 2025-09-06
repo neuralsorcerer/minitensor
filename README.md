@@ -101,9 +101,11 @@ np_array = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)
 w = mt.from_numpy(np_array) # From NumPy
 
 # Operations
-result = x + y              # Element-wise addition
-product = x.matmul(y.T)     # Matrix multiplication
-mean_val = x.mean()         # Reduction operations
+result = x + y                      # Element-wise addition
+product = x.matmul(y.T)             # Matrix multiplication
+mean_val = x.mean()                 # Reduction operations
+max_val = x.max()                   # -inf for empty or all-NaN tensors
+min_vals, min_idx = x.min(dim=1)    # Returns values & indices; empty dims yield (inf, 0)
 ```
 
 #### Neural Networks

@@ -585,59 +585,129 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Maximum values along dimension."""
-        if dim is None:
-            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
 
+        if dim is None:
             if self.numel() == 0:
                 if np.issubdtype(np_dtype, np.floating):
                     return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
                 elif np.issubdtype(np_dtype, np.integer):
                     return Tensor(
-                        np.array(np.iinfo(np_dtype).min, dtype=np_dtype), dtype=self.dtype
+                        np.array(np.iinfo(np_dtype).min, dtype=np_dtype),
+                        dtype=self.dtype,
                     )
                 else:  # bool
                     return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
 
-            if np.issubdtype(np_dtype, np.floating) and bool(self.isnan().all().numpy()):
+            if np.issubdtype(np_dtype, np.floating) and bool(
+                self.isnan().all().numpy()
+            ):
                 return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
         
+            result = Tensor.__new__(Tensor)
+            result._tensor = self._tensor.max(dim, keepdim)
+            return result
+
+        dim = dim if dim >= 0 else dim + self.ndim
+        dim_size = self.shape[dim]
+        out_shape = list(self.shape)
+        if keepdim:
+            out_shape[dim] = 1
+        else:
+            out_shape.pop(dim)
+
+        if dim_size == 0:
+            if np.issubdtype(np_dtype, np.floating):
+                fill_val = -np.inf
+            elif np.issubdtype(np_dtype, np.integer):
+                fill_val = np.iinfo(np_dtype).min
+            else:
+                fill_val = False
+            values = np.full(out_shape, fill_val, dtype=np_dtype)
+            indices = np.zeros(out_shape, dtype=np.int64)
+            return Tensor(values, dtype=self.dtype), Tensor(indices, dtype="int64")
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.max(dim, keepdim)
-        if dim is None:
-            return result
-        else:
-            indices = Tensor.__new__(Tensor)
-            indices._tensor = self._tensor.argmax(dim, keepdim)
-            return result, indices
+        indices = Tensor.__new__(Tensor)
+        indices._tensor = self._tensor.argmax(dim, keepdim)
+
+        if np.issubdtype(np_dtype, np.floating):
+            all_nan = self.isnan().all(dim, keepdim)
+            if bool(all_nan.any().numpy()):
+                mask = all_nan.numpy().astype(bool)
+                res_np = result.numpy()
+                idx_np = indices.numpy()
+                res_np[mask] = -np.inf
+                idx_np[mask] = 0
+                result = Tensor(res_np, dtype=self.dtype)
+                indices = Tensor(idx_np, dtype="int64")
+
+        return result, indices
 
     def min(
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Minimum values along dimension."""
-        if dim is None:
-            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
 
+        if dim is None:
             if self.numel() == 0:
                 if np.issubdtype(np_dtype, np.floating):
                     return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
                 elif np.issubdtype(np_dtype, np.integer):
                     return Tensor(
-                        np.array(np.iinfo(np_dtype).max, dtype=np_dtype), dtype=self.dtype
+                        np.array(np.iinfo(np_dtype).max, dtype=np_dtype),
+                        dtype=self.dtype,
                     )
                 else:  # bool
                     return Tensor(np.array(True, dtype=np_dtype), dtype=self.dtype)
 
-            if np.issubdtype(np_dtype, np.floating) and bool(self.isnan().all().numpy()):
+            if np.issubdtype(np_dtype, np.floating) and bool(
+                self.isnan().all().numpy()
+            ):
                 return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
         
+            result = Tensor.__new__(Tensor)
+            result._tensor = self._tensor.min(dim, keepdim)
+            return result
+
+        dim = dim if dim >= 0 else dim + self.ndim
+        dim_size = self.shape[dim]
+        out_shape = list(self.shape)
+        if keepdim:
+            out_shape[dim] = 1
+        else:
+            out_shape.pop(dim)
+
+        if dim_size == 0:
+            if np.issubdtype(np_dtype, np.floating):
+                fill_val = np.inf
+            elif np.issubdtype(np_dtype, np.integer):
+                fill_val = np.iinfo(np_dtype).max
+            else:
+                fill_val = True
+            values = np.full(out_shape, fill_val, dtype=np_dtype)
+            indices = np.zeros(out_shape, dtype=np.int64)
+            return Tensor(values, dtype=self.dtype), Tensor(indices, dtype="int64")
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.min(dim, keepdim)
-        if dim is None:
-            return result
-        else:
-            indices = Tensor.__new__(Tensor)
-            indices._tensor = self._tensor.argmin(dim, keepdim)
-            return result, indices
+        indices = Tensor.__new__(Tensor)
+        indices._tensor = self._tensor.argmin(dim, keepdim)
+
+        if np.issubdtype(np_dtype, np.floating):
+            all_nan = self.isnan().all(dim, keepdim)
+            if bool(all_nan.any().numpy()):
+                mask = all_nan.numpy().astype(bool)
+                res_np = result.numpy()
+                idx_np = indices.numpy()
+                res_np[mask] = np.inf
+                idx_np[mask] = 0
+                result = Tensor(res_np, dtype=self.dtype)
+                indices = Tensor(idx_np, dtype="int64")
+
+        return result, indices
 
     def argmax(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Indices of maximum values."""
