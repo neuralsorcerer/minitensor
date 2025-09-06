@@ -67,6 +67,21 @@ fn test_z_leaky_relu_backward_correct() {
 }
 
 #[test]
+fn test_relu_backward_nan_propagates() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(vec![-1.0, f32::NAN, 1.0], vec![3], true);
+    let output = activation::relu(&input).unwrap();
+    let grad_output = create_test_tensor_f32(vec![1.0, f32::NAN, 1.0], vec![3], false);
+    let grads = autograd::backward(&output, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    let vals = grad_input.data().as_f32_slice().unwrap();
+    assert_eq!(vals[0], 0.0);
+    assert!(vals[1].is_nan());
+    assert_eq!(vals[2], 1.0);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
 fn test_sum_backward_correct() {
     autograd::clear_graph().unwrap();
     let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], true);
@@ -86,7 +101,10 @@ fn test_mean_backward_correct() {
     let grad_output = Tensor::ones(m.shape().clone(), DataType::Float32, Device::cpu(), false);
     let grads = autograd::backward(&m, Some(grad_output)).unwrap();
     let grad_a = grads.get(&a.id()).unwrap();
-    assert_eq!(grad_a.data().as_f32_slice().unwrap(), &[0.25, 0.25, 0.25, 0.25]);
+    assert_eq!(
+        grad_a.data().as_f32_slice().unwrap(),
+        &[0.25, 0.25, 0.25, 0.25]
+    );
     autograd::clear_graph().unwrap();
 }
 

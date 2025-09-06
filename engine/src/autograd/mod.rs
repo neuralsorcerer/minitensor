@@ -813,7 +813,7 @@ impl GradientFunction for ReluBackward {
                 let len = go.len();
                 if len < PAR_THRESHOLD {
                     for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
+                        grad_slice[i] = go[i] * if self.mask[i] { 1.0 } else { 0.0 };
                     }
                 } else {
                     let mask = &self.mask;
@@ -822,11 +822,8 @@ impl GradientFunction for ReluBackward {
                     (0..len).into_par_iter().for_each(|i| unsafe {
                         let go_ptr = go_ptr as *const f32;
                         let grad_ptr = grad_ptr as *mut f32;
-                        *grad_ptr.add(i) = if *mask.get_unchecked(i) {
-                            *go_ptr.add(i)
-                        } else {
-                            0.0
-                        };
+                        let m = if *mask.get_unchecked(i) { 1.0 } else { 0.0 };
+                        *grad_ptr.add(i) = *go_ptr.add(i) * m;
                     });
                 }
             }
@@ -842,7 +839,7 @@ impl GradientFunction for ReluBackward {
                 let len = go.len();
                 if len < PAR_THRESHOLD {
                     for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
+                        grad_slice[i] = go[i] * if self.mask[i] { 1.0 } else { 0.0 };
                     }
                 } else {
                     let mask = &self.mask;
@@ -851,11 +848,8 @@ impl GradientFunction for ReluBackward {
                     (0..len).into_par_iter().for_each(|i| unsafe {
                         let go_ptr = go_ptr as *const f64;
                         let grad_ptr = grad_ptr as *mut f64;
-                        *grad_ptr.add(i) = if *mask.get_unchecked(i) {
-                            *go_ptr.add(i)
-                        } else {
-                            0.0
-                        };
+                        let m = if *mask.get_unchecked(i) { 1.0 } else { 0.0 };
+                        *grad_ptr.add(i) = *go_ptr.add(i) * m;
                     });
                 }
             }
