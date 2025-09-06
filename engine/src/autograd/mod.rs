@@ -100,19 +100,22 @@ impl ComputationGraph {
         stack.push((output_tensor.id(), initial_grad));
 
         while let Some((tensor_id, grad_output)) = stack.pop() {
+            // Propagate gradients to inputs before storing them. This allows us to
+            // insert the gradient into the map without cloning in the common case
+            // where this is the first contribution for `tensor_id`.
+            if let Some(grad_fn) = self.nodes.get(&tensor_id) {
+                let input_grads = grad_fn.backward(&grad_output)?;
+                stack.extend(input_grads.into_iter());
+            }
+
             match gradients.entry(tensor_id) {
                 Entry::Occupied(mut e) => {
                     let new_grad = crate::operations::arithmetic::add(e.get(), &grad_output)?;
                     *e.get_mut() = new_grad;
                 }
                 Entry::Vacant(e) => {
-                    e.insert(grad_output.clone());
+                    e.insert(grad_output);
                 }
-            }
-
-            if let Some(grad_fn) = self.nodes.get(&tensor_id) {
-                let input_grads = grad_fn.backward(&grad_output)?;
-                stack.extend(input_grads.into_iter());
             }
         }
 

@@ -519,8 +519,8 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
         TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
-    // Perform ReLU based on data type
-    match tensor.dtype() {
+    // Perform ReLU based on data type while capturing mask of positive inputs
+    let mask = match tensor.dtype() {
         DataType::Float32 => relu_f32(tensor, &mut output_data)?,
         DataType::Float64 => relu_f64(tensor, &mut output_data)?,
         DataType::Int32 => relu_i32(tensor, &mut output_data)?,
@@ -530,7 +530,7 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
                 "ReLU function not supported for boolean tensors",
             ))
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -540,39 +540,6 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
         tensor.device(),
         tensor.requires_grad(),
     );
-
-    // Prepare mask for gradient computation
-    let mask: Vec<bool> = match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-            })?;
-            input_data.iter().map(|&v| v > 0.0).collect()
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-            })?;
-            input_data.iter().map(|&v| v > 0.0).collect()
-        }
-        DataType::Int32 => {
-            let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from input tensor")
-            })?;
-            input_data.iter().map(|&v| v > 0).collect()
-        }
-        DataType::Int64 => {
-            let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from input tensor")
-            })?;
-            input_data.iter().map(|&v| v > 0).collect()
-        }
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "ReLU function not supported for boolean tensors",
-            ))
-        }
-    };
 
     // Set up gradient function if needed
     if output.requires_grad() {
@@ -877,7 +844,7 @@ fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
@@ -885,17 +852,39 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: f32| {
-        if v.is_nan() {
-            v
-        } else {
-            v.max(0.0)
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    if len >= PAR_THRESHOLD {
+        output_slice
+            .par_iter_mut()
+            .zip(input_data.par_iter())
+            .zip(mask.par_iter_mut())
+            .for_each(|((o, &v), m)| {
+                if v.is_nan() {
+                    *o = v;
+                } else if v > 0.0 {
+                    *o = v;
+                    *m = true;
+                } else {
+                    *o = 0.0;
+                }
+            });
+    } else {
+        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+            if v.is_nan() {
+                *o = v;
+            } else if v > 0.0 {
+                *o = v;
+                *m = true;
+            } else {
+                *o = 0.0;
+            }
         }
-    });
-    Ok(())
+    }
+    Ok(mask)
 }
 
-fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -903,17 +892,39 @@ fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: f64| {
-        if v.is_nan() {
-            v
-        } else {
-            v.max(0.0)
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    if len >= PAR_THRESHOLD {
+        output_slice
+            .par_iter_mut()
+            .zip(input_data.par_iter())
+            .zip(mask.par_iter_mut())
+            .for_each(|((o, &v), m)| {
+                if v.is_nan() {
+                    *o = v;
+                } else if v > 0.0 {
+                    *o = v;
+                    *m = true;
+                } else {
+                    *o = 0.0;
+                }
+            });
+    } else {
+        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+            if v.is_nan() {
+                *o = v;
+            } else if v > 0.0 {
+                *o = v;
+                *m = true;
+            } else {
+                *o = 0.0;
+            }
         }
-    });
-    Ok(())
+    }
+    Ok(mask)
 }
 
-fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
@@ -921,11 +932,35 @@ fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: i32| v.max(0));
-    Ok(())
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    if len >= PAR_THRESHOLD {
+        output_slice
+            .par_iter_mut()
+            .zip(input_data.par_iter())
+            .zip(mask.par_iter_mut())
+            .for_each(|((o, &v), m)| {
+                if v > 0 {
+                    *o = v;
+                    *m = true;
+                } else {
+                    *o = 0;
+                }
+            });
+    } else {
+        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+            if v > 0 {
+                *o = v;
+                *m = true;
+            } else {
+                *o = 0;
+            }
+        }
+    }
+    Ok(mask)
 }
 
-fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
@@ -933,8 +968,32 @@ fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: i64| v.max(0));
-    Ok(())
+    let len = input_data.len();
+    let mut mask = vec![false; len];
+    if len >= PAR_THRESHOLD {
+        output_slice
+            .par_iter_mut()
+            .zip(input_data.par_iter())
+            .zip(mask.par_iter_mut())
+            .for_each(|((o, &v), m)| {
+                if v > 0 {
+                    *o = v;
+                    *m = true;
+                } else {
+                    *o = 0;
+                }
+            });
+    } else {
+        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+            if v > 0 {
+                *o = v;
+                *m = true;
+            } else {
+                *o = 0;
+            }
+        }
+    }
+    Ok(mask)
 }
 
 fn leaky_relu_f32(

@@ -238,8 +238,8 @@ impl ComputationGraph {
                     continue;
                 }
                 
-                // Get the gradient for this node
-                if let Some(grad_output) = self.gradients.get(&node_id).cloned() {
+                // Take the gradient for this node out of the map to avoid cloning
+                if let Some(mut grad_output) = self.gradients.remove(&node_id) {
                     // If this node has a gradient function, compute gradients for inputs
                     if let Some(grad_fn) = &node.grad_fn {
                         match grad_fn.backward(&grad_output) {
@@ -249,7 +249,6 @@ impl ComputationGraph {
                                     if let Some(grad) = input_grad {
                                         let input_id = grad_fn.inputs()[i];
                                         
-                                        // Accumulate gradient (add to existing or set new)
                                         match self.gradients.entry(input_id) {
                                             Entry::Occupied(mut e) => {
                                                 let new_grad = e.get().add(&grad)?;
@@ -262,11 +261,12 @@ impl ComputationGraph {
                                     }
                                 }
                             }
-                            Err(e) => {
-                                return Err(e);
-                            }
+                            Err(e) => return Err(e),
                         }
                     }
+                    // Re-insert the gradient for this node so it is available in the
+                    // final gradient map returned to callers
+                    self.gradients.insert(node_id, grad_output);
                 }
             }
         }
@@ -277,7 +277,7 @@ impl ComputationGraph {
     /// Validate the computation graph for correctness
     pub fn validate(&self) -> Result<()> {
         // Check for cycles
-        if !self.has_cycles() {
+        if self.has_cycles() {
             return Err(crate::error::MinitensorError::gradient_error(
                 "Computation graph contains cycles"
             ));
@@ -339,8 +339,8 @@ impl ComputationGraph {
     
     /// Check if there are cycles in the computation graph
     pub fn has_cycles(&self) -> bool {
-        // If topological sort includes all nodes, there are no cycles
-        self.topological_order.len() == self.nodes.len()
+        // A cycle exists when the topological order doesn't include all nodes
+        self.topological_order.len() != self.nodes.len()
     }
     
     /// Remove a tensor and its dependencies from the graph
@@ -373,7 +373,7 @@ impl ComputationGraph {
             total_nodes: self.nodes.len(),
             leaf_nodes,
             grad_enabled_nodes,
-            has_cycles: !self.has_cycles(),
+            has_cycles: self.has_cycles(),
         }
     }
 
@@ -423,7 +423,7 @@ mod tests {
         
         assert_eq!(graph.num_nodes(), 1);
         assert!(graph.contains_tensor(tensor_id));
-        assert!(graph.has_cycles());
+        assert!(!graph.has_cycles());
     }
 
     #[test]

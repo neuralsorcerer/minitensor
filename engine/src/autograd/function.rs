@@ -12,7 +12,10 @@ use crate::{
     tensor::DataType,
     device::Device,
 };
+use rayon::prelude::*;
 use std::sync::Arc;
+
+const PAR_THRESHOLD: usize = 1 << 12;
 
 /// Handle gradient broadcasting by summing over broadcasted dimensions
 fn handle_broadcast_gradient(grad_output: &Tensor, target_shape: &[usize]) -> Result<Tensor> {
@@ -25,7 +28,7 @@ fn handle_broadcast_gradient(grad_output: &Tensor, target_shape: &[usize]) -> Re
 
     let mut grad = grad_output.clone();
     let grad_dims = grad_output.shape().dims();
-    let mut axes_to_sum = Vec::new();
+    let mut axes_to_sum = Vec::with_capacity(grad_dims.len());
 
     // Sum over extra leading dimensions introduced by broadcasting
     if grad_dims.len() > target_shape.len() {
@@ -42,7 +45,6 @@ fn handle_broadcast_gradient(grad_output: &Tensor, target_shape: &[usize]) -> Re
 
     if !axes_to_sum.is_empty() {
         axes_to_sum.sort_unstable();
-        axes_to_sum.dedup();
         grad = grad.sum(Some(axes_to_sum), true)?;
     }
 
@@ -566,20 +568,39 @@ impl GradientFunction for SigmoidBackward {
 
 impl GradientFunction for ReluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
-        let mut grad_data = TensorData::zeros_on_device(self.mask.len(), grad_output.dtype(), grad_output.device());
+        let len = self.mask.len();
+        let mut grad_data = TensorData::zeros_on_device(len, grad_output.dtype(), grad_output.device());
         match grad_output.dtype() {
             DataType::Float32 => {
                 let go = grad_output.data().as_f32_slice().unwrap();
                 let out = grad_data.as_f32_slice_mut().unwrap();
-                for (i, &m) in self.mask.iter().enumerate() {
-                    out[i] = if m { go[i] } else { 0.0 };
+                if len >= PAR_THRESHOLD {
+                    out.par_iter_mut()
+                        .zip(go.par_iter())
+                        .zip(self.mask.par_iter())
+                        .for_each(|((o, &g), &m)| {
+                            *o = if m { g } else { 0.0 };
+                        });
+                } else {
+                    for ((o, &g), &m) in out.iter_mut().zip(go.iter()).zip(self.mask.iter()) {
+                        *o = if m { g } else { 0.0 };
+                    }
                 }
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().unwrap();
                 let out = grad_data.as_f64_slice_mut().unwrap();
-                for (i, &m) in self.mask.iter().enumerate() {
-                    out[i] = if m { go[i] } else { 0.0 };
+                if len >= PAR_THRESHOLD {
+                    out.par_iter_mut()
+                        .zip(go.par_iter())
+                        .zip(self.mask.par_iter())
+                        .for_each(|((o, &g), &m)| {
+                            *o = if m { g } else { 0.0 };
+                        });
+                } else {
+                    for ((o, &g), &m) in out.iter_mut().zip(go.iter()).zip(self.mask.iter()) {
+                        *o = if m { g } else { 0.0 };
+                    }
                 }
             }
             _ => unreachable!("ReLU only supports float"),
@@ -957,18 +978,45 @@ fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<T
 }
 
 fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
-    let mut output = TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    let len = tensor.numel();
+    let mut output = TensorData::zeros_on_device(len, tensor.dtype(), tensor.device());
     match tensor.dtype() {
         DataType::Float32 => {
-            let inp = tensor.data().as_f32_slice().ok_or_else(|| MinitensorError::internal_error("f32 slice"))?;
-            let out = output.as_f32_slice_mut().ok_or_else(|| MinitensorError::internal_error("f32 slice mut"))?;
+            let inp = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("f32 slice"))?;
+            let out = output
+                .as_f32_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("f32 slice mut"))?;
             let exp = exponent as f32;
-            for (o, &i) in out.iter_mut().zip(inp.iter()) { *o = i.powf(exp); }
+            if len >= PAR_THRESHOLD {
+                out.par_iter_mut()
+                    .zip(inp.par_iter())
+                    .for_each(|(o, &i)| *o = i.powf(exp));
+            } else {
+                for (o, &i) in out.iter_mut().zip(inp.iter()) {
+                    *o = i.powf(exp);
+                }
+            }
         }
         DataType::Float64 => {
-            let inp = tensor.data().as_f64_slice().ok_or_else(|| MinitensorError::internal_error("f64 slice"))?;
-            let out = output.as_f64_slice_mut().ok_or_else(|| MinitensorError::internal_error("f64 slice mut"))?;
-            for (o, &i) in out.iter_mut().zip(inp.iter()) { *o = i.powf(exponent); }
+            let inp = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("f64 slice"))?;
+            let out = output
+                .as_f64_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("f64 slice mut"))?;
+            if len >= PAR_THRESHOLD {
+                out.par_iter_mut()
+                    .zip(inp.par_iter())
+                    .for_each(|(o, &i)| *o = i.powf(exponent));
+            } else {
+                for (o, &i) in out.iter_mut().zip(inp.iter()) {
+                    *o = i.powf(exponent);
+                }
+            }
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
