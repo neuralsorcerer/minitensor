@@ -1068,7 +1068,13 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data
         .par_iter()
         .cloned()
-        .reduce(|| f32::NEG_INFINITY, |a, b| a.max(b));
+        .reduce(|| f32::NEG_INFINITY, |a, b| {
+            if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        });
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -1087,7 +1093,13 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data
         .par_iter()
         .cloned()
-        .reduce(|| f64::NEG_INFINITY, |a, b| a.max(b));
+        .reduce(|| f64::NEG_INFINITY, |a, b| {
+            if b.is_nan() {
+                a
+            } else {
+                a.max(b)
+            }
+        });
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -1155,7 +1167,13 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data
         .par_iter()
         .cloned()
-        .reduce(|| f32::INFINITY, |a, b| a.min(b));
+        .reduce(|| f32::INFINITY, |a, b| {
+            if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        });
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -1174,7 +1192,13 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data
         .par_iter()
         .cloned()
-        .reduce(|| f64::INFINITY, |a, b| a.min(b));
+        .reduce(|| f64::INFINITY, |a, b| {
+            if b.is_nan() {
+                a
+            } else {
+                a.min(b)
+            }
+        });
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -1503,7 +1527,10 @@ fn max_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
                     let mut max_val = f32::NEG_INFINITY;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        max_val = max_val.max(input[idx]);
+                        let val = input[idx];
+                        if !val.is_nan() {
+                            max_val = max_val.max(val);
+                        }
                     }
                     output[o * inner + r] = max_val;
                 }
@@ -1523,7 +1550,10 @@ fn max_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
                     let mut max_val = f64::NEG_INFINITY;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        max_val = max_val.max(input[idx]);
+                        let val = input[idx];
+                        if !val.is_nan() {
+                            max_val = max_val.max(val);
+                        }
                     }
                     output[o * inner + r] = max_val;
                 }
@@ -1639,7 +1669,10 @@ fn min_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
                     let mut min_val = f32::INFINITY;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        min_val = min_val.min(input[idx]);
+                        let val = input[idx];
+                        if !val.is_nan() {
+                            min_val = min_val.min(val);
+                        }
                     }
                     output[o * inner + r] = min_val;
                 }
@@ -1659,7 +1692,10 @@ fn min_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
                     let mut min_val = f64::INFINITY;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        min_val = min_val.min(input[idx]);
+                        let val = input[idx];
+                        if !val.is_nan() {
+                            min_val = min_val.min(val);
+                        }
                     }
                     output[o * inner + r] = min_val;
                 }

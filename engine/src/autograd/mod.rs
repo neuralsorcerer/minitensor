@@ -10,11 +10,11 @@ use crate::{
     operations::{activation, arithmetic, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::collections::hash_map::Entry;
-use rayon::prelude::*;
 
 const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
@@ -74,8 +74,7 @@ impl ComputationGraph {
         output_tensor: &Tensor,
         grad_output: Option<Tensor>,
     ) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::new();
-        let mut visited = std::collections::HashSet::new();
+        let mut gradients = HashMap::with_capacity(self.nodes.len());
 
         // Initialize with output gradient
         let initial_grad = match grad_output {
@@ -95,51 +94,29 @@ impl ComputationGraph {
             }
         };
 
-        // Start backward pass from output tensor
-        self.backward_recursive(
-            output_tensor.id(),
-            initial_grad,
-            &mut gradients,
-            &mut visited,
-        )?;
+        // Iterative depth-first traversal using an explicit stack avoids the
+        // overhead of recursive function calls and additional visited sets.
+        let mut stack = Vec::with_capacity(self.nodes.len().max(1));
+        stack.push((output_tensor.id(), initial_grad));
+
+        while let Some((tensor_id, grad_output)) = stack.pop() {
+            match gradients.entry(tensor_id) {
+                Entry::Occupied(mut e) => {
+                    let new_grad = crate::operations::arithmetic::add(e.get(), &grad_output)?;
+                    *e.get_mut() = new_grad;
+                }
+                Entry::Vacant(e) => {
+                    e.insert(grad_output.clone());
+                }
+            }
+
+            if let Some(grad_fn) = self.nodes.get(&tensor_id) {
+                let input_grads = grad_fn.backward(&grad_output)?;
+                stack.extend(input_grads.into_iter());
+            }
+        }
 
         Ok(gradients)
-    }
-
-    /// Recursive backward pass implementation
-    fn backward_recursive(
-        &self,
-        tensor_id: TensorId,
-        grad_output: Tensor,
-        gradients: &mut HashMap<TensorId, Tensor>,
-        visited: &mut std::collections::HashSet<TensorId>,
-    ) -> Result<()> {
-        if visited.contains(&tensor_id) {
-            return Ok(());
-        }
-        visited.insert(tensor_id);
-
-        // Accumulate gradient for this tensor
-        match gradients.entry(tensor_id) {
-            Entry::Occupied(mut e) => {
-                let new_grad = crate::operations::arithmetic::add(e.get(), &grad_output)?;
-                *e.get_mut() = new_grad;
-            }
-            Entry::Vacant(e) => {
-                e.insert(grad_output.clone());
-            }
-        }
-
-        // If this tensor has a gradient function, compute gradients for its inputs
-        if let Some(grad_fn) = self.nodes.get(&tensor_id) {
-            let input_grads = grad_fn.backward(&grad_output)?;
-
-            for (input_id, input_grad) in input_grads {
-                self.backward_recursive(input_id, input_grad, gradients, visited)?;
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -153,36 +130,15 @@ impl Default for ComputationGraph {
 thread_local! {
     static GLOBAL_GRAPH: std::cell::RefCell<ComputationGraph> =
         std::cell::RefCell::new(ComputationGraph::new());
-
-    // Track whether gradient recording is enabled. During backward passes we
-    // temporarily disable recording so that gradient calculations can freely
-    // perform tensor operations without trying to modify the computation graph
-    // again, which would otherwise trigger a `RefCell` double borrow panic.
-    static GRAD_ENABLED: std::cell::RefCell<bool> = std::cell::RefCell::new(true);
-}
-
-/// Check if gradient recording is currently enabled.
-fn is_grad_enabled() -> bool {
-    GRAD_ENABLED.with(|flag| *flag.borrow())
-}
-
-/// Set whether gradient recording is enabled.
-fn set_grad_enabled(enabled: bool) {
-    GRAD_ENABLED.with(|flag| *flag.borrow_mut() = enabled);
 }
 
 /// Add a tensor and its gradient function to the global computation graph
 pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>) -> Result<()> {
-    // During backward passes we disable gradient recording to avoid
-    // mutating the computation graph while it's immutably borrowed. When the
-    // flag is disabled simply return without touching the graph.
-    if !is_grad_enabled() {
-        return Ok(());
-    }
-
     if let Some(grad_fn) = grad_fn {
         GLOBAL_GRAPH.with(|graph| {
-            graph.borrow_mut().add_node(tensor.id(), grad_fn);
+            if let Ok(mut g) = graph.try_borrow_mut() {
+                g.add_node(tensor.id(), grad_fn);
+            }
         });
     }
     Ok(())
@@ -190,16 +146,7 @@ pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>)
 
 /// Perform backward pass from the given tensor using the global computation graph
 pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<HashMap<TensorId, Tensor>> {
-    // Temporarily disable gradient recording so that operations executed during
-    // the backward pass (e.g. for gradient accumulation) don't attempt to
-    // register new nodes in the computation graph. This prevents a runtime
-    // panic from `RefCell` double-borrows when the graph is already
-    // immutably borrowed for traversal.
-    let prev = is_grad_enabled();
-    set_grad_enabled(false);
-    let result = GLOBAL_GRAPH.with(|graph| graph.borrow().backward(tensor, grad_output));
-    set_grad_enabled(prev);
-    result
+    GLOBAL_GRAPH.with(|graph| graph.borrow().backward(tensor, grad_output))
 }
 
 /// Clear the global computation graph
@@ -658,9 +605,8 @@ impl GradientFunction for PowBackward {
                     let len = base_slice.len();
                     if len < PAR_THRESHOLD {
                         for i in 0..len {
-                            grad_slice[i] = exp_slice[i]
-                                * base_slice[i].powf(exp_slice[i] - 1.0)
-                                * grad_out[i];
+                            grad_slice[i] =
+                                exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
                         }
                     } else {
                         let base_ptr = base_slice.as_ptr() as usize;
@@ -755,9 +701,8 @@ impl GradientFunction for PowBackward {
                     let len = base_slice.len();
                     if len < PAR_THRESHOLD {
                         for i in 0..len {
-                            grad_slice[i] = exp_slice[i]
-                                * base_slice[i].powf(exp_slice[i] - 1.0)
-                                * grad_out[i];
+                            grad_slice[i] =
+                                exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
                         }
                     } else {
                         let base_ptr = base_slice.as_ptr() as usize;
