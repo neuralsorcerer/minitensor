@@ -23,22 +23,45 @@ where
     T: Copy + Send + Sync,
     F: Fn(T) -> T + Sync + Send,
 {
+    #[inline(always)]
+    fn apply_chunk<T, F>(input: &[T], output: &mut [T], op: &F)
+    where
+        T: Copy,
+        F: Fn(T) -> T,
+    {
+        let len = input.len();
+        let mut i = 0usize;
+        let n = len.saturating_sub(len % 8);
+        while i < n {
+            unsafe {
+                *output.get_unchecked_mut(i) = op(*input.get_unchecked(i));
+                *output.get_unchecked_mut(i + 1) = op(*input.get_unchecked(i + 1));
+                *output.get_unchecked_mut(i + 2) = op(*input.get_unchecked(i + 2));
+                *output.get_unchecked_mut(i + 3) = op(*input.get_unchecked(i + 3));
+                *output.get_unchecked_mut(i + 4) = op(*input.get_unchecked(i + 4));
+                *output.get_unchecked_mut(i + 5) = op(*input.get_unchecked(i + 5));
+                *output.get_unchecked_mut(i + 6) = op(*input.get_unchecked(i + 6));
+                *output.get_unchecked_mut(i + 7) = op(*input.get_unchecked(i + 7));
+            }
+            i += 8;
+        }
+        for j in i..len {
+            unsafe {
+                *output.get_unchecked_mut(j) = op(*input.get_unchecked(j));
+            }
+        }
+    }
+
     let len = input.len();
     debug_assert_eq!(len, output.len());
     if len < PAR_THRESHOLD {
-        for i in 0..len {
-            unsafe {
-                *output.get_unchecked_mut(i) = op(*input.get_unchecked(i));
-            }
-        }
+        apply_chunk(input, output, &op);
     } else {
-        let in_ptr = input.as_ptr() as usize;
-        let out_ptr = output.as_mut_ptr() as usize;
-        (0..len).into_par_iter().for_each(|i| unsafe {
-            let in_ptr = in_ptr as *const T;
-            let out_ptr = out_ptr as *mut T;
-            *out_ptr.add(i) = op(*in_ptr.add(i));
-        });
+        const CHUNK: usize = 1024;
+        input
+            .par_chunks(CHUNK)
+            .zip(output.par_chunks_mut(CHUNK))
+            .for_each(|(in_chunk, out_chunk)| apply_chunk(in_chunk, out_chunk, &op));
     }
 }
 

@@ -7,6 +7,7 @@
 use crate::{
     autograd::{add_to_graph, SumBackward},
     error::{MinitensorError, Result},
+    operations::simd::{simd_sum_f32, simd_sum_f64, simd_sum_i32, simd_sum_i64},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -703,7 +704,11 @@ fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let sum: f32 = data.par_iter().sum();
+    let sum: f32 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_sum_f32).sum::<f32>()
+    } else {
+        simd_sum_f32(data)
+    };
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -719,7 +724,11 @@ fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let sum: f64 = data.par_iter().sum();
+    let sum: f64 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_sum_f64).sum::<f64>()
+    } else {
+        simd_sum_f64(data)
+    };
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -735,7 +744,11 @@ fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let sum: i32 = data.par_iter().sum();
+    let sum: i32 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_sum_i32).sum::<i32>()
+    } else {
+        simd_sum_i32(data)
+    };
 
     let result_slice = result_data
         .as_i32_slice_mut()
@@ -751,7 +764,11 @@ fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
-    let sum: i64 = data.par_iter().sum();
+    let sum: i64 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_sum_i64).sum::<i64>()
+    } else {
+        simd_sum_i64(data)
+    };
 
     let result_slice = result_data
         .as_i64_slice_mut()
@@ -845,7 +862,7 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
                     .par_iter_mut()
                     .zip(input_data.par_chunks_exact(cols))
                     .for_each(|(out, row)| {
-                        *out = row.iter().copied().sum();
+                        *out = simd_sum_f32(row);
                     });
             }
             _ => {
@@ -905,7 +922,7 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
                     .par_iter_mut()
                     .zip(input_data.par_chunks_exact(cols))
                     .for_each(|(out, row)| {
-                        *out = row.iter().copied().sum();
+                        *out = simd_sum_f64(row);
                     });
             }
             _ => {
@@ -965,7 +982,7 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
                     .par_iter_mut()
                     .zip(input_data.par_chunks_exact(cols))
                     .for_each(|(out, row)| {
-                        *out = row.iter().copied().sum();
+                        *out = simd_sum_i32(row);
                     });
             }
             _ => {
@@ -1025,7 +1042,7 @@ fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
                     .par_iter_mut()
                     .zip(input_data.par_chunks_exact(cols))
                     .for_each(|(out, row)| {
-                        *out = row.iter().copied().sum();
+                        *out = simd_sum_i64(row);
                     });
             }
             _ => {

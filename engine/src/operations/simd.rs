@@ -190,6 +190,78 @@ fn simd_add_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<(
     Ok(())
 }
 
+/// Unrolled sum for f32 slices to leverage auto-vectorization
+pub fn simd_sum_f32(data: &[f32]) -> f32 {
+    let mut sums = [0f32; 8];
+    let chunks = data.chunks_exact(8);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        sums[0] += chunk[0];
+        sums[1] += chunk[1];
+        sums[2] += chunk[2];
+        sums[3] += chunk[3];
+        sums[4] += chunk[4];
+        sums[5] += chunk[5];
+        sums[6] += chunk[6];
+        sums[7] += chunk[7];
+    }
+    let mut total: f32 = sums.iter().sum();
+    total += rem.iter().copied().sum::<f32>();
+    total
+}
+
+/// Unrolled sum for f64 slices to leverage auto-vectorization
+pub fn simd_sum_f64(data: &[f64]) -> f64 {
+    let mut sums = [0f64; 4];
+    let chunks = data.chunks_exact(4);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        sums[0] += chunk[0];
+        sums[1] += chunk[1];
+        sums[2] += chunk[2];
+        sums[3] += chunk[3];
+    }
+    let mut total: f64 = sums.iter().sum();
+    total += rem.iter().copied().sum::<f64>();
+    total
+}
+
+/// Unrolled sum for i32 slices to leverage auto-vectorization
+pub fn simd_sum_i32(data: &[i32]) -> i32 {
+    let mut sums = [0i32; 8];
+    let chunks = data.chunks_exact(8);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        sums[0] += chunk[0];
+        sums[1] += chunk[1];
+        sums[2] += chunk[2];
+        sums[3] += chunk[3];
+        sums[4] += chunk[4];
+        sums[5] += chunk[5];
+        sums[6] += chunk[6];
+        sums[7] += chunk[7];
+    }
+    let mut total: i32 = sums.iter().sum();
+    total += rem.iter().copied().sum::<i32>();
+    total
+}
+
+/// Unrolled sum for i64 slices to leverage auto-vectorization
+pub fn simd_sum_i64(data: &[i64]) -> i64 {
+    let mut sums = [0i64; 4];
+    let chunks = data.chunks_exact(4);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        sums[0] += chunk[0];
+        sums[1] += chunk[1];
+        sums[2] += chunk[2];
+        sums[3] += chunk[3];
+    }
+    let mut total: i64 = sums.iter().sum();
+    total += rem.iter().copied().sum::<i64>();
+    total
+}
+
 fn simd_sub_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     for i in 0..lhs.len() {
         output[i] = lhs[i] - rhs[i];

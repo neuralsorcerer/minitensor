@@ -822,12 +822,55 @@ where
     // fall back to a simple loop for smaller ones to reduce rayon overhead.
     if lhs_dims == output_dims && rhs_dims == output_dims {
         if output_data.len() >= 1024 {
-            output_data.par_iter_mut().enumerate().for_each(|(i, out)| {
-                *out = op(lhs_data[i], rhs_data[i]);
-            });
+            output_data
+                .par_iter_mut()
+                .zip(lhs_data.par_iter().zip(rhs_data.par_iter()))
+                .for_each(|(out, (l, r))| {
+                    *out = op(*l, *r);
+                });
         } else {
-            for i in 0..output_data.len() {
-                output_data[i] = op(lhs_data[i], rhs_data[i]);
+            for ((out, &l), &r) in
+                output_data.iter_mut().zip(lhs_data.iter()).zip(rhs_data.iter())
+            {
+                *out = op(l, r);
+            }
+        }
+        return Ok(());
+    }
+
+    // Fast path when one side is a scalar and the other already matches the
+    // output shape. This avoids the more expensive coordinate calculation
+    // used for general broadcasting. We again switch between parallel and
+    // sequential execution based on tensor size to minimize overhead.
+    if lhs_data.len() == 1 && rhs_dims == output_dims {
+        let lhs_val = lhs_data[0];
+        if output_data.len() >= 1024 {
+            output_data
+                .par_iter_mut()
+                .zip(rhs_data.par_iter())
+                .for_each(|(out, &r)| {
+                    *out = op(lhs_val, r);
+                });
+        } else {
+            for (out, &r) in output_data.iter_mut().zip(rhs_data.iter()) {
+                *out = op(lhs_val, r);
+            }
+        }
+        return Ok(());
+    }
+
+    if rhs_data.len() == 1 && lhs_dims == output_dims {
+        let rhs_val = rhs_data[0];
+        if output_data.len() >= 1024 {
+            output_data
+                .par_iter_mut()
+                .zip(lhs_data.par_iter())
+                .for_each(|(out, &l)| {
+                    *out = op(l, rhs_val);
+                });
+        } else {
+            for (out, &l) in output_data.iter_mut().zip(lhs_data.iter()) {
+                *out = op(l, rhs_val);
             }
         }
         return Ok(());

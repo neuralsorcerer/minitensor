@@ -9,9 +9,10 @@ use crate::{
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 
-fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send>(
+fn broadcast_compare_op<T, F>(
     lhs_data: &[T],
     rhs_data: &[T],
     output_data: &mut [bool],
@@ -19,19 +20,73 @@ fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send
     rhs_shape: &Shape,
     output_shape: &Shape,
     op: F,
-) -> Result<()> {
+) -> Result<()>
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> bool + Sync + Send,
+{
     let output_dims = output_shape.dims();
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
     let rank = output_dims.len();
+
+    // Fast path when no broadcasting is required
+    if lhs_dims == output_dims && rhs_dims == output_dims {
+        if output_data.len() >= 1024 {
+            output_data
+                .par_iter_mut()
+                .zip(lhs_data.par_iter().zip(rhs_data.par_iter()))
+                .for_each(|(out, (l, r))| *out = op(*l, *r));
+        } else {
+            for ((out, &l), &r) in output_data
+                .iter_mut()
+                .zip(lhs_data.iter())
+                .zip(rhs_data.iter())
+            {
+                *out = op(l, r);
+            }
+        }
+        return Ok(());
+    }
+
+    // Fast path when one side is a scalar
+    if lhs_data.len() == 1 && rhs_dims == output_dims {
+        let lhs_val = lhs_data[0];
+        if output_data.len() >= 1024 {
+            output_data
+                .par_iter_mut()
+                .zip(rhs_data.par_iter())
+                .for_each(|(out, &r)| *out = op(lhs_val, r));
+        } else {
+            for (out, &r) in output_data.iter_mut().zip(rhs_data.iter()) {
+                *out = op(lhs_val, r);
+            }
+        }
+        return Ok(());
+    }
+
+    if rhs_data.len() == 1 && lhs_dims == output_dims {
+        let rhs_val = rhs_data[0];
+        if output_data.len() >= 1024 {
+            output_data
+                .par_iter_mut()
+                .zip(lhs_data.par_iter())
+                .for_each(|(out, &l)| *out = op(l, rhs_val));
+        } else {
+            for (out, &l) in output_data.iter_mut().zip(lhs_data.iter()) {
+                *out = op(l, rhs_val);
+            }
+        }
+        return Ok(());
+    }
 
     let lhs_contiguous = Strides::from_shape(lhs_shape);
     let rhs_contiguous = Strides::from_shape(rhs_shape);
     let lhs_strides = lhs_contiguous.as_slice();
     let rhs_strides = rhs_contiguous.as_slice();
 
-    let mut lhs_aligned = vec![0usize; rank];
-    let mut rhs_aligned = vec![0usize; rank];
+    let mut lhs_aligned: SmallVec<[usize; 8]> = smallvec![0; rank];
+    let mut rhs_aligned: SmallVec<[usize; 8]> = smallvec![0; rank];
 
     let lhs_offset = rank.saturating_sub(lhs_dims.len());
     for (i, &dim) in lhs_dims.iter().enumerate() {
@@ -44,55 +99,43 @@ fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send
     }
 
     const CHUNK: usize = 1024;
-    let process_chunk = |chunk_idx: usize, out_chunk: &mut [bool]| {
-        let start = chunk_idx * CHUNK;
-        let mut coord = vec![0usize; rank];
-        let mut tmp = start;
-        for i in (0..rank).rev() {
-            coord[i] = tmp % output_dims[i];
-            tmp /= output_dims[i];
-        }
-
-        let mut lhs_idx = 0usize;
-        let mut rhs_idx = 0usize;
-        for i in 0..rank {
-            lhs_idx += coord[i] * lhs_aligned[i];
-            rhs_idx += coord[i] * rhs_aligned[i];
-        }
-
-        let lhs_ptr = lhs_data.as_ptr();
-        let rhs_ptr = rhs_data.as_ptr();
-        for out in out_chunk.iter_mut() {
-            unsafe {
-                *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
-            }
+    output_data
+        .par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(chunk_idx, out_chunk)| {
+            let start = chunk_idx * CHUNK;
+            let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
+            let mut tmp = start;
             for i in (0..rank).rev() {
-                coord[i] += 1;
-                lhs_idx += lhs_aligned[i];
-                rhs_idx += rhs_aligned[i];
-                if coord[i] < output_dims[i] {
-                    break;
-                }
-                coord[i] = 0;
-                lhs_idx -= lhs_aligned[i] * output_dims[i];
-                rhs_idx -= rhs_aligned[i] * output_dims[i];
+                coord[i] = tmp % output_dims[i];
+                tmp /= output_dims[i];
             }
-        }
-    };
 
-    if output_data.len() < CHUNK {
-        process_chunk(0, output_data);
-    } else if output_data.len() < CHUNK * 4 {
-        output_data
-            .chunks_mut(CHUNK)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| process_chunk(chunk_idx, out_chunk));
-    } else {
-        output_data
-            .par_chunks_mut(CHUNK)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| process_chunk(chunk_idx, out_chunk));
-    }
+            let mut lhs_idx = 0usize;
+            let mut rhs_idx = 0usize;
+            for i in 0..rank {
+                lhs_idx += coord[i] * lhs_aligned[i];
+                rhs_idx += coord[i] * rhs_aligned[i];
+            }
+            let lhs_ptr = lhs_data.as_ptr();
+            let rhs_ptr = rhs_data.as_ptr();
+            for out in out_chunk.iter_mut() {
+                unsafe {
+                    *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
+                }
+                for i in (0..rank).rev() {
+                    coord[i] += 1;
+                    lhs_idx += lhs_aligned[i];
+                    rhs_idx += rhs_aligned[i];
+                    if coord[i] < output_dims[i] {
+                        break;
+                    }
+                    coord[i] = 0;
+                    lhs_idx -= lhs_aligned[i] * output_dims[i];
+                    rhs_idx -= rhs_aligned[i] * output_dims[i];
+                }
+            }
+        });
 
     Ok(())
 }
