@@ -6,7 +6,8 @@
 
 use super::GradientFunction;
 use crate::{tensor::Tensor, error::Result};
-use std::collections::{HashMap, hash_map::Entry};
+use smallvec::SmallVec;
+use std::collections::{HashMap, hash_map::Entry, VecDeque};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 /// Statistics about the computation graph
@@ -168,58 +169,55 @@ impl ComputationGraph {
     /// Update the topological ordering of nodes using Kahn's algorithm
     fn update_topological_order(&mut self) {
         self.topological_order.clear();
-        
-        // Build dependency graph: for each node, track which nodes depend on it
-        let mut dependents: HashMap<TensorId, Vec<TensorId>> = HashMap::new();
-        let mut in_degree: HashMap<TensorId, usize> = HashMap::new();
-        
-        // Initialize all nodes
+
+        let mut dependents: HashMap<TensorId, SmallVec<[TensorId; 4]>> =
+            HashMap::with_capacity(self.nodes.len());
+        let mut in_degree: HashMap<TensorId, usize> = HashMap::with_capacity(self.nodes.len());
+
         for &node_id in self.nodes.keys() {
-            dependents.entry(node_id).or_insert_with(Vec::new);
             in_degree.entry(node_id).or_insert(0);
         }
         
-        // Build the dependency relationships
         for node in self.nodes.values() {
             for &input_id in &node.inputs {
-                // input_id is a dependency of node.tensor_id
-                dependents.entry(input_id).or_insert_with(Vec::new).push(node.tensor_id);
+                dependents
+                    .entry(input_id)
+                    .or_insert_with(SmallVec::new)
+                    .push(node.tensor_id);
                 *in_degree.entry(node.tensor_id).or_insert(0) += 1;
             }
         }
-        
-        // Find nodes with no dependencies (output nodes)
-        let mut queue: Vec<TensorId> = in_degree
+
+        let mut queue: VecDeque<TensorId> = in_degree
             .iter()
             .filter(|(_, &degree)| degree == 0)
             .map(|(&id, _)| id)
             .collect();
         
-        // Process nodes in topological order (outputs first for backward pass)
-        while let Some(current_id) = queue.pop() {
-            self.topological_order.push(current_id);
-            
-            // For each node that depends on current node, reduce its in-degree
+        let mut order: Vec<TensorId> = Vec::with_capacity(self.nodes.len());
+        while let Some(current_id) = queue.pop_front() {
+            order.push(current_id);
+
             if let Some(deps) = dependents.get(&current_id) {
                 for &dependent_id in deps {
                     if let Some(degree) = in_degree.get_mut(&dependent_id) {
                         *degree -= 1;
                         if *degree == 0 {
-                            queue.push(dependent_id);
+                            queue.push_back(dependent_id);
                         }
                     }
                 }
             }
         }
         
-        // Reverse the order to get backward pass order (outputs to inputs)
-        self.topological_order.reverse();
+        self.topological_order = order.into_iter().rev().collect();
     }
 
     /// Perform backward pass from a given tensor
     pub fn backward(&mut self, start_tensor: TensorId, gradient: Option<Tensor>) -> Result<HashMap<TensorId, Tensor>> {
-        // Clear previous gradients
+        // Clear previous gradients and ensure sufficient capacity for accumulation
         self.gradients.clear();
+        self.gradients.reserve(self.nodes.len());
         
         // Set the initial gradient
         if let Some(grad) = gradient {

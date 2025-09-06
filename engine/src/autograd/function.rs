@@ -13,6 +13,7 @@ use crate::{
     device::Device,
 };
 use rayon::prelude::*;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 const PAR_THRESHOLD: usize = 1 << 12;
@@ -28,14 +29,12 @@ fn handle_broadcast_gradient(grad_output: &Tensor, target_shape: &[usize]) -> Re
 
     let mut grad = grad_output.clone();
     let grad_dims = grad_output.shape().dims();
-    let mut axes_to_sum = Vec::with_capacity(grad_dims.len());
+    let mut axes_to_sum: SmallVec<[usize; 8]> = SmallVec::new();
 
-    // Sum over extra leading dimensions introduced by broadcasting
     if grad_dims.len() > target_shape.len() {
         axes_to_sum.extend(0..grad_dims.len() - target_shape.len());
     }
 
-    // Sum over dimensions where target shape had size 1
     for (i, (&gdim, &tdim)) in grad_dims.iter().rev().zip(target_shape.iter().rev()).enumerate() {
         let axis = grad_dims.len() - 1 - i;
         if tdim == 1 && gdim > 1 {
@@ -45,7 +44,7 @@ fn handle_broadcast_gradient(grad_output: &Tensor, target_shape: &[usize]) -> Re
 
     if !axes_to_sum.is_empty() {
         axes_to_sum.sort_unstable();
-        grad = grad.sum(Some(axes_to_sum), true)?;
+        grad = grad.sum(Some(axes_to_sum.into_vec()), true)?;
     }
 
     if grad.shape().dims() != target_shape {
