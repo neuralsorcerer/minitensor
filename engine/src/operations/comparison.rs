@@ -44,44 +44,55 @@ fn broadcast_compare_op<T: Copy + Send + Sync, F: Fn(T, T) -> bool + Sync + Send
     }
 
     const CHUNK: usize = 1024;
-    output_data
-        .par_chunks_mut(CHUNK)
-        .enumerate()
-        .for_each(|(chunk_idx, out_chunk)| {
-            let start = chunk_idx * CHUNK;
-            let mut coord = vec![0usize; rank];
-            let mut tmp = start;
+    let process_chunk = |chunk_idx: usize, out_chunk: &mut [bool]| {
+        let start = chunk_idx * CHUNK;
+        let mut coord = vec![0usize; rank];
+        let mut tmp = start;
+        for i in (0..rank).rev() {
+            coord[i] = tmp % output_dims[i];
+            tmp /= output_dims[i];
+        }
+
+        let mut lhs_idx = 0usize;
+        let mut rhs_idx = 0usize;
+        for i in 0..rank {
+            lhs_idx += coord[i] * lhs_aligned[i];
+            rhs_idx += coord[i] * rhs_aligned[i];
+        }
+
+        let lhs_ptr = lhs_data.as_ptr();
+        let rhs_ptr = rhs_data.as_ptr();
+        for out in out_chunk.iter_mut() {
+            unsafe {
+                *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
+            }
             for i in (0..rank).rev() {
-                coord[i] = tmp % output_dims[i];
-                tmp /= output_dims[i];
-            }
-
-            let mut lhs_idx = 0usize;
-            let mut rhs_idx = 0usize;
-            for i in 0..rank {
-                lhs_idx += coord[i] * lhs_aligned[i];
-                rhs_idx += coord[i] * rhs_aligned[i];
-            }
-
-            let lhs_ptr = lhs_data.as_ptr();
-            let rhs_ptr = rhs_data.as_ptr();
-            for out in out_chunk.iter_mut() {
-                unsafe {
-                    *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
+                coord[i] += 1;
+                lhs_idx += lhs_aligned[i];
+                rhs_idx += rhs_aligned[i];
+                if coord[i] < output_dims[i] {
+                    break;
                 }
-                for i in (0..rank).rev() {
-                    coord[i] += 1;
-                    lhs_idx += lhs_aligned[i];
-                    rhs_idx += rhs_aligned[i];
-                    if coord[i] < output_dims[i] {
-                        break;
-                    }
-                    coord[i] = 0;
-                    lhs_idx -= lhs_aligned[i] * output_dims[i];
-                    rhs_idx -= rhs_aligned[i] * output_dims[i];
-                }
+                coord[i] = 0;
+                lhs_idx -= lhs_aligned[i] * output_dims[i];
+                rhs_idx -= rhs_aligned[i] * output_dims[i];
             }
-        });
+        }
+    };
+
+    if output_data.len() < CHUNK {
+        process_chunk(0, output_data);
+    } else if output_data.len() < CHUNK * 4 {
+        output_data
+            .chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| process_chunk(chunk_idx, out_chunk));
+    } else {
+        output_data
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| process_chunk(chunk_idx, out_chunk));
+    }
 
     Ok(())
 }

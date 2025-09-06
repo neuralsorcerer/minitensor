@@ -15,6 +15,8 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+
 #[inline(always)]
 fn unary_apply<T, F>(input: &[T], output: &mut [T], op: F)
 where
@@ -23,13 +25,21 @@ where
 {
     let len = input.len();
     debug_assert_eq!(len, output.len());
-    let in_ptr = input.as_ptr() as usize;
-    let out_ptr = output.as_mut_ptr() as usize;
-    (0..len).into_par_iter().for_each(|i| unsafe {
-        let in_ptr = in_ptr as *const T;
-        let out_ptr = out_ptr as *mut T;
-        *out_ptr.add(i) = op(*in_ptr.add(i));
-    });
+    if len < PAR_THRESHOLD {
+        for i in 0..len {
+            unsafe {
+                *output.get_unchecked_mut(i) = op(*input.get_unchecked(i));
+            }
+        }
+    } else {
+        let in_ptr = input.as_ptr() as usize;
+        let out_ptr = output.as_mut_ptr() as usize;
+        (0..len).into_par_iter().for_each(|i| unsafe {
+            let in_ptr = in_ptr as *const T;
+            let out_ptr = out_ptr as *mut T;
+            *out_ptr.add(i) = op(*in_ptr.add(i));
+        });
+    }
 }
 
 /// Exponential function with gradient support
@@ -1396,7 +1406,7 @@ fn round_f64(tensor: &Tensor, output_data: &mut TensorData, decimals: i32) -> Re
     })?;
 
     let multiplier = 10.0_f64.powi(decimals);
-     unary_apply(input_data, output_slice, |val: f64| {
+    unary_apply(input_data, output_slice, |val: f64| {
         (val * multiplier).round() / multiplier
     });
     Ok(())

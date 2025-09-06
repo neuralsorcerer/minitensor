@@ -815,6 +815,23 @@ where
     let rhs_dims = rhs_shape.dims();
     let rank = output_dims.len();
 
+    // Fast path when no broadcasting is required. This avoids the
+    // relatively expensive index mapping logic below and simply applies the
+    // operation element-wise. We use parallel iteration for large tensors and
+    // fall back to a simple loop for smaller ones to reduce rayon overhead.
+    if lhs_dims == output_dims && rhs_dims == output_dims {
+        if output_data.len() >= 1024 {
+            output_data.par_iter_mut().enumerate().for_each(|(i, out)| {
+                *out = op(lhs_data[i], rhs_data[i]);
+            });
+        } else {
+            for i in 0..output_data.len() {
+                output_data[i] = op(lhs_data[i], rhs_data[i]);
+            }
+        }
+        return Ok(());
+    }
+
     let lhs_contiguous = Strides::from_shape(lhs_shape);
     let rhs_contiguous = Strides::from_shape(rhs_shape);
     let lhs_strides = lhs_contiguous.as_slice();
