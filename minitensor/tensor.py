@@ -394,51 +394,75 @@ class Tensor:
         return self.__mul__(-1)
     
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if isinstance(other, Tensor):
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.__add__(other._tensor)
-            return result
-        else:
+        if not isinstance(other, Tensor):
             # Scalar addition
-            scalar_tensor = Tensor(other)
+            scalar_tensor = Tensor(other, dtype=self.dtype)
             return self.__add__(scalar_tensor)
+
+        if self.numel() == 0 or other.numel() == 0:
+            if self.dtype != other.dtype:
+                raise TypeError("Cannot add tensors with different dtypes")
+            result_array = self.numpy() + other.numpy()
+            return Tensor(result_array, dtype=self.dtype)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__add__(other._tensor)
+        return result
 
     def __radd__(self, other: Union[float, int]) -> "Tensor":
         return self.__add__(other)
 
     def __sub__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if isinstance(other, Tensor):
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.__sub__(other._tensor)
-            return result
-        else:
-            scalar_tensor = Tensor(other)
+        if not isinstance(other, Tensor):
+            scalar_tensor = Tensor(other, dtype=self.dtype)
             return self.__sub__(scalar_tensor)
+
+        if self.numel() == 0 or other.numel() == 0:
+            if self.dtype != other.dtype:
+                raise TypeError("Cannot subtract tensors with different dtypes")
+            result_array = self.numpy() - other.numpy()
+            return Tensor(result_array, dtype=self.dtype)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__sub__(other._tensor)
+        return result
 
     def __rsub__(self, other: Union[float, int]) -> "Tensor":
         scalar_tensor = Tensor(other)
         return scalar_tensor.__sub__(self)
 
     def __mul__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if isinstance(other, Tensor):
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.__mul__(other._tensor)
-            return result
-        else:
-            scalar_tensor = Tensor(other)
+        if not isinstance(other, Tensor):
+            scalar_tensor = Tensor(other, dtype=self.dtype)
             return self.__mul__(scalar_tensor)
+
+        if self.numel() == 0 or other.numel() == 0:
+            if self.dtype != other.dtype:
+                raise TypeError("Cannot multiply tensors with different dtypes")
+            result_array = self.numpy() * other.numpy()
+            return Tensor(result_array, dtype=self.dtype)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__mul__(other._tensor)
+        return result
 
     def __rmul__(self, other: Union[float, int]) -> "Tensor":
         return self.__mul__(other)
 
     def __truediv__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if isinstance(other, Tensor):
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.__truediv__(other._tensor)
-            return result
-        else:
-            scalar_tensor = Tensor(other)
+        if not isinstance(other, Tensor):
+            scalar_tensor = Tensor(other, dtype=self.dtype)
             return self.__truediv__(scalar_tensor)
+
+        if self.numel() == 0 or other.numel() == 0:
+            if self.dtype != other.dtype:
+                raise TypeError("Cannot divide tensors with different dtypes")
+            result_array = self.numpy() / other.numpy()
+            return Tensor(result_array, dtype=self.dtype)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__truediv__(other._tensor)
+        return result
 
     def __rtruediv__(self, other: Union[float, int]) -> "Tensor":
         scalar_tensor = Tensor(other)
