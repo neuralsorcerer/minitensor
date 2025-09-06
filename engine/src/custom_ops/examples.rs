@@ -31,18 +31,18 @@ pub fn create_swish_op() -> Result<Arc<dyn CustomOp>> {
                     Some(&input_id),
                     Some(input_shape),
                     Some(&input_dtype),
-                    Some(input_device),
+                    Some(&input_device),
                 ) = (
-                    input_ids.get(0),
-                    input_shapes.get(0),
-                    input_dtypes.get(0),
-                    input_devices.get(0),
+                    input_ids.first(),
+                    input_shapes.first(),
+                    input_dtypes.first(),
+                    input_devices.first(),
                 ) {
                     // Create a gradient tensor (simplified implementation)
                     let grad = Tensor::ones(
                         Shape::new(input_shape.clone()),
                         input_dtype,
-                        input_device.clone(),
+                        input_device,
                         false,
                     );
                     gradients.insert(input_id, grad);
@@ -83,17 +83,17 @@ pub fn create_gelu_op() -> Result<Arc<dyn CustomOp>> {
                     Some(&input_id),
                     Some(input_shape),
                     Some(&input_dtype),
-                    Some(input_device),
+                    Some(&input_device),
                 ) = (
-                    input_ids.get(0),
-                    input_shapes.get(0),
-                    input_dtypes.get(0),
-                    input_devices.get(0),
+                    input_ids.first(),
+                    input_shapes.first(),
+                    input_dtypes.first(),
+                    input_devices.first(),
                 ) {
                     let grad = Tensor::ones(
                         Shape::new(input_shape.clone()),
                         input_dtype,
-                        input_device.clone(),
+                        input_device,
                         false,
                     );
                     gradients.insert(input_id, grad);
@@ -125,10 +125,10 @@ pub fn create_mish_op() -> Result<Arc<dyn CustomOp>> {
                     Some(&_input_dtype),
                     Some(_input_device),
                 ) = (
-                    input_ids.get(0),
-                    input_shapes.get(0),
-                    input_dtypes.get(0),
-                    input_devices.get(0),
+                    input_ids.first(),
+                    input_shapes.first(),
+                    input_dtypes.first(),
+                    input_devices.first(),
                 ) {
                     let grad = grad_output.clone();
                     gradients.insert(input_id, grad);
@@ -158,7 +158,7 @@ pub fn create_power_op() -> Result<Arc<dyn CustomOp>> {
                 // Power gradient: d/dx(x^y) = y * x^(y-1), d/dy(x^y) = x^y * ln(x)
                 // Simplified implementation
                 for (i, &input_id) in input_ids.iter().enumerate() {
-                    if let (Some(input_shape), Some(&input_dtype), Some(input_device)) = (
+                    if let (Some(input_shape), Some(&input_dtype), Some(&input_device)) = (
                         input_shapes.get(i),
                         input_dtypes.get(i),
                         input_devices.get(i),
@@ -166,7 +166,7 @@ pub fn create_power_op() -> Result<Arc<dyn CustomOp>> {
                         let grad = Tensor::ones(
                             Shape::new(input_shape.clone()),
                             input_dtype,
-                            input_device.clone(),
+                            input_device,
                             false,
                         );
                         gradients.insert(input_id, grad);
@@ -215,7 +215,7 @@ pub fn create_layer_norm_op() -> Result<Arc<dyn CustomOp>> {
 
                 // Layer norm has gradients for input, weight, and bias
                 for (i, &input_id) in input_ids.iter().enumerate() {
-                    if let (Some(input_shape), Some(&input_dtype), Some(input_device)) = (
+                    if let (Some(input_shape), Some(&input_dtype), Some(&input_device)) = (
                         input_shapes.get(i),
                         input_dtypes.get(i),
                         input_devices.get(i),
@@ -228,7 +228,7 @@ pub fn create_layer_norm_op() -> Result<Arc<dyn CustomOp>> {
                             Tensor::ones(
                                 Shape::new(input_shape.clone()),
                                 input_dtype,
-                                input_device.clone(),
+                                input_device,
                                 false,
                             )
                         };

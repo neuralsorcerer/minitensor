@@ -15,6 +15,25 @@ use crate::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+// Type aliases to keep function signatures manageable and avoid repeated
+// complex trait bounds that hurt compile times and readability.
+type ForwardFn = Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>;
+type BackwardFn = Arc<
+    dyn Fn(
+            &Tensor,
+            &[TensorId],
+            &[Vec<usize>],
+            &[DataType],
+            &[Device],
+        ) -> Result<HashMap<TensorId, Tensor>>
+        + Send
+        + Sync,
+>;
+type ValidateFn = Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>;
+type OutputShapeFn = Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>;
+type OutputDtypeFn = Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>;
+type OutputDeviceFn = Arc<dyn Fn(&[&Device]) -> Result<Device> + Send + Sync>;
+
 /// Trait for custom operations that can be registered with the system
 pub trait CustomOp: Send + Sync {
     /// The name of the operation (must be unique)
@@ -76,7 +95,7 @@ impl CustomOpRegistry {
 
         // Check for duplicate names
         if ops.contains_key(&name) {
-            return Err(MinitensorError::invalid_argument(&format!(
+            return Err(MinitensorError::invalid_argument(format!(
                 "Operation '{}' is already registered",
                 name
             )));
@@ -93,7 +112,7 @@ impl CustomOpRegistry {
         })?;
 
         if ops.remove(name).is_none() {
-            return Err(MinitensorError::invalid_argument(&format!(
+            return Err(MinitensorError::invalid_argument(format!(
                 "Operation '{}' is not registered",
                 name
             )));
@@ -110,7 +129,7 @@ impl CustomOpRegistry {
             .map_err(|_| MinitensorError::internal_error("Failed to acquire registry read lock"))?;
 
         ops.get(name).cloned().ok_or_else(|| {
-            MinitensorError::invalid_argument(&format!("Operation '{}' is not registered", name))
+            MinitensorError::invalid_argument(format!("Operation '{}' is not registered", name))
         })
     }
 
@@ -164,7 +183,7 @@ impl Default for CustomOpRegistry {
 
 /// Global custom operation registry
 static GLOBAL_REGISTRY: std::sync::LazyLock<CustomOpRegistry> =
-    std::sync::LazyLock::new(|| CustomOpRegistry::new());
+    std::sync::LazyLock::new(CustomOpRegistry::new);
 
 /// Register a custom operation globally
 pub fn register_custom_op(op: Arc<dyn CustomOp>) -> Result<()> {
@@ -198,17 +217,7 @@ pub struct CustomOpBackward {
     pub input_shapes: Vec<Vec<usize>>,
     pub input_dtypes: Vec<DataType>,
     pub input_devices: Vec<Device>,
-    pub backward_fn: Arc<
-        dyn Fn(
-                &Tensor,
-                &[TensorId],
-                &[Vec<usize>],
-                &[DataType],
-                &[Device],
-            ) -> Result<HashMap<TensorId, Tensor>>
-            + Send
-            + Sync,
-    >,
+    pub backward_fn: BackwardFn,
 }
 
 impl GradientFunction for CustomOpBackward {
@@ -231,24 +240,12 @@ impl GradientFunction for CustomOpBackward {
 pub struct CustomOpBuilder {
     name: String,
     num_inputs: usize,
-    forward_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>>,
-    backward_fn: Option<
-        Arc<
-            dyn Fn(
-                    &Tensor,
-                    &[TensorId],
-                    &[Vec<usize>],
-                    &[DataType],
-                    &[Device],
-                ) -> Result<HashMap<TensorId, Tensor>>
-                + Send
-                + Sync,
-        >,
-    >,
-    validate_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>>,
-    output_shape_fn: Option<Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>>,
-    output_dtype_fn: Option<Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>>,
-    output_device_fn: Option<Arc<dyn Fn(&[&Device]) -> Result<Device> + Send + Sync>>,
+    forward_fn: Option<ForwardFn>,
+    backward_fn: Option<BackwardFn>,
+    validate_fn: Option<ValidateFn>,
+    output_shape_fn: Option<OutputShapeFn>,
+    output_dtype_fn: Option<OutputDtypeFn>,
+    output_device_fn: Option<OutputDeviceFn>,
 }
 
 impl CustomOpBuilder {
@@ -352,24 +349,12 @@ impl CustomOpBuilder {
 struct BuiltCustomOp {
     name: String,
     num_inputs: usize,
-    forward_fn: Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>,
-    backward_fn: Option<
-        Arc<
-            dyn Fn(
-                    &Tensor,
-                    &[TensorId],
-                    &[Vec<usize>],
-                    &[DataType],
-                    &[Device],
-                ) -> Result<HashMap<TensorId, Tensor>>
-                + Send
-                + Sync,
-        >,
-    >,
-    validate_fn: Option<Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>>,
-    output_shape_fn: Option<Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>>,
-    output_dtype_fn: Option<Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>>,
-    output_device_fn: Option<Arc<dyn Fn(&[&Device]) -> Result<Device> + Send + Sync>>,
+    forward_fn: ForwardFn,
+    backward_fn: Option<BackwardFn>,
+    validate_fn: Option<ValidateFn>,
+    output_shape_fn: Option<OutputShapeFn>,
+    output_dtype_fn: Option<OutputDtypeFn>,
+    output_device_fn: Option<OutputDeviceFn>,
 }
 
 impl CustomOp for BuiltCustomOp {
@@ -380,7 +365,7 @@ impl CustomOp for BuiltCustomOp {
     fn validate_inputs(&self, inputs: &[&Tensor]) -> Result<()> {
         // Check number of inputs
         if inputs.len() != self.num_inputs {
-            return Err(MinitensorError::invalid_argument(&format!(
+            return Err(MinitensorError::invalid_argument(format!(
                 "Operation '{}' expects {} inputs, got {}",
                 self.name,
                 self.num_inputs,

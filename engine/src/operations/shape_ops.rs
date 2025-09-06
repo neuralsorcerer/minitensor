@@ -336,7 +336,7 @@ pub fn slice(tensor: &Tensor, dim: usize, start: usize, end: usize, step: usize)
 
     // Compute output shape
     let mut output_shape = tensor.shape().dims().to_vec();
-    output_shape[dim] = (end - start + step - 1) / step; // Ceiling division
+    output_shape[dim] = (end - start).div_ceil(step);
     let output_shape_vec = output_shape.clone();
     let output_shape_obj = Shape::new(output_shape);
 

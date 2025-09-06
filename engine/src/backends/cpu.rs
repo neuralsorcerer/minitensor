@@ -48,6 +48,7 @@ impl Backend for CpuBackend {
         Ok(ptr)
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()> {
         if ptr.is_null() || size_bytes == 0 {
             return Ok(());
@@ -57,10 +58,14 @@ impl Backend for CpuBackend {
             crate::error::MinitensorError::memory_error(format!("Invalid layout: {}", e))
         })?;
 
-        unsafe { dealloc(ptr, layout) };
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
+        unsafe {
+            dealloc(ptr, layout);
+        }
         Ok(())
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
@@ -68,12 +73,14 @@ impl Backend for CpuBackend {
             ));
         }
 
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         }
         Ok(())
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
@@ -81,6 +88,7 @@ impl Backend for CpuBackend {
             ));
         }
 
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         unsafe {
             std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
         }

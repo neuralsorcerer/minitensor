@@ -212,6 +212,12 @@ impl CompositeScheduler {
     }
 }
 
+impl Default for CompositeScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LearningRateScheduler for CompositeScheduler {
     fn get_lr(&self, step: usize, base_lr: f64) -> f64 {
         // Find the most recent scheduler that should be active

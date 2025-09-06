@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Supported data types for tensor elements
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DataType {
+    #[default]
     Float32,
     Float64,
     Int32,
@@ -58,12 +59,6 @@ impl DataType {
             DataType::Int64 => "int64",
             DataType::Bool => "bool",
         }
-    }
-}
-
-impl Default for DataType {
-    fn default() -> Self {
-        DataType::Float32
     }
 }
 

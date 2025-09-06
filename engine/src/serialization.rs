@@ -323,7 +323,7 @@ impl StateDict {
     /// Load parameter tensor
     pub fn load_parameter(&self, name: &str, device: Option<Device>) -> Result<Tensor> {
         let serialized = self.parameters.get(name).ok_or_else(|| {
-            MinitensorError::serialization_error(&format!("Parameter '{}' not found", name))
+            MinitensorError::serialization_error(format!("Parameter '{}' not found", name))
         })?;
         serialized.to_tensor(device)
     }
@@ -331,7 +331,7 @@ impl StateDict {
     /// Load buffer tensor
     pub fn load_buffer(&self, name: &str, device: Option<Device>) -> Result<Tensor> {
         let serialized = self.buffers.get(name).ok_or_else(|| {
-            MinitensorError::serialization_error(&format!("Buffer '{}' not found", name))
+            MinitensorError::serialization_error(format!("Buffer '{}' not found", name))
         })?;
         serialized.to_tensor(device)
     }
@@ -374,7 +374,7 @@ impl SerializedModel {
     pub fn check_compatibility(&self) -> Result<()> {
         let current_version = ModelVersion::current();
         if !current_version.is_compatible(&self.metadata.version) {
-            return Err(MinitensorError::serialization_error(&format!(
+            return Err(MinitensorError::serialization_error(format!(
                 "Model version {}.{}.{} is not compatible with current version {}.{}.{}",
                 self.metadata.version.major,
                 self.metadata.version.minor,
@@ -428,7 +428,7 @@ impl ModelSerializer {
         match format {
             SerializationFormat::Json => {
                 serde_json::to_writer_pretty(&mut writer, model).map_err(|e| {
-                    MinitensorError::serialization_error(&format!(
+                    MinitensorError::serialization_error(format!(
                         "JSON serialization failed: {}",
                         e
                     ))
@@ -436,7 +436,7 @@ impl ModelSerializer {
             }
             SerializationFormat::Binary => {
                 bincode::serialize_into(&mut writer, model).map_err(|e| {
-                    MinitensorError::serialization_error(&format!(
+                    MinitensorError::serialization_error(format!(
                         "Binary serialization failed: {}",
                         e
                     ))
@@ -444,7 +444,7 @@ impl ModelSerializer {
             }
             SerializationFormat::MessagePack => {
                 rmp_serde::encode::write(&mut writer, model).map_err(|e| {
-                    MinitensorError::serialization_error(&format!(
+                    MinitensorError::serialization_error(format!(
                         "MessagePack serialization failed: {}",
                         e
                     ))
@@ -467,17 +467,17 @@ impl ModelSerializer {
 
         let model = match format {
             SerializationFormat::Json => serde_json::from_reader(&mut reader).map_err(|e| {
-                MinitensorError::serialization_error(&format!("JSON deserialization failed: {}", e))
+                MinitensorError::serialization_error(format!("JSON deserialization failed: {}", e))
             })?,
             SerializationFormat::Binary => bincode::deserialize_from(&mut reader).map_err(|e| {
-                MinitensorError::serialization_error(&format!(
+                MinitensorError::serialization_error(format!(
                     "Binary deserialization failed: {}",
                     e
                 ))
             })?,
             SerializationFormat::MessagePack => {
                 rmp_serde::decode::from_read(&mut reader).map_err(|e| {
-                    MinitensorError::serialization_error(&format!(
+                    MinitensorError::serialization_error(format!(
                         "MessagePack deserialization failed: {}",
                         e
                     ))
@@ -581,7 +581,7 @@ impl DeploymentModel {
         let mut writer = BufWriter::new(file);
 
         bincode::serialize_into(&mut writer, self).map_err(|e| {
-            MinitensorError::serialization_error(&format!(
+            MinitensorError::serialization_error(format!(
                 "Deployment model serialization failed: {}",
                 e
             ))
@@ -601,7 +601,7 @@ impl DeploymentModel {
         let reader = BufReader::new(file);
 
         bincode::deserialize_from(reader).map_err(|e| {
-            MinitensorError::serialization_error(&format!(
+            MinitensorError::serialization_error(format!(
                 "Deployment model deserialization failed: {}",
                 e
             ))

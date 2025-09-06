@@ -22,10 +22,11 @@ use std::sync::Arc;
 /// * `training` - When true, use batch statistics and update running stats.
 /// * `momentum` - Momentum factor for running statistics update.
 /// * `eps` - Small epsilon added to variance for numerical stability.
+#[allow(clippy::too_many_arguments)]
 pub fn batch_norm(
     input: &Tensor,
-    mut running_mean: Option<&mut Tensor>,
-    mut running_var: Option<&mut Tensor>,
+    running_mean: Option<&mut Tensor>,
+    running_var: Option<&mut Tensor>,
     weight: Option<&Tensor>,
     bias: Option<&Tensor>,
     training: bool,
@@ -85,11 +86,9 @@ pub fn batch_norm(
 
     // Decide which statistics to use
     let (mean_used, var_used) = if training || running_mean.is_none() || running_var.is_none() {
-        (batch_mean.clone(), batch_var.clone())
-    } else {
+        (batch_mean.clone(), batch_var.clone())␊
+    } else if let (Some(rm), Some(rv)) = (running_mean.as_ref(), running_var.as_ref()) {
         // Use running statistics (reshape for broadcasting)
-        let rm = running_mean.as_ref().unwrap();
-        let rv = running_var.as_ref().unwrap();
         let mut rm_view = (*rm).clone().unsqueeze(0)?; // [1, C]
         let mut rv_view = (*rv).clone().unsqueeze(0)?;
         for _ in 2..input.ndim() {
@@ -97,6 +96,8 @@ pub fn batch_norm(
             rv_view = rv_view.unsqueeze(rv_view.ndim())?;
         }
         (rm_view, rv_view)
+    } else {
+        unreachable!("running stats checked")
     };
 
     // Prepare epsilon tensor
@@ -145,7 +146,7 @@ pub fn batch_norm(
 
     // Update running statistics if training
     if training {
-        if let (Some(rm), Some(rv)) = (running_mean.as_deref_mut(), running_var.as_deref_mut()) {
+        if let (Some(rm), Some(rv)) = (running_mean, running_var) {
             let mean_flat = batch_mean.view(Shape::new(vec![num_features]))?.detach();
             let var_flat = batch_var.view(Shape::new(vec![num_features]))?.detach();
 

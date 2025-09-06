@@ -60,7 +60,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             squared_diff
         }
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -129,7 +129,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             abs_diff
         }
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -199,7 +199,7 @@ pub fn cross_entropy_loss(
         "sum" => sum_all_elements(&per_sample)?,
         "none" => per_sample,
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -327,7 +327,7 @@ pub fn binary_cross_entropy_loss(
         "sum" => sum_all_elements(&negative_bce)?,
         "none" => negative_bce,
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -387,7 +387,7 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         "sum" => sum_all_elements(&kld)?,
         "none" => kld,
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -481,7 +481,7 @@ pub fn focal_loss(
         "sum" => sum_all_elements(&focal_values)?,
         "none" => focal_values,
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -563,7 +563,7 @@ pub fn huber_loss(
         "sum" => sum_all_elements(&huber_values)?,
         "none" => huber_values,
         _ => {
-            return Err(MinitensorError::invalid_operation(&format!(
+            return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
             )))
@@ -678,7 +678,7 @@ fn validate_classification_inputs(
 
 fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
     if targets.ndim() + 1 == predictions.ndim() {
-        let num_classes = predictions.size(predictions.ndim() - 1)? as usize;
+        let num_classes = predictions.size(predictions.ndim() - 1)?;
         let total = targets.numel();
         let mut data = TensorData::zeros_on_device(
             total * num_classes,

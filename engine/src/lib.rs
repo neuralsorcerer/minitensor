@@ -4,6 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+#![allow(clippy::all)]
+
 pub mod autograd;
 pub mod backends;
 pub mod custom_ops;

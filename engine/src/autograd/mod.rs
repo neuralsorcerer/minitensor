@@ -30,6 +30,12 @@ impl TensorId {
     }
 }
 
+impl Default for TensorId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Trait for gradient functions in the computation graph
 pub trait GradientFunction: Send + Sync {
     /// Compute gradients for inputs given the output gradient

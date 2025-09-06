@@ -143,14 +143,14 @@ impl PluginManager {
         // Load the library
         let lib = unsafe {
             Library::new(path).map_err(|e| {
-                MinitensorError::plugin_error(&format!("Failed to load plugin library: {}", e))
+                MinitensorError::plugin_error(format!("Failed to load plugin library: {}", e))
             })?
         };
 
         // Get the plugin creation function
         let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
             lib.get(b"create_plugin").map_err(|e| {
-                MinitensorError::plugin_error(&format!(
+                MinitensorError::plugin_error(format!(
                     "Plugin missing create_plugin function: {}",
                     e
                 ))
@@ -172,7 +172,7 @@ impl PluginManager {
         let plugin_info = plugin.info();
 
         if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
-            return Err(MinitensorError::version_mismatch(&format!(
+            return Err(MinitensorError::version_mismatch(format!(
                 "Plugin '{}' requires minitensor >= {}, but current version is {}",
                 plugin_info.name, plugin_info.min_minitensor_version, current_version
             )));
@@ -180,7 +180,7 @@ impl PluginManager {
 
         if let Some(max_version) = &plugin_info.max_minitensor_version {
             if !max_version.is_compatible_with(&current_version) {
-                return Err(MinitensorError::version_mismatch(&format!(
+                return Err(MinitensorError::version_mismatch(format!(
                     "Plugin '{}' requires minitensor <= {}, but current version is {}",
                     plugin_info.name, max_version, current_version
                 )));
@@ -194,7 +194,7 @@ impl PluginManager {
             })?;
 
             if plugins.contains_key(&plugin_info.name) {
-                return Err(MinitensorError::plugin_error(&format!(
+                return Err(MinitensorError::plugin_error(format!(
                     "Plugin '{}' is already loaded",
                     plugin_info.name
                 )));
@@ -229,7 +229,7 @@ impl PluginManager {
         let current_version = VersionInfo::current()?;
 
         if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
-            return Err(MinitensorError::version_mismatch(&format!(
+            return Err(MinitensorError::version_mismatch(format!(
                 "Plugin '{}' requires minitensor >= {}, but current version is {}",
                 plugin_info.name, plugin_info.min_minitensor_version, current_version
             )));
@@ -237,7 +237,7 @@ impl PluginManager {
 
         if let Some(max_version) = &plugin_info.max_minitensor_version {
             if !max_version.is_compatible_with(&current_version) {
-                return Err(MinitensorError::version_mismatch(&format!(
+                return Err(MinitensorError::version_mismatch(format!(
                     "Plugin '{}' requires minitensor <= {}, but current version is {}",
                     plugin_info.name, max_version, current_version
                 )));
@@ -251,7 +251,7 @@ impl PluginManager {
             })?;
 
             if plugins.contains_key(&plugin_info.name) {
-                return Err(MinitensorError::plugin_error(&format!(
+                return Err(MinitensorError::plugin_error(format!(
                     "Plugin '{}' is already loaded",
                     plugin_info.name
                 )));
@@ -285,9 +285,9 @@ impl PluginManager {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
             })?;
 
-            plugins.remove(name).ok_or_else(|| {
-                MinitensorError::plugin_error(&format!("Plugin '{}' is not loaded", name))
-            })?
+            plugins
+                .remove(name)
+                .ok_or_else(|| MinitensorError::plugin_error(format!("Plugin '{}' is not loaded", name)))?
         };
 
         // Cleanup the plugin
@@ -321,7 +321,7 @@ impl PluginManager {
             .map_err(|_| MinitensorError::internal_error("Failed to acquire plugins read lock"))?;
 
         plugins.get(name).map(|p| p.info().clone()).ok_or_else(|| {
-            MinitensorError::plugin_error(&format!("Plugin '{}' is not loaded", name))
+            MinitensorError::plugin_error(format!("Plugin '{}' is not loaded", name))
         })
     }
 

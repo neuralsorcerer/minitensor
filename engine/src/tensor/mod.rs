@@ -756,7 +756,7 @@ impl Tensor {
                     let size = if end <= start {
                         0
                     } else {
-                        ((end - start) + step - 1) / step
+                        (end - start).div_ceil(step)
                     };
                     out_dims.push(size);
                     orig_dim_map.push(i);
@@ -825,7 +825,7 @@ impl Tensor {
                     .as_f32_slice()
                     .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
                 let output = result_data.as_f32_slice_mut().unwrap();
-                for idx in 0..out_shape.numel() {
+                for (idx, out_elem) in output.iter_mut().enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -834,7 +834,7 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    output[idx] = input[src_idx];
+                    *out_elem = input[src_idx];
                 }
             }
             DataType::Float64 => {
@@ -843,7 +843,7 @@ impl Tensor {
                     .as_f64_slice()
                     .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
                 let output = result_data.as_f64_slice_mut().unwrap();
-                for idx in 0..out_shape.numel() {
+                for (idx, out_elem) in output.iter_mut().enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -852,7 +852,7 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    output[idx] = input[src_idx];
+                    *out_elem = input[src_idx];
                 }
             }
             DataType::Int32 => {
@@ -861,7 +861,7 @@ impl Tensor {
                     .as_i32_slice()
                     .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?;
                 let output = result_data.as_i32_slice_mut().unwrap();
-                for idx in 0..out_shape.numel() {
+                for (idx, out_elem) in output.iter_mut().enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -870,7 +870,7 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    output[idx] = input[src_idx];
+                    *out_elem = input[src_idx];
                 }
             }
             DataType::Int64 => {
@@ -879,7 +879,7 @@ impl Tensor {
                     .as_i64_slice()
                     .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?;
                 let output = result_data.as_i64_slice_mut().unwrap();
-                for idx in 0..out_shape.numel() {
+                for (idx, out_elem) in output.iter_mut().enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -888,7 +888,7 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    output[idx] = input[src_idx];
+                    *out_elem = input[src_idx];
                 }
             }
             DataType::Bool => {
@@ -897,7 +897,7 @@ impl Tensor {
                     .as_bool_slice()
                     .ok_or_else(|| MinitensorError::internal_error("Expected bool data"))?;
                 let output = result_data.as_bool_slice_mut().unwrap();
-                for idx in 0..out_shape.numel() {
+                for (idx, out_elem) in output.iter_mut().enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -906,7 +906,7 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    output[idx] = input[src_idx];
+                    *out_elem = input[src_idx];
                 }
             }
         }
@@ -956,7 +956,7 @@ impl Tensor {
                     let size = if end <= start {
                         0
                     } else {
-                        ((end - start) + step - 1) / step
+                        (end - start).div_ceil(step)
                     };
                     out_dims.push(size);
                     orig_dim_map.push(i);
@@ -985,8 +985,12 @@ impl Tensor {
             DataType::Float32 => {
                 let slice = data.as_f32_slice_mut().unwrap();
                 let val_slice = value.data().as_f32_slice().unwrap();
-                let scalar = val_slice.get(0).copied();
-                for idx in 0..out_shape.numel() {
+                for (idx, &val) in val_slice
+                    .iter()
+                    .cycle()
+                    .take(out_shape.numel())
+                    .enumerate()
+                {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -995,19 +999,18 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 {
-                        scalar.unwrap()
-                    } else {
-                        val_slice[idx]
-                    };
                     slice[src_idx] = val;
                 }
             }
             DataType::Float64 => {
                 let slice = data.as_f64_slice_mut().unwrap();
                 let val_slice = value.data().as_f64_slice().unwrap();
-                let scalar = val_slice.get(0).copied();
-                for idx in 0..out_shape.numel() {
+                for (idx, &val) in val_slice
+                    .iter()
+                    .cycle()
+                    .take(out_shape.numel())
+                    .enumerate()
+                {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1016,19 +1019,18 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 {
-                        scalar.unwrap()
-                    } else {
-                        val_slice[idx]
-                    };
                     slice[src_idx] = val;
                 }
             }
             DataType::Int32 => {
                 let slice = data.as_i32_slice_mut().unwrap();
                 let val_slice = value.data().as_i32_slice().unwrap();
-                let scalar = val_slice.get(0).copied();
-                for idx in 0..out_shape.numel() {
+                for (idx, &val) in val_slice
+                    .iter()
+                    .cycle()
+                    .take(out_shape.numel())
+                    .enumerate()
+                {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1037,19 +1039,18 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 {
-                        scalar.unwrap()
-                    } else {
-                        val_slice[idx]
-                    };
                     slice[src_idx] = val;
                 }
             }
             DataType::Int64 => {
                 let slice = data.as_i64_slice_mut().unwrap();
                 let val_slice = value.data().as_i64_slice().unwrap();
-                let scalar = val_slice.get(0).copied();
-                for idx in 0..out_shape.numel() {
+                for (idx, &val) in val_slice
+                    .iter()
+                    .cycle()
+                    .take(out_shape.numel())
+                    .enumerate()
+                {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1058,19 +1059,18 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 {
-                        scalar.unwrap()
-                    } else {
-                        val_slice[idx]
-                    };
                     slice[src_idx] = val;
                 }
             }
             DataType::Bool => {
                 let slice = data.as_bool_slice_mut().unwrap();
                 let val_slice = value.data().as_bool_slice().unwrap();
-                let scalar = val_slice.get(0).copied();
-                for idx in 0..out_shape.numel() {
+                for (idx, &val) in val_slice
+                    .iter()
+                    .cycle()
+                    .take(out_shape.numel())
+                    .enumerate()
+                {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1079,11 +1079,6 @@ impl Tensor {
                         let orig_dim = orig_dim_map[j];
                         src_idx += (starts[j] + coord) * strides[orig_dim];
                     }
-                    let val = if value.numel() == 1 {
-                        scalar.unwrap()
-                    } else {
-                        val_slice[idx]
-                    };
                     slice[src_idx] = val;
                 }
             }

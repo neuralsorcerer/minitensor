@@ -302,6 +302,11 @@ impl TensorData {
         self.layout.numel
     }
 
+    /// Check if there are no elements
+    pub fn is_empty(&self) -> bool {
+        self.layout.numel == 0
+    }
+
     /// Get the size in bytes
     pub fn size_bytes(&self) -> usize {
         match &self.buffer {
