@@ -548,6 +548,15 @@ class Tensor:
             dim = [dim]
         elif isinstance(dim, tuple):
             dim = list(dim)
+        if dim is None and self.numel() == 0:
+            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+            if np.issubdtype(np_dtype, np.floating) or np.issubdtype(
+                np_dtype, np.integer
+            ):
+                return Tensor(np.array(0, dtype=np_dtype), dtype=self.dtype)
+            else:  # bool
+                return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
+        
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.sum(dim, keepdim)
         return result
@@ -560,6 +569,14 @@ class Tensor:
             dim = [dim]
         elif isinstance(dim, tuple):
             dim = list(dim)
+        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+        if np.issubdtype(np_dtype, np.integer):
+            raise ValueError("mean not defined for integer tensors")
+
+        if dim is None and self.numel() == 0:
+            if np.issubdtype(np_dtype, np.floating):
+                return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
+        
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.mean(dim, keepdim)
         return result
@@ -568,11 +585,6 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Maximum values along dimension."""
-        # The Rust backend currently aborts when asked to reduce an empty tensor or
-        # one consisting solely of NaN values. Guard these edge cases in Python and
-        # return the appropriate identity values instead of delegating to the
-        # backend.
-
         if dim is None:
             np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
 
@@ -602,9 +614,6 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Minimum values along dimension."""
-        # Mirror the safeguards in ``max`` for empty tensors or tensors filled with
-        # NaNs by returning the appropriate identity values.
-
         if dim is None:
             np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
 
