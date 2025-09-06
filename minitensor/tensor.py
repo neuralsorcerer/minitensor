@@ -238,6 +238,8 @@ class Tensor:
 
     def tolist(self) -> List:
         """Convert to Python list."""
+        if self.numel() == 0:
+            return []
         return self._tensor.tolist()
 
     def item(self) -> Union[float, int, bool]:
