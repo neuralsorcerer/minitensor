@@ -86,7 +86,7 @@ pub fn batch_norm(
 
     // Decide which statistics to use
     let (mean_used, var_used) = if training || running_mean.is_none() || running_var.is_none() {
-        (batch_mean.clone(), batch_var.clone())␊
+        (batch_mean.clone(), batch_var.clone())
     } else if let (Some(rm), Some(rv)) = (running_mean.as_ref(), running_var.as_ref()) {
         // Use running statistics (reshape for broadcasting)
         let mut rm_view = (*rm).clone().unsqueeze(0)?; // [1, C]
