@@ -285,4 +285,23 @@ mod tests {
         let broadcasted = shape1.broadcast_with(&shape2).unwrap();
         assert_eq!(broadcasted.dims(), &[1, 2, 3]);
     }
+
+    #[test]
+    fn test_numel_with_zero_dim() {
+        let shape = Shape::new(vec![2, 0, 4]);
+        assert_eq!(shape.numel(), 0);
+    }
+
+    #[test]
+    fn test_broadcasting_with_zero_dim() {
+        let shape1 = Shape::new(vec![2, 0, 4]);
+        let shape2 = Shape::new(vec![1, 0, 1]);
+        assert!(shape1.is_broadcastable_with(&shape2));
+        let broadcasted = shape1.broadcast_with(&shape2).unwrap();
+        assert_eq!(broadcasted.dims(), &[2, 0, 4]);
+
+        let shape3 = Shape::new(vec![2, 2, 4]);
+        assert!(!shape1.is_broadcastable_with(&shape3));
+        assert!(shape1.broadcast_with(&shape3).is_err());
+    }
 }

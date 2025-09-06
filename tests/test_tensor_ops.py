@@ -52,3 +52,23 @@ def test_backward_non_scalar_error():
     t = mt.Tensor([1.0, 2.0], requires_grad=True)
     with pytest.raises(RuntimeError):
         t.backward()
+
+
+def test_sum_negative_dim_error():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(OverflowError):
+        t.sum(dim=[-1])
+
+
+def test_sum_multiple_dims_not_implemented():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(NotImplementedError):
+        t.sum(dim=[0, 1])
+
+
+def test_any_all_keepdim():
+    t = mt.Tensor([[1.0, 0.0], [0.0, 2.0]])
+    any_res = t.any(dim=1, keepdim=True)
+    all_res = t.all(dim=0)
+    np.testing.assert_array_equal(any_res.numpy(), np.array([[True], [True]]))
+    np.testing.assert_array_equal(all_res.numpy(), np.array([False, False]))

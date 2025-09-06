@@ -43,3 +43,28 @@ def test_matmul_insufficient_dims():
     b = mt.Tensor([3.0, 4.0])
     with pytest.raises(ValueError):
         a.matmul(b)
+
+
+def test_matmul_batch_dimensions():
+    a = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 2, 3))
+    b = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 3, 2))
+    result = a.matmul(b)
+    expected = np.matmul(
+        np.arange(12, dtype=np.float32).reshape(2, 2, 3),
+        np.arange(12, dtype=np.float32).reshape(2, 3, 2),
+    )
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_matmul_batch_mismatch_error():
+    a = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 2, 3))
+    b = mt.Tensor(np.arange(18, dtype=np.float32).reshape(3, 3, 2))
+    with pytest.raises(ValueError):
+        a.matmul(b)
+
+
+def test_matmul_zero_dimension():
+    a = mt.Tensor(np.empty((2, 0), dtype=np.float32))
+    b = mt.Tensor(np.empty((0, 3), dtype=np.float32))
+    result = a.matmul(b)
+    np.testing.assert_allclose(result.numpy(), np.zeros((2, 3), dtype=np.float32))

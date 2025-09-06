@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+import pytest
 
 from minitensor.tensor import Tensor
 
@@ -41,3 +42,8 @@ def test_randn_int32_dtype():
     assert x.dtype == "int32"
     assert arr.dtype == np.int32
     assert arr.shape == (3,)
+
+
+def test_mixed_type_creation_error():
+    with pytest.raises(TypeError):
+        Tensor([1, "a"])

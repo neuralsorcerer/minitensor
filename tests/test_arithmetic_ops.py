@@ -38,7 +38,12 @@ def test_division_broadcasting_and_zero():
 def test_boolean_arithmetic_error():
     a = mt.Tensor([True, False], dtype="bool")
     b = mt.Tensor([False, True], dtype="bool")
-    for op in [lambda x, y: x + y, lambda x, y: x - y, lambda x, y: x * y, lambda x, y: x / y]:
+    for op in [
+        lambda x, y: x + y,
+        lambda x, y: x - y,
+        lambda x, y: x * y,
+        lambda x, y: x / y,
+    ]:
         with pytest.raises(ValueError):
             op(a, b)
 
@@ -55,3 +60,20 @@ def test_dtype_mismatch_error():
     b = mt.Tensor([1, 2], dtype="int32")
     with pytest.raises(TypeError):
         _ = a + b
+
+def test_empty_tensor_arithmetic():
+    a = mt.Tensor([]).reshape([0])
+    b = mt.Tensor([]).reshape([0])
+    c = a + b
+    m = a * b
+    assert c.tolist() == []
+    assert m.tolist() == []
+
+
+def test_nan_propagation():
+    a = mt.Tensor([np.nan, 1.0])
+    b = mt.Tensor([1.0, 2.0])
+    c = a + b
+    result = c.numpy()
+    assert np.isnan(result[0])
+    np.testing.assert_allclose(result[1], 3.0)

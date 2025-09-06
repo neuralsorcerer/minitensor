@@ -7,7 +7,7 @@
 use engine::{
     autograd,
     device::Device,
-    operations::{activation, arithmetic, comparison, linalg, shape_ops},
+    operations::{activation, arithmetic, comparison, linalg, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
@@ -315,5 +315,51 @@ fn test_broadcasting_and_reshaping() {
     assert_eq!(transposed.shape().dims(), &[2, 3]);
 
     // Clear computation graph
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_matmul_batch_dimensions() {
+    let a = create_test_tensor_f32((0..12).map(|x| x as f32).collect(), vec![2, 2, 3], false);
+    let b = create_test_tensor_f32((0..12).map(|x| x as f32).collect(), vec![2, 3, 2], false);
+    let result = linalg::matmul(&a, &b).unwrap();
+    assert_eq!(result.shape().dims(), &[2, 2, 2]);
+    let expected = [10.0, 13.0, 28.0, 40.0, 172.0, 193.0, 244.0, 274.0];
+    assert_eq!(result.data().as_f32_slice().unwrap(), &expected);
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_matmul_shape_mismatch_error() {
+    let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+    let b = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+    assert!(linalg::matmul(&a, &b).is_err());
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_reduction_operations_edges() {
+    let t = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
+
+    let sum_dim1 = reduction::sum(&t, Some(vec![1]), true).unwrap();
+    assert_eq!(sum_dim1.shape().dims(), &[2, 1]);
+    assert_eq!(sum_dim1.data().as_f32_slice().unwrap(), &[3.0, 7.0]);
+
+    let mean_all = reduction::mean(&t, None, false).unwrap();
+    assert!(mean_all.shape().dims().is_empty());
+    assert!((mean_all.data().as_f32_slice().unwrap()[0] - 2.5).abs() < 1e-6);
+
+    assert!(reduction::sum(&t, Some(vec![0, 1]), false).is_err());
+    assert!(reduction::sum(&t, Some(vec![2]), false).is_err());
+
+    let bool_src = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 2.0], vec![2, 2], false);
+    let any_res = reduction::any(&bool_src, Some(1), true).unwrap();
+    assert_eq!(any_res.shape().dims(), &[2, 1]);
+    assert_eq!(any_res.data().as_bool_slice().unwrap(), &[true, true]);
+
+    let all_res = reduction::all(&bool_src, Some(0), false).unwrap();
+    assert_eq!(all_res.shape().dims(), &[2]);
+    assert_eq!(all_res.data().as_bool_slice().unwrap(), &[false, false]);
+
     let _ = autograd::clear_graph();
 }
