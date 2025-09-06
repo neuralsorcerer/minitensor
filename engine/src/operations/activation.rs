@@ -887,7 +887,7 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     })?;
     unary_apply(input_data, output_slice, |v: f32| {
         if v.is_nan() {
-            0.0
+            v
         } else {
             v.max(0.0)
         }
