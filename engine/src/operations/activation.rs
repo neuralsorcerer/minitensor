@@ -885,7 +885,13 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: f32| v.max(0.0));
+    unary_apply(input_data, output_slice, |v: f32| {
+        if v.is_nan() {
+            v
+        } else {
+            v.max(0.0)
+        }
+    });
     Ok(())
 }
 
@@ -897,7 +903,13 @@ fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |v: f64| v.max(0.0));
+    unary_apply(input_data, output_slice, |v: f64| {
+        if v.is_nan() {
+            v
+        } else {
+            v.max(0.0)
+        }
+    });
     Ok(())
 }
 
