@@ -127,27 +127,42 @@ pub fn init_uniform(
     let data = match dtype {
         DataType::Float32 => {
             let dist = Uniform::new(a as f32, b as f32);
-            let vec: Vec<f32> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Uniform::new(a, b);
-            let vec: Vec<f64> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Uniform::new(a as i32, b as i32);
-            let vec: Vec<i32> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Uniform::new(a as i64, b as i64);
-            let vec: Vec<i64> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Uniform::new(0.0, 1.0);
-            let vec: Vec<bool> = (0..numel).map(|_| dist.sample(&mut rng) > 0.5).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng) > 0.5);
+            }
             TensorData::from_vec_bool(vec, device)
         }
     };
@@ -174,31 +189,42 @@ pub fn init_normal(
     let data = match dtype {
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
-            let vec: Vec<f32> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Normal::new(mean, std).unwrap();
-            let vec: Vec<f64> = (0..numel).map(|_| dist.sample(&mut rng)).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng));
+            }
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Normal::new(mean, std).unwrap();
-            let vec: Vec<i32> = (0..numel)
-                .map(|_| dist.sample(&mut rng).round() as i32)
-                .collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng).round() as i32);
+            }
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Normal::new(mean, std).unwrap();
-            let vec: Vec<i64> = (0..numel)
-                .map(|_| dist.sample(&mut rng).round() as i64)
-                .collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng).round() as i64);
+            }
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Normal::new(mean, std).unwrap();
-            let vec: Vec<bool> = (0..numel).map(|_| dist.sample(&mut rng) > 0.0).collect();
+            let mut vec = Vec::with_capacity(numel);
+            for _ in 0..numel {
+                vec.push(dist.sample(&mut rng) > 0.0);
+            }
             TensorData::from_vec_bool(vec, device)
         }
     };
@@ -384,5 +410,23 @@ mod tests {
         let bias = init_bias(bias_shape.clone(), dtype, device).unwrap();
         assert_eq!(bias.shape(), &bias_shape);
         assert!(bias.requires_grad());
+    }
+
+    #[test]
+    fn test_uniform_range() {
+        let shape = Shape::new(vec![100]);
+        let tensor = init_uniform(
+            shape.clone(),
+            -0.5,
+            0.5,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+        .unwrap();
+        let slice = tensor.data().as_f32_slice().unwrap();
+        for &v in slice {
+            assert!(v >= -0.5 && v <= 0.5);
+        }
     }
 }

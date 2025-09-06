@@ -10,7 +10,8 @@ use crate::{
     operations::arithmetic,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rand::Rng;
+use rand::distributions::{Bernoulli, Distribution};
+use rand::thread_rng;
 use std::sync::Arc;
 
 /// Generate a dropout mask with values either `0` or `1/(1-p)`.
@@ -30,19 +31,20 @@ fn generate_dropout_mask(
         1.0 / keep_prob
     };
     let numel = shape.numel();
-    let mut rng = rand::thread_rng();
+    let mut rng = thread_rng();
+    let bernoulli =
+        Bernoulli::new(keep_prob).map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
 
     match dtype {
         DataType::Float32 => {
             let mut data = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                let r: f64 = rng.gen();
-                if r < keep_prob {
-                    data.push(scale as f32);
+            data.extend(bernoulli.sample_iter(&mut rng).take(numel).map(|b| {
+                if b {
+                    scale as f32
                 } else {
-                    data.push(0.0);
+                    0.0
                 }
-            }
+            }));
             let td = TensorData::from_vec_f32(data, device);
             Ok(Tensor::new(
                 Arc::new(td),
@@ -54,14 +56,13 @@ fn generate_dropout_mask(
         }
         DataType::Float64 => {
             let mut data = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                let r: f64 = rng.gen();
-                if r < keep_prob {
-                    data.push(scale);
+            data.extend(bernoulli.sample_iter(&mut rng).take(numel).map(|b| {
+                if b {
+                    scale
                 } else {
-                    data.push(0.0);
+                    0.0
                 }
-            }
+            }));
             let td = TensorData::from_vec_f64(data, device);
             Ok(Tensor::new(
                 Arc::new(td),
@@ -426,5 +427,26 @@ mod tests {
         dropout2d.eval();
         let output_eval = dropout2d.forward(&input).unwrap();
         assert_eq!(output_eval.shape(), input.shape());
+    }
+
+    #[test]
+    fn test_dropout2d_edge_cases() {
+        let input = Tensor::ones(
+            Shape::new(vec![1, 2, 4, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        // p = 0 should return identical input
+        let mut no_dropout = Dropout2d::new(Some(0.0)).unwrap();
+        let output = no_dropout.forward(&input).unwrap();
+        assert_eq!(output.shape(), input.shape());
+
+        // p = 1 should return all zeros
+        let mut full_dropout = Dropout2d::new(Some(1.0)).unwrap();
+        let output = full_dropout.forward(&input).unwrap();
+        let data = output.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|&v| v == 0.0));
     }
 }

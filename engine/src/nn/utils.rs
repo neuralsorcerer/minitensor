@@ -29,34 +29,38 @@ impl LayerUtils {
     /// Get parameter statistics for a layer
     pub fn parameter_stats(layer: &dyn Layer) -> ParameterStats {
         let params = layer.parameters();
-        let total_params = params.iter().map(|p| p.numel()).sum();
-        let trainable_params = params
-            .iter()
-            .filter(|p| p.requires_grad())
-            .map(|p| p.numel())
-            .sum();
-        let non_trainable_params = total_params - trainable_params;
+        let mut total_params = 0usize;
+        let mut trainable_params = 0usize;
+        let mut counts = Vec::with_capacity(params.len());
+
+        for p in &params {
+            let n = p.numel();
+            total_params += n;
+            if p.requires_grad() {
+                trainable_params += n;
+            }
+            counts.push(n);
+        }
 
         ParameterStats {
             total_parameters: total_params,
             trainable_parameters: trainable_params,
-            non_trainable_parameters: non_trainable_params,
-            parameter_count_by_tensor: params.iter().map(|p| p.numel()).collect(),
+            non_trainable_parameters: total_params - trainable_params,
+            parameter_count_by_tensor: counts,
         }
     }
 
     /// Get memory usage statistics for a layer's parameters
     pub fn memory_usage(layer: &dyn Layer) -> MemoryUsage {
         let params = layer.parameters();
-        let mut total_bytes = 0;
-        let mut bytes_by_dtype = HashMap::new();
+        let mut total_bytes = 0usize;
+        let mut bytes_by_dtype = HashMap::with_capacity(params.len());
 
         for param in params {
-            let param_bytes = param.numel() * param.dtype().size_in_bytes();
+            let dtype = param.dtype();
+            let param_bytes = param.numel() * dtype.size_in_bytes();
             total_bytes += param_bytes;
-
-            let dtype_name = format!("{:?}", param.dtype());
-            *bytes_by_dtype.entry(dtype_name).or_insert(0) += param_bytes;
+            *bytes_by_dtype.entry(dtype).or_insert(0) += param_bytes;
         }
 
         MemoryUsage {
@@ -107,12 +111,21 @@ impl SequentialUtils {
 
     /// Get detailed parameter statistics for a sequential model
     pub fn parameter_stats(model: &Sequential) -> SequentialStats {
-        let total_params = Self::count_parameters(model);
-        let trainable_params = Self::count_trainable_parameters(model);
+        let params = model.parameters();
+        let mut total_params = 0usize;
+        let mut trainable_params = 0usize;
+        for p in &params {
+            let n = p.numel();
+            total_params += n;
+            if p.requires_grad() {
+                trainable_params += n;
+            }
+        }
         let non_trainable_params = total_params - trainable_params;
 
-        let mut layer_stats = Vec::new();
-        for i in 0..model.len() {
+        let num_layers = model.len();
+        let mut layer_stats = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
             if let Some(layer) = model.get_layer(i) {
                 let stats = LayerUtils::parameter_stats(layer);
                 layer_stats.push((i, stats));
@@ -123,7 +136,7 @@ impl SequentialUtils {
             total_parameters: total_params,
             trainable_parameters: trainable_params,
             non_trainable_parameters: non_trainable_params,
-            num_layers: model.len(),
+            num_layers,
             layer_stats,
         }
     }
@@ -210,7 +223,7 @@ pub struct ParameterStats {
 #[derive(Debug, Clone)]
 pub struct MemoryUsage {
     pub total_bytes: usize,
-    pub bytes_by_dtype: HashMap<String, usize>,
+    pub bytes_by_dtype: HashMap<crate::tensor::DataType, usize>,
 }
 
 /// Statistics for sequential models
@@ -289,7 +302,7 @@ mod tests {
         let memory = LayerUtils::memory_usage(&layer);
 
         assert_eq!(memory.total_bytes, 55 * 4); // 55 parameters * 4 bytes each (f32)
-        assert!(memory.bytes_by_dtype.contains_key("Float32"));
+        assert!(memory.bytes_by_dtype.contains_key(&DataType::Float32));
     }
 
     #[test]

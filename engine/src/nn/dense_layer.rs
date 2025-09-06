@@ -116,7 +116,7 @@ impl DenseLayer {
 
     /// Get named parameters for this layer
     pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &self.weight);
         if let Some(ref bias) = self.bias {
             params.insert("bias".to_string(), bias);
@@ -126,7 +126,7 @@ impl DenseLayer {
 
     /// Get named mutable parameters for this layer
     pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &mut self.weight);
         if let Some(ref mut bias) = self.bias {
             params.insert("bias".to_string(), bias);
@@ -168,7 +168,8 @@ impl Layer for DenseLayer {
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
-        let mut params = vec![&self.weight];
+        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+        params.push(&self.weight);t];
         if let Some(ref bias) = self.bias {
             params.push(bias);
         }
@@ -176,7 +177,8 @@ impl Layer for DenseLayer {
     }
 
     fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        let mut params = vec![&mut self.weight];
+        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+        params.push(&mut self.weight);
         if let Some(ref mut bias) = self.bias {
             params.push(bias);
         }
@@ -247,6 +249,19 @@ mod tests {
         assert_eq!(named_params_mut.len(), 2);
         assert!(named_params_mut.contains_key("weight"));
         assert!(named_params_mut.contains_key("bias"));
+    }
+
+    #[test]
+    fn test_dense_layer_named_parameters_no_bias() {
+        let mut layer = DenseLayer::new(10, 5, false, Device::cpu(), DataType::Float32).unwrap();
+
+        let named_params = layer.named_parameters();
+        assert_eq!(named_params.len(), 1);
+        assert!(named_params.contains_key("weight"));
+
+        let named_params_mut = layer.named_parameters_mut();
+        assert_eq!(named_params_mut.len(), 1);
+        assert!(named_params_mut.contains_key("weight"));
     }
 
     #[test]

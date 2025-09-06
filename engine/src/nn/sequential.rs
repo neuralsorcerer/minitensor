@@ -120,31 +120,41 @@ impl Layer for Sequential {
 impl Sequential {
     /// Get named parameters of the sequential model
     pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut named_params = HashMap::new();
+        let mut collected: Vec<Vec<&Tensor>> = Vec::with_capacity(self.layers.len());
+        let mut total = 0usize;
+        for layer in &self.layers {
+            let params = layer.parameters();
+            total += params.len();
+            collected.push(params);
+        }
 
-        for (i, layer) in self.layers.iter().enumerate() {
-            let layer_params = layer.parameters();
+        let mut named_params = HashMap::with_capacity(total);
+        for (i, layer_params) in collected.iter().enumerate() {
             for (j, param) in layer_params.iter().enumerate() {
                 let name = format!("layer_{}.param_{}", i, j);
                 named_params.insert(name, *param);
             }
         }
-
         named_params
     }
 
     /// Get named mutable parameters of the sequential model
     pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut named_params = HashMap::new();
+        let mut collected: Vec<Vec<&mut Tensor>> = Vec::with_capacity(self.layers.len());
+        let mut total = 0usize;
+        for layer in &mut self.layers {
+            let params = layer.parameters_mut();
+            total += params.len();
+            collected.push(params);
+        }
 
-        for (i, layer) in self.layers.iter_mut().enumerate() {
-            let layer_params = layer.parameters_mut();
+        let mut named_params = HashMap::with_capacity(total);
+        for (i, layer_params) in collected.into_iter().enumerate() {
             for (j, param) in layer_params.into_iter().enumerate() {
                 let name = format!("layer_{}.param_{}", i, j);
                 named_params.insert(name, param);
             }
         }
-
         named_params
     }
 }

@@ -11,9 +11,29 @@ use super::{
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
+
+fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
+    let mut data = TensorData::zeros_on_device(1, dtype, device);
+    match dtype {
+        DataType::Float32 => data.as_f32_slice_mut().unwrap()[0] = value as f32,
+        DataType::Float64 => data.as_f64_slice_mut().unwrap()[0] = value,
+        _ => {
+            return Err(MinitensorError::invalid_argument(
+                "BatchNorm only supports floating types".to_string(),
+            ))
+        }
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(vec![1]),
+        dtype,
+        device,
+        false,
+    ))
+}
 
 /// 1D Batch normalization layer
 ///
@@ -31,6 +51,9 @@ pub struct BatchNorm1d {
     eps: f64,
     momentum: f64,
     training: bool,
+    eps_tensor: Tensor,
+    momentum_tensor: Tensor,
+    one_minus_tensor: Tensor,
 }
 
 impl BatchNorm1d {
@@ -64,6 +87,10 @@ impl BatchNorm1d {
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false); // No gradients for running stats
         let running_var = Tensor::ones(param_shape, dtype, device, false); // No gradients for running stats
 
+        let eps_tensor = scalar_tensor(eps, dtype, device)?;
+        let momentum_tensor = scalar_tensor(momentum, dtype, device)?;
+        let one_minus_tensor = scalar_tensor(1.0 - momentum, dtype, device)?;
+
         Ok(Self {
             weight,
             bias,
@@ -73,6 +100,9 @@ impl BatchNorm1d {
             eps,
             momentum,
             training: true,
+            eps_tensor,
+            momentum_tensor,
+            one_minus_tensor,
         })
     }
 
@@ -128,7 +158,7 @@ impl BatchNorm1d {
 
     /// Get named parameters for this layer
     pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(2);
         params.insert("weight".to_string(), &self.weight);
         params.insert("bias".to_string(), &self.bias);
         params
@@ -136,7 +166,7 @@ impl BatchNorm1d {
 
     /// Get named mutable parameters for this layer
     pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(2);
         params.insert("weight".to_string(), &mut self.weight);
         params.insert("bias".to_string(), &mut self.bias);
         params
@@ -144,7 +174,7 @@ impl BatchNorm1d {
 
     /// Get named buffers (non-trainable parameters) for this layer
     pub fn named_buffers(&self) -> HashMap<String, &Tensor> {
-        let mut buffers = HashMap::new();
+        let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &self.running_mean);
         buffers.insert("running_var".to_string(), &self.running_var);
         buffers
@@ -197,34 +227,7 @@ impl Layer for BatchNorm1d {
         };
 
         let centered = crate::operations::arithmetic::sub(input, &mean)?;
-        let var = var;
-
-        // Prepare epsilon tensor
-        let eps_tensor = {
-            use crate::tensor::TensorData;
-            use std::sync::Arc;
-            let mut data = TensorData::zeros_on_device(1, input.dtype(), input.device());
-            match input.dtype() {
-                DataType::Float32 => {
-                    let slice = data.as_f32_slice_mut().unwrap();
-                    slice[0] = self.eps as f32;
-                }
-                DataType::Float64 => {
-                    let slice = data.as_f64_slice_mut().unwrap();
-                    slice[0] = self.eps;
-                }
-                _ => unreachable!("BatchNorm only supports floating types"),
-            }
-            Tensor::new(
-                Arc::new(data),
-                Shape::new(vec![1]),
-                input.dtype(),
-                input.device(),
-                false,
-            )
-        };
-
-        let var = crate::operations::arithmetic::add(&var, &eps_tensor)?;
+        let var = crate::operations::arithmetic::add(&var, &self.eps_tensor)?;
         let std = crate::operations::activation::sqrt(&var)?;
         let normalized = crate::operations::arithmetic::div(&centered, &std)?;
 
@@ -248,64 +251,13 @@ impl Layer for BatchNorm1d {
             let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
             let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
 
-            let momentum = self.momentum;
-            let one_minus = 1.0 - momentum;
-
-            let m_tensor = {
-                use crate::tensor::TensorData;
-                use std::sync::Arc;
-                let mut data = TensorData::zeros_on_device(1, input.dtype(), input.device());
-                match input.dtype() {
-                    DataType::Float32 => {
-                        let s = data.as_f32_slice_mut().unwrap();
-                        s[0] = momentum as f32;
-                    }
-                    DataType::Float64 => {
-                        let s = data.as_f64_slice_mut().unwrap();
-                        s[0] = momentum;
-                    }
-                    _ => unreachable!(),
-                }
-                Tensor::new(
-                    Arc::new(data),
-                    Shape::new(vec![1]),
-                    input.dtype(),
-                    input.device(),
-                    false,
-                )
-            };
-
-            let one_minus_tensor = {
-                use crate::tensor::TensorData;
-                use std::sync::Arc;
-                let mut data = TensorData::zeros_on_device(1, input.dtype(), input.device());
-                match input.dtype() {
-                    DataType::Float32 => {
-                        let s = data.as_f32_slice_mut().unwrap();
-                        s[0] = one_minus as f32;
-                    }
-                    DataType::Float64 => {
-                        let s = data.as_f64_slice_mut().unwrap();
-                        s[0] = one_minus;
-                    }
-                    _ => unreachable!(),
-                }
-                Tensor::new(
-                    Arc::new(data),
-                    Shape::new(vec![1]),
-                    input.dtype(),
-                    input.device(),
-                    false,
-                )
-            };
-
             self.running_mean = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_mean, &one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&mean_flat, &m_tensor)?,
+                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
             )?;
             self.running_var = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_var, &one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&var_flat, &m_tensor)?,
+                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
             )?;
         }
 
@@ -342,6 +294,7 @@ pub struct BatchNorm2d {
     _eps: f64,
     _momentum: f64,
     training: bool,
+    eps_tensor: Tensor,
 }
 
 impl BatchNorm2d {
@@ -375,6 +328,8 @@ impl BatchNorm2d {
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false);
         let running_var = Tensor::ones(param_shape, dtype, device, false);
 
+        let eps_tensor = scalar_tensor(eps, dtype, device)?;
+
         Ok(Self {
             weight,
             bias,
@@ -384,6 +339,7 @@ impl BatchNorm2d {
             _eps: eps,
             _momentum: momentum,
             training: true,
+            eps_tensor,
         })
     }
 
@@ -400,6 +356,22 @@ impl BatchNorm2d {
     /// Set evaluation mode
     pub fn eval(&mut self) {
         self.training = false;
+    }
+
+    /// Get named buffers (non-trainable parameters) for this layer
+    pub fn named_buffers(&self) -> HashMap<String, &Tensor> {
+        let mut buffers = HashMap::with_capacity(2);
+        buffers.insert("running_mean".to_string(), &self._running_mean);
+        buffers.insert("running_var".to_string(), &self._running_var);
+        buffers
+    }
+
+    /// Get named mutable buffers for this layer
+    pub fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut buffers = HashMap::with_capacity(2);
+        buffers.insert("running_mean".to_string(), &mut self._running_mean);
+        buffers.insert("running_var".to_string(), &mut self._running_var);
+        buffers
     }
 }
 
@@ -437,26 +409,7 @@ impl Layer for BatchNorm2d {
         let var = var.view(Shape::new(vec![1, self.num_features, 1, 1]))?;
 
         let centered = crate::operations::arithmetic::sub(input, &mean)?;
-
-        let eps_tensor = {
-            use crate::tensor::TensorData;
-            use std::sync::Arc;
-            let mut data = TensorData::zeros_on_device(1, input.dtype(), input.device());
-            match input.dtype() {
-                DataType::Float32 => data.as_f32_slice_mut().unwrap()[0] = self._eps as f32,
-                DataType::Float64 => data.as_f64_slice_mut().unwrap()[0] = self._eps,
-                _ => unreachable!("BatchNorm only supports floating types"),
-            }
-            Tensor::new(
-                Arc::new(data),
-                Shape::new(vec![1]),
-                input.dtype(),
-                input.device(),
-                false,
-            )
-        };
-
-        let var = crate::operations::arithmetic::add(&var, &eps_tensor)?;
+        let var = crate::operations::arithmetic::add(&var, &self.eps_tensor)?;
         let std = crate::operations::activation::sqrt(&var)?;
         let normalized = crate::operations::arithmetic::div(&centered, &std)?;
         let weight = self
@@ -495,7 +448,8 @@ impl Layer for BatchNorm2d {
 mod tests {
     use super::*;
     use crate::device::Device;
-    use crate::tensor::{DataType, Shape};
+    use crate::tensor::{DataType, Shape, TensorData};
+    use std::sync::Arc;
 
     #[test]
     fn test_batchnorm1d_creation() {
@@ -592,6 +546,31 @@ mod tests {
         );
         let result = layer.forward(&wrong_dim_input);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batchnorm1d_running_stats() {
+        let mut layer =
+            BatchNorm1d::new(2, None, None, Device::cpu(), DataType::Float32).unwrap();
+
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], Device::cpu());
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        layer.forward(&input).unwrap();
+        assert!(layer.running_mean().data().as_f32_slice().unwrap()[0] != 0.0);
+
+        let mean_before = layer.running_mean().clone();
+        layer.eval();
+        layer.forward(&input).unwrap();
+        let before = mean_before.data().as_f32_slice().unwrap()[0];
+        let after = layer.running_mean().data().as_f32_slice().unwrap()[0];
+        assert!((after - before).abs() < 1e-6);
     }
 
     #[test]

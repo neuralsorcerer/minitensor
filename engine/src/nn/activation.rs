@@ -49,6 +49,22 @@ fn scalar_tensor(
     }
 }
 
+fn cached_scalar<'a>(
+    cache: &'a mut Option<Tensor>,
+    value: f64,
+    dtype: DataType,
+    device: Device,
+) -> Result<&'a Tensor> {
+    let needs_update = match cache {
+        Some(t) => t.dtype() != dtype || t.device() != device,
+        None => true,
+    };
+    if needs_update {
+        *cache = Some(scalar_tensor(value, dtype, device, false)?);
+    }
+    Ok(cache.as_ref().unwrap())
+}
+
 /// ReLU (Rectified Linear Unit) activation layer
 ///
 /// Applies the rectified linear unit function element-wise:
@@ -245,6 +261,7 @@ impl Layer for LeakyReLU {
 /// ELU(x) = max(0, x) + min(0, alpha * (exp(x) - 1))
 pub struct ELU {
     alpha: f64,
+    alpha_tensor: Option<Tensor>,
 }
 
 impl ELU {
@@ -255,6 +272,7 @@ impl ELU {
     pub fn new(alpha: Option<f64>) -> Self {
         Self {
             alpha: alpha.unwrap_or(1.0),
+            alpha_tensor: None,
         }
     }
 
@@ -286,8 +304,13 @@ impl Layer for ELU {
             false,
         );
         let exp_minus_one = arithmetic::sub(&exp_neg, &ones)?;
-        let alpha = scalar_tensor(self.alpha, input.dtype(), input.device(), false)?;
-        let neg_part = arithmetic::mul(&exp_minus_one, &alpha)?;
+        let alpha = cached_scalar(
+            &mut self.alpha_tensor,
+            self.alpha,
+            input.dtype(),
+            input.device(),
+        )?;
+        let neg_part = arithmetic::mul(&exp_minus_one, alpha)?;
 
         // Combine positive and negative parts
         arithmetic::add(&positive, &neg_part)
@@ -305,14 +328,37 @@ impl Layer for ELU {
 /// GELU (Gaussian Error Linear Unit) activation layer
 ///
 /// Applies the Gaussian Error Linear Unit function:
-/// GELU(x) = x * Φ(x)
-/// where Φ(x) is the Cumulative Distribution Function for Gaussian Distribution.
-pub struct GELU;
+/// GELU(x) = x * theta(x)
+/// where theta(x) is the Cumulative Distribution Function for Gaussian Distribution.
+pub struct GELU {
+    half: Option<Tensor>,
+    one: Option<Tensor>,
+    coeff: Option<Tensor>,
+    cubic_coeff: Option<Tensor>,
+}
 
 impl GELU {
     /// Create a new GELU activation layer
     pub fn new() -> Self {
-        Self
+        Self {
+            half: None,
+            one: None,
+            coeff: None,
+            cubic_coeff: None,
+        }
+    }
+
+    fn prepare_constants(&mut self, dtype: DataType, device: Device) -> Result<()> {
+        let _ = cached_scalar(&mut self.half, 0.5, dtype, device)?;
+        let _ = cached_scalar(&mut self.one, 1.0, dtype, device)?;
+        let _ = cached_scalar(
+            &mut self.coeff,
+            (2.0 / std::f64::consts::PI).sqrt(),
+            dtype,
+            device,
+        )?;
+        let _ = cached_scalar(&mut self.cubic_coeff, 0.044_715, dtype, device)?;
+        Ok(())
     }
 }
 
@@ -326,24 +372,21 @@ impl Layer for GELU {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Use tanh-based approximation:
         // 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715x^3)))
-        let half = scalar_tensor(0.5, input.dtype(), input.device(), false)?;
-        let one = scalar_tensor(1.0, input.dtype(), input.device(), false)?;
-        let coeff = scalar_tensor(
-            (2.0 / std::f64::consts::PI).sqrt(),
-            input.dtype(),
-            input.device(),
-            false,
-        )?;
-        let cubic_coeff = scalar_tensor(0.044_715, input.dtype(), input.device(), false)?;
+        self.prepare_constants(input.dtype(), input.device())?;
+
+        let half = self.half.as_ref().unwrap();
+        let one = self.one.as_ref().unwrap();
+        let coeff = self.coeff.as_ref().unwrap();
+        let cubic_coeff = self.cubic_coeff.as_ref().unwrap();
 
         let x_sq = arithmetic::mul(input, input)?;
         let x_cubed = arithmetic::mul(&x_sq, input)?;
-        let scaled_cubic = arithmetic::mul(&x_cubed, &cubic_coeff)?;
+        let scaled_cubic = arithmetic::mul(&x_cubed, cubic_coeff)?;
         let inner = arithmetic::add(input, &scaled_cubic)?;
-        let inner = arithmetic::mul(&inner, &coeff)?;
+        let inner = arithmetic::mul(&inner, coeff)?;
         let tanh_inner = tanh(&inner)?;
-        let one_plus_tanh = arithmetic::add(&one, &tanh_inner)?;
-        let half_x = arithmetic::mul(input, &half)?;
+        let one_plus_tanh = arithmetic::add(one, &tanh_inner)?;
+        let half_x = arithmetic::mul(input, half)?;
         arithmetic::mul(&half_x, &one_plus_tanh)
     }
 
@@ -434,6 +477,38 @@ mod tests {
         for (o, e) in out_slice.iter().zip(expected.iter()) {
             assert!((o - e).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn test_relu_forward_values() {
+        let mut relu = ReLU::new();
+        let data = TensorData::from_vec_f32(vec![-1.0, 0.0, 1.0], Device::cpu());
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let output = relu.forward(&input).unwrap();
+        let out_slice = output.data().as_f32_slice().unwrap();
+        assert_eq!(out_slice, &[0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_leaky_relu_forward_values() {
+        let mut lr = LeakyReLU::new(Some(0.1));
+        let data = TensorData::from_vec_f32(vec![-2.0, 0.0, 2.0], Device::cpu());
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let output = lr.forward(&input).unwrap();
+        let out_slice = output.data().as_f32_slice().unwrap();
+        assert_eq!(out_slice, &[-0.2, 0.0, 2.0]);
     }
 
     #[test]

@@ -174,7 +174,7 @@ impl Conv2d {
 
     /// Get named parameters for this layer
     pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &self.weight);
         if let Some(ref bias) = self.bias {
             params.insert("bias".to_string(), bias);
@@ -184,7 +184,7 @@ impl Conv2d {
 
     /// Get named mutable parameters for this layer
     pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &mut self.weight);
         if let Some(ref mut bias) = self.bias {
             params.insert("bias".to_string(), bias);
@@ -206,7 +206,8 @@ impl Layer for Conv2d {
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
-        let mut params = vec![&self.weight];
+        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+        params.push(&self.weight);
         if let Some(ref bias) = self.bias {
             params.push(bias);
         }
@@ -214,7 +215,8 @@ impl Layer for Conv2d {
     }
 
     fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        let mut params = vec![&mut self.weight];
+        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+        params.push(&mut self.weight);
         if let Some(ref mut bias) = self.bias {
             params.push(bias);
         }
@@ -446,5 +448,30 @@ mod tests {
         assert_eq!(output.shape(), &Shape::new(vec![1, 1, 2, 2]));
         let data = output.data().as_f32_slice().unwrap();
         assert_eq!(data, &[2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_conv2d_stride_padding_output() {
+        let mut layer = Conv2d::new(
+            1,
+            1,
+            (3, 3),
+            Some((2, 2)),
+            Some((1, 1)),
+            true,
+            Device::cpu(),
+            DataType::Float32,
+        )
+        .unwrap();
+
+        let input = Tensor::zeros(
+            Shape::new(vec![1, 1, 7, 7]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let output = layer.forward(&input).unwrap();
+        assert_eq!(output.shape(), &Shape::new(vec![1, 1, 4, 4]));
     }
 }

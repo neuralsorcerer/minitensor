@@ -15,7 +15,7 @@ The original implementation assumed that every piece of functionality was
 always present in the compiled extension.  The stripped down test environment
 ships a minimal core where many of these components are missing which caused
 importing :mod:`minitensor` to fail with ``AttributeError``.  To make the Python
-API robust we now populate the namespace dynamically – only symbols that exist
+API robust we now populate the namespace dynamically - only symbols that exist
 in the core are exported.  This mirrors the behaviour of optional components in
 other numerical libraries and allows parts of the library (such as the tensor
 API) to be used independently of the neural network layers.
@@ -53,6 +53,7 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
         "BatchNorm1d",
         "BatchNorm2d",
         "Dropout",
+        "Dropout2d",
         "Sequential",
         # Activations
         "ReLU",

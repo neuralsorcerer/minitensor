@@ -12,8 +12,9 @@ use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss};
 use engine::nn::{
     activation::{LeakyReLU, ELU, GELU},
     conv::Conv2d,
-    dropout::Dropout,
+    dropout::{Dropout, Dropout2d},
     normalization::{BatchNorm1d, BatchNorm2d},
+    utils::{LayerUtils, SequentialUtils},
     DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
 };
 use engine::operations::batch_norm as batch_norm_op;
@@ -22,9 +23,9 @@ use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use engine::tensor::DataType;
 use engine::Device;
-use pyo3::prelude::*;
 use pyo3::exceptions::PyIndexError;
-use pyo3::types::{PyAny, PyModule as Pyo3Module};
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
 
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None, stride=None, padding=None))]
@@ -92,13 +93,8 @@ fn cross_entropy(
     if axis < 0 || axis as usize >= ndim as usize {
         return Err(PyIndexError::new_err("dim out of range"));
     }
-    let result = cross_entropy_op(
-        input.tensor(),
-        target.tensor(),
-        reduction,
-        axis as usize,
-    )
-    .map_err(_convert_error)?;
+    let result = cross_entropy_op(input.tensor(), target.tensor(), reduction, axis as usize)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -124,6 +120,7 @@ enum ModuleType {
     BatchNorm1d(BatchNorm1d),
     BatchNorm2d(BatchNorm2d),
     Dropout(Dropout),
+    Dropout2d(Dropout2d),
 }
 
 #[pymethods]
@@ -144,6 +141,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.forward(input.tensor()),
             ModuleType::BatchNorm2d(layer) => layer.forward(input.tensor()),
             ModuleType::Dropout(layer) => layer.forward(input.tensor()),
+            ModuleType::Dropout2d(layer) => layer.forward(input.tensor()),
         }
         .map_err(_convert_error)?;
 
@@ -166,6 +164,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.parameters(),
             ModuleType::BatchNorm2d(layer) => layer.parameters(),
             ModuleType::Dropout(layer) => layer.parameters(),
+            ModuleType::Dropout2d(layer) => layer.parameters(),
         };
 
         params
@@ -190,6 +189,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.train(),
             ModuleType::BatchNorm2d(layer) => layer.train(),
             ModuleType::Dropout(layer) => layer.train(),
+            ModuleType::Dropout2d(layer) => layer.train(),
         }
     }
 
@@ -209,6 +209,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.eval(),
             ModuleType::BatchNorm2d(layer) => layer.eval(),
             ModuleType::Dropout(layer) => layer.eval(),
+            ModuleType::Dropout2d(layer) => layer.eval(),
         }
     }
 
@@ -228,6 +229,122 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.num_parameters(),
             ModuleType::BatchNorm2d(layer) => layer.num_parameters(),
             ModuleType::Dropout(layer) => layer.num_parameters(),
+            ModuleType::Dropout2d(layer) => layer.num_parameters(),
+        }
+    }
+
+    /// Get detailed parameter statistics
+    fn parameter_stats(&self, py: Python) -> PyResult<PyObject> {
+        let layer: &dyn Layer = match &self.inner {
+            ModuleType::DenseLayer(layer) => layer,
+            ModuleType::ReLU(layer) => layer,
+            ModuleType::Sigmoid(layer) => layer,
+            ModuleType::Tanh(layer) => layer,
+            ModuleType::Softmax(layer) => layer,
+            ModuleType::LeakyReLU(layer) => layer,
+            ModuleType::ELU(layer) => layer,
+            ModuleType::GELU(layer) => layer,
+            ModuleType::Sequential(layer) => layer,
+            ModuleType::Conv2d(layer) => layer,
+            ModuleType::BatchNorm1d(layer) => layer,
+            ModuleType::BatchNorm2d(layer) => layer,
+            ModuleType::Dropout(layer) => layer,
+            ModuleType::Dropout2d(layer) => layer,
+        };
+        let stats = LayerUtils::parameter_stats(layer);
+        let dict = PyDict::new(py);
+        dict.set_item("total_parameters", stats.total_parameters)?;
+        dict.set_item("trainable_parameters", stats.trainable_parameters)?;
+        dict.set_item("non_trainable_parameters", stats.non_trainable_parameters)?;
+        dict.set_item("parameter_count_by_tensor", stats.parameter_count_by_tensor)?;
+        Ok(dict.into())
+    }
+
+    /// Get memory usage information
+    fn memory_usage(&self, py: Python) -> PyResult<PyObject> {
+        let layer: &dyn Layer = match &self.inner {
+            ModuleType::DenseLayer(layer) => layer,
+            ModuleType::ReLU(layer) => layer,
+            ModuleType::Sigmoid(layer) => layer,
+            ModuleType::Tanh(layer) => layer,
+            ModuleType::Softmax(layer) => layer,
+            ModuleType::LeakyReLU(layer) => layer,
+            ModuleType::ELU(layer) => layer,
+            ModuleType::GELU(layer) => layer,
+            ModuleType::Sequential(layer) => layer,
+            ModuleType::Conv2d(layer) => layer,
+            ModuleType::BatchNorm1d(layer) => layer,
+            ModuleType::BatchNorm2d(layer) => layer,
+            ModuleType::Dropout(layer) => layer,
+            ModuleType::Dropout2d(layer) => layer,
+        };
+        let usage = LayerUtils::memory_usage(layer);
+        let dict = PyDict::new(py);
+        dict.set_item("total_bytes", usage.total_bytes)?;
+        let dtype_dict = PyDict::new(py);
+        for (dtype, bytes) in usage.bytes_by_dtype {
+            dtype_dict.set_item(format!("{:?}", dtype), bytes)?;
+        }
+        dict.set_item("bytes_by_dtype", dtype_dict)?;
+        Ok(dict.into())
+    }
+
+    /// Generate a human readable summary
+    fn summary(&self, name: Option<&str>) -> PyResult<String> {
+        match &self.inner {
+            ModuleType::Sequential(model) => Ok(SequentialUtils::model_summary(model, name)),
+            _ => {
+                let layer: &dyn Layer = match &self.inner {
+                    ModuleType::DenseLayer(layer) => layer,
+                    ModuleType::ReLU(layer) => layer,
+                    ModuleType::Sigmoid(layer) => layer,
+                    ModuleType::Tanh(layer) => layer,
+                    ModuleType::Softmax(layer) => layer,
+                    ModuleType::LeakyReLU(layer) => layer,
+                    ModuleType::ELU(layer) => layer,
+                    ModuleType::GELU(layer) => layer,
+                    ModuleType::Sequential(layer) => layer,
+                    ModuleType::Conv2d(layer) => layer,
+                    ModuleType::BatchNorm1d(layer) => layer,
+                    ModuleType::BatchNorm2d(layer) => layer,
+                    ModuleType::Dropout(layer) => layer,
+                    ModuleType::Dropout2d(layer) => layer,
+                };
+                let owned;
+                let layer_name = match name {
+                    Some(n) => n,
+                    None => {
+                        owned = self.__repr__();
+                        &owned
+                    }
+                };
+                Ok(LayerUtils::layer_summary(layer, layer_name))
+            }
+        }
+    }
+
+    /// Estimate forward memory usage for Sequential models
+    fn forward_memory_estimate(
+        &self,
+        input_shape: Vec<usize>,
+        batch_size: usize,
+        py: Python,
+    ) -> PyResult<PyObject> {
+        if let ModuleType::Sequential(model) = &self.inner {
+            let est = SequentialUtils::estimate_forward_memory(model, &input_shape, batch_size);
+            let dict = PyDict::new(py);
+            dict.set_item("parameter_memory", est.parameter_memory)?;
+            dict.set_item(
+                "estimated_activation_memory",
+                est.estimated_activation_memory,
+            )?;
+            dict.set_item("estimated_total_memory", est.estimated_total_memory)?;
+            dict.set_item("input_memory", est.input_memory)?;
+            Ok(dict.into())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "forward_memory_estimate only valid for Sequential modules",
+            ))
         }
     }
 
@@ -262,6 +379,7 @@ impl PyModule {
                 format!("BatchNorm2d(num_features={})", layer.num_features())
             }
             ModuleType::Dropout(layer) => format!("Dropout(p={})", layer.p()),
+            ModuleType::Dropout2d(layer) => format!("Dropout2d(p={})", layer.p()),
         }
     }
 
@@ -283,6 +401,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.state_dict(),
             ModuleType::BatchNorm2d(layer) => layer.state_dict(),
             ModuleType::Dropout(layer) => layer.state_dict(),
+            ModuleType::Dropout2d(layer) => layer.state_dict(),
         };
 
         let metadata = ModelMetadata::new("module".to_string(), "Module".to_string());
@@ -338,6 +457,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.state_dict(),
             ModuleType::BatchNorm2d(layer) => layer.state_dict(),
             ModuleType::Dropout(layer) => layer.state_dict(),
+            ModuleType::Dropout2d(layer) => layer.state_dict(),
         };
         crate::serialization::PyStateDict::from_engine(state)
     }
@@ -361,6 +481,7 @@ impl PyModule {
             ModuleType::BatchNorm1d(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::BatchNorm2d(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::Dropout(layer) => layer.load_state_dict(sd_ref, dev),
+            ModuleType::Dropout2d(layer) => layer.load_state_dict(sd_ref, dev),
         };
         res.map_err(_convert_error)
     }
@@ -442,6 +563,12 @@ impl PyModule {
     pub fn from_dropout(dropout: Dropout) -> Self {
         Self {
             inner: ModuleType::Dropout(dropout),
+        }
+    }
+
+    pub fn from_dropout2d(dropout: Dropout2d) -> Self {
+        Self {
+            inner: ModuleType::Dropout2d(dropout),
         }
     }
 }
@@ -682,6 +809,34 @@ impl PyDropout {
     fn p(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
         if let ModuleType::Dropout(layer) = &module.inner {
+            Ok(layer.p())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+}
+
+/// 2D Dropout layer
+#[pyclass(name = "Dropout2d", extends = PyModule)]
+pub struct PyDropout2d;
+
+#[pymethods]
+impl PyDropout2d {
+    /// Create a new Dropout2d layer
+    #[new]
+    fn new(p: Option<f64>) -> PyResult<(Self, PyModule)> {
+        let p = p.unwrap_or(0.5);
+        let dropout = Dropout2d::new(Some(p)).map_err(_convert_error)?;
+        Ok((Self, PyModule::from_dropout2d(dropout)))
+    }
+
+    /// Get the dropout probability
+    #[getter]
+    fn p(slf: PyRef<Self>) -> PyResult<f64> {
+        let module = slf.as_ref();
+        if let ModuleType::Dropout2d(layer) = &module.inner {
             Ok(layer.p())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1182,6 +1337,7 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PyELU>()?;
     nn_module.add_class::<PyGELU>()?;
     nn_module.add_class::<PyDropout>()?;
+    nn_module.add_class::<PyDropout2d>()?;
     nn_module.add_class::<PyConv2d>()?;
     nn_module.add_class::<PyBatchNorm1d>()?;
     nn_module.add_class::<PyBatchNorm2d>()?;
