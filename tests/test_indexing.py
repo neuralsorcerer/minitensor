@@ -59,3 +59,16 @@ def test_multi_dim_slice():
     np.testing.assert_allclose(
         sub.numpy(), np.array([[3.0, 4.0], [6.0, 7.0]], dtype=np.float32)
     )
+
+
+def test_boolean_mask_indexing_error():
+    t = mt.Tensor([0.0, 1.0, 2.0, 3.0])
+    mask = t.gt(mt.Tensor([1.0]))
+    with pytest.raises(TypeError):
+        _ = t[mask]
+
+
+def test_integer_array_indexing_error():
+    t = mt.Tensor([10.0, 20.0, 30.0, 40.0])
+    with pytest.raises(TypeError):
+        _ = t[[2, 0]]

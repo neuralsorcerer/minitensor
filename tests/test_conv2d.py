@@ -31,3 +31,11 @@ def test_conv2d_kernel_too_large_raises():
     w = Tensor(np.zeros((1, 1, 5, 5), dtype=np.float32))
     with pytest.raises(Exception):
         F.conv2d(x, w)
+
+
+def test_conv2d_large_stride_output_shape():
+    x = Tensor(np.arange(1, 17, dtype=np.float32).reshape(1, 1, 4, 4))
+    w = Tensor(np.ones((1, 1, 1, 1), dtype=np.float32))
+    y = F.conv2d(x, w, stride=5)
+    assert y.shape == (1, 1, 1, 1)
+    assert np.allclose(y.numpy()[0, 0, 0, 0], 1.0)

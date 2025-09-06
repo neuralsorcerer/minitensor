@@ -21,3 +21,19 @@ def test_astype_int():
     y = x.astype("int32")
     assert y.dtype == "int32"
     assert np.array_equal(y.numpy(), np.array([1, -2], dtype=np.int32))
+
+
+def test_astype_nan_and_overflow():
+    x = Tensor([float("nan"), 1e40, -1e40], dtype="float32")
+    y = x.astype("int32")
+    assert np.array_equal(
+        y.numpy(),
+        np.array([0, np.iinfo(np.int32).max, np.iinfo(np.int32).min], dtype=np.int32),
+    )
+
+
+def test_astype_bool_from_float():
+    x = Tensor([-0.1, 0.0, 2.0], dtype="float32")
+    y = x.astype("bool")
+    assert y.dtype == "bool"
+    assert np.array_equal(y.numpy(), np.array([True, False, True], dtype=bool))

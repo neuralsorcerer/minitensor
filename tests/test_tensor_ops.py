@@ -72,3 +72,37 @@ def test_any_all_keepdim():
     all_res = t.all(dim=0)
     np.testing.assert_array_equal(any_res.numpy(), np.array([[True], [True]]))
     np.testing.assert_array_equal(all_res.numpy(), np.array([False, False]))
+
+
+def test_empty_tensor_reductions():
+    t = mt.Tensor(np.array([], dtype=np.float32))
+    s = t.sum()
+    m = t.mean()
+    np.testing.assert_allclose(s.numpy(), np.array([0.0], dtype=np.float32))
+    assert np.isinf(m.numpy())
+
+
+def test_sum_with_nan_propagation():
+    t = mt.Tensor([1.0, np.nan])
+    s = t.sum()
+    assert np.isnan(s.numpy()).all()
+
+
+def test_log_negative_returns_neg_infinity():
+    t = mt.Tensor([-1.0])
+    r = t.log()
+    assert np.isneginf(r.numpy()).all()
+
+
+def test_mul_overflow_results_infinity():
+    a = mt.Tensor([3.4e38])
+    b = mt.Tensor([10.0])
+    res = a * b
+    assert np.isinf(res.numpy()).all()
+
+def test_exp_extreme_values():
+    t = mt.Tensor([1000.0, -1000.0])
+    r = t.exp()
+    result = r.numpy()
+    assert np.isinf(result[0])
+    assert result[1] == 0.0

@@ -33,3 +33,11 @@ def test_trigonometric_functions():
     tan_angles = [a for a in angles if abs(np.cos(a)) > 1e-6]
     tan_result = Tensor(tan_angles).tan().tolist()
     np.testing.assert_allclose(tan_result, np.tan(tan_angles), rtol=1e-6, atol=1e-6)
+
+
+def test_trig_large_values():
+    x = Tensor([1e10])
+    sin_res = x.sin().numpy()[0]
+    cos_res = x.cos().numpy()[0]
+    np.testing.assert_allclose(sin_res, np.sin(1e10), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(cos_res, np.cos(1e10), rtol=1e-6, atol=1e-6)

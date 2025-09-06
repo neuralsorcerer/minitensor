@@ -36,3 +36,10 @@ def test_tensor_pow_dtype_mismatch_error():
     exp = Tensor([1.0, 2.0], dtype="float64")
     with pytest.raises(TypeError):
         _ = base**exp
+
+
+def test_negative_base_fractional_power_clamps_zero():
+    base = Tensor([-1.0], dtype="float32")
+    exp = Tensor([0.5], dtype="float32")
+    y = base ** exp
+    assert y.numpy()[0] == 0.0

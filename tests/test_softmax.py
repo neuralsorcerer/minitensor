@@ -26,3 +26,14 @@ def test_functional_softmax_dim():
     expected = np.exp(x_np - x_np.max(axis=0, keepdims=True))
     expected = expected / expected.sum(axis=0, keepdims=True)
     assert np.allclose(result.numpy(), expected)
+
+
+def test_softmax_extreme_values():
+    x_np = np.array([[1e9, -1e9], [-1e9, 1e9]], dtype=np.float32)
+    x = mt.Tensor(x_np.tolist())
+    result = F.softmax(x)
+    shifted = x_np - x_np.max(axis=1, keepdims=True)
+    expected = np.exp(shifted)
+    expected = expected / expected.sum(axis=1, keepdims=True)
+    assert np.allclose(result.numpy(), expected)
+    assert np.allclose(result.numpy().sum(axis=1), np.array([1.0, 1.0]))

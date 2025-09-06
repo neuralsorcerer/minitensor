@@ -68,3 +68,10 @@ def test_matmul_zero_dimension():
     b = mt.Tensor(np.empty((0, 3), dtype=np.float32))
     result = a.matmul(b)
     np.testing.assert_allclose(result.numpy(), np.zeros((2, 3), dtype=np.float32))
+
+
+def test_matmul_inf_nan_propagation():
+    a = mt.Tensor([[np.inf, np.nan], [1.0, 2.0]], dtype="float32")
+    b = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+    result = a.matmul(b).numpy()
+    assert np.isnan(result[0]).all()

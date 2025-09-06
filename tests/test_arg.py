@@ -20,3 +20,16 @@ def test_argmin_dim_keepdim():
     result = x.argmin(dim=1, keepdim=True)
     assert result.shape == (2, 1)
     assert np.array_equal(result.numpy(), np.array([[0], [1]], dtype=np.int64))
+
+
+def test_argmax_no_dim_first_index():
+    x = Tensor([1.0, 5.0, 5.0, -1.0], dtype="float32")
+    result = x.argmax()
+    assert result.shape == ()
+    assert result.numpy().item() == 1
+
+
+def test_argmin_all_equal_returns_zero():
+    x = Tensor([2.0, 2.0, 2.0], dtype="float32")
+    result = x.argmin()
+    assert result.numpy().item() == 0

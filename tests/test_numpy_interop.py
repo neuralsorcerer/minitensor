@@ -111,3 +111,11 @@ def test_np_maximum_minimum_bool():
     assert min_res.dtype == "bool"
     assert np.array_equal(max_res.numpy(), np.array([True, True], dtype=np.bool_))
     assert np.array_equal(min_res.numpy(), np.array([False, False], dtype=np.bool_))
+
+
+def test_from_numpy_nan_inf_preserved():
+    arr = np.array([np.nan, np.inf, -np.inf], dtype=np.float32)
+    t = Tensor.from_numpy(arr)
+    out = t.numpy()
+    assert t.dtype == "float32"
+    assert np.isnan(out[0]) and np.isposinf(out[1]) and np.isneginf(out[2])

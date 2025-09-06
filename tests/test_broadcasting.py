@@ -46,3 +46,18 @@ def test_high_dim_broadcast_mismatch_error():
     b = mt.Tensor(np.ones((4, 3, 1), dtype=np.float32))
     with pytest.raises(ValueError):
         _ = a + b
+
+
+def test_broadcast_zero_dimension():
+    a = mt.Tensor(np.empty((0, 3), dtype=np.float32))
+    b = mt.Tensor(np.ones((3,), dtype=np.float32))
+    result = a + b
+    assert result.shape == (0, 3)
+
+
+def test_conv_bias_broadcasting():
+    inp = mt.Tensor(np.ones((2, 3, 4, 4), dtype=np.float32))
+    bias = mt.Tensor(np.arange(3, dtype=np.float32).reshape(3, 1, 1))
+    out = inp + bias
+    expected = np.ones((2, 3, 4, 4), dtype=np.float32) + np.arange(3, dtype=np.float32).reshape(1, 3, 1, 1)
+    np.testing.assert_allclose(out.numpy(), expected

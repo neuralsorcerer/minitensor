@@ -77,3 +77,10 @@ def test_nan_propagation():
     result = c.numpy()
     assert np.isnan(result[0])
     np.testing.assert_allclose(result[1], 3.0)
+
+
+def test_inf_minus_inf_nan():
+    a = mt.Tensor([np.inf])
+    b = mt.Tensor([np.inf])
+    c = a - b
+    assert np.isnan(c.numpy()).all()

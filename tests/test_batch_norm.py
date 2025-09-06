@@ -43,3 +43,11 @@ def test_batch_norm_with_weight_and_bias():
     var = x_np.var(axis=0)
     expected = ((x_np - mean) / np.sqrt(var + 1e-5)) * weight.numpy() + bias.numpy()
     assert np.allclose(out.numpy(), expected, atol=1e-5)
+
+
+def test_batch_norm_zero_variance():
+    x = Tensor([[5.0, 5.0], [5.0, 5.0]], dtype="float32")
+    running_mean = Tensor([0.0, 0.0], dtype="float32")
+    running_var = Tensor([1.0, 1.0], dtype="float32")
+    out = F.batch_norm(x, running_mean, running_var, training=True)
+    assert np.allclose(out.numpy(), 0.0, atol=1e-5)

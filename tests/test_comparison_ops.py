@@ -37,3 +37,14 @@ def test_eq_type_mismatch_error():
     b = mt.Tensor([1, 2], dtype="int32")
     with pytest.raises(TypeError):
         a.eq(b)
+
+
+def test_nan_and_inf_comparisons():
+    a = mt.Tensor([float("nan"), float("inf")])
+    b = mt.Tensor([0.0, 1.0])
+    eq_res = a.eq(a)
+    lt_res = a.lt(b)
+    gt_res = a.gt(b)
+    assert not eq_res.numpy()[0]
+    assert not lt_res.numpy()[0]
+    assert gt_res.numpy()[1] and not lt_res.numpy()[1]
