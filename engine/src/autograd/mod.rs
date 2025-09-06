@@ -13,6 +13,10 @@ use crate::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::collections::hash_map::Entry;
+use rayon::prelude::*;
+
+const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
 /// Unique identifier for tensors in the computation graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,14 +114,13 @@ impl ComputationGraph {
         visited.insert(tensor_id);
 
         // Accumulate gradient for this tensor
-        match gradients.get_mut(&tensor_id) {
-            Some(existing_grad) => {
-                // Add to existing gradient
-                let new_grad = crate::operations::arithmetic::add(existing_grad, &grad_output)?;
-                *existing_grad = new_grad;
+        match gradients.entry(tensor_id) {
+            Entry::Occupied(mut e) => {
+                let new_grad = crate::operations::arithmetic::add(e.get(), &grad_output)?;
+                *e.get_mut() = new_grad;
             }
-            None => {
-                gradients.insert(tensor_id, grad_output.clone());
+            Entry::Vacant(e) => {
+                e.insert(grad_output.clone());
             }
         }
 
@@ -614,9 +617,27 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f32 slice from grad_data",
                         )
                     })?;
-                    for i in 0..base_slice.len() {
-                        grad_slice[i] =
-                            exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
+                    let len = base_slice.len();
+                    if len < PAR_THRESHOLD {
+                        for i in 0..len {
+                            grad_slice[i] = exp_slice[i]
+                                * base_slice[i].powf(exp_slice[i] - 1.0)
+                                * grad_out[i];
+                        }
+                    } else {
+                        let base_ptr = base_slice.as_ptr() as usize;
+                        let exp_ptr = exp_slice.as_ptr() as usize;
+                        let go_ptr = grad_out.as_ptr() as usize;
+                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                        (0..len).into_par_iter().for_each(|i| unsafe {
+                            let base_ptr = base_ptr as *const f32;
+                            let exp_ptr = exp_ptr as *const f32;
+                            let go_ptr = go_ptr as *const f32;
+                            let grad_ptr = grad_ptr as *mut f32;
+                            *grad_ptr.add(i) = *exp_ptr.add(i)
+                                * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
+                                * *go_ptr.add(i);
+                        });
                     }
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -639,8 +660,24 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f32 slice from grad_data",
                         )
                     })?;
-                    for i in 0..exp_slice.len() {
-                        grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                    let len = exp_slice.len();
+                    if len < PAR_THRESHOLD {
+                        for i in 0..len {
+                            grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                        }
+                    } else {
+                        let out_ptr = out_slice.as_ptr() as usize;
+                        let base_ptr = base_slice.as_ptr() as usize;
+                        let go_ptr = grad_out.as_ptr() as usize;
+                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                        (0..len).into_par_iter().for_each(|i| unsafe {
+                            let out_ptr = out_ptr as *const f32;
+                            let base_ptr = base_ptr as *const f32;
+                            let go_ptr = go_ptr as *const f32;
+                            let grad_ptr = grad_ptr as *mut f32;
+                            *grad_ptr.add(i) =
+                                *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
+                        });
                     }
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -677,9 +714,27 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f64 slice from grad_data",
                         )
                     })?;
-                    for i in 0..base_slice.len() {
-                        grad_slice[i] =
-                            exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
+                    let len = base_slice.len();
+                    if len < PAR_THRESHOLD {
+                        for i in 0..len {
+                            grad_slice[i] = exp_slice[i]
+                                * base_slice[i].powf(exp_slice[i] - 1.0)
+                                * grad_out[i];
+                        }
+                    } else {
+                        let base_ptr = base_slice.as_ptr() as usize;
+                        let exp_ptr = exp_slice.as_ptr() as usize;
+                        let go_ptr = grad_out.as_ptr() as usize;
+                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                        (0..len).into_par_iter().for_each(|i| unsafe {
+                            let base_ptr = base_ptr as *const f64;
+                            let exp_ptr = exp_ptr as *const f64;
+                            let go_ptr = go_ptr as *const f64;
+                            let grad_ptr = grad_ptr as *mut f64;
+                            *grad_ptr.add(i) = *exp_ptr.add(i)
+                                * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
+                                * *go_ptr.add(i);
+                        });
                     }
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -702,8 +757,24 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f64 slice from grad_data",
                         )
                     })?;
-                    for i in 0..exp_slice.len() {
-                        grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                    let len = exp_slice.len();
+                    if len < PAR_THRESHOLD {
+                        for i in 0..len {
+                            grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                        }
+                    } else {
+                        let out_ptr = out_slice.as_ptr() as usize;
+                        let base_ptr = base_slice.as_ptr() as usize;
+                        let go_ptr = grad_out.as_ptr() as usize;
+                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                        (0..len).into_par_iter().for_each(|i| unsafe {
+                            let out_ptr = out_ptr as *const f64;
+                            let base_ptr = base_ptr as *const f64;
+                            let go_ptr = go_ptr as *const f64;
+                            let grad_ptr = grad_ptr as *mut f64;
+                            *grad_ptr.add(i) =
+                                *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
+                        });
                     }
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -756,8 +827,24 @@ impl GradientFunction for ReluBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                for (i, &g) in go.iter().enumerate() {
-                    grad_slice[i] = if self.mask[i] { g } else { 0.0 };
+                let len = go.len();
+                if len < PAR_THRESHOLD {
+                    for i in 0..len {
+                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
+                    }
+                } else {
+                    let mask = &self.mask;
+                    let go_ptr = go.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    (0..len).into_par_iter().for_each(|i| unsafe {
+                        let go_ptr = go_ptr as *const f32;
+                        let grad_ptr = grad_ptr as *mut f32;
+                        *grad_ptr.add(i) = if *mask.get_unchecked(i) {
+                            *go_ptr.add(i)
+                        } else {
+                            0.0
+                        };
+                    });
                 }
             }
             DataType::Float64 => {
@@ -769,8 +856,24 @@ impl GradientFunction for ReluBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                for (i, &g) in go.iter().enumerate() {
-                    grad_slice[i] = if self.mask[i] { g } else { 0.0 };
+                let len = go.len();
+                if len < PAR_THRESHOLD {
+                    for i in 0..len {
+                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
+                    }
+                } else {
+                    let mask = &self.mask;
+                    let go_ptr = go.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    (0..len).into_par_iter().for_each(|i| unsafe {
+                        let go_ptr = go_ptr as *const f64;
+                        let grad_ptr = grad_ptr as *mut f64;
+                        *grad_ptr.add(i) = if *mask.get_unchecked(i) {
+                            *go_ptr.add(i)
+                        } else {
+                            0.0
+                        };
+                    });
                 }
             }
             _ => {
@@ -824,12 +927,26 @@ impl GradientFunction for LeakyReluBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                for (i, &g) in go.iter().enumerate() {
-                    grad_slice[i] = if self.mask[i] {
-                        g
-                    } else {
-                        g * self.negative_slope as f32
-                    };
+                let len = go.len();
+                let slope = self.negative_slope as f32;
+                if len < PAR_THRESHOLD {
+                    for i in 0..len {
+                        grad_slice[i] = if self.mask[i] { go[i] } else { go[i] * slope };
+                    }
+                } else {
+                    let mask = &self.mask;
+                    let go_ptr = go.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    (0..len).into_par_iter().for_each(|i| unsafe {
+                        let go_ptr = go_ptr as *const f32;
+                        let grad_ptr = grad_ptr as *mut f32;
+                        let val = if *mask.get_unchecked(i) {
+                            *go_ptr.add(i)
+                        } else {
+                            *go_ptr.add(i) * slope
+                        };
+                        *grad_ptr.add(i) = val;
+                    });
                 }
             }
             DataType::Float64 => {
@@ -841,12 +958,26 @@ impl GradientFunction for LeakyReluBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                for (i, &g) in go.iter().enumerate() {
-                    grad_slice[i] = if self.mask[i] {
-                        g
-                    } else {
-                        g * self.negative_slope
-                    };
+                let len = go.len();
+                let slope = self.negative_slope;
+                if len < PAR_THRESHOLD {
+                    for i in 0..len {
+                        grad_slice[i] = if self.mask[i] { go[i] } else { go[i] * slope };
+                    }
+                } else {
+                    let mask = &self.mask;
+                    let go_ptr = go.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    (0..len).into_par_iter().for_each(|i| unsafe {
+                        let go_ptr = go_ptr as *const f64;
+                        let grad_ptr = grad_ptr as *mut f64;
+                        let val = if *mask.get_unchecked(i) {
+                            *go_ptr.add(i)
+                        } else {
+                            *go_ptr.add(i) * slope
+                        };
+                        *grad_ptr.add(i) = val;
+                    });
                 }
             }
             _ => {
@@ -1047,13 +1178,28 @@ impl GradientFunction for HuberLossBackward {
                     MinitensorError::internal_error("Failed to get mutable f32 slice from grad")
                 })?;
                 let delta = self.delta as f32;
-                for i in 0..numel {
-                    let d = diff_slice[i];
-                    grad_slice[i] = if d.abs() <= delta {
-                        d
-                    } else {
-                        delta * d.signum()
-                    };
+                if numel < PAR_THRESHOLD {
+                    for i in 0..numel {
+                        let d = diff_slice[i];
+                        grad_slice[i] = if d.abs() <= delta {
+                            d
+                        } else {
+                            delta * d.signum()
+                        };
+                    }
+                } else {
+                    let diff_ptr = diff_slice.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    (0..numel).into_par_iter().for_each(|i| unsafe {
+                        let diff_ptr = diff_ptr as *const f32;
+                        let grad_ptr = grad_ptr as *mut f32;
+                        let d = *diff_ptr.add(i);
+                        *grad_ptr.add(i) = if d.abs() <= delta {
+                            d
+                        } else {
+                            delta * d.signum()
+                        };
+                    });
                 }
             }
             DataType::Float64 => {
@@ -1063,13 +1209,29 @@ impl GradientFunction for HuberLossBackward {
                 let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get mutable f64 slice from grad")
                 })?;
-                for i in 0..numel {
-                    let d = diff_slice[i];
-                    grad_slice[i] = if d.abs() <= self.delta {
-                        d
-                    } else {
-                        self.delta * d.signum()
-                    };
+                if numel < PAR_THRESHOLD {
+                    for i in 0..numel {
+                        let d = diff_slice[i];
+                        grad_slice[i] = if d.abs() <= self.delta {
+                            d
+                        } else {
+                            self.delta * d.signum()
+                        };
+                    }
+                } else {
+                    let diff_ptr = diff_slice.as_ptr() as usize;
+                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                    let delta = self.delta;
+                    (0..numel).into_par_iter().for_each(|i| unsafe {
+                        let diff_ptr = diff_ptr as *const f64;
+                        let grad_ptr = grad_ptr as *mut f64;
+                        let d = *diff_ptr.add(i);
+                        *grad_ptr.add(i) = if d.abs() <= delta {
+                            d
+                        } else {
+                            delta * d.signum()
+                        };
+                    });
                 }
             }
             _ => {
@@ -1375,8 +1537,20 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f32 slice from output")
             })?;
             let exp = exponent as f32;
-            for (o, &i) in output.iter_mut().zip(input.iter()) {
-                *o = i.powf(exp);
+            let len = input.len();
+            debug_assert_eq!(len, output.len());
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    output[i] = input[i].powf(exp);
+                }
+            } else {
+                let in_ptr = input.as_ptr() as usize;
+                let out_ptr = output.as_mut_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let in_ptr = in_ptr as *const f32;
+                    let out_ptr = out_ptr as *mut f32;
+                    *out_ptr.add(i) = (*in_ptr.add(i)).powf(exp);
+                });
             }
         }
         DataType::Float64 => {
@@ -1386,8 +1560,20 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
             let output = output_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
-            for (o, &i) in output.iter_mut().zip(input.iter()) {
-                *o = i.powf(exponent);
+            let len = input.len();
+            debug_assert_eq!(len, output.len());
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    output[i] = input[i].powf(exponent);
+                }
+            } else {
+                let in_ptr = input.as_ptr() as usize;
+                let out_ptr = output.as_mut_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let in_ptr = in_ptr as *const f64;
+                    let out_ptr = out_ptr as *mut f64;
+                    *out_ptr.add(i) = (*in_ptr.add(i)).powf(exponent);
+                });
             }
         }
         _ => {

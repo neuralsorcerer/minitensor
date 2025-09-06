@@ -6,7 +6,7 @@
 
 use super::GradientFunction;
 use crate::{tensor::Tensor, error::Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 /// Statistics about the computation graph
@@ -250,12 +250,13 @@ impl ComputationGraph {
                                         let input_id = grad_fn.inputs()[i];
                                         
                                         // Accumulate gradient (add to existing or set new)
-                                        match self.gradients.get_mut(&input_id) {
-                                            Some(existing_grad) => {
-                                                *existing_grad = existing_grad.add(&grad)?;
+                                        match self.gradients.entry(input_id) {
+                                            Entry::Occupied(mut e) => {
+                                                let new_grad = e.get().add(&grad)?;
+                                                *e.get_mut() = new_grad;
                                             }
-                                            None => {
-                                                self.gradients.insert(input_id, grad);
+                                            Entry::Vacant(e) => {
+                                                e.insert(grad);
                                             }
                                         }
                                     }
