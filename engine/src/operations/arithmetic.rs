@@ -14,6 +14,7 @@ use crate::{
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 
 /// Element-wise addition with broadcasting support
@@ -837,8 +838,8 @@ where
     let lhs_strides = lhs_contiguous.as_slice();
     let rhs_strides = rhs_contiguous.as_slice();
 
-    let mut lhs_aligned = vec![0usize; rank];
-    let mut rhs_aligned = vec![0usize; rank];
+    let mut lhs_aligned: SmallVec<[usize; 8]> = smallvec![0; rank];
+    let mut rhs_aligned: SmallVec<[usize; 8]> = smallvec![0; rank];
 
     let lhs_offset = rank.saturating_sub(lhs_dims.len());
     for (i, &dim) in lhs_dims.iter().enumerate() {
@@ -856,7 +857,7 @@ where
         .enumerate()
         .for_each(|(chunk_idx, out_chunk)| {
             let start = chunk_idx * CHUNK;
-            let mut coord = vec![0usize; rank];
+            let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
             let mut tmp = start;
             for i in (0..rank).rev() {
                 coord[i] = tmp % output_dims[i];

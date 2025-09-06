@@ -27,6 +27,7 @@ parking_lot = "0.12"
 rayon = "1.7"
 wide = "0.7"
 matrixmultiply = { version = "0.3", features = ["threading"] }
+smallvec = "1.11"
 
 # GPU backends
 cudarc = "0.9"
