@@ -169,7 +169,7 @@ impl Layer for DenseLayer {
 
     fn parameters(&self) -> Vec<&Tensor> {
         let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
-        params.push(&self.weight);t];
+        params.push(&self.weight);
         if let Some(ref bias) = self.bias {
             params.push(bias);
         }
