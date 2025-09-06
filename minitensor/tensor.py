@@ -402,7 +402,11 @@ class Tensor:
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
                 raise TypeError("Cannot add tensors with different dtypes")
-            result_array = self.numpy() + other.numpy()
+            try:
+                result_shape = np.broadcast_shapes(self.shape, other.shape)
+            except ValueError as e:
+                raise ValueError("Shapes are not broadcastable") from e
+            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
             return Tensor(result_array, dtype=self.dtype)
 
         result = Tensor.__new__(Tensor)
@@ -420,7 +424,11 @@ class Tensor:
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
                 raise TypeError("Cannot subtract tensors with different dtypes")
-            result_array = self.numpy() - other.numpy()
+            try:
+                result_shape = np.broadcast_shapes(self.shape, other.shape)
+            except ValueError as e:
+                raise ValueError("Shapes are not broadcastable") from e
+            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
             return Tensor(result_array, dtype=self.dtype)
 
         result = Tensor.__new__(Tensor)
@@ -439,7 +447,11 @@ class Tensor:
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
                 raise TypeError("Cannot multiply tensors with different dtypes")
-            result_array = self.numpy() * other.numpy()
+            try:
+                result_shape = np.broadcast_shapes(self.shape, other.shape)
+            except ValueError as e:
+                raise ValueError("Shapes are not broadcastable") from e
+            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
             return Tensor(result_array, dtype=self.dtype)
 
         result = Tensor.__new__(Tensor)
@@ -457,7 +469,11 @@ class Tensor:
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
                 raise TypeError("Cannot divide tensors with different dtypes")
-            result_array = self.numpy() / other.numpy()
+            try:
+                result_shape = np.broadcast_shapes(self.shape, other.shape)
+            except ValueError as e:
+                raise ValueError("Shapes are not broadcastable") from e
+            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
             return Tensor(result_array, dtype=self.dtype)
 
         result = Tensor.__new__(Tensor)
