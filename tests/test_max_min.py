@@ -44,3 +44,25 @@ def test_max_min_all_nan_returns_extremes():
     t = mt.Tensor([np.nan, np.nan], dtype="float32")
     assert np.isneginf(t.max().numpy())
     assert np.isinf(t.min().numpy())
+
+
+def test_max_min_empty_tensor_with_dim():
+    t = mt.Tensor(np.empty((0, 3), dtype=np.float32))
+    max_vals, max_idx = t.max(dim=0)
+    assert np.isneginf(max_vals.numpy()).all()
+    assert np.array_equal(max_idx.numpy(), np.zeros(3, dtype=np.int64))
+
+    min_vals, min_idx = t.min(dim=0)
+    assert np.isposinf(min_vals.numpy()).all()
+    assert np.array_equal(min_idx.numpy(), np.zeros(3, dtype=np.int64))
+
+
+def test_max_min_all_nan_with_dim_returns_extremes():
+    t = mt.Tensor(np.array([[np.nan, np.nan], [np.nan, np.nan]], dtype=np.float32))
+    max_vals, max_idx = t.max(dim=1)
+    assert np.isneginf(max_vals.numpy()).all()
+    assert np.array_equal(max_idx.numpy(), np.zeros(2, dtype=np.int64))
+
+    min_vals, min_idx = t.min(dim=1)
+    assert np.isposinf(min_vals.numpy()).all()
+    assert np.array_equal(min_idx.numpy(), np.zeros(2, dtype=np.int64))

@@ -568,30 +568,25 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Maximum values along dimension."""
-        # The Rust backend raises an exception when reducing empty tensors or tensors
-        # containing only NaNs. NumPy follows a different convention where the
-        # maximum of an empty array is ``-inf`` and a reduction over all ``NaN``
-        # values also yields ``-inf``. To provide more robust semantics that mirror
-        # the expectation in our tests we handle these edge cases in Python before
-        # delegating to the backend implementation.
+        # The Rust backend currently aborts when asked to reduce an empty tensor or
+        # one consisting solely of NaN values. Guard these edge cases in Python and
+        # return the appropriate identity values instead of delegating to the
+        # backend.
 
         if dim is None:
             np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
 
-            # Return ``-inf`` (or the minimum representable value for non-floating
-            # types) when the tensor is empty.
             if self.numel() == 0:
                 if np.issubdtype(np_dtype, np.floating):
                     return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
                 elif np.issubdtype(np_dtype, np.integer):
-                    return Tensor(np.array(np.iinfo(np_dtype).min, dtype=np_dtype), dtype=self.dtype)
+                    return Tensor(
+                        np.array(np.iinfo(np_dtype).min, dtype=np_dtype), dtype=self.dtype
+                    )
                 else:  # bool
                     return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
 
-            # If all values are ``NaN`` return ``-inf`` to mirror NumPy's behaviour
-            # as expected by the tests.
-            arr = self.numpy()
-            if np.issubdtype(arr.dtype, np.floating) and np.isnan(arr).all():
+            if np.issubdtype(np_dtype, np.floating) and bool(self.isnan().all().numpy()):
                 return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
         
         result = Tensor.__new__(Tensor)
@@ -607,10 +602,8 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Minimum values along dimension."""
-        # Similar to ``max`` we need to gracefully handle reductions over empty
-        # tensors or tensors filled only with ``NaN`` values. NumPy returns ``inf``
-        # (or the maximum representable value for integer dtypes) for such cases
-        # and our tests are written with this behaviour in mind.
+        # Mirror the safeguards in ``max`` for empty tensors or tensors filled with
+        # NaNs by returning the appropriate identity values.
 
         if dim is None:
             np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
@@ -619,12 +612,13 @@ class Tensor:
                 if np.issubdtype(np_dtype, np.floating):
                     return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
                 elif np.issubdtype(np_dtype, np.integer):
-                    return Tensor(np.array(np.iinfo(np_dtype).max, dtype=np_dtype), dtype=self.dtype)
+                    return Tensor(
+                        np.array(np.iinfo(np_dtype).max, dtype=np_dtype), dtype=self.dtype
+                    )
                 else:  # bool
                     return Tensor(np.array(True, dtype=np_dtype), dtype=self.dtype)
 
-            arr = self.numpy()
-            if np.issubdtype(arr.dtype, np.floating) and np.isnan(arr).all():
+            if np.issubdtype(np_dtype, np.floating) and bool(self.isnan().all().numpy()):
                 return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
         
         result = Tensor.__new__(Tensor)
