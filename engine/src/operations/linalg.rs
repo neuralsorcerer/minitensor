@@ -357,25 +357,40 @@ where
     let m = lhs_dims[lhs_dims.len() - 2];
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
-
-    output_data
-        .par_chunks_mut(m * n)
-        .enumerate()
-        .for_each(|(b, chunk)| {
-            let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
-            let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
-            chunk.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-                for j in 0..n {
-                    let mut sum = T::default();
-                    for l in 0..k {
-                        let lhs_idx = i * k + l;
-                        let rhs_idx = l * n + j;
-                        sum = sum + lhs_batch[lhs_idx] * rhs_batch[rhs_idx];
-                    }
-                    row[j] = sum;
+    let batch = lhs_data.len() / (m * k);
+    if batch == 1 && m * n * k < PAR_THRESHOLD {
+        // For small single-batch matrices, avoid parallel overhead
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = T::default();
+                for l in 0..k {
+                    let lhs_idx = i * k + l;
+                    let rhs_idx = l * n + j;
+                    sum = sum + lhs_data[lhs_idx] * rhs_data[rhs_idx];
                 }
+                output_data[i * n + j] = sum;
+            }
+        }
+    } else {
+        output_data
+            .par_chunks_mut(m * n)
+            .enumerate()
+            .for_each(|(b, chunk)| {
+                let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
+                let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
+                chunk.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                    for j in 0..n {
+                        let mut sum = T::default();
+                        for l in 0..k {
+                            let lhs_idx = i * k + l;
+                            let rhs_idx = l * n + j;
+                            sum = sum + lhs_batch[lhs_idx] * rhs_batch[rhs_idx];
+                        }
+                        row[j] = sum;
+                    }
+                });
             });
-        });
+    }
 
     Ok(())
 }
@@ -626,7 +641,7 @@ fn transpose_generic<T: Copy + Send + Sync>(
         }
         return Ok(());
     }
-    
+
     let input_strides = Strides::from_shape(input_shape);
     let output_strides = Strides::from_shape(output_shape);
     let in_strides = input_strides.as_slice().to_vec();
