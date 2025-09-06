@@ -60,4 +60,4 @@ def test_conv_bias_broadcasting():
     bias = mt.Tensor(np.arange(3, dtype=np.float32).reshape(3, 1, 1))
     out = inp + bias
     expected = np.ones((2, 3, 4, 4), dtype=np.float32) + np.arange(3, dtype=np.float32).reshape(1, 3, 1, 1)
-    np.testing.assert_allclose(out.numpy(), expected
+    np.testing.assert_allclose(out.numpy(), expected)
