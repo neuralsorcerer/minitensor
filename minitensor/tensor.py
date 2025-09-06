@@ -508,6 +508,22 @@ class Tensor:
         """Matrix multiplication."""
         if not isinstance(other, Tensor):
             raise TypeError("matmul requires another Tensor")
+        if self.dtype != other.dtype:
+            raise TypeError("matmul requires tensors to have the same dtype")
+        if self.dtype == "bool":
+            raise ValueError("matmul does not support bool tensors")
+        if self.ndim < 2 or other.ndim < 2:
+            raise ValueError("matmul requires tensors with at least 2 dims")
+        if self.shape[:-2] != other.shape[:-2]:
+            raise ValueError("matmul batch dimensions must match")
+        if self.shape[-1] != other.shape[-2]:
+            raise ValueError("matmul dimension mismatch")
+
+        if self.numel() == 0 or other.numel() == 0:
+            result_shape = self.shape[:-1] + (other.shape[-1],)
+            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+            return Tensor(np.zeros(result_shape, dtype=np_dtype), dtype=self.dtype)
+        
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.matmul(other._tensor)
         return result
@@ -721,9 +737,7 @@ class Tensor:
             other = other.astype(self.dtype)
 
         if self.dtype == "bool" and other.dtype == "bool":
-            return (
-                self.astype("int32").maximum(other.astype("int32")).astype("bool")
-            )
+            return self.astype("int32").maximum(other.astype("int32")).astype("bool")
 
         mask = self.ge(other).astype(self.dtype)
         one = Tensor(1, dtype=self.dtype)
@@ -737,9 +751,7 @@ class Tensor:
             other = other.astype(self.dtype)
 
         if self.dtype == "bool" and other.dtype == "bool":
-            return (
-                self.astype("int32").minimum(other.astype("int32")).astype("bool")
-            )
+            return self.astype("int32").minimum(other.astype("int32")).astype("bool")
 
         mask = self.le(other).astype(self.dtype)
         one = Tensor(1, dtype=self.dtype)
