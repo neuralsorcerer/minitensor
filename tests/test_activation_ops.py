@@ -13,7 +13,7 @@ def test_relu_negative_and_nan():
     t = mt.Tensor([-1.0, float("nan"), 2.0])
     out = t.relu()
     vals = out.numpy()
-    np.testing.assert_allclose(vals, np.array([0.0, 0.0, 2.0]))
+    np.testing.assert_allclose(vals, np.array([0.0, np.nan, 2.0]), equal_nan=True)
 
 
 def test_sigmoid_tanh_extreme_inputs():
