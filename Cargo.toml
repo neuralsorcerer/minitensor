@@ -34,11 +34,6 @@ cudarc = "0.9"
 metal = "0.27"
 opencl3 = "0.9"
 
-# BLAS integration (optional for now)
-# blas-src = { version = "0.8", features = ["netlib"] }
-# cblas = "0.4"
-# lapack = "0.19"
-
 # System information
 num_cpus = "1.16"
 libc = "0.2"

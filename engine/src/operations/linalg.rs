@@ -9,9 +9,71 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use matrixmultiply::{dgemm, sgemm};
 use rayon::prelude::*;
 use std::sync::Arc;
+
+#[cfg(feature = "blas")]
+use cblas::{Layout, Transpose};
+
+const PAR_THRESHOLD: usize = 1 << 12;
+
+#[cfg(feature = "blas")]
+#[inline]
+unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
+    cblas::sgemm(
+        Layout::RowMajor,
+        Transpose::None,
+        Transpose::None,
+        m as i32,
+        n as i32,
+        k as i32,
+        1.0,
+        a,
+        k as i32,
+        b,
+        n as i32,
+        0.0,
+        c,
+        n as i32,
+    );
+}
+
+#[cfg(feature = "blas")]
+#[inline]
+unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
+    cblas::dgemm(
+        Layout::RowMajor,
+        Transpose::None,
+        Transpose::None,
+        m as i32,
+        n as i32,
+        k as i32,
+        1.0,
+        a,
+        k as i32,
+        b,
+        n as i32,
+        0.0,
+        c,
+        n as i32,
+    );
+}
+
+#[cfg(not(feature = "blas"))]
+#[inline]
+unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
+    matrixmultiply::sgemm(
+        m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+    );
+}
+
+#[cfg(not(feature = "blas"))]
+#[inline]
+unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
+    matrixmultiply::dgemm(
+        m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+    );
+}
 
 /// Matrix multiplication with gradient support
 pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -312,7 +374,7 @@ where
                     }
                     row[j] = sum;
                 }
-                });
+            });
         });
 
     Ok(())
@@ -331,31 +393,31 @@ fn optimized_matmul_f32(
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
 
-    output_data
-        .par_chunks_mut(m * n)
-        .enumerate()
-        .for_each(|(b, chunk)| {
-            let a = &lhs_data[b * m * k..(b + 1) * m * k];
-            let r = &rhs_data[b * k * n..(b + 1) * k * n];
-            unsafe {
-                sgemm(
-                    m,
-                    k,
-                    n,
-                    1.0,
-                    a.as_ptr(),
-                    k as isize,
-                    1,
-                    r.as_ptr(),
-                    n as isize,
-                    1,
-                    0.0,
-                    chunk.as_mut_ptr(),
-                    n as isize,
-                    1,
-                );
-            }
-        });
+    let batch = lhs_data.len() / (m * k);
+    if batch == 1 {
+        // Avoid parallel overhead for single matrix multiplication
+        unsafe {
+            gemm_f32(
+                m,
+                k,
+                n,
+                lhs_data.as_ptr(),
+                rhs_data.as_ptr(),
+                output_data.as_mut_ptr(),
+            )
+        };
+    } else {
+        output_data
+            .par_chunks_mut(m * n)
+            .enumerate()
+            .for_each(|(b, chunk)| {
+                let a = &lhs_data[b * m * k..(b + 1) * m * k];
+                let r = &rhs_data[b * k * n..(b + 1) * k * n];
+                unsafe {
+                    gemm_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+                }
+            });
+    }
 
     Ok(())
 }
@@ -373,31 +435,30 @@ fn optimized_matmul_f64(
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
 
-    output_data
-        .par_chunks_mut(m * n)
-        .enumerate()
-        .for_each(|(b, chunk)| {
-            let a = &lhs_data[b * m * k..(b + 1) * m * k];
-            let r = &rhs_data[b * k * n..(b + 1) * k * n];
-            unsafe {
-                dgemm(
-                    m,
-                    k,
-                    n,
-                    1.0,
-                    a.as_ptr(),
-                    k as isize,
-                    1,
-                    r.as_ptr(),
-                    n as isize,
-                    1,
-                    0.0,
-                    chunk.as_mut_ptr(),
-                    n as isize,
-                    1,
-                );
-            }
-        });
+    let batch = lhs_data.len() / (m * k);
+    if batch == 1 {
+        unsafe {
+            gemm_f64(
+                m,
+                k,
+                n,
+                lhs_data.as_ptr(),
+                rhs_data.as_ptr(),
+                output_data.as_mut_ptr(),
+            )
+        };
+    } else {
+        output_data
+            .par_chunks_mut(m * n)
+            .enumerate()
+            .for_each(|(b, chunk)| {
+                let a = &lhs_data[b * m * k..(b + 1) * m * k];
+                let r = &rhs_data[b * k * n..(b + 1) * k * n];
+                unsafe {
+                    gemm_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+                }
+            });
+    }
 
     Ok(())
 }
@@ -538,6 +599,34 @@ fn transpose_generic<T: Copy + Send + Sync>(
     dim0: usize,
     dim1: usize,
 ) -> Result<()> {
+    // Fast path for 2D matrix transpose
+    if input_shape.ndim() == 2 && dim0 == 0 && dim1 == 1 {
+        let rows = input_shape.dims()[0];
+        let cols = input_shape.dims()[1];
+        if rows * cols < PAR_THRESHOLD {
+            for i in 0..rows {
+                for j in 0..cols {
+                    unsafe {
+                        *output_data.get_unchecked_mut(j * rows + i) =
+                            *input_data.get_unchecked(i * cols + j);
+                    }
+                }
+            }
+        } else {
+            output_data
+                .par_chunks_mut(rows)
+                .enumerate()
+                .for_each(|(j, col)| {
+                    for i in 0..rows {
+                        unsafe {
+                            col[i] = *input_data.get_unchecked(i * cols + j);
+                        }
+                    }
+                });
+        }
+        return Ok(());
+    }
+    
     let input_strides = Strides::from_shape(input_shape);
     let output_strides = Strides::from_shape(output_shape);
     let in_strides = input_strides.as_slice().to_vec();
