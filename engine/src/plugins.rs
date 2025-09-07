@@ -285,9 +285,9 @@ impl PluginManager {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
             })?;
 
-            plugins
-                .remove(name)
-                .ok_or_else(|| MinitensorError::plugin_error(format!("Plugin '{}' is not loaded", name)))?
+            plugins.remove(name).ok_or_else(|| {
+                MinitensorError::plugin_error(format!("Plugin '{}' is not loaded", name))
+            })?
         };
 
         // Cleanup the plugin

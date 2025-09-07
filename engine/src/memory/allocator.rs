@@ -43,10 +43,9 @@ pub struct OpenCLAllocator {
 
 impl CpuAllocator {
     /// Create a new CPU allocator
+    #[inline]
     pub fn new() -> Self {
-        Self {
-            device: Device::cpu(),
-        }
+        Self { device: Device::cpu() }
     }
 }
 
@@ -144,17 +143,19 @@ impl Allocator for OpenCLAllocator {
 }
 
 impl Allocator for CpuAllocator {
+    #[inline(always)]
     fn allocate(&mut self, size: usize) -> Result<*mut u8> {
         if size == 0 {
             return Ok(std::ptr::null_mut());
         }
 
-        // Use system allocator for CPU memory
-        let layout = std::alloc::Layout::from_size_align(size, std::mem::align_of::<u8>())
-            .map_err(|_| crate::error::MinitensorError::memory_error(
-                format!("Invalid memory layout for size {}", size)
-            ))?;
+        if size > isize::MAX as usize {
+            return Err(crate::error::MinitensorError::memory_error(
+                format!("Invalid memory layout for size {}", size),
+            ));
+        }
 
+        let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(size, 1) };
         let ptr = unsafe { std::alloc::alloc(layout) };
         
         if ptr.is_null() {
@@ -166,24 +167,46 @@ impl Allocator for CpuAllocator {
         }
     }
 
+    #[inline(always)]
     fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {
             return Ok(());
         }
 
-        let layout = std::alloc::Layout::from_size_align(size, std::mem::align_of::<u8>())
-            .map_err(|_| crate::error::MinitensorError::memory_error(
-                format!("Invalid memory layout for size {}", size)
-            ))?;
-
-        unsafe {
-            std::alloc::dealloc(ptr, layout);
+        if size > isize::MAX as usize {
+            return Err(crate::error::MinitensorError::memory_error(
+                format!("Invalid memory layout for size {}", size),
+            ));
         }
+
+        let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(size, 1) };
+        unsafe { std::alloc::dealloc(ptr, layout) };
         
         Ok(())
     }
 
+    #[inline(always)]
     fn device(&self) -> Device {
         self.device
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_allocator_zero() {
+        let mut alloc = CpuAllocator::new();
+        let ptr = alloc.allocate(0).unwrap();
+        assert!(ptr.is_null());
+        alloc.deallocate(ptr, 0).unwrap();
+    }
+
+    #[test]
+    fn test_cpu_allocator_large_allocation_error() {
+        let mut alloc = CpuAllocator::new();
+        let res = alloc.allocate(usize::MAX);
+        assert!(res.is_err());
     }
 }

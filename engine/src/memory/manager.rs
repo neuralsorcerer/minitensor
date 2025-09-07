@@ -4,81 +4,74 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::{CpuAllocator, PoolStats};
+use super::{MemoryPool, PoolStats};
 use crate::{device::Device, error::Result};
-use std::collections::HashMap;
+use parking_lot::Mutex;
+use std::{collections::HashMap, sync::OnceLock};
 
-/// Unified memory manager for all devices
+/// Unified memory manager maintaining a memory pool for each device.
 pub struct UnifiedMemoryManager {
-    cpu_allocator: CpuAllocator,
+    pools: HashMap<Device, MemoryPool>,
 }
 
 impl UnifiedMemoryManager {
-    /// Create a new unified memory manager
+    /// Create a new manager with no pools initialised.
+    #[inline]
     pub fn new() -> Self {
         Self {
-            cpu_allocator: CpuAllocator::new(),
+            pools: HashMap::new(),
         }
     }
 
-    /// Allocate memory on the specified device
+    #[inline(always)]
+    fn pool_for(&mut self, device: Device) -> &mut MemoryPool {
+        self.pools
+            .entry(device)
+            .or_insert_with(|| MemoryPool::new(device))
+    }
+
+    /// Allocate memory on the specified device.
+    #[inline]
     pub fn allocate(&mut self, size: usize, device: Device) -> Result<*mut u8> {
-        match device.device_type {
-            crate::device::DeviceType::CPU => {
-                self.cpu_allocator.allocate(size)
-            }
-            _ => {
-                // For now, fallback to CPU for GPU devices
-                // GPU allocators will be implemented in tasks 9.1-9.3
-                self.cpu_allocator.allocate(size)
-            }
-        }
+        self.pool_for(device).allocate(size)
     }
 
-    /// Deallocate memory on the specified device
+    /// Deallocate memory on the specified device.
+    #[inline]
     pub fn deallocate(&mut self, ptr: *mut u8, size: usize, device: Device) -> Result<()> {
-        match device.device_type {
-            crate::device::DeviceType::CPU => {
-                self.cpu_allocator.deallocate(ptr, size)
-            }
-            _ => {
-                // For now, fallback to CPU for GPU devices
-                self.cpu_allocator.deallocate(ptr, size)
-            }
-        }
+        self.pool_for(device).deallocate(ptr, size)
     }
 
-    /// Get statistics for a specific device
-    pub fn get_stats(&self, _device: Device) -> Option<PoolStats> {
-        // Simplified stats - will be enhanced with proper pooling
-        Some(PoolStats {
-            free_blocks: 0,
-            allocated_blocks: 0,
-            total_free_memory: 0,
-            total_allocated_memory: 0,
-        })
+    /// Get statistics for a specific device.
+    #[inline]
+    pub fn get_stats(&self, device: Device) -> Option<PoolStats> {
+        self.pools.get(&device).map(|p| p.stats())
     }
 
     /// Get statistics for all devices
+    #[inline]
     pub fn get_all_stats(&self) -> HashMap<Device, PoolStats> {
-        let mut stats = HashMap::new();
-        stats.insert(Device::cpu(), PoolStats {
-            free_blocks: 0,
-            allocated_blocks: 0,
-            total_free_memory: 0,
-            total_allocated_memory: 0,
-        });
-        stats
+        let mut out = HashMap::with_capacity(self.pools.len());
+        for (device, pool) in &self.pools {
+            out.insert(*device, pool.stats());
+        }
+        out
     }
 
     /// Clear all memory pools
+    #[inline]
     pub fn clear_all(&mut self) {
-        // Nothing to clear in simplified version
+        for pool in self.pools.values_mut() {
+            pool.clear();
+        }
     }
 
-    /// Clear memory pool for a specific device
-    pub fn clear_device(&mut self, _device: Device) {
-        // Nothing to clear in simplified version
+    /// Clear memory pool for a specific device.
+    #[inline]
+    pub fn clear_device(&mut self, device: Device) {
+        if let Some(pool) = self.pools.get_mut(&device) {
+            pool.clear();
+        }
     }
 }
 
@@ -88,64 +81,52 @@ impl Default for UnifiedMemoryManager {
     }
 }
 
-use super::Allocator;
-use std::sync::Mutex;
+static GLOBAL_MEMORY_MANAGER: OnceLock<Mutex<UnifiedMemoryManager>> = OnceLock::new();
 
-/// Global memory manager instance
-static GLOBAL_MEMORY_MANAGER: Mutex<Option<UnifiedMemoryManager>> = Mutex::new(None);
-
-/// Initialize the global memory manager
+/// Ensure the global manager is initialised.
+#[inline]
 pub fn init_memory_manager() {
-    let mut manager = GLOBAL_MEMORY_MANAGER.lock().unwrap();
-    *manager = Some(UnifiedMemoryManager::new());
+    let _ = GLOBAL_MEMORY_MANAGER.get_or_init(|| Mutex::new(UnifiedMemoryManager::new()));
 }
 
-/// Allocate memory using the global manager
+fn global_manager() -> &'static Mutex<UnifiedMemoryManager> {
+    GLOBAL_MEMORY_MANAGER.get_or_init(|| Mutex::new(UnifiedMemoryManager::new()))
+}
+
+/// Allocate memory using the global manager.
+#[inline]
 pub fn global_allocate(size: usize, device: Device) -> Result<*mut u8> {
-    let mut manager = GLOBAL_MEMORY_MANAGER.lock().unwrap();
-    if let Some(ref mut mgr) = *manager {
-        mgr.allocate(size, device)
-    } else {
-        // Fallback to direct CPU allocation if manager not initialized
-        let mut cpu_allocator = CpuAllocator::new();
-        cpu_allocator.allocate(size)
-    }
+    let mut mgr = global_manager().lock();
+    mgr.allocate(size, device)
 }
 
-/// Deallocate memory using the global manager
-pub fn global_deallocate(ptr: *mut u8, device: Device) -> Result<()> {
-    let mut manager = GLOBAL_MEMORY_MANAGER.lock().unwrap();
-    if let Some(ref mut mgr) = *manager {
-        // We need to know the size for deallocation, but we don't track it here
-        // This is a limitation of the current design - in a real implementation,
-        // we'd track allocation sizes
-        mgr.deallocate(ptr, 0, device) // Size 0 as placeholder
-    } else {
-        // Fallback to direct CPU deallocation
-        let mut cpu_allocator = CpuAllocator::new();
-        cpu_allocator.deallocate(ptr, 0) // Size 0 as placeholder
-    }
+/// Deallocate memory using the global manager.
+#[inline]
+pub fn global_deallocate(ptr: *mut u8, size: usize, device: Device) -> Result<()> {
+    let mut mgr = global_manager().lock();
+    mgr.deallocate(ptr, size, device)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn test_unified_memory_manager() {
         let mut manager = UnifiedMemoryManager::new();
         let device = Device::cpu();
         
-        // Test allocation
         let ptr = manager.allocate(1024, device).unwrap();
         assert!(!ptr.is_null());
         
-        // Test stats
-        let stats = manager.get_stats(device).unwrap();
-        assert_eq!(stats.allocated_blocks, 0); // Simplified stats
-        
-        // Test deallocation
         manager.deallocate(ptr, 1024, device).unwrap();
+
+        // stats should track allocations
+        let stats = manager.get_stats(device).unwrap();
+        assert_eq!(stats.free_blocks, 1);
+        manager.clear_all();
+        assert_eq!(manager.get_stats(device).unwrap().free_blocks, 0);
     }
 
     #[test]
@@ -156,6 +137,62 @@ mod tests {
         let ptr = global_allocate(512, device).unwrap();
         assert!(!ptr.is_null());
         
-        global_deallocate(ptr, device).unwrap();
+        global_deallocate(ptr, 512, device).unwrap();
+
+        // Zero-sized allocations should be handled gracefully
+        let ptr = global_allocate(0, device).unwrap();
+        assert!(ptr.is_null());
+        global_deallocate(ptr, 0, device).unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_global_allocations() {
+        init_memory_manager();
+        let device = Device::cpu();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        let ptr = global_allocate(128, device).unwrap();
+                        global_deallocate(ptr, 128, device).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_clear_device_and_stats() {
+        let mut manager = UnifiedMemoryManager::new();
+        let device = Device::cpu();
+        let ptr = manager.allocate(128, device).unwrap();
+        manager.deallocate(ptr, 128, device).unwrap();
+        let stats_before = manager.get_stats(device).unwrap();
+        assert_eq!(stats_before.free_blocks, 1);
+        manager.clear_device(device);
+        let stats_after = manager.get_stats(device).unwrap();
+        assert_eq!(stats_after.free_blocks, 0);
+    }
+
+    #[test]
+    fn test_manager_large_allocation_error() {
+        let mut manager = UnifiedMemoryManager::new();
+        let device = Device::cpu();
+        let res = manager.allocate(usize::MAX, device);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_get_all_stats() {
+        let mut manager = UnifiedMemoryManager::new();
+        let device = Device::cpu();
+        let ptr = manager.allocate(64, device).unwrap();
+        manager.deallocate(ptr, 64, device).unwrap();
+        let all = manager.get_all_stats();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get(&device).unwrap().free_blocks, 1);
     }
 }

@@ -204,11 +204,15 @@ pub fn concatenate(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
                         let t_dims = t.shape().dims();
                         let src_start = o * t_dims[dim] * inner;
                         let src_len = t_dims[dim] * inner;
-                        let src = t.data().$slice().ok_or_else(|| {
-                            MinitensorError::invalid_operation(
-                                "Tensor data access failed for concatenate",
-                            )
-                        }).unwrap();
+                        let src = t
+                            .data()
+                            .$slice()
+                            .ok_or_else(|| {
+                                MinitensorError::invalid_operation(
+                                    "Tensor data access failed for concatenate",
+                                )
+                            })
+                            .unwrap();
                         out_chunk[dst_offset..dst_offset + src_len]
                             .copy_from_slice(&src[src_start..src_start + src_len]);
                         dst_offset += src_len;

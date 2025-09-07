@@ -51,7 +51,6 @@ fn test_division_by_zero_infinities() {
     assert!(vals[1].is_infinite() && vals[1].is_sign_positive());
 }
 
-
 #[test]
 fn test_nan_addition_propagates() {
     let a = Tensor::new(
@@ -171,7 +170,10 @@ fn test_inf_sub_inf_produces_nan() {
 #[test]
 fn test_sigmoid_extreme_inputs() {
     let tensor = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(vec![1000.0, -1000.0], Device::cpu())),
+        Arc::new(TensorData::from_vec_f32(
+            vec![1000.0, -1000.0],
+            Device::cpu(),
+        )),
         Shape::new(vec![2]),
         DataType::Float32,
         Device::cpu(),
@@ -186,7 +188,10 @@ fn test_sigmoid_extreme_inputs() {
 #[test]
 fn test_tanh_extreme_inputs() {
     let tensor = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(vec![1000.0, -1000.0], Device::cpu())),
+        Arc::new(TensorData::from_vec_f32(
+            vec![1000.0, -1000.0],
+            Device::cpu(),
+        )),
         Shape::new(vec![2]),
         DataType::Float32,
         Device::cpu(),
@@ -201,7 +206,10 @@ fn test_tanh_extreme_inputs() {
 #[test]
 fn test_softmax_extreme_range() {
     let tensor = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(vec![1000.0, -1000.0], Device::cpu())),
+        Arc::new(TensorData::from_vec_f32(
+            vec![1000.0, -1000.0],
+            Device::cpu(),
+        )),
         Shape::new(vec![2]),
         DataType::Float32,
         Device::cpu(),
@@ -245,7 +253,10 @@ fn test_sum_nan_propagates() {
 #[test]
 fn test_sum_overflow_results_infinity() {
     let tensor = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(vec![f32::MAX, f32::MAX], Device::cpu())),
+        Arc::new(TensorData::from_vec_f32(
+            vec![f32::MAX, f32::MAX],
+            Device::cpu(),
+        )),
         Shape::new(vec![2]),
         DataType::Float32,
         Device::cpu(),
@@ -329,10 +340,7 @@ fn test_cross_entropy_zero_prob_returns_inf() {
         false,
     );
     let target = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(
-            vec![0.0, 1.0],
-            Device::cpu(),
-        )),
+        Arc::new(TensorData::from_vec_f32(vec![0.0, 1.0], Device::cpu())),
         Shape::new(vec![1, 2]),
         DataType::Float32,
         Device::cpu(),

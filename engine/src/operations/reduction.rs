@@ -1065,16 +1065,16 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let max_val = data
-        .par_iter()
-        .cloned()
-        .reduce(|| f32::NEG_INFINITY, |a, b| {
+    let max_val = data.par_iter().cloned().reduce(
+        || f32::NEG_INFINITY,
+        |a, b| {
             if b.is_nan() {
                 a
             } else {
                 a.max(b)
             }
-        });
+        },
+    );
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -1090,16 +1090,16 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let max_val = data
-        .par_iter()
-        .cloned()
-        .reduce(|| f64::NEG_INFINITY, |a, b| {
+    let max_val = data.par_iter().cloned().reduce(
+        || f64::NEG_INFINITY,
+        |a, b| {
             if b.is_nan() {
                 a
             } else {
                 a.max(b)
             }
-        });
+        },
+    );
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -1164,16 +1164,16 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let min_val = data
-        .par_iter()
-        .cloned()
-        .reduce(|| f32::INFINITY, |a, b| {
+    let min_val = data.par_iter().cloned().reduce(
+        || f32::INFINITY,
+        |a, b| {
             if b.is_nan() {
                 a
             } else {
                 a.min(b)
             }
-        });
+        },
+    );
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -1189,16 +1189,16 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let min_val = data
-        .par_iter()
-        .cloned()
-        .reduce(|| f64::INFINITY, |a, b| {
+    let min_val = data.par_iter().cloned().reduce(
+        || f64::INFINITY,
+        |a, b| {
             if b.is_nan() {
                 a
             } else {
                 a.min(b)
             }
-        });
+        },
+    );
 
     let result_slice = result_data
         .as_f64_slice_mut()

@@ -6,157 +6,13 @@
 
 use super::{Allocator, CpuAllocator};
 use crate::{device::Device, error::Result};
-use std::collections::HashMap;
+use std::array::from_fn;
+use std::ptr::NonNull;
 
-/// Memory pool for efficient allocation/deallocation
-pub struct MemoryPool {
-    device: Device,
-    free_blocks: HashMap<usize, Vec<usize>>, // Free blocks by block ID
-    allocated_blocks: HashMap<usize, (usize, *mut u8)>, // Map block ID to (size, ptr)
-    allocator: Box<dyn Allocator>,
-    next_block_id: usize,
-}
+const POOL_BUCKETS: usize = usize::BITS as usize;
 
-impl MemoryPool {
-    /// Create a new memory pool for the given device
-    pub fn new(device: Device) -> Self {
-        let allocator: Box<dyn Allocator> = match device.device_type {
-            crate::device::DeviceType::CPU => Box::new(CpuAllocator::new()),
-            #[cfg(feature = "cuda")]
-            crate::device::DeviceType::CUDA => Box::new(super::CudaAllocator::new(device.device_id)),
-            #[cfg(feature = "metal")]
-            crate::device::DeviceType::Metal => Box::new(super::MetalAllocator::new(device.device_id)),
-            #[cfg(feature = "opencl")]
-            crate::device::DeviceType::OpenCL => Box::new(super::OpenCLAllocator::new(device.device_id)),
-            #[cfg(not(feature = "cuda"))]
-            crate::device::DeviceType::CUDA => Box::new(CpuAllocator::new()), // Fallback to CPU
-            #[cfg(not(feature = "metal"))]
-            crate::device::DeviceType::Metal => Box::new(CpuAllocator::new()), // Fallback to CPU
-            #[cfg(not(feature = "opencl"))]
-            crate::device::DeviceType::OpenCL => Box::new(CpuAllocator::new()), // Fallback to CPU
-        };
-
-        Self {
-            device,
-            free_blocks: HashMap::new(),
-            allocated_blocks: HashMap::new(),
-            allocator,
-            next_block_id: 0,
-        }
-    }
-
-    /// Get a block from the pool or allocate a new one
-    pub fn get_block(&mut self, size: usize) -> Result<MemoryBlock> {
-        // Round up to nearest power of 2 for better pooling
-        let rounded_size = size.next_power_of_two();
-        
-        // Try to get a free block of the right size
-        if let Some(free_list) = self.free_blocks.get_mut(&rounded_size) {
-            if let Some(block_id) = free_list.pop() {
-                if let Some((block_size, ptr)) = self.allocated_blocks.get(&block_id) {
-                    return Ok(MemoryBlock {
-                        id: block_id,
-                        ptr: *ptr,
-                        size: *block_size,
-                        device: self.device,
-                    });
-                }
-            }
-        }
-
-        // No free block available, allocate a new one
-        let ptr = self.allocator.allocate(rounded_size)?;
-        let block_id = self.next_block_id;
-        self.next_block_id += 1;
-        
-        self.allocated_blocks.insert(block_id, (rounded_size, ptr));
-        
-        Ok(MemoryBlock {
-            id: block_id,
-            ptr,
-            size: rounded_size,
-            device: self.device,
-        })
-    }
-
-    /// Return a block to the pool
-    pub fn return_block(&mut self, block: MemoryBlock) -> Result<()> {
-        if self.allocated_blocks.contains_key(&block.id) {
-            // Add to free list for reuse
-            self.free_blocks.entry(block.size).or_insert_with(Vec::new).push(block.id);
-            Ok(())
-        } else {
-            Err(crate::error::MinitensorError::memory_error(
-                "Attempted to return untracked memory block"
-            ))
-        }
-    }
-
-    /// Clear all free blocks
-    pub fn clear(&mut self) {
-        // Deallocate all free blocks
-        for (_size, block_ids) in self.free_blocks.drain() {
-            for block_id in block_ids {
-                if let Some((size, ptr)) = self.allocated_blocks.remove(&block_id) {
-                    let _ = self.allocator.deallocate(ptr, size);
-                }
-            }
-        }
-        
-        // Note: We don't deallocate allocated blocks as they're still in use
-        // The caller is responsible for returning them first
-    }
-
-    /// Get the device this pool operates on
-    pub fn device(&self) -> Device {
-        self.device
-    }
-
-    /// Get statistics about the pool
-    pub fn stats(&self) -> PoolStats {
-        let free_blocks: usize = self.free_blocks.values().map(|v| v.len()).sum();
-        let allocated_blocks = self.allocated_blocks.len();
-        let total_free_memory: usize = self.free_blocks.iter()
-            .map(|(size, blocks)| size * blocks.len())
-            .sum();
-        let total_allocated_memory: usize = self.allocated_blocks.values().map(|(size, _)| *size).sum();
-
-        PoolStats {
-            free_blocks,
-            allocated_blocks,
-            total_free_memory,
-            total_allocated_memory,
-        }
-    }
-}
-
-impl Drop for MemoryPool {
-    fn drop(&mut self) {
-        // Clean up all memory when the pool is dropped
-        self.clear();
-        
-        // Also deallocate any remaining allocated blocks
-        // This is a safety measure - ideally all blocks should be returned
-        for (_block_id, (size, ptr)) in self.allocated_blocks.drain() {
-            let _ = self.allocator.deallocate(ptr, size);
-        }
-    }
-}
-
-/// A memory block handle that's safe to send between threads
-#[derive(Debug)]
-pub struct MemoryBlock {
-    pub id: usize,
-    pub ptr: *mut u8,
-    pub size: usize,
-    pub device: Device,
-}
-
-unsafe impl Send for MemoryBlock {}
-unsafe impl Sync for MemoryBlock {}
-
-/// Statistics about memory pool usage
-#[derive(Debug, Clone)]
+/// Statistics about memory pool usage.
+#[derive(Debug, Clone, Default)]
 pub struct PoolStats {
     pub free_blocks: usize,
     pub allocated_blocks: usize,
@@ -164,39 +20,265 @@ pub struct PoolStats {
     pub total_allocated_memory: usize,
 }
 
-/// Pooled allocator that uses a simple in-memory free list.
-pub struct PooledAllocator {
+/// Memory pool that groups allocations by powers of two and reuses freed blocks.
+/// The pool keeps per-size free lists indexed by the exponent of the size.
+pub struct MemoryPool {
     device: Device,
-    free_list: Vec<(*mut u8, usize)>,
+    base_allocator: Box<dyn Allocator>,
+    free_lists: [Vec<NonNull<u8>>; POOL_BUCKETS],
+    allocated_blocks: usize,
+    allocated_bytes: usize,
+    free_blocks: usize,
+    free_bytes: usize,
 }
 
-impl PooledAllocator {
-    /// Create a new pooled allocator
+unsafe impl Send for MemoryPool {}
+unsafe impl Sync for MemoryPool {}
+
+impl MemoryPool {
+    /// Create a new memory pool for the given device
+    #[inline]
     pub fn new(device: Device) -> Self {
-        Self { device, free_list: Vec::new() }
-    }
-}
+        let allocator: Box<dyn Allocator> = match device.device_type() {
+            crate::device::DeviceType::Cpu => Box::new(CpuAllocator::new()),
+            #[cfg(feature = "cuda")]
+            crate::device::DeviceType::Cuda => {
+                Box::new(super::CudaAllocator::new(device.device_id()))
+            }
+            #[cfg(feature = "metal")]
+            crate::device::DeviceType::Metal => {
+                Box::new(super::MetalAllocator::new(device.device_id()))
+            }
+            #[cfg(feature = "opencl")]
+            crate::device::DeviceType::OpenCL => {
+                Box::new(super::OpenCLAllocator::new(device.device_id()))
+            }
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "opencl")))]
+            _ => Box::new(CpuAllocator::new()),
+        };
 
-impl Allocator for PooledAllocator {
-    fn allocate(&mut self, size: usize) -> Result<*mut u8> {
-        if let Some(pos) = self.free_list.iter().position(|&(_, s)| s >= size) {
-            let (ptr, _) = self.free_list.remove(pos);
-            Ok(ptr)
-        } else {
-            let mut cpu_allocator = CpuAllocator::new();
-            cpu_allocator.allocate(size)
+        Self {
+            device,
+            base_allocator: allocator,
+            free_lists: from_fn(|_| Vec::new()),
+            allocated_blocks: 0,
+            allocated_bytes: 0,
+            free_blocks: 0,
+            free_bytes: 0,
         }
     }
 
-    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+    #[inline]
+    fn bucket_for(size: usize) -> Result<(usize, usize)> {
+        if size == 0 {
+            return Ok((0, 0));
+        }
+        let rounded = size.checked_next_power_of_two().ok_or_else(|| {
+            crate::error::MinitensorError::memory_error("Allocation size too large")
+        })?;
+        let idx = rounded.trailing_zeros() as usize;
+        Ok((rounded, idx))
+    }
+
+        /// Allocate memory from the pool.
+    #[inline]
+    pub fn allocate(&mut self, size: usize) -> Result<*mut u8> {
+        if size == 0 {
+            return Ok(std::ptr::null_mut());
+        }
+        let (rounded, idx) = Self::bucket_for(size)?;
+        self.allocated_blocks += 1;
+        self.allocated_bytes += rounded;
+        if let Some(ptr) = self.free_lists[idx].pop() {
+            self.free_blocks -= 1;
+            self.free_bytes -= rounded;
+            Ok(ptr.as_ptr())
+        } else {
+            self.base_allocator.allocate(rounded)
+        }
+    }
+
+    /// Return memory to the pool for future reuse.
+    #[inline]
+    pub fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {
             return Ok(());
         }
-        self.free_list.push((ptr, size));
+        
+        let (rounded, idx) = Self::bucket_for(size)?;
+        self.allocated_blocks = self.allocated_blocks.saturating_sub(1);
+        self.allocated_bytes = self.allocated_bytes.saturating_sub(rounded);
+        self.free_blocks += 1;
+        self.free_bytes += rounded;
+        self.free_lists[idx].push(unsafe { NonNull::new_unchecked(ptr) });
         Ok(())
     }
 
-    fn device(&self) -> Device {
+    /// Clear all cached blocks.
+    #[inline]
+    pub fn clear(&mut self) {
+        for (idx, list) in self.free_lists.iter_mut().enumerate() {
+            let size = 1usize << idx;
+            for ptr in list.drain(..) {
+                let _ = self.base_allocator.deallocate(ptr.as_ptr(), size);
+            }
+        }
+        self.free_blocks = 0;
+        self.free_bytes = 0;
+    }
+
+    /// Retrieve statistics about current pool usage.
+    #[inline]
+    pub fn stats(&self) -> PoolStats {
+        PoolStats {
+            free_blocks: self.free_blocks,
+            allocated_blocks: self.allocated_blocks,
+            total_free_memory: self.free_bytes,
+            total_allocated_memory: self.allocated_bytes,
+        }
+    }
+
+    /// Get the device this pool operates on.
+    #[inline]
+    pub fn device(&self) -> Device {
         self.device
+    }
+}
+
+impl Drop for MemoryPool {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// Simple allocator wrapper backed by a [`MemoryPool`].
+pub struct PooledAllocator {
+    pool: MemoryPool,
+}
+
+impl PooledAllocator {
+    #[inline]
+    pub fn new(device: Device) -> Self {
+        Self {
+            pool: MemoryPool::new(device),
+        }
+    }
+}
+
+unsafe impl Send for PooledAllocator {}
+unsafe impl Sync for PooledAllocator {}
+
+impl Allocator for PooledAllocator {
+    #[inline(always)]
+    fn allocate(&mut self, size: usize) -> Result<*mut u8> {
+        self.pool.allocate(size)
+    }
+
+    #[inline(always)]
+    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+        self.pool.deallocate(ptr, size)
+    }
+
+    #[inline(always)]
+    fn device(&self) -> Device {
+        self.pool.device()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_pool_reuse() {
+        let mut pool = MemoryPool::new(Device::cpu());
+        let ptr1 = pool.allocate(100).unwrap();
+        pool.deallocate(ptr1, 100).unwrap();
+        let ptr2 = pool.allocate(80).unwrap();
+        assert_eq!(ptr1, ptr2);
+        pool.deallocate(ptr2, 80).unwrap();
+    }
+
+    #[test]
+    fn test_pool_clear() {
+        let mut pool = MemoryPool::new(Device::cpu());
+        let ptr = pool.allocate(256).unwrap();
+        pool.deallocate(ptr, 256).unwrap();
+        assert!(pool.stats().free_blocks > 0);
+        pool.clear();
+        assert_eq!(pool.stats().free_blocks, 0);
+        // allocating again still works
+        let new_ptr = pool.allocate(256).unwrap();
+        assert!(!new_ptr.is_null());
+        pool.deallocate(new_ptr, 256).unwrap();
+    }
+
+    #[test]
+    fn test_zero_sized_allocation() {
+        let mut pool = MemoryPool::new(Device::cpu());
+        let ptr = pool.allocate(0).unwrap();
+        assert!(ptr.is_null());
+        pool.deallocate(ptr, 0).unwrap();
+    }
+
+    #[test]
+    fn test_pooled_allocator_reuse() {
+        let mut alloc = PooledAllocator::new(Device::cpu());
+        let ptr1 = alloc.allocate(100).unwrap();
+        alloc.deallocate(ptr1, 100).unwrap();
+        // 100 and 80 both round up to 128 bytes
+        let ptr2 = alloc.allocate(80).unwrap();
+        assert_eq!(ptr1, ptr2);
+    }
+
+    #[test]
+    fn test_concurrent_pool_usage() {
+        let pool = Arc::new(Mutex::new(MemoryPool::new(Device::cpu())));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        let mut pool = pool.lock();
+                        let ptr = pool.allocate(128).unwrap();
+                        pool.deallocate(ptr, 128).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_stats_tracking() {
+        let mut pool = MemoryPool::new(Device::cpu());
+        let a = pool.allocate(64).unwrap();
+        let b = pool.allocate(128).unwrap();
+        pool.deallocate(a, 64).unwrap();
+        pool.deallocate(b, 128).unwrap();
+        let stats = pool.stats();
+        assert_eq!(stats.free_blocks, 2);
+        assert_eq!(stats.total_free_memory, 192);
+        assert_eq!(stats.allocated_blocks, 0);
+        assert_eq!(stats.total_allocated_memory, 0);
+
+        let c = pool.allocate(100).unwrap();
+        assert_eq!(c, b);
+        let stats2 = pool.stats();
+        assert_eq!(stats2.free_blocks, 1);
+        assert_eq!(stats2.total_free_memory, 64);
+        pool.deallocate(c, 100).unwrap();
+    }
+
+    #[test]
+    fn test_pool_large_allocation_error() {
+        let mut pool = MemoryPool::new(Device::cpu());
+        let res = pool.allocate(usize::MAX);
+        assert!(res.is_err());
     }
 }

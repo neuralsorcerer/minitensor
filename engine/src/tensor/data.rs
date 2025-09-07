@@ -475,14 +475,9 @@ impl Drop for TensorData {
     fn drop(&mut self) {
         // Only deallocate if this is the last reference
         if self.ref_count.load(Ordering::Relaxed) == 1 {
-            if let TensorBuffer::Raw {
-                ptr,
-                size: _,
-                device,
-            } = &self.buffer
-            {
+            if let TensorBuffer::Raw { ptr, size, device } = &self.buffer {
                 // Deallocate GPU memory
-                let _ = global_deallocate(*ptr, *device);
+                let _ = global_deallocate(*ptr, *size, *device);
             }
         }
     }

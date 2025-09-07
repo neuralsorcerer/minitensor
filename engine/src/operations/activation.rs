@@ -870,7 +870,11 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
                 }
             });
     } else {
-        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+        for ((o, &v), m) in output_slice
+            .iter_mut()
+            .zip(input_data.iter())
+            .zip(mask.iter_mut())
+        {
             if v.is_nan() {
                 *o = v;
             } else if v > 0.0 {
@@ -910,7 +914,11 @@ fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
                 }
             });
     } else {
-        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+        for ((o, &v), m) in output_slice
+            .iter_mut()
+            .zip(input_data.iter())
+            .zip(mask.iter_mut())
+        {
             if v.is_nan() {
                 *o = v;
             } else if v > 0.0 {
@@ -948,7 +956,11 @@ fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
                 }
             });
     } else {
-        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+        for ((o, &v), m) in output_slice
+            .iter_mut()
+            .zip(input_data.iter())
+            .zip(mask.iter_mut())
+        {
             if v > 0 {
                 *o = v;
                 *m = true;
@@ -984,7 +996,11 @@ fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
                 }
             });
     } else {
-        for ((o, &v), m) in output_slice.iter_mut().zip(input_data.iter()).zip(mask.iter_mut()) {
+        for ((o, &v), m) in output_slice
+            .iter_mut()
+            .zip(input_data.iter())
+            .zip(mask.iter_mut())
+        {
             if v > 0 {
                 *o = v;
                 *m = true;
