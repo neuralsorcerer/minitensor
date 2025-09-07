@@ -25,26 +25,24 @@ fn generate_dropout_mask(
     device: crate::device::Device,
 ) -> Result<Tensor> {
     let keep_prob = 1.0 - p;
-    let scale = if keep_prob == 0.0 {
-        0.0
-    } else {
-        1.0 / keep_prob
-    };
     let numel = shape.numel();
-    let mut rng = thread_rng();
-    let bernoulli =
-        Bernoulli::new(keep_prob).map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
 
     match dtype {
         DataType::Float32 => {
-            let mut data = Vec::with_capacity(numel);
-            data.extend(bernoulli.sample_iter(&mut rng).take(numel).map(|b| {
-                if b {
-                    scale as f32
-                } else {
-                    0.0
+            let mut data = vec![0.0f32; numel];
+            if keep_prob >= 1.0 {
+                data.fill(1.0);
+            } else if keep_prob > 0.0 {
+                let scale = 1.0f32 / keep_prob as f32;
+                let mut rng = thread_rng();
+                let bernoulli = Bernoulli::new(keep_prob)
+                    .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
+                for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
+                    if b {
+                        *v = scale;
+                    }
                 }
-            }));
+            }
             let td = TensorData::from_vec_f32(data, device);
             Ok(Tensor::new(
                 Arc::new(td),
@@ -55,14 +53,20 @@ fn generate_dropout_mask(
             ))
         }
         DataType::Float64 => {
-            let mut data = Vec::with_capacity(numel);
-            data.extend(bernoulli.sample_iter(&mut rng).take(numel).map(|b| {
-                if b {
-                    scale
-                } else {
-                    0.0
+            let mut data = vec![0.0f64; numel];
+            if keep_prob >= 1.0 {
+                data.fill(1.0);
+            } else if keep_prob > 0.0 {
+                let scale = 1.0 / keep_prob;
+                let mut rng = thread_rng();
+                let bernoulli = Bernoulli::new(keep_prob)
+                    .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
+                for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
+                    if b {
+                        *v = scale;
+                    }
                 }
-            }));
+            }
             let td = TensorData::from_vec_f64(data, device);
             Ok(Tensor::new(
                 Arc::new(td),
@@ -364,12 +368,17 @@ mod tests {
         dropout_zero.train();
         let output = dropout_zero.forward(&input).unwrap();
         assert_eq!(output.shape(), input.shape());
+        let in_data = input.data().as_f32_slice().unwrap();
+        let out_data = output.data().as_f32_slice().unwrap();
+        assert_eq!(in_data, out_data);
 
         // Test p=1 (complete dropout)
         let mut dropout_one = Dropout::new(Some(1.0)).unwrap();
         dropout_one.train();
         let output = dropout_one.forward(&input).unwrap();
         assert_eq!(output.shape(), input.shape());
+        let out_data = output.data().as_f32_slice().unwrap();
+        assert!(out_data.iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -442,11 +451,31 @@ mod tests {
         let mut no_dropout = Dropout2d::new(Some(0.0)).unwrap();
         let output = no_dropout.forward(&input).unwrap();
         assert_eq!(output.shape(), input.shape());
+        let out_data = output.data().as_f32_slice().unwrap();
+        let in_data = input.data().as_f32_slice().unwrap();
+        assert_eq!(out_data, in_data);
 
         // p = 1 should return all zeros
         let mut full_dropout = Dropout2d::new(Some(1.0)).unwrap();
         let output = full_dropout.forward(&input).unwrap();
         let data = output.data().as_f32_slice().unwrap();
         assert!(data.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dropout_scaling_expectation() {
+        let mut dropout = Dropout::new(Some(0.25)).unwrap();
+        dropout.train();
+        let input = Tensor::ones(
+            Shape::new(vec![10_000]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let output = dropout.forward(&input).unwrap();
+        let data = output.data().as_f32_slice().unwrap();
+        let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+        // Expected mean should remain close to 1.0 after scaling
+        assert!((mean - 1.0).abs() < 0.1);
     }
 }

@@ -288,13 +288,15 @@ impl Layer for BatchNorm1d {
 pub struct BatchNorm2d {
     weight: Tensor,
     bias: Tensor,
-    _running_mean: Tensor,
-    _running_var: Tensor,
+    running_mean: Tensor,
+    running_var: Tensor,
     num_features: usize,
     _eps: f64,
     _momentum: f64,
     training: bool,
     eps_tensor: Tensor,
+    momentum_tensor: Tensor,
+    one_minus_tensor: Tensor,
 }
 
 impl BatchNorm2d {
@@ -329,17 +331,21 @@ impl BatchNorm2d {
         let running_var = Tensor::ones(param_shape, dtype, device, false);
 
         let eps_tensor = scalar_tensor(eps, dtype, device)?;
+        let momentum_tensor = scalar_tensor(momentum, dtype, device)?;
+        let one_minus_tensor = scalar_tensor(1.0 - momentum, dtype, device)?;
 
         Ok(Self {
             weight,
             bias,
-            _running_mean: running_mean,
-            _running_var: running_var,
+            running_mean: running_mean,
+            running_var: running_var,
             num_features,
             _eps: eps,
             _momentum: momentum,
             training: true,
             eps_tensor,
+            momentum_tensor,
+            one_minus_tensor,
         })
     }
 
@@ -361,16 +367,16 @@ impl BatchNorm2d {
     /// Get named buffers (non-trainable parameters) for this layer
     pub fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut buffers = HashMap::with_capacity(2);
-        buffers.insert("running_mean".to_string(), &self._running_mean);
-        buffers.insert("running_var".to_string(), &self._running_var);
+        buffers.insert("running_mean".to_string(), &self.running_mean);
+        buffers.insert("running_var".to_string(), &self.running_var);
         buffers
     }
 
     /// Get named mutable buffers for this layer
     pub fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut buffers = HashMap::with_capacity(2);
-        buffers.insert("running_mean".to_string(), &mut self._running_mean);
-        buffers.insert("running_var".to_string(), &mut self._running_var);
+        buffers.insert("running_mean".to_string(), &mut self.running_mean);
+        buffers.insert("running_var".to_string(), &mut self.running_var);
         buffers
     }
 }
@@ -394,19 +400,44 @@ impl Layer for BatchNorm2d {
             ));
         }
 
-        // Reshape to compute statistics over N*H*W x C
-        let n = input.size(0)?;
-        let h = input.size(2)?;
-        let w = input.size(3)?;
-        let reshaped = input.view(Shape::new(vec![n * h * w, self.num_features]))?;
+        // Reshape to compute statistics over N*H*W x C when training
+        let (mean, var) = if self.training {
+            let n = input.size(0)?;
+            let h = input.size(2)?;
+            let w = input.size(3)?;
+            let reshaped = input.view(Shape::new(vec![n * h * w, self.num_features]))?;
 
-        let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
-        let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-        let var =
-            crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(vec![0]), true)?; // [1,C]
+            let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
+            let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
+            let var = crate::operations::arithmetic::mul(&centered, &centered)?
+                .mean(Some(vec![0]), true)?; // [1,C]
 
-        let mean = mean.view(Shape::new(vec![1, self.num_features, 1, 1]))?;
-        let var = var.view(Shape::new(vec![1, self.num_features, 1, 1]))?;
+            let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
+            let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
+
+            self.running_mean = crate::operations::arithmetic::add(
+                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
+            )?;
+            self.running_var = crate::operations::arithmetic::add(
+                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
+            )?;
+
+            (
+                mean.view(Shape::new(vec![1, self.num_features, 1, 1]))?,
+                var.view(Shape::new(vec![1, self.num_features, 1, 1]))?,
+            )
+        } else {
+            (
+                self.running_mean
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features, 1, 1]))?,
+                self.running_var
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features, 1, 1]))?,
+            )
+        };
 
         let centered = crate::operations::arithmetic::sub(input, &mean)?;
         let var = crate::operations::arithmetic::add(&var, &self.eps_tensor)?;
@@ -550,8 +581,7 @@ mod tests {
 
     #[test]
     fn test_batchnorm1d_running_stats() {
-        let mut layer =
-            BatchNorm1d::new(2, None, None, Device::cpu(), DataType::Float32).unwrap();
+        let mut layer = BatchNorm1d::new(2, None, None, Device::cpu(), DataType::Float32).unwrap();
 
         let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], Device::cpu());
         let input = Tensor::new(
@@ -614,5 +644,83 @@ mod tests {
         );
         let result = layer.forward(&wrong_dim_input);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batchnorm2d_running_stats() {
+        let mut layer = BatchNorm2d::new(2, None, None, Device::cpu(), DataType::Float32).unwrap();
+
+        let data =
+            TensorData::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], Device::cpu());
+        let input = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![1, 2, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        layer.forward(&input).unwrap();
+        assert!(
+            layer.named_buffers()["running_mean"]
+                .data()
+                .as_f32_slice()
+                .unwrap()[0]
+                != 0.0
+        );
+
+        let mean_before = layer.named_buffers()["running_mean"].clone();
+        layer.eval();
+        let data2 = TensorData::from_vec_f32(
+            vec![9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+            Device::cpu(),
+        );
+        let input2 = Tensor::new(
+            Arc::new(data2),
+            Shape::new(vec![1, 2, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        layer.forward(&input2).unwrap();
+        let before = mean_before.data().as_f32_slice().unwrap()[0];
+        let after = layer.named_buffers()["running_mean"]
+            .data()
+            .as_f32_slice()
+            .unwrap()[0];
+        assert!((after - before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_batchnorm2d_inference_output() {
+        let mut layer =
+            BatchNorm2d::new(1, Some(1e-5), Some(1.0), Device::cpu(), DataType::Float32).unwrap();
+
+        // First batch to set running statistics
+        let data1 = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], Device::cpu());
+        let input1 = Tensor::new(
+            Arc::new(data1),
+            Shape::new(vec![1, 1, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        layer.forward(&input1).unwrap();
+
+        // Inference with different input should use stored running stats
+        layer.eval();
+        let data2 = TensorData::from_vec_f32(vec![5.0, 5.0, 5.0, 5.0], Device::cpu());
+        let input2 = Tensor::new(
+            Arc::new(data2),
+            Shape::new(vec![1, 1, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let output = layer.forward(&input2).unwrap();
+
+        let expected = (5.0 - 2.5) / (1.25 + layer._eps as f32).sqrt();
+        let out_slice = output.data().as_f32_slice().unwrap();
+        assert!(out_slice.iter().all(|&v| (v - expected).abs() < 1e-4));
     }
 }

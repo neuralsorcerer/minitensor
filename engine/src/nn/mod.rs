@@ -23,12 +23,6 @@ pub use layer::{Layer, Module};
 pub use loss::{BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, MAELoss, MSELoss};
 pub use sequential::{Sequential, SequentialBuilder};
 
-// Re-export from other modules when they exist
-#[cfg(feature = "conv")]
 pub use conv::*;
-
-#[cfg(feature = "dropout")]
 pub use dropout::*;
-
-#[cfg(feature = "normalization")]
 pub use normalization::*;

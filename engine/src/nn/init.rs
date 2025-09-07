@@ -127,41 +127,41 @@ pub fn init_uniform(
     let data = match dtype {
         DataType::Float32 => {
             let dist = Uniform::new(a as f32, b as f32);
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0.0f32; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Uniform::new(a, b);
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0.0f64; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Uniform::new(a as i32, b as i32);
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0i32; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Uniform::new(a as i64, b as i64);
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0i64; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);rng));
             }
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Uniform::new(0.0, 1.0);
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng) > 0.5);
+            let mut vec = vec![false; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng) > 0.5
             }
             TensorData::from_vec_bool(vec, device)
         }
@@ -189,41 +189,41 @@ pub fn init_normal(
     let data = match dtype {
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0.0f32; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Normal::new(mean, std).unwrap();
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng));
+            let mut vec = vec![0.0f64; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Normal::new(mean, std).unwrap();
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng).round() as i32);
+            let mut vec = vec![0i32; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng).round() as i32;
             }
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Normal::new(mean, std).unwrap();
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng).round() as i64);
+            let mut vec = vec![0i64; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng).round() as i64;
             }
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Normal::new(mean, std).unwrap();
-            let mut vec = Vec::with_capacity(numel);
-            for _ in 0..numel {
-                vec.push(dist.sample(&mut rng) > 0.0);
+            let mut vec = vec![false; numel];
+            for v in &mut vec {
+                *v = dist.sample(&mut rng) > 0.0;
             }
             TensorData::from_vec_bool(vec, device)
         }
@@ -428,5 +428,14 @@ mod tests {
         for &v in slice {
             assert!(v >= -0.5 && v <= 0.5);
         }
+    }
+
+    #[test]
+    fn test_normal_distribution_statistics() {
+        let shape = Shape::new(vec![10_000]);
+        let tensor = init_normal(shape, 0.0, 1.0, DataType::Float32, Device::cpu(), false).unwrap();
+        let slice = tensor.data().as_f32_slice().unwrap();
+        let mean: f32 = slice.iter().sum::<f32>() / slice.len() as f32;
+        assert!(mean.abs() < 0.1);
     }
 }
