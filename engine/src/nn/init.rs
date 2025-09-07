@@ -153,7 +153,7 @@ pub fn init_uniform(
             let dist = Uniform::new(a as i64, b as i64);
             let mut vec = vec![0i64; numel];
             for v in &mut vec {
-                *v = dist.sample(&mut rng);rng));
+                *v = dist.sample(&mut rng);
             }
             TensorData::from_vec_i64(vec, device)
         }
