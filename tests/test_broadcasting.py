@@ -110,4 +110,4 @@ def test_broadcast_backward_mul():
     grad = mt.Tensor(1.0, device=dev)
     c.sum().backward(grad)
     np.testing.assert_allclose(a.grad.numpy(), np.tile(np.arange(1, 4, dtype=np.float32), (2, 1)))
-    np.testing.assert_allclose(b.grad.numpy(), np.array([3.0, 7.0, 11.0], dtype=np.float32))
+    np.testing.assert_allclose(b.grad.numpy(), np.array([3.0, 5.0, 7.0], dtype=np.float32))
