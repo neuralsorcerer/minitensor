@@ -6,7 +6,7 @@
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
-use rayon::prelude::*
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Adam optimizer with bias correction and parameter groups
