@@ -214,7 +214,7 @@ impl CpuInfo {
     }
 
     fn detect_cache_info() -> Vec<CacheLevel> {
-        let mut cache_levels = Vec::with_capacity(4);;
+        let mut cache_levels = Vec::with_capacity(4);
 
         // Try to detect cache sizes (Linux-specific for now)
         #[cfg(target_os = "linux")]
