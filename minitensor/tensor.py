@@ -375,10 +375,14 @@ class Tensor:
         create_graph: bool = False,
     ):
         """Compute gradients via backpropagation."""
-        if gradient is not None:
-            self._tensor.backward(gradient._tensor)
-        else:
-            self._tensor.backward()
+        if gradient is None:
+            if self.numel() != 1:
+                raise RuntimeError(
+                    "grad can be implicitly created only for scalar outputs"
+                )
+            gradient = Tensor(1.0, dtype=self.dtype, device=self.device)
+
+        self._tensor.backward(gradient._tensor)
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
         """Set requires_grad flag in-place."""

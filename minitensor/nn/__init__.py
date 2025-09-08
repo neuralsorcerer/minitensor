@@ -72,5 +72,74 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
         "FocalLoss",
     ]:
         _export(_name)
+
+    if "DenseLayer" in globals():
+        _DenseLayer = globals()["DenseLayer"]
+
+        class DenseLayer:  # pragma: no cover - thin wrapper
+            """Wrap the Rust :class:`DenseLayer` to provide default arguments."""
+
+            def __init__(
+                self,
+                in_features: int,
+                out_features: int,
+                bias: bool = True,
+                device=None,
+                dtype=None,
+            ) -> None:
+                self._layer = _DenseLayer(in_features, out_features, bias, device, dtype)
+
+            def __getattr__(self, name):
+                return getattr(self._layer, name)
+
+        globals()["DenseLayer"] = DenseLayer
+
+    if "BatchNorm1d" in globals():
+        _BatchNorm1d = globals()["BatchNorm1d"]
+
+        class BatchNorm1d:  # pragma: no cover - thin wrapper
+            """Wrap the Rust :class:`BatchNorm1d` with default parameters."""
+
+            def __init__(
+                self,
+                num_features: int,
+                eps: float = 1e-5,
+                momentum: float = 0.1,
+                affine: bool = True,
+                device=None,
+                dtype=None,
+            ) -> None:
+                self._layer = _BatchNorm1d(
+                    num_features, eps, momentum, affine, device, dtype
+                )
+
+            def __getattr__(self, name):
+                return getattr(self._layer, name)
+
+        globals()["BatchNorm1d"] = BatchNorm1d
+
+    if "BatchNorm2d" in globals():
+        _BatchNorm2d = globals()["BatchNorm2d"]
+
+        class BatchNorm2d:  # pragma: no cover - thin wrapper
+            """Wrap the Rust :class:`BatchNorm2d` with default parameters."""
+
+            def __init__(
+                self,
+                num_features: int,
+                eps: float = 1e-5,
+                momentum: float = 0.1,
+                affine: bool = True,
+                device=None,
+                dtype=None,
+            ) -> None:
+                self._layer = _BatchNorm2d(
+                    num_features, eps, momentum, affine, device, dtype
+                )
+
+            def __getattr__(self, name):
+                return getattr(self._layer, name)
+
+        globals()["BatchNorm2d"] = BatchNorm2d
 # When the core is missing we simply expose an empty namespace so that importing
 # :mod:`minitensor.nn` never raises an exception.
