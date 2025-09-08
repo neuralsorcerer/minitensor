@@ -73,7 +73,7 @@ impl GpuDevice {
     /// Detect all available GPU devices
     pub fn detect_all() -> Vec<Self> {
         #[allow(unused_mut)]
-        let mut devices = Vec::new();
+        let mut devices = Vec::with_capacity(4);
 
         // Detect CUDA devices
         #[cfg(feature = "cuda")]
@@ -98,52 +98,51 @@ impl GpuDevice {
 
     #[cfg(feature = "cuda")]
     fn _detect_cuda_devices() -> Vec<Self> {
-        let mut devices = Vec::new();
+        let initial = match cudarc::driver::CudaDevice::new(0) {
+            Ok(device) => device.num_devices().unwrap_or(0) as usize,
+            Err(_) => 0,
+        };
+        let mut devices = Vec::with_capacity(initial);
 
         // Use cudarc to detect CUDA devices
-        match cudarc::driver::CudaDevice::new(0) {
-            Ok(device) => {
-                let device_count = device.num_devices().unwrap_or(0);
+        if let Ok(device) = cudarc::driver::CudaDevice::new(0) {
+            let device_count = device.num_devices().unwrap_or(0);
 
-                for device_id in 0..device_count {
-                    if let Ok(cuda_device) = cudarc::driver::CudaDevice::new(device_id) {
-                        let name = cuda_device
-                            .name()
-                            .unwrap_or_else(|_| format!("CUDA Device {}", device_id));
-                        let memory_info = cuda_device.memory_info().unwrap_or((0, 0));
-                        let total_memory = memory_info.1;
+            for device_id in 0..device_count {
+                if let Ok(cuda_device) = cudarc::driver::CudaDevice::new(device_id) {
+                    let name = cuda_device
+                        .name()
+                        .unwrap_or_else(|_| format!("CUDA Device {}", device_id));
+                    let memory_info = cuda_device.memory_info().unwrap_or((0, 0));
+                    let total_memory = memory_info.1;
 
-                        // Get compute capability
-                        let (major, minor) = cuda_device.compute_capability().unwrap_or((0, 0));
+                    // Get compute capability
+                    let (major, minor) = cuda_device.compute_capability().unwrap_or((0, 0));
 
-                        devices.push(Self {
-                            device_type: DeviceType::CUDA,
-                            device_id,
-                            name,
-                            vendor: "NVIDIA".to_string(),
-                            memory_size: total_memory,
-                            compute_capability: ComputeCapability::CUDA { major, minor },
-                            max_compute_units: 0, // Would need additional CUDA API calls
-                            max_work_group_size: 1024, // Common CUDA default
-                            max_clock_frequency: None,
-                            is_available: true,
-                            capabilities: GpuCapabilities {
-                                supports_fp16: major >= 5 || (major == 5 && minor >= 3),
-                                supports_fp64: true,
-                                supports_int8: major >= 6,
-                                supports_unified_memory: major >= 6,
-                                supports_async_compute: true,
-                                max_texture_size: Some((65536, 65536)),
-                                local_memory_size: 48 * 1024, // 48KB shared memory typical
-                                constant_memory_size: 64 * 1024, // 64KB constant memory
-                                memory_bandwidth: None,       // Would need device-specific lookup
-                            },
-                        });
-                    }
+                    devices.push(Self {
+                        device_type: DeviceType::CUDA,
+                        device_id,
+                        name,
+                        vendor: "NVIDIA".to_string(),
+                        memory_size: total_memory,
+                        compute_capability: ComputeCapability::CUDA { major, minor },
+                        max_compute_units: 0, // Would need additional CUDA API calls
+                        max_work_group_size: 1024, // Common CUDA default
+                        max_clock_frequency: None,
+                        is_available: true,
+                        capabilities: GpuCapabilities {
+                            supports_fp16: major >= 5 || (major == 5 && minor >= 3),
+                            supports_fp64: true,
+                            supports_int8: major >= 6,
+                            supports_unified_memory: major >= 6,
+                            supports_async_compute: true,
+                            max_texture_size: Some((65536, 65536)),
+                            local_memory_size: 48 * 1024, // 48KB shared memory typical
+                            constant_memory_size: 64 * 1024, // 64KB constant memory
+                            memory_bandwidth: None,       // Would need device-specific lookup
+                        },
+                    });
                 }
-            }
-            Err(_) => {
-                // CUDA not available or no devices
             }
         }
 
@@ -270,6 +269,7 @@ impl GpuDevice {
     }
 
     /// Check if this GPU supports a specific precision
+    #[inline]
     pub fn supports_precision(&self, precision: Precision) -> bool {
         match precision {
             Precision::FP16 => self.capabilities.supports_fp16,
@@ -280,36 +280,32 @@ impl GpuDevice {
     }
 
     /// Get estimated memory bandwidth in GB/s
+    #[inline]
     pub fn memory_bandwidth(&self) -> f64 {
         self.capabilities.memory_bandwidth.unwrap_or_else(|| {
-            // Rough estimates based on device type and memory size
             match self.device_type {
                 DeviceType::Cuda => {
-                    // Rough estimate based on memory size
                     if self.memory_size > 32 * 1024 * 1024 * 1024 {
-                        // > 32GB
-                        900.0 // High-end datacenter GPU
+                        900.0
                     } else if self.memory_size > 16 * 1024 * 1024 * 1024 {
-                        // > 16GB
-                        600.0 // High-end consumer GPU
+                        600.0
                     } else if self.memory_size > 8 * 1024 * 1024 * 1024 {
-                        // > 8GB
-                        400.0 // Mid-range GPU
+                        400.0
                     } else {
-                        200.0 // Entry-level GPU
+                        200.0
                     }
                 }
-                DeviceType::Metal => 400.0,  // Apple Silicon estimate
-                DeviceType::OpenCL => 300.0, // Conservative estimate
-                DeviceType::Cpu => 50.0,     // Should not happen for GPU device
+                DeviceType::Metal => 400.0,
+                DeviceType::OpenCL => 300.0,
+                DeviceType::Cpu => 50.0,
             }
         })
     }
 
     /// Check if this device is suitable for a given workload
+    #[inline]
     pub fn is_suitable_for_workload(&self, workload_size: usize, required_memory: usize) -> bool {
         self.is_available && self.memory_size >= required_memory && workload_size >= 1000
-        // GPUs are better for larger workloads
     }
 }
 
@@ -324,6 +320,7 @@ pub enum Precision {
 
 impl ComputeCapability {
     /// Check if this compute capability supports a specific feature
+    #[inline]
     pub fn supports_feature(&self, feature: &str) -> bool {
         match self {
             ComputeCapability::CUDA { major, minor } => match feature {
@@ -410,5 +407,42 @@ mod tests {
         };
         assert!(metal_cap.supports_feature("fp16"));
         assert!(metal_cap.supports_feature("unified_memory"));
+    }
+
+    #[test]
+    fn test_workload_suitability_and_bandwidth() {
+        let device = GpuDevice {
+            device_type: DeviceType::Cuda,
+            device_id: 0,
+            name: "Test GPU".to_string(),
+            vendor: "Test".to_string(),
+            memory_size: 8 * 1024 * 1024 * 1024,
+            compute_capability: ComputeCapability::CUDA { major: 7, minor: 5 },
+            max_compute_units: 32,
+            max_work_group_size: 1024,
+            max_clock_frequency: Some(1500.0),
+            is_available: true,
+            capabilities: GpuCapabilities {
+                supports_fp16: true,
+                supports_fp64: true,
+                supports_int8: true,
+                supports_unified_memory: true,
+                supports_async_compute: true,
+                max_texture_size: Some((16384, 16384)),
+                local_memory_size: 48 * 1024,
+                constant_memory_size: 64 * 1024,
+                memory_bandwidth: None,
+            },
+        };
+
+        // Small workload shouldn't favor GPU
+        assert!(!device.is_suitable_for_workload(500, 1024));
+        // Larger workload with adequate memory should
+        assert!(device.is_suitable_for_workload(10_000, 1024));
+        // Insufficient memory
+        assert!(!device.is_suitable_for_workload(10_000, 16 * 1024 * 1024 * 1024));
+
+        // Bandwidth estimation should provide a reasonable value
+        assert!(device.memory_bandwidth() > 0.0);
     }
 }

@@ -160,8 +160,8 @@ impl CpuInfo {
     }
 
     fn detect_generic() -> Self {
-        let cores = num_cpus::get();
-        let threads = num_cpus::get(); // Assume no hyperthreading for generic case
+        let cores = num_cpus::get_physical();
+        let threads = num_cpus::get();
 
         Self {
             model_name: Self::get_cpu_model(),
@@ -180,13 +180,14 @@ impl CpuInfo {
         #[cfg(target_os = "linux")]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
-                for line in content.lines() {
-                    if line.starts_with("model name") {
-                        if let Some(name) = line.split(':').nth(1) {
-                            return name.trim().to_string();
-                        }
-                    }
-                }
+                return content
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(key, value)| {
+                            (key.trim() == "model name").then(|| value.trim().to_string())
+                        })
+                    })
+                    .unwrap_or_else(|| "Unknown CPU".to_string());
             }
         }
 
@@ -198,13 +199,14 @@ impl CpuInfo {
         #[cfg(target_os = "linux")]
         {
             if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
-                for line in content.lines() {
-                    if line.starts_with("vendor_id") {
-                        if let Some(vendor) = line.split(':').nth(1) {
-                            return vendor.trim().to_string();
-                        }
-                    }
-                }
+                return content
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(key, value)| {
+                            (key.trim() == "vendor_id").then(|| value.trim().to_string())
+                        })
+                    })
+                    .unwrap_or_else(|| "Unknown".to_string());
             }
         }
 
@@ -212,7 +214,7 @@ impl CpuInfo {
     }
 
     fn detect_cache_info() -> Vec<CacheLevel> {
-        let mut cache_levels = Vec::new();
+        let mut cache_levels = Vec::with_capacity(4);;
 
         // Try to detect cache sizes (Linux-specific for now)
         #[cfg(target_os = "linux")]
@@ -310,30 +312,24 @@ impl CpuInfo {
 
     #[cfg(target_os = "linux")]
     fn parse_cache_size(size_str: &str) -> Option<usize> {
-        let size_str = size_str.trim().to_uppercase();
-
-        if let Some(kb_pos) = size_str.find('K') {
-            if let Ok(kb) = size_str[..kb_pos].parse::<usize>() {
-                return Some(kb * 1024);
-            }
+        let s = size_str.trim();
+        if let Some(num) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
+            num.trim().parse::<usize>().ok().map(|kb| kb * 1024)
+        } else if let Some(num) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+            num.trim().parse::<usize>().ok().map(|mb| mb * 1024 * 1024)
+        } else {
+            None
         }
-
-        if let Some(mb_pos) = size_str.find('M') {
-            if let Ok(mb) = size_str[..mb_pos].parse::<usize>() {
-                return Some(mb * 1024 * 1024);
-            }
-        }
-
-        None
     }
 
     /// Get the optimal number of threads for parallel operations
+    #[inline]
     pub fn optimal_thread_count(&self) -> usize {
-        // Use physical cores for CPU-bound tasks
         self.cores
     }
 
     /// Check if CPU supports a specific SIMD instruction set
+    #[inline]
     pub fn supports_simd(&self, simd: SIMDSupport) -> bool {
         match simd {
             SIMDSupport::None => true,
@@ -372,6 +368,7 @@ impl Default for CpuFeatures {
 
 impl SIMDSupport {
     /// Get the vector width in bytes for this SIMD instruction set
+    #[inline]
     pub fn vector_width(&self) -> usize {
         match self {
             SIMDSupport::None => 1,
@@ -388,11 +385,13 @@ impl SIMDSupport {
     }
 
     /// Get the number of f32 elements that fit in one SIMD register
+    #[inline]
     pub fn f32_lanes(&self) -> usize {
         self.vector_width() / 4
     }
 
     /// Get the number of f64 elements that fit in one SIMD register
+    #[inline]
     pub fn f64_lanes(&self) -> usize {
         self.vector_width() / 8
     }
@@ -421,5 +420,34 @@ mod tests {
     fn test_simd_lanes() {
         assert_eq!(SIMDSupport::AVX2.f32_lanes(), 8);
         assert_eq!(SIMDSupport::AVX2.f64_lanes(), 4);
+    }
+
+    #[test]
+    fn test_simd_support_and_threads() {
+        let mut info = CpuInfo {
+            model_name: String::new(),
+            vendor: String::new(),
+            cores: 4,
+            threads: 8,
+            base_frequency: None,
+            max_frequency: None,
+            features: CpuFeatures::default(),
+            cache_info: Vec::new(),
+        };
+
+        assert!(info.supports_simd(SIMDSupport::None));
+        assert!(!info.supports_simd(SIMDSupport::AVX));
+        info.features.has_avx = true;
+        info.features.simd_support = SIMDSupport::AVX;
+        assert!(info.supports_simd(SIMDSupport::AVX));
+        assert_eq!(info.optimal_thread_count(), 4);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cache_size() {
+        assert_eq!(CpuInfo::parse_cache_size("32K"), Some(32 * 1024));
+        assert_eq!(CpuInfo::parse_cache_size("2m"), Some(2 * 1024 * 1024));
+        assert_eq!(CpuInfo::parse_cache_size("bad"), None);
     }
 }
