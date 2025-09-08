@@ -469,16 +469,16 @@ impl PyTensor {
     }
 
     // NumPy conversion methods
-    fn numpy(&self, py: Python) -> PyResult<PyObject> {
+    fn numpy(&self, py: Python) -> PyResult<Py<PyAny>> {
         convert_tensor_to_numpy(&self.inner, py, false)
     }
 
-    fn numpy_copy(&self, py: Python) -> PyResult<PyObject> {
+    fn numpy_copy(&self, py: Python) -> PyResult<Py<PyAny>> {
         convert_tensor_to_numpy(&self.inner, py, true)
     }
 
-    fn tolist(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| convert_tensor_to_python_list(&self.inner, py))
+    fn tolist(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| convert_tensor_to_python_list(&self.inner, py))
     }
 
     // Comparison operations
@@ -511,7 +511,7 @@ impl PyTensor {
     fn __str__(&self) -> String {
         if self.inner.numel() <= 100 {
             match self.tolist() {
-                Ok(datadata) => Python::with_gil(|py| format!("tensor({})", data.bind(py))),
+                Ok(data) => Python::attach(|py| format!("tensor({})", data.bind(py))),
                 Err(_) => self.__repr__(),
             }
         } else {
@@ -1049,7 +1049,7 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
     }
 }
 
-fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyResult<PyObject> {
+fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyResult<Py<PyAny>> {
     if tensor.device() != Device::cpu() {
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Cannot convert GPU tensor to NumPy array. Use .cpu() first.",
@@ -1120,7 +1120,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
     }
 }
 
-fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<PyObject> {
+fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     // Simplified implementation - would need recursive structure for multi-dimensional
     match tensor.dtype() {
         DataType::Float32 => {

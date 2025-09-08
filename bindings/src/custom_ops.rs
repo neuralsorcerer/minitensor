@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn test_custom_ops_bindings() {
-        Python::with_gil(|_| {
+        pyo3::Python::initialize();
+        Python::attach(|_| {
             // Test that we can call the functions without panicking
             let result = register_example_custom_ops();
             assert!(result.is_ok());

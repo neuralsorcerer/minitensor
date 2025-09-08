@@ -138,14 +138,14 @@ impl PyPluginInfo {
 #[pyclass(name = "CustomPlugin")]
 pub struct PyCustomPlugin {
     info: PluginInfo,
-    initialize_fn: Option<PyObject>,
-    cleanup_fn: Option<PyObject>,
-    custom_operations_fn: Option<PyObject>,
+    initialize_fn: Option<Py<PyAny>>,
+    cleanup_fn: Option<Py<PyAny>>,
+    custom_operations_fn: Option<Py<PyAny>>,
 }
 
 impl Clone for PyCustomPlugin {
     fn clone(&self) -> Self {
-        Python::with_gil(|py| Self {
+        Python::attach(|py| Self {
             info: self.info.clone(),
             initialize_fn: self.initialize_fn.as_ref().map(|f| f.clone_ref(py)),
             cleanup_fn: self.cleanup_fn.as_ref().map(|f| f.clone_ref(py)),
@@ -183,15 +183,15 @@ impl PyCustomPlugin {
         }
     }
 
-    fn set_initialize_fn(&mut self, func: PyObject) {
+    fn set_initialize_fn(&mut self, func: Py<PyAny>) {
         self.initialize_fn = Some(func);
     }
 
-    fn set_cleanup_fn(&mut self, func: PyObject) {
+    fn set_cleanup_fn(&mut self, func: Py<PyAny>) {
         self.cleanup_fn = Some(func);
     }
 
-    fn set_custom_operations_fn(&mut self, func: PyObject) {
+    fn set_custom_operations_fn(&mut self, func: Py<PyAny>) {
         self.custom_operations_fn = Some(func);
     }
 
@@ -293,7 +293,7 @@ impl PyPluginRegistry {
     }
 
     fn get_plugin<'py>(&self, name: &str) -> PyResult<Py<PyCustomPlugin>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             if let Some(plugin) = self.plugins.get(name) {
                 Py::new(
                     py,
@@ -326,8 +326,8 @@ impl PyPluginRegistry {
 #[pyclass(name = "CustomLayer", subclass)]
 pub struct PyCustomLayer {
     name: String,
-    forward_fn: Option<PyObject>,
-    parameters: HashMap<String, PyObject>,
+    forward_fn: Option<Py<PyAny>>,
+    parameters: HashMap<String, Py<PyAny>>,
 }
 
 #[pymethods]
@@ -341,16 +341,16 @@ impl PyCustomLayer {
         }
     }
 
-    fn set_forward(&mut self, func: PyObject) {
+    fn set_forward(&mut self, func: Py<PyAny>) {
         self.forward_fn = Some(func);
     }
 
-    fn add_parameter(&mut self, name: String, tensor: PyObject) {
+    fn add_parameter(&mut self, name: String, tensor: Py<PyAny>) {
         self.parameters.insert(name, tensor);
     }
 
-    fn get_parameter(&self, name: &str) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn get_parameter(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             self.parameters
                 .get(name)
                 .map(|t| t.clone_ref(py))
@@ -372,7 +372,7 @@ impl PyCustomLayer {
         &self.name
     }
 
-    fn forward(&self, py: Python, inputs: &Bound<PyList>) -> PyResult<PyObject> {
+    fn forward(&self, py: Python, inputs: &Bound<PyList>) -> PyResult<Py<PyAny>> {
         if let Some(forward_fn) = &self.forward_fn {
             forward_fn.call1(py, (inputs,))
         } else {

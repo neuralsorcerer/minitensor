@@ -234,7 +234,7 @@ impl PyModule {
     }
 
     /// Get detailed parameter statistics
-    fn parameter_stats(&self, py: Python) -> PyResult<PyObject> {
+    fn parameter_stats(&self, py: Python) -> PyResult<Py<PyAny>> {
         let layer: &dyn Layer = match &self.inner {
             ModuleType::DenseLayer(layer) => layer,
             ModuleType::ReLU(layer) => layer,
@@ -261,7 +261,7 @@ impl PyModule {
     }
 
     /// Get memory usage information
-    fn memory_usage(&self, py: Python) -> PyResult<PyObject> {
+    fn memory_usage(&self, py: Python) -> PyResult<Py<PyAny>> {
         let layer: &dyn Layer = match &self.inner {
             ModuleType::DenseLayer(layer) => layer,
             ModuleType::ReLU(layer) => layer,
@@ -329,7 +329,7 @@ impl PyModule {
         input_shape: Vec<usize>,
         batch_size: usize,
         py: Python,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         if let ModuleType::Sequential(model) = &self.inner {
             let est = SequentialUtils::estimate_forward_memory(model, &input_shape, batch_size);
             let dict = PyDict::new(py);
