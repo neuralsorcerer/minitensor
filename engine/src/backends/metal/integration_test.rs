@@ -329,4 +329,129 @@ mod tests {
             println!("Metal only available on macOS, skipping test");
         }
     }
+
+    #[test]
+    fn test_metal_zero_length_operations() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            let ptr = backend.allocate(0).unwrap();
+            assert!(ptr.is_null());
+
+            backend.copy_from_host(ptr, &[]).unwrap();
+            backend.copy_to_host(&mut [], ptr).unwrap();
+
+            backend.deallocate(ptr, 0).unwrap();
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
+
+    #[test]
+    fn test_metal_zero_length_copy_to_valid_pointer() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            let ptr = backend.allocate(8).unwrap();
+            backend.copy_from_host(ptr, &[]).unwrap();
+            let mut buf = [0u8; 0];
+            backend.copy_to_host(&mut buf, ptr).unwrap();
+            backend.deallocate(ptr, 8).unwrap();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
+
+    #[test]
+    fn test_metal_null_pointer_errors() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            assert!(backend
+                .copy_from_host(std::ptr::null_mut(), &[1u8])
+                .is_err());
+            let mut buf = [0u8; 1];
+            assert!(backend
+                .copy_to_host(&mut buf, std::ptr::null())
+                .is_err());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
+
+    #[test]
+    fn test_metal_multiple_allocations_and_copies() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            let ptr1 = backend.allocate(4).unwrap();
+            let ptr2 = backend.allocate(4).unwrap();
+
+            let data1 = [1u8, 2, 3, 4];
+            let data2 = [5u8, 6, 7, 8];
+
+            backend.copy_from_host(ptr1, &data1).unwrap();
+            backend.copy_from_host(ptr2, &data2).unwrap();
+
+            let mut out1 = [0u8; 4];
+            let mut out2 = [0u8; 4];
+            backend.copy_to_host(&mut out1, ptr1).unwrap();
+            backend.copy_to_host(&mut out2, ptr2).unwrap();
+
+            assert_eq!(data1, out1);
+            assert_eq!(data2, out2);
+
+            backend.deallocate(ptr1, 4).unwrap();
+            backend.deallocate(ptr2, 4).unwrap();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
+
+    #[test]
+    fn test_metal_deallocate_null_pointer() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            backend.deallocate(std::ptr::null_mut(), 128).unwrap();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
 }

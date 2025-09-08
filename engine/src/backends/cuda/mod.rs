@@ -10,8 +10,9 @@ use super::Backend;
 use crate::{device::Device, error::Result};
 use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr};
 use cudarc::nvrtc::Ptx;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use parking_lot::{Mutex, RwLock};
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 pub use stream::{CudaExecutionContext, CudaStreamPool, PooledCudaStream};
 
@@ -20,21 +21,24 @@ pub struct CudaBackend {
     device: Device,
     cuda_device: Arc<CudaDevice>,
     execution_context: Arc<Mutex<CudaExecutionContext>>,
-    kernels: Arc<Mutex<HashMap<String, cudarc::driver::CudaFunction>>>,
+    kernels: Arc<RwLock<FxHashMap<String, cudarc::driver::CudaFunction>>>,
 }
 
 impl CudaBackend {
     /// Get the CUDA device
+    #[inline(always)]
     pub fn cuda_device(&self) -> &Arc<CudaDevice> {
         &self.cuda_device
     }
 
-    /// Get the execution context
+    /// Get the execution 
+    #[inline(always)]
     pub fn execution_context(&self) -> &Arc<Mutex<CudaExecutionContext>> {
         &self.execution_context
     }
 
     /// Load and compile a CUDA kernel
+    #[inline(always)]
     pub fn load_kernel(&self, name: &str, ptx_src: &str) -> Result<()> {
         let ptx = Ptx::from_src(ptx_src);
         self.cuda_device.load_ptx(ptx, name, &[name]).map_err(|e| {
@@ -51,18 +55,20 @@ impl CudaBackend {
             )
         })?;
 
-        let mut kernels = self.kernels.lock().unwrap();
+        let mut kernels = self.kernels.write();
         kernels.insert(name.to_string(), function);
         Ok(())
     }
 
-    /// Get a loaded kernel function
+    /// Get a loaded kernel 
+    #[inline(always)]
     pub fn get_kernel(&self, name: &str) -> Option<cudarc::driver::CudaFunction> {
-        let kernels = self.kernels.lock().unwrap();
+        let kernels = self.kernels.read();
         kernels.get(name).cloned()
     }
 
-    /// Allocate device memory and return a CudaSlice
+    /// Allocate device memory and return a 
+    #[inline(always)]
     pub fn allocate_slice<T>(&self, len: usize) -> Result<CudaSlice<T>>
     where
         T: cudarc::driver::DeviceRepr,
@@ -73,11 +79,20 @@ impl CudaBackend {
     }
 
     /// Copy data from host to device
+    #[inline(always)]
     pub fn copy_to_device<T>(&self, data: &[T]) -> Result<CudaSlice<T>>
     where
         T: cudarc::driver::DeviceRepr + Clone,
     {
-        self.cuda_device.htod_copy(data.to_vec()).map_err(|e| {
+        if data.is_empty() {
+            return self.cuda_device.alloc_zeros::<T>(0).map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!(
+                    "CUDA allocation failed: {}",
+                    e
+                ))
+            });
+        }
+        self.cuda_device.htod_copy(data).map_err(|e| {
             crate::error::MinitensorError::memory_error(format!(
                 "Host to device copy failed: {}",
                 e
@@ -86,10 +101,14 @@ impl CudaBackend {
     }
 
     /// Copy data from device to host
+    #[inline(always)]
     pub fn copy_from_device<T>(&self, device_data: &CudaSlice<T>) -> Result<Vec<T>>
     where
         T: cudarc::driver::DeviceRepr + Clone,
     {
+        if device_data.len() == 0 {
+            return Ok(Vec::new());
+        }
         self.cuda_device.dtoh_sync_copy(device_data).map_err(|e| {
             crate::error::MinitensorError::memory_error(format!(
                 "Device to host copy failed: {}",
@@ -99,6 +118,7 @@ impl CudaBackend {
     }
 
     /// Synchronize the device
+    #[inline(always)]
     pub fn synchronize(&self) -> Result<()> {
         self.cuda_device.synchronize().map_err(|e| {
             crate::error::MinitensorError::backend_error(
@@ -110,14 +130,17 @@ impl CudaBackend {
 }
 
 impl Backend for CudaBackend {
+    #[inline(always)]
     fn device(&self) -> Device {
         self.device
     }
 
+    #[inline(always)]
     fn is_available() -> bool {
         CudaDevice::new(0).is_ok()
     }
 
+    #[inline(always)]
     fn initialize() -> Result<Self> {
         let device_id = 0; // Default to device 0, could be configurable
         let cuda_device = CudaDevice::new(device_id).map_err(|e| {
@@ -137,10 +160,11 @@ impl Backend for CudaBackend {
             device: Device::cuda(Some(device_id)),
             cuda_device,
             execution_context,
-            kernels: Arc::new(Mutex::new(HashMap::new())),
+            kernels: Arc::new(RwLock::new(FxHashMap::default())),
         })
     }
 
+    #[inline(always)]
     fn allocate(&self, size_bytes: usize) -> Result<*mut u8> {
         if size_bytes == 0 {
             return Ok(std::ptr::null_mut());
@@ -153,6 +177,7 @@ impl Backend for CudaBackend {
         Ok(ptr.device_ptr() as *mut u8)
     }
 
+    #[inline(always)]
     fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
@@ -163,7 +188,11 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+        if src.is_empty() {
+            return Ok(());
+        }
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null destination pointer",
@@ -187,7 +216,11 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+        if dst.is_empty() {
+            return Ok(());
+        }
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null source pointer",
@@ -295,6 +328,7 @@ impl CudaOps {
     }
 
     /// Element-wise addition on GPU
+    #[inline(always)]
     pub fn add(
         &self,
         a: &CudaSlice<f32>,
@@ -340,6 +374,7 @@ impl CudaOps {
     }
 
     /// Element-wise multiplication on GPU
+    #[inline(always)]
     pub fn mul(
         &self,
         a: &CudaSlice<f32>,
@@ -385,6 +420,7 @@ impl CudaOps {
     }
 
     /// Matrix multiplication on GPU
+    #[inline(always)]
     pub fn matmul(
         &self,
         a: &CudaSlice<f32>,
@@ -436,6 +472,7 @@ impl CudaOps {
     }
 
     /// ReLU activation on GPU
+    #[inline(always)]
     pub fn relu(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
         let n = input.len();
         if output.len() != n {
@@ -475,6 +512,7 @@ impl CudaOps {
     }
 
     /// Sigmoid activation on GPU
+    #[inline(always)]
     pub fn sigmoid(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
         let n = input.len();
         if output.len() != n {
@@ -570,5 +608,89 @@ mod tests {
         for (r, e) in result.iter().zip(expected.iter()) {
             assert!((r - e).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_cuda_zero_length_operations() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+        let ptr = backend.allocate(0).unwrap();
+        assert!(ptr.is_null());
+
+        backend.copy_from_host(ptr, &[]).unwrap();
+        backend.copy_to_host(&mut [], ptr).unwrap();
+
+        backend.deallocate(ptr, 0).unwrap();
+    }
+
+    #[test]
+    fn test_cuda_zero_length_copy_to_valid_pointer() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+        let ptr = backend.allocate(8).unwrap();
+        backend.copy_from_host(ptr, &[]).unwrap();
+        let mut buf = [0u8; 0];
+        backend.copy_to_host(&mut buf, ptr).unwrap();
+        backend.deallocate(ptr, 8).unwrap();
+    }
+
+    #[test]
+    fn test_cuda_null_pointer_errors() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+        assert!(backend
+            .copy_from_host(std::ptr::null_mut(), &[1u8])
+            .is_err());
+        let mut buf = [0u8; 1];
+        assert!(backend
+            .copy_to_host(&mut buf, std::ptr::null())
+            .is_err());
+    }
+
+    #[test]
+    fn test_cuda_multiple_allocations_and_copies() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+        let ptr1 = backend.allocate(4).unwrap();
+        let ptr2 = backend.allocate(4).unwrap();
+
+        let data1 = [1u8, 2, 3, 4];
+        let data2 = [5u8, 6, 7, 8];
+
+        backend.copy_from_host(ptr1, &data1).unwrap();
+        backend.copy_from_host(ptr2, &data2).unwrap();
+
+        let mut out1 = [0u8; 4];
+        let mut out2 = [0u8; 4];
+        backend.copy_to_host(&mut out1, ptr1).unwrap();
+        backend.copy_to_host(&mut out2, ptr2).unwrap();
+
+        assert_eq!(data1, out1);
+        assert_eq!(data2, out2);
+
+        backend.deallocate(ptr1, 4).unwrap();
+        backend.deallocate(ptr2, 4).unwrap();
+    }
+
+    #[test]
+    fn test_cuda_deallocate_null_pointer() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+        backend.deallocate(std::ptr::null_mut(), 128).unwrap();
     }
 }

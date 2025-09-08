@@ -14,9 +14,11 @@ use opencl3::memory::{Buffer, CL_MEM_READ_WRITE};
 use opencl3::platform::get_platforms;
 use opencl3::program::Program;
 use opencl3::types::{cl_float, CL_BLOCKING};
-use std::collections::HashMap;
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// OpenCL buffer wrapper for memory management
 pub struct OpenCLBuffer {
@@ -33,29 +35,33 @@ pub struct OpenCLBackend {
     opencl_device: OpenCLDevice,
     context: Context,
     command_queue: CommandQueue,
-    programs: Arc<Mutex<HashMap<String, Program>>>,
-    kernels: Arc<Mutex<HashMap<String, Kernel>>>,
-    buffers: Arc<Mutex<HashMap<usize, OpenCLBuffer>>>,
-    next_buffer_id: Arc<Mutex<usize>>,
+    programs: Arc<RwLock<FxHashMap<String, Program>>>,
+    kernels: Arc<RwLock<FxHashMap<String, Kernel>>>,
+    buffers: Arc<RwLock<FxHashMap<usize, OpenCLBuffer>>>,
+    next_buffer_id: AtomicUsize,
 }
 
 impl OpenCLBackend {
     /// Get the OpenCL device
+    #[inline(always)]
     pub fn opencl_device(&self) -> &OpenCLDevice {
         &self.opencl_device
     }
 
     /// Get the OpenCL context
+    #[inline(always)]
     pub fn context(&self) -> &Context {
         &self.context
     }
 
     /// Get the command queue
+    #[inline(always)]
     pub fn command_queue(&self) -> &CommandQueue {
         &self.command_queue
     }
 
     /// Create an OpenCL buffer
+    #[inline(always)]
     pub fn create_buffer(&self, size: usize, flags: u64) -> Result<Buffer<cl_float>> {
         let buffer =
             unsafe { Buffer::<cl_float>::create(&self.context, flags, size, ptr::null_mut()) }
@@ -70,6 +76,7 @@ impl OpenCLBackend {
     }
 
     /// Create an OpenCL buffer with data
+    #[inline(always)]
     pub fn create_buffer_with_data(&self, data: &[f32], flags: u64) -> Result<Buffer<cl_float>> {
         let mut buffer = unsafe {
             Buffer::<cl_float>::create(&self.context, flags, data.len(), ptr::null_mut())
@@ -96,7 +103,8 @@ impl OpenCLBackend {
         Ok(buffer)
     }
 
-    /// Build an OpenCL program from source
+    /// Build an OpenCL program from 
+    #[inline(always)]
     pub fn build_program(&self, name: &str, source: &str) -> Result<()> {
         let program =
             Program::create_and_build_from_source(&self.context, source, "").map_err(|e| {
@@ -106,15 +114,16 @@ impl OpenCLBackend {
                 )
             })?;
 
-        let mut programs = self.programs.lock().unwrap();
+        let mut programs = self.programs.write();
         programs.insert(name.to_string(), program);
 
         Ok(())
     }
 
     /// Create a kernel from a program
+    #[inline(always)]
     pub fn create_kernel(&self, program_name: &str, kernel_name: &str) -> Result<()> {
-        let programs = self.programs.lock().unwrap();
+        let programs = self.programs.read();
         let program = programs.get(program_name).ok_or_else(|| {
             crate::error::MinitensorError::backend_error(
                 "OpenCL",
@@ -129,15 +138,16 @@ impl OpenCLBackend {
             )
         })?;
 
-        let mut kernels = self.kernels.lock().unwrap();
+        let mut kernels = self.kernels.write();
         kernels.insert(kernel_name.to_string(), kernel);
 
         Ok(())
     }
 
     /// Get a kernel (creates a new kernel instance to avoid borrowing issues)
+    #[inline(always)]
     pub fn get_kernel(&self, kernel_name: &str) -> Option<Kernel> {
-        let programs = self.programs.lock().unwrap();
+        let programs = self.programs.read();
         if let Some(program) = programs.get("tensor_ops") {
             Kernel::create(program, kernel_name).ok()
         } else {
@@ -146,6 +156,7 @@ impl OpenCLBackend {
     }
 
     /// Execute a kernel
+    #[inline(always)]
     pub fn execute_kernel(
         &self,
         kernel_name: &str,
@@ -183,6 +194,7 @@ impl OpenCLBackend {
     }
 
     /// Read data from buffer
+    #[inline(always)]
     pub fn read_buffer(&self, buffer: &Buffer<cl_float>, data: &mut [f32]) -> Result<()> {
         unsafe {
             self.command_queue
@@ -199,6 +211,7 @@ impl OpenCLBackend {
     }
 
     /// Write data to buffer
+    #[inline(always)]
     pub fn write_buffer(&self, buffer: &mut Buffer<cl_float>, data: &[f32]) -> Result<()> {
         unsafe {
             self.command_queue
@@ -215,12 +228,13 @@ impl OpenCLBackend {
     }
 
     /// Execute operation on buffers by pointer
+    #[inline(always)]
     pub fn execute_buffer_operation<F, R>(&self, ptr: *const u8, operation: F) -> Result<R>
     where
         F: FnOnce(&Buffer<cl_float>) -> Result<R>,
     {
         let buffer_id = ptr as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         if let Some(opencl_buffer) = buffers.get(&buffer_id) {
             operation(&opencl_buffer.buffer)
         } else {
@@ -231,20 +245,23 @@ impl OpenCLBackend {
     }
 
     /// Get buffer information for debugging
+    #[inline(always)]
     pub fn get_buffer_info(&self, ptr: *const u8) -> Option<(usize, usize)> {
         let buffer_id = ptr as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         buffers
             .get(&buffer_id)
             .map(|buf| (buffer_id, buf.size_bytes))
     }
 
     /// Get total number of tracked buffers
+    #[inline(always)]
     pub fn buffer_count(&self) -> usize {
-        self.buffers.lock().unwrap().len()
+        self.buffers.read().len()
     }
 
     /// Finish all operations in the command queue
+    #[inline(always)]
     pub fn finish(&self) -> Result<()> {
         self.command_queue.finish().map_err(|e| {
             crate::error::MinitensorError::backend_error(
@@ -256,10 +273,12 @@ impl OpenCLBackend {
 }
 
 impl Backend for OpenCLBackend {
+    #[inline(always)]
     fn device(&self) -> Device {
         self.device
     }
 
+    #[inline(always)]
     fn is_available() -> bool {
         // Check if OpenCL platforms and GPU devices are available
         if let Ok(platforms) = get_platforms() {
@@ -276,6 +295,7 @@ impl Backend for OpenCLBackend {
         false
     }
 
+    #[inline(always)]
     fn initialize() -> Result<Self> {
         // Get the first available GPU device
         let platforms = get_platforms().map_err(|e| {
@@ -327,13 +347,14 @@ impl Backend for OpenCLBackend {
             opencl_device,
             context,
             command_queue,
-            programs: Arc::new(Mutex::new(HashMap::new())),
-            kernels: Arc::new(Mutex::new(HashMap::new())),
-            buffers: Arc::new(Mutex::new(HashMap::new())),
-            next_buffer_id: Arc::new(Mutex::new(1)),
+            programs: Arc::new(RwLock::new(FxHashMap::default())),
+            kernels: Arc::new(RwLock::new(FxHashMap::default())),
+            buffers: Arc::new(RwLock::new(FxHashMap::default())),
+            next_buffer_id: AtomicUsize::new(1),
         })
     }
 
+    #[inline(always)]
     fn allocate(&self, size_bytes: usize) -> Result<*mut u8> {
         if size_bytes == 0 {
             return Ok(std::ptr::null_mut());
@@ -344,23 +365,19 @@ impl Backend for OpenCLBackend {
         let buffer = self.create_buffer(size_floats, CL_MEM_READ_WRITE)?;
 
         // Create a unique ID to track this buffer
-        let buffer_id = {
-            let mut next_id = self.next_buffer_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let buffer_id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
 
         let opencl_buffer = OpenCLBuffer { buffer, size_bytes };
 
         // Store the buffer for tracking
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.write();
         buffers.insert(buffer_id, opencl_buffer);
 
         // Return the buffer ID as a pointer
         Ok(buffer_id as *mut u8)
     }
 
+    #[inline(always)]
     fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
@@ -368,14 +385,18 @@ impl Backend for OpenCLBackend {
 
         // Remove the buffer from tracking
         let buffer_id = ptr as usize;
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.write();
         buffers.remove(&buffer_id);
 
         // OpenCL buffer will be automatically dropped and freed
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+        if src.is_empty() {
+            return Ok(());
+        }
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null destination pointer",
@@ -384,7 +405,7 @@ impl Backend for OpenCLBackend {
 
         // Find the OpenCL buffer corresponding to this pointer
         let buffer_id = dst as usize;
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.write();
         if let Some(opencl_buffer) = buffers.get_mut(&buffer_id) {
             // Convert bytes to f32 for OpenCL buffer
             let src_floats = unsafe {
@@ -418,7 +439,11 @@ impl Backend for OpenCLBackend {
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+        if dst.is_empty() {
+            return Ok(());
+        }
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null source pointer",
@@ -427,7 +452,7 @@ impl Backend for OpenCLBackend {
 
         // Find the OpenCL buffer corresponding to this pointer
         let buffer_id = src as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         if let Some(opencl_buffer) = buffers.get(&buffer_id) {
             // Convert bytes to f32 for OpenCL buffer
             let dst_floats = unsafe {
@@ -814,7 +839,7 @@ impl OpenCLOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -841,7 +866,7 @@ impl OpenCLOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -870,7 +895,7 @@ impl OpenCLOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -890,7 +915,7 @@ impl OpenCLOps {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
@@ -909,7 +934,7 @@ impl OpenCLOps {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),

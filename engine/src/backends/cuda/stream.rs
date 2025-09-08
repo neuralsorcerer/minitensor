@@ -6,7 +6,8 @@
 
 use crate::error::Result;
 use cudarc::driver::{CudaDevice, CudaStream};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// CUDA stream pool for managing async execution
 pub struct CudaStreamPool {
@@ -17,6 +18,7 @@ pub struct CudaStreamPool {
 
 impl CudaStreamPool {
     /// Create a new CUDA stream pool
+    #[inline(always)]
     pub fn new(device: Arc<CudaDevice>, max_streams: usize) -> Self {
         Self {
             device,
@@ -26,8 +28,9 @@ impl CudaStreamPool {
     }
 
     /// Get a stream from the pool or create a new one
+    #[inline(always)]
     pub fn get_stream(&self) -> Result<CudaStream> {
-        let mut streams = self.available_streams.lock().unwrap();
+        let mut streams = self.available_streams.lock();
 
         if let Some(stream) = streams.pop() {
             Ok(stream)
@@ -43,8 +46,9 @@ impl CudaStreamPool {
     }
 
     /// Return a stream to the pool
+    #[inline(always)]
     pub fn return_stream(&self, stream: CudaStream) {
-        let mut streams = self.available_streams.lock().unwrap();
+        let mut streams = self.available_streams.lock();
 
         // Only keep streams if we haven't exceeded the max
         if streams.len() < self.max_streams {
@@ -54,13 +58,15 @@ impl CudaStreamPool {
     }
 
     /// Get the number of available streams in the pool
+    #[inline(always)]
     pub fn available_count(&self) -> usize {
-        self.available_streams.lock().unwrap().len()
+        self.available_streams.lock().len()
     }
 
     /// Synchronize all streams in the pool
+    #[inline(always)]
     pub fn synchronize_all(&self) -> Result<()> {
-        let streams = self.available_streams.lock().unwrap();
+        let streams = self.available_streams.lock();
 
         for stream in streams.iter() {
             stream.synchronize().map_err(|e| {
@@ -83,6 +89,7 @@ pub struct PooledCudaStream {
 
 impl PooledCudaStream {
     /// Create a new pooled stream
+    #[inline(always)]
     pub fn new(pool: Arc<CudaStreamPool>) -> Result<Self> {
         let stream = pool.get_stream()?;
         Ok(Self {
@@ -92,11 +99,13 @@ impl PooledCudaStream {
     }
 
     /// Get the underlying CUDA stream
+    #[inline(always)]
     pub fn stream(&self) -> &CudaStream {
         self.stream.as_ref().unwrap()
     }
 
     /// Take the stream out of the wrapper (prevents automatic return to pool)
+    #[inline(always)]
     pub fn take(mut self) -> CudaStream {
         self.stream.take().unwrap()
     }
@@ -118,6 +127,7 @@ pub struct CudaExecutionContext {
 
 impl CudaExecutionContext {
     /// Create a new execution context
+    #[inline(always)]
     pub fn new(device: Arc<CudaDevice>, max_streams: usize) -> Self {
         let stream_pool = Arc::new(CudaStreamPool::new(device, max_streams));
 
@@ -128,6 +138,7 @@ impl CudaExecutionContext {
     }
 
     /// Get or create a stream for the current context
+    #[inline(always)]
     pub fn get_stream(&mut self) -> Result<&CudaStream> {
         if self.current_stream.is_none() {
             self.current_stream = Some(PooledCudaStream::new(self.stream_pool.clone())?);
@@ -137,6 +148,7 @@ impl CudaExecutionContext {
     }
 
     /// Synchronize the current stream
+    #[inline(always)]
     pub fn synchronize(&self) -> Result<()> {
         if let Some(ref stream) = self.current_stream {
             stream.stream().synchronize().map_err(|e| {
@@ -150,11 +162,13 @@ impl CudaExecutionContext {
     }
 
     /// Release the current stream back to the pool
+    #[inline(always)]
     pub fn release_stream(&mut self) {
         self.current_stream = None;
     }
 
     /// Get the stream pool
+    #[inline(always)]
     pub fn stream_pool(&self) -> &Arc<CudaStreamPool> {
         &self.stream_pool
     }

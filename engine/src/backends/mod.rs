@@ -46,6 +46,7 @@ pub trait Backend: Send + Sync {
 }
 
 /// Get the appropriate backend for a device
+#[inline(always)]
 pub fn get_backend(device: Device) -> Result<Box<dyn Backend>> {
     match device.device_type() {
         crate::device::DeviceType::Cpu => Ok(Box::new(cpu::CpuBackend::initialize()?)),
@@ -59,5 +60,22 @@ pub fn get_backend(device: Device) -> Result<Box<dyn Backend>> {
             "Unknown",
             format!("Backend not available for device: {}", device),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_backend_cpu() {
+        let backend = get_backend(Device::cpu()).unwrap();
+        assert!(backend.device().is_cpu());
+    }
+
+    #[test]
+    fn test_get_backend_unavailable() {
+        #[cfg(not(feature = "cuda"))]
+        assert!(get_backend(Device::cuda(Some(0))).is_err());
     }
 }

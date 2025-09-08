@@ -7,8 +7,10 @@
 use super::Backend;
 use crate::{device::Device, error::Result};
 use metal::*;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Metal buffer wrapper for memory management
 pub struct MetalBufferWrapper {
@@ -24,24 +26,27 @@ pub struct MetalBackend {
     device: Device,
     metal_device: metal::Device,
     command_queue: metal::CommandQueue,
-    library: Arc<Mutex<Option<metal::Library>>>,
-    compute_pipelines: Arc<Mutex<HashMap<String, metal::ComputePipelineState>>>,
-    buffers: Arc<Mutex<HashMap<usize, MetalBufferWrapper>>>,
-    next_buffer_id: Arc<Mutex<usize>>,
+    library: Arc<RwLock<Option<metal::Library>>>,
+    compute_pipelines: Arc<RwLock<FxHashMap<String, metal::ComputePipelineState>>>,
+    buffers: Arc<RwLock<FxHashMap<usize, MetalBufferWrapper>>>,
+    next_buffer_id: AtomicUsize,
 }
 
 impl MetalBackend {
     /// Get the Metal device
+    #[inline(always)]
     pub fn metal_device(&self) -> &metal::Device {
         &self.metal_device
     }
 
     /// Get the command queue
+    #[inline(always)]
     pub fn command_queue(&self) -> &metal::CommandQueue {
         &self.command_queue
     }
 
     /// Create a Metal buffer
+    #[inline(always)]
     pub fn create_buffer(
         &self,
         length: u64,
@@ -51,7 +56,8 @@ impl MetalBackend {
         Ok(buffer)
     }
 
-    /// Create a Metal buffer with data
+    /// Create a Metal buffer with 
+    #[inline(always)]
     pub fn create_buffer_with_data<T>(
         &self,
         data: &[T],
@@ -71,6 +77,7 @@ impl MetalBackend {
     }
 
     /// Load Metal shaders from source
+    #[inline(always)]
     pub fn load_library_from_source(&self, source: &str) -> Result<()> {
         let compile_options = metal::CompileOptions::new();
 
@@ -84,18 +91,19 @@ impl MetalBackend {
                 )
             })?;
 
-        let mut lib = self.library.lock().unwrap();
+        let mut lib = self.library.lock();
         *lib = Some(library);
 
         Ok(())
     }
 
     /// Create a compute pipeline state
+    #[inline(always)]
     pub fn create_compute_pipeline(
         &self,
         function_name: &str,
     ) -> Result<metal::ComputePipelineState> {
-        let library = self.library.lock().unwrap();
+        let library = self.library.read();
         let library = library.as_ref().ok_or_else(|| {
             crate::error::MinitensorError::backend_error("Metal", "No Metal library loaded")
         })?;
@@ -118,19 +126,21 @@ impl MetalBackend {
             })?;
 
         // Cache the pipeline state
-        let mut pipelines = self.compute_pipelines.lock().unwrap();
+        let mut pipelines = self.compute_pipelines.write();
         pipelines.insert(function_name.to_string(), pipeline_state.clone());
 
         Ok(pipeline_state)
     }
 
-    /// Get a cached compute pipeline state
+    /// Get a cached compute pipeline 
+    #[inline(always)]
     pub fn get_compute_pipeline(&self, function_name: &str) -> Option<metal::ComputePipelineState> {
-        let pipelines = self.compute_pipelines.lock().unwrap();
+        let pipelines = self.compute_pipelines.read();
         pipelines.get(function_name).cloned()
     }
 
     /// Execute a compute command
+    #[inline(always)]
     pub fn execute_compute_command<F>(&self, setup: F) -> Result<()>
     where
         F: FnOnce(&metal::ComputeCommandEncoderRef) -> Result<()>,
@@ -148,6 +158,7 @@ impl MetalBackend {
     }
 
     /// Copy data from buffer to host
+    #[inline(always)]
     pub fn copy_buffer_to_host<T>(&self, buffer: &metal::Buffer, data: &mut [T]) -> Result<()>
     where
         T: Copy,
@@ -168,6 +179,7 @@ impl MetalBackend {
     }
 
     /// Copy data from host to buffer
+    #[inline(always)]
     pub fn copy_host_to_buffer<T>(&self, data: &[T], buffer: &metal::Buffer) -> Result<()>
     where
         T: Copy,
@@ -188,26 +200,29 @@ impl MetalBackend {
     }
 
     /// Get buffer information for debugging
+    #[inline(always)]
     pub fn get_buffer_info(&self, ptr: *const u8) -> Option<(usize, usize)> {
         let buffer_id = ptr as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         buffers
             .get(&buffer_id)
             .map(|buf| (buffer_id, buf.size_bytes))
     }
 
     /// Get total number of tracked buffers
+    #[inline(always)]
     pub fn buffer_count(&self) -> usize {
-        self.buffers.lock().unwrap().len()
+        self.buffers.read().len()
     }
 
-    /// Execute operation on buffers by pointer
+    /// Execute operation on buffers by 
+    #[inline(always)]
     pub fn execute_buffer_operation<F, R>(&self, ptr: *const u8, operation: F) -> Result<R>
     where
         F: FnOnce(&metal::Buffer) -> Result<R>,
     {
         let buffer_id = ptr as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         if let Some(metal_buffer) = buffers.get(&buffer_id) {
             operation(&metal_buffer.buffer)
         } else {
@@ -218,6 +233,7 @@ impl MetalBackend {
     }
 
     /// Get optimal thread group size for the device
+    #[inline(always)]
     pub fn optimal_thread_group_size(
         &self,
         pipeline: &metal::ComputePipelineState,
@@ -231,6 +247,7 @@ impl MetalBackend {
     }
 
     /// Get optimal thread group size for 2D operations
+    #[inline(always)]
     pub fn optimal_thread_group_size_2d(
         &self,
         pipeline: &metal::ComputePipelineState,
@@ -246,10 +263,12 @@ impl MetalBackend {
 }
 
 impl Backend for MetalBackend {
+    #[inline(always)]
     fn device(&self) -> Device {
         self.device
     }
 
+    #[inline(always)]
     fn is_available() -> bool {
         // Metal is only available on Apple platforms
         #[cfg(target_os = "macos")]
@@ -262,6 +281,7 @@ impl Backend for MetalBackend {
         }
     }
 
+    #[inline(always)]
     fn initialize() -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
@@ -275,10 +295,10 @@ impl Backend for MetalBackend {
                 device: Device::metal(Some(0)),
                 metal_device,
                 command_queue,
-                library: Arc::new(Mutex::new(None)),
-                compute_pipelines: Arc::new(Mutex::new(HashMap::new())),
-                buffers: Arc::new(Mutex::new(HashMap::new())),
-                next_buffer_id: Arc::new(Mutex::new(1)),
+                library: Arc::new(RwLock::new(None)),
+                compute_pipelines: Arc::new(RwLock::new(FxHashMap::default())),
+                buffers: Arc::new(RwLock::new(FxHashMap::default())),
+                next_buffer_id: AtomicUsize::new(1),
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -290,6 +310,7 @@ impl Backend for MetalBackend {
         }
     }
 
+    #[inline(always)]
     fn allocate(&self, size_bytes: usize) -> Result<*mut u8> {
         if size_bytes == 0 {
             return Ok(std::ptr::null_mut());
@@ -301,23 +322,19 @@ impl Backend for MetalBackend {
         )?;
 
         // Create a unique ID to track this buffer
-        let buffer_id = {
-            let mut next_id = self.next_buffer_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let buffer_id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
 
         let metal_buffer = MetalBufferWrapper { buffer, size_bytes };
 
         // Store the buffer for tracking
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.write();
         buffers.insert(buffer_id, metal_buffer);
 
         // Return the buffer ID as a pointer
         Ok(buffer_id as *mut u8)
     }
 
+    #[inline(always)]
     fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
@@ -325,14 +342,18 @@ impl Backend for MetalBackend {
 
         // Remove the buffer from tracking
         let buffer_id = ptr as usize;
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.write();
         buffers.remove(&buffer_id);
 
         // Metal buffer will be automatically dropped and freed by ARC
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_from_host(&self, dst: *mut u8, src: &[u8]) -> Result<()> {
+        if src.is_empty() {
+            return Ok(());
+        }
         if dst.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null destination pointer",
@@ -341,7 +362,7 @@ impl Backend for MetalBackend {
 
         // Find the Metal buffer corresponding to this pointer
         let buffer_id = dst as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         if let Some(metal_buffer) = buffers.get(&buffer_id) {
             unsafe {
                 let contents = metal_buffer.buffer.contents() as *mut u8;
@@ -356,7 +377,11 @@ impl Backend for MetalBackend {
         Ok(())
     }
 
+    #[inline(always)]
     fn copy_to_host(&self, dst: &mut [u8], src: *const u8) -> Result<()> {
+        if dst.is_empty() {
+            return Ok(());
+        }
         if src.is_null() {
             return Err(crate::error::MinitensorError::memory_error(
                 "Null source pointer",
@@ -365,7 +390,7 @@ impl Backend for MetalBackend {
 
         // Find the Metal buffer corresponding to this pointer
         let buffer_id = src as usize;
-        let buffers = self.buffers.lock().unwrap();
+        let buffers = self.buffers.read();
         if let Some(metal_buffer) = buffers.get(&buffer_id) {
             unsafe {
                 let contents = metal_buffer.buffer.contents() as *const u8;
@@ -730,7 +755,7 @@ impl MetalOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -757,7 +782,7 @@ impl MetalOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -786,7 +811,7 @@ impl MetalOps {
         let b_buffer_id = b_ptr as usize;
         let c_buffer_id = c_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(a_buf), Some(b_buf), Some(c_buf)) = (
             buffers.get(&a_buffer_id),
@@ -806,7 +831,7 @@ impl MetalOps {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
@@ -825,7 +850,7 @@ impl MetalOps {
         let input_buffer_id = input_ptr as usize;
         let output_buffer_id = output_ptr as usize;
 
-        let buffers = self.backend.buffers.lock().unwrap();
+        let buffers = self.backend.buffers.read();
 
         if let (Some(input_buf), Some(output_buf)) = (
             buffers.get(&input_buffer_id),
