@@ -6,6 +6,7 @@
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// SGD optimizer with momentum support and parameter groups
@@ -129,24 +130,14 @@ impl SGD {
         self.weight_decay
     }
 
-    /// Apply weight decay to gradient
-    fn apply_weight_decay(
-        &self,
-        _param: &Tensor,
+    /// Apply simple SGD update without momentum and optional weight decay
+    fn apply_simple_update(
+        &mut self,
+        param: &mut Tensor,
         grad: &Tensor,
-        _weight_decay: f64,
-    ) -> Result<Tensor> {
-        // For now, return the original gradient
-        // In a full implementation, we would compute: grad + weight_decay * _param
-        // This requires tensor addition which will be implemented in arithmetic operations
-        Ok(grad.clone())
-    }
-
-    /// Apply simple SGD update without momentum
-    fn apply_simple_update(&mut self, param: &mut Tensor, grad: &Tensor, _lr: f64) -> Result<()> {
-        // Simple update: param = param - lr * grad
-        // For now, we'll implement a basic CPU-only version
-
+        lr: f64,
+        weight_decay: f64,
+    ) -> Result<()> {
         if param.device() != grad.device() {
             return Err(crate::error::MinitensorError::device_mismatch(
                 param.device().to_string(),
@@ -161,35 +152,103 @@ impl SGD {
             ));
         }
 
-        // Get mutable access to parameter data
-        // For now, we'll implement a simplified version that doesn't require mutable access to Arc
-        // In a full implementation, we would need to handle this differently
-        Err(crate::error::MinitensorError::not_implemented(
-            "Mutable tensor updates not yet implemented - requires tensor arithmetic operations",
-        ))
+        match param.dtype() {
+            crate::tensor::DataType::Float32 => {
+                let p = param.data_mut().as_f32_slice_mut().unwrap();
+                let g = grad.data().as_f32_slice().unwrap();
+                let lr = lr as f32;
+                let wd = weight_decay as f32;
+                p.par_iter_mut().zip(g.par_iter()).for_each(|(p_i, &g_i)| {
+                    let grad_val = g_i + wd * *p_i;
+                    *p_i -= lr * grad_val;
+                });
+            }
+            crate::tensor::DataType::Float64 => {
+                let p = param.data_mut().as_f64_slice_mut().unwrap();
+                let g = grad.data().as_f64_slice().unwrap();
+                p.par_iter_mut().zip(g.par_iter()).for_each(|(p_i, &g_i)| {
+                    let grad_val = g_i + weight_decay * *p_i;
+                    *p_i -= lr * grad_val;
+                });
+            }
+            _ => {
+                return Err(crate::error::MinitensorError::invalid_operation(
+                    "SGD only supports float32/float64 tensors",
+                ))
+            }
+        }
+
+        Ok(())
     }
 
     /// Apply momentum-based SGD update
-    fn apply_momentum_update(&mut self, param: &mut Tensor, grad: &Tensor, lr: f64) -> Result<()> {
+    fn apply_momentum_update(
+        &mut self,
+        param: &mut Tensor,
+        grad: &Tensor,
+        lr: f64,
+        weight_decay: f64,
+    ) -> Result<()> {
         let param_id = param.id();
 
         // Get or create velocity buffer
-        let _velocity = if let Some(v) = self.velocity.get(&param_id) {
-            v.clone()
-        } else {
-            // Create new velocity buffer initialized to zeros
-            let v = Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false);
-            self.velocity.insert(param_id, v.clone());
-            v
-        };
+        let velocity = self.velocity.entry(param_id).or_insert_with(|| {
+            Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
+        });
 
-        // For now, implement simple momentum update
-        // In a full implementation: _velocity = momentum * _velocity + (1 - dampening) * grad
-        // Then: param = param - lr * (grad + momentum * _velocity) for Nesterov
-        // Or: param = param - lr * _velocity for standard momentum
+        match param.dtype() {
+            crate::tensor::DataType::Float32 => {
+                let p = param.data_mut().as_f32_slice_mut().unwrap();
+                let g = grad.data().as_f32_slice().unwrap();
+                let v = velocity.data_mut().as_f32_slice_mut().unwrap();
+                let lr = lr as f32;
+                let momentum = self.momentum as f32;
+                let damp = self.dampening as f32;
+                let wd = weight_decay as f32;
+                let nesterov = self.nesterov;
+                p.par_iter_mut()
+                    .zip(g.par_iter())
+                    .zip(v.par_iter_mut())
+                    .for_each(|((p_i, &g_i), v_i)| {
+                        let grad_val = g_i + wd * *p_i;
+                        *v_i = momentum * *v_i + (1.0 - damp) * grad_val;
+                        let update = if nesterov {
+                            grad_val + momentum * *v_i
+                        } else {
+                            *v_i
+                        };
+                        *p_i -= lr * update;
+                    });
+            }
+            crate::tensor::DataType::Float64 => {
+                let p = param.data_mut().as_f64_slice_mut().unwrap();
+                let g = grad.data().as_f64_slice().unwrap();
+                let v = velocity.data_mut().as_f64_slice_mut().unwrap();
+                let momentum = self.momentum;
+                let damp = self.dampening;
+                let nesterov = self.nesterov;
+                p.par_iter_mut()
+                    .zip(g.par_iter())
+                    .zip(v.par_iter_mut())
+                    .for_each(|((p_i, &g_i), v_i)| {
+                        let grad_val = g_i + weight_decay * *p_i;
+                        *v_i = momentum * *v_i + (1.0 - damp) * grad_val;
+                        let update = if nesterov {
+                            grad_val + momentum * *v_i
+                        } else {
+                            *v_i
+                        };
+                        *p_i -= lr * update;
+                    });
+            }
+            _ => {
+                return Err(crate::error::MinitensorError::invalid_operation(
+                    "SGD only supports float32/float64 tensors",
+                ))
+            }
+        }
 
-        // Simplified implementation: just apply simple update for now
-        self.apply_simple_update(param, grad, lr)
+        Ok(())
     }
 }
 
@@ -208,7 +267,7 @@ impl Optimizer for SGD {
             }
 
             let grad = match param.grad() {
-                Some(g) => g,
+                Some(g) => std::sync::Arc::clone(g),
                 None => continue, // Skip parameters without gradients
             };
 
@@ -216,20 +275,11 @@ impl Optimizer for SGD {
             let lr = self.get_param_lr(param.id());
             let weight_decay = self.get_param_weight_decay(param.id());
 
-            // Apply weight decay if configured
-            let effective_grad = if weight_decay > 0.0 {
-                // grad = grad + weight_decay * param
-                self.apply_weight_decay(param, grad, weight_decay)?
-            } else {
-                grad.as_ref().clone()
-            };
-
-            // Apply momentum if configured
             if self.momentum > 0.0 {
-                self.apply_momentum_update(param, &effective_grad, lr)?;
+                self.apply_momentum_update(param, grad.as_ref(), lr, weight_decay)?;
             } else {
                 // Simple SGD update: param = param - lr * grad
-                self.apply_simple_update(param, &effective_grad, lr)?;
+                self.apply_simple_update(param, grad.as_ref(), lr, weight_decay)?;
             }
         }
 

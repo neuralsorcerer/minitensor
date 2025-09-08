@@ -158,6 +158,12 @@ impl Tensor {
         &self.data
     }
 
+    /// Get a mutable reference to the tensor data
+    #[inline(always)]
+    pub(crate) fn data_mut(&mut self) -> &mut TensorData {
+        Arc::get_mut(&mut self.data).expect("Tensor data is shared")
+    }
+
     /// Set the gradient function for this tensor
     #[inline(always)]
     pub fn set_grad_fn(&mut self, grad_fn: Option<Arc<dyn GradientFunction>>) {
@@ -181,6 +187,12 @@ impl Tensor {
     #[inline(always)]
     pub fn grad(&self) -> Option<&Arc<Tensor>> {
         self.grad.as_ref()
+    }
+
+    /// Get mutable access to the gradient if uniquely owned
+    #[inline(always)]
+    pub fn grad_mut(&mut self) -> Option<&mut Tensor> {
+        self.grad.as_mut().and_then(|g| std::sync::Arc::get_mut(g))
     }
 
     /// Set the gradient for this tensor

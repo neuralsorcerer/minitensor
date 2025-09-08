@@ -6,6 +6,7 @@
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// RMSprop optimizer with parameter groups
@@ -166,77 +167,40 @@ impl RMSprop {
         self.weight_decay
     }
 
-    /// Apply weight decay to gradient
-    fn apply_weight_decay(
-        &self,
-        _param: &Tensor,
-        grad: &Tensor,
-        _weight_decay: f64,
-    ) -> Result<Tensor> {
-        // For now, return the original gradient
-        // In a full implementation, we would compute: grad + weight_decay * _param
-        Ok(grad.clone())
-    }
-
     /// Apply RMSprop optimization update
-    fn apply_rmsprop_update(&mut self, param: &mut Tensor, grad: &Tensor, lr: f64) -> Result<()> {
-        let param_id = param.id();
-
-        // Get or create square average buffer
-        let square_avg = if let Some(avg) = self.square_avg.get(&param_id) {
-            avg.clone()
-        } else {
-            let avg = Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false);
-            self.square_avg.insert(param_id, avg.clone());
-            avg
-        };
-
-        // Get or create momentum buffer if momentum > 0
-        let momentum_buffer = if self.momentum > 0.0 {
-            if let Some(buf) = self.momentum_buffer.get(&param_id) {
-                buf.clone()
-            } else {
-                let buf =
-                    Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false);
-                self.momentum_buffer.insert(param_id, buf.clone());
-                buf
-            }
-        } else {
-            // Dummy tensor for no momentum case
-            Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
-        };
-
-        // Get or create gradient average buffer for centered variant
-        let grad_avg = if self.centered {
-            if let Some(avg) = self.grad_avg.get(&param_id) {
-                avg.clone()
-            } else {
-                let avg =
-                    Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false);
-                self.grad_avg.insert(param_id, avg.clone());
-                avg
-            }
-        } else {
-            // Dummy tensor for non-centered case
-            Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
-        };
-
-        // Perform RMSprop update
-        self.rmsprop_step(param, grad, &square_avg, &momentum_buffer, &grad_avg, lr)?;
-
-        Ok(())
-    }
-
-    /// Perform the actual RMSprop optimization step
-    fn rmsprop_step(
+    fn apply_rmsprop_update(
         &mut self,
         param: &mut Tensor,
         grad: &Tensor,
-        _square_avg: &Tensor,
-        _momentum_buffer: &Tensor,
-        _grad_avg: &Tensor,
-        _lr: f64,
+        lr: f64,
+        weight_decay: f64,
     ) -> Result<()> {
+        let param_id = param.id();
+
+        // Get or create square average buffer
+        let square_avg = self.square_avg.entry(param_id).or_insert_with(|| {
+            Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
+        });
+
+        // Get or create momentum buffer if momentum > 0
+        let momentum_buffer_opt = if self.momentum > 0.0 {
+            Some(self.momentum_buffer.entry(param_id).or_insert_with(|| {
+                Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
+            }))
+        } else {
+            None
+        };
+
+        // Get or create gradient average buffer for centered variant
+        let grad_avg_opt = if self.centered {
+            Some(self.grad_avg.entry(param_id).or_insert_with(|| {
+                Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
+            }))
+        } else {
+            None
+        };
+
+        // Perform RMSprop update directly
         if param.device() != grad.device() {
             return Err(crate::error::MinitensorError::device_mismatch(
                 param.device().to_string(),
@@ -251,11 +215,153 @@ impl RMSprop {
             ));
         }
 
-        // For now, we'll implement a simplified version that doesn't require mutable access to Arc
-        // In a full implementation, we would need to handle this differently
-        Err(crate::error::MinitensorError::not_implemented(
-            "Mutable tensor updates not yet implemented - requires tensor arithmetic operations",
-        ))
+        let alpha = self.alpha;
+        let eps = self.epsilon;
+
+        match param.dtype() {
+            crate::tensor::DataType::Float32 => {
+                let p = param.data_mut().as_f32_slice_mut().unwrap();
+                let g = grad.data().as_f32_slice().unwrap();
+                let sq = square_avg.data_mut().as_f32_slice_mut().unwrap();
+                let lr = lr as f32;
+                let momentum = self.momentum as f32;
+                let wd = weight_decay as f32;
+                match (momentum_buffer_opt, grad_avg_opt) {
+                    (Some(mb), Some(ga)) => {
+                        let mb = mb.data_mut().as_f32_slice_mut().unwrap();
+                        let ga = ga.data_mut().as_f32_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(mb.par_iter_mut())
+                            .zip(ga.par_iter_mut())
+                            .for_each(|((((p_i, &g_i), sq_i), mb_i), ga_i)| {
+                                let g_val = g_i + wd * *p_i;
+                                *sq_i = alpha as f32 * *sq_i + (1.0 - alpha as f32) * g_val * g_val;
+                                *ga_i = alpha as f32 * *ga_i + (1.0 - alpha as f32) * g_val;
+                                let avg = *sq_i - *ga_i * *ga_i;
+                                let denom = avg.sqrt() + eps as f32;
+                                *mb_i = momentum * *mb_i + lr * g_val / denom;
+                                *p_i -= *mb_i;
+                            });
+                    }
+                    (Some(mb), None) => {
+                        let mb = mb.data_mut().as_f32_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(mb.par_iter_mut())
+                            .for_each(|(((p_i, &g_i), sq_i), mb_i)| {
+                                let g_val = g_i + wd * *p_i;
+                                *sq_i = alpha as f32 * *sq_i + (1.0 - alpha as f32) * g_val * g_val;
+                                let denom = sq_i.sqrt() + eps as f32;
+                                *mb_i = momentum * *mb_i + lr * g_val / denom;
+                                *p_i -= *mb_i;
+                            });
+                    }
+                    (None, Some(ga)) => {
+                        let ga = ga.data_mut().as_f32_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(ga.par_iter_mut())
+                            .for_each(|(((p_i, &g_i), sq_i), ga_i)| {
+                                let g_val = g_i + wd * *p_i;
+                                *sq_i = alpha as f32 * *sq_i + (1.0 - alpha as f32) * g_val * g_val;
+                                *ga_i = alpha as f32 * *ga_i + (1.0 - alpha as f32) * g_val;
+                                let avg = *sq_i - *ga_i * *ga_i;
+                                let denom = avg.sqrt() + eps as f32;
+                                *p_i -= lr * g_val / denom;
+                            });
+                    }
+                    (None, None) => {
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .for_each(|((p_i, &g_i), sq_i)| {
+                                let g_val = g_i + wd * *p_i;
+                                *sq_i = alpha as f32 * *sq_i + (1.0 - alpha as f32) * g_val * g_val;
+                                let denom = sq_i.sqrt() + eps as f32;
+                                *p_i -= lr * g_val / denom;
+                            });
+                    }
+                }
+            }
+            crate::tensor::DataType::Float64 => {
+                let p = param.data_mut().as_f64_slice_mut().unwrap();
+                let g = grad.data().as_f64_slice().unwrap();
+                let sq = square_avg.data_mut().as_f64_slice_mut().unwrap();
+                let lr = lr;
+                let momentum = self.momentum;
+                match (momentum_buffer_opt, grad_avg_opt) {
+                    (Some(mb), Some(ga)) => {
+                        let mb = mb.data_mut().as_f64_slice_mut().unwrap();
+                        let ga = ga.data_mut().as_f64_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(mb.par_iter_mut())
+                            .zip(ga.par_iter_mut())
+                            .for_each(|((((p_i, &g_i), sq_i), mb_i), ga_i)| {
+                                let g_val = g_i + weight_decay * *p_i;
+                                *sq_i = alpha * *sq_i + (1.0 - alpha) * g_val * g_val;
+                                *ga_i = alpha * *ga_i + (1.0 - alpha) * g_val;
+                                let avg = *sq_i - *ga_i * *ga_i;
+                                let denom = avg.sqrt() + eps;
+                                *mb_i = momentum * *mb_i + lr * g_val / denom;
+                                *p_i -= *mb_i;
+                            });
+                    }
+                    (Some(mb), None) => {
+                        let mb = mb.data_mut().as_f64_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(mb.par_iter_mut())
+                            .for_each(|(((p_i, &g_i), sq_i), mb_i)| {
+                                let g_val = g_i + weight_decay * *p_i;
+                                *sq_i = alpha * *sq_i + (1.0 - alpha) * g_val * g_val;
+                                let denom = sq_i.sqrt() + eps;
+                                *mb_i = momentum * *mb_i + lr * g_val / denom;
+                                *p_i -= *mb_i;
+                            });
+                    }
+                    (None, Some(ga)) => {
+                        let ga = ga.data_mut().as_f64_slice_mut().unwrap();
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .zip(ga.par_iter_mut())
+                            .for_each(|(((p_i, &g_i), sq_i), ga_i)| {
+                                let g_val = g_i + weight_decay * *p_i;
+                                *sq_i = alpha * *sq_i + (1.0 - alpha) * g_val * g_val;
+                                *ga_i = alpha * *ga_i + (1.0 - alpha) * g_val;
+                                let avg = *sq_i - *ga_i * *ga_i;
+                                let denom = avg.sqrt() + eps;
+                                *p_i -= lr * g_val / denom;
+                            });
+                    }
+                    (None, None) => {
+                        p.par_iter_mut()
+                            .zip(g.par_iter())
+                            .zip(sq.par_iter_mut())
+                            .for_each(|((p_i, &g_i), sq_i)| {
+                                let g_val = g_i + weight_decay * *p_i;
+                                *sq_i = alpha * *sq_i + (1.0 - alpha) * g_val * g_val;
+                                let denom = sq_i.sqrt() + eps;
+                                *p_i -= lr * g_val / denom;
+                            });
+                    }
+                }
+            }
+            _ => {
+                return Err(crate::error::MinitensorError::invalid_operation(
+                    "RMSprop only supports float32/float64 tensors",
+                ))
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -274,7 +380,7 @@ impl Optimizer for RMSprop {
             }
 
             let grad = match param.grad() {
-                Some(g) => g,
+                Some(g) => std::sync::Arc::clone(g),
                 None => continue, // Skip parameters without gradients
             };
 
@@ -282,15 +388,8 @@ impl Optimizer for RMSprop {
             let lr = self.get_param_lr(param.id());
             let weight_decay = self.get_param_weight_decay(param.id());
 
-            // Apply weight decay if configured
-            let effective_grad = if weight_decay > 0.0 {
-                self.apply_weight_decay(param, grad, weight_decay)?
-            } else {
-                grad.as_ref().clone()
-            };
-
             // Apply RMSprop update
-            self.apply_rmsprop_update(param, &effective_grad, lr)?;
+            self.apply_rmsprop_update(param, grad.as_ref(), lr, weight_decay)?;
         }
 
         Ok(())

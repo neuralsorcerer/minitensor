@@ -6,6 +6,7 @@
 
 use super::optimizer::LearningRateScheduler;
 use crate::{error::Result, tensor::Tensor};
+use rayon::prelude::*;
 
 /// Utility functions for gradient operations
 pub struct GradientUtils;
@@ -13,44 +14,57 @@ pub struct GradientUtils;
 impl GradientUtils {
     /// Compute the L2 norm of gradients across all parameters
     pub fn compute_grad_norm(parameters: &[&Tensor]) -> Result<f64> {
-        let mut total_norm_squared = 0.0;
-        let mut has_gradients = false;
-
-        for param in parameters {
-            if let Some(grad) = param.grad() {
-                has_gradients = true;
-                // For now, we'll use a simplified norm calculation
-                // In a full implementation, we would compute the actual L2 norm of the gradient tensor
-                let grad_norm_squared = grad.numel() as f64; // Placeholder calculation
-                total_norm_squared += grad_norm_squared;
-            }
-        }
-
-        if !has_gradients {
-            return Ok(0.0);
-        }
-
-        Ok(total_norm_squared.sqrt())
+        let total_sq_norm: f64 = parameters
+            .par_iter()
+            .map(|param| {
+                if let Some(grad) = param.grad() {
+                    match grad.dtype() {
+                        crate::tensor::DataType::Float32 => grad
+                            .data()
+                            .as_f32_slice()
+                            .unwrap()
+                            .par_iter()
+                            .map(|&v| (v as f64) * (v as f64))
+                            .sum::<f64>(),
+                        crate::tensor::DataType::Float64 => grad
+                            .data()
+                            .as_f64_slice()
+                            .unwrap()
+                            .par_iter()
+                            .map(|&v| v * v)
+                            .sum::<f64>(),
+                        _ => 0.0
+                    }
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        Ok(total_sq_norm.sqrt())
     }
 
     /// Apply gradient clipping by norm to a set of parameters
     pub fn clip_grad_norm(parameters: &mut [&mut Tensor], max_norm: f64) -> Result<f64> {
-        let total_norm =
-            Self::compute_grad_norm(&parameters.iter().map(|p| p as &Tensor).collect::<Vec<_>>())?;
-
-        if total_norm <= max_norm {
-            return Ok(total_norm);
-        }
-
-        let _clip_coef = max_norm / total_norm;
-
-        // Apply clipping to all gradients
-        for param in parameters {
-            if param.grad().is_some() {
-                // In a full implementation, we would scale the gradient tensor by _clip_coef
-                // For now, we'll just mark that clipping occurred
-                // Clipping gradient for parameter by factor _clip_coef
-            }
+        let refs: Vec<&Tensor> = parameters.iter().map(|p| &**p).collect();
+        let total_norm = Self::compute_grad_norm(&refs)?;
+        if total_norm > max_norm {
+            let clip_coef = max_norm / (total_norm + 1e-6);
+            parameters.par_iter_mut().for_each(|param| {
+                if let Some(grad) = param.grad_mut() {
+                    match grad.dtype() {
+                        crate::tensor::DataType::Float32 => {
+                            let g = grad.data_mut().as_f32_slice_mut().unwrap();
+                            let coef = clip_coef as f32;
+                            g.par_iter_mut().for_each(|v| *v *= coef);
+                        }
+                        crate::tensor::DataType::Float64 => {
+                            let g = grad.data_mut().as_f64_slice_mut().unwrap();
+                            g.par_iter_mut().for_each(|v| *v *= clip_coef);
+                        }
+                        _ => {}
+                    }
+                }
+            });
         }
 
         Ok(total_norm)
@@ -59,16 +73,38 @@ impl GradientUtils {
     /// Apply gradient clipping by value to a set of parameters
     pub fn clip_grad_value(
         parameters: &mut [&mut Tensor],
-        _min_value: f64,
-        _max_value: f64,
+        min_value: f64,
+        max_value: f64,
     ) -> Result<()> {
-        for param in parameters {
-            if param.grad().is_some() {
-                // In a full implementation, we would clamp all gradient values
-                // For now, we'll just mark that clipping occurred
-                // Clipping gradient values for parameter to range [min_value, max_value]
+        parameters.par_iter_mut().for_each(|param| {
+            if let Some(grad) = param.grad_mut() {
+                match grad.dtype() {
+                    crate::tensor::DataType::Float32 => {
+                        let g = grad.data_mut().as_f32_slice_mut().unwrap();
+                        let min = min_value as f32;
+                        let max = max_value as f32;
+                        g.par_iter_mut().for_each(|v| {
+                            if *v < min {
+                                *v = min;
+                            } else if *v > max {
+                                *v = max;
+                            }
+                        });
+                    }
+                    crate::tensor::DataType::Float64 => {
+                        let g = grad.data_mut().as_f64_slice_mut().unwrap();
+                        g.par_iter_mut().for_each(|v| {
+                            if *v < min_value {
+                                *v = min_value;
+                            } else if *v > max_value {
+                                *v = max_value;
+                            }
+                        });
+                    }
+                    _ => {}
+                }
             }
-        }
+        });
 
         Ok(())
     }

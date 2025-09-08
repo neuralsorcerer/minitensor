@@ -6,7 +6,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::optim::{Adam, Optimizer, ParameterGroup, RMSprop, SGD};
+    use crate::optim::{
+        Adam, GradientClipping, GradientUtils, Optimizer, ParameterGroup, RMSprop, SGD,
+    };
     use crate::{
         device::Device,
         tensor::{DataType, Shape, Tensor},
@@ -111,16 +113,144 @@ mod tests {
     }
 
     #[test]
-    fn test_optimizer_step_not_implemented() {
-        let mut sgd = SGD::new(0.01, None, None);
-        let mut tensor = Tensor::zeros(
+    fn test_sgd_step_updates_parameters() {
+        let mut sgd = SGD::new(0.1, None, None);
+        let mut tensor = Tensor::ones(
             Shape::new(vec![2, 2]),
             DataType::Float32,
             Device::cpu(),
             true,
         );
+        let grad = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        let data = tensor.data().as_f32_slice().unwrap();
+        // 1 - 0.1*1 = 0.9
+        assert!(data.iter().all(|&v| (v - 0.9).abs() < 1e-6));
+    }
 
-        // Set a gradient
+    #[test]
+    fn test_adam_step_updates_parameters() {
+        let mut adam = Adam::new(0.1, Some(0.9), Some(0.999), Some(1e-8), None);
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let mut grad = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        grad.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 0.1);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        adam.step(&mut params).unwrap();
+        let data = tensor.data().as_f32_slice().unwrap();
+        // Expected ~0.9 as per Adam first update
+        assert!(data.iter().all(|&v| (v - 0.9).abs() < 1e-5));
+    }
+
+    #[test]
+    fn test_rmsprop_step_updates_parameters() {
+        let mut rmsprop = RMSprop::new(0.1, Some(0.99), Some(1e-8), None, None);
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let mut grad = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        grad.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 0.1);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        rmsprop.step(&mut params).unwrap();
+        let data = tensor.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|&v| v < 1e-4));
+    }
+
+    #[test]
+    fn test_sgd_nesterov_momentum_step() {
+        let mut sgd = SGD::new(0.1, Some(0.9), None).with_nesterov(true);
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let grad = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        let data = tensor.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|&v| (v - 0.81).abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_adam_amsgrad_effect() {
+        let mut adam_plain = Adam::new(0.1, Some(0.9), Some(0.999), Some(1e-8), None);
+        let mut adam_ams =
+            Adam::new(0.1, Some(0.9), Some(0.999), Some(1e-8), None).with_amsgrad(true);
+        let mut t1 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut t2 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        // First step with grad 0.1
+        let mut g = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        g.data_mut().as_f32_slice_mut().unwrap()[0] = 0.1;
+        t1.set_grad(Some(g.clone()));
+        t2.set_grad(Some(g));
+        let mut params1 = vec![&mut t1];
+        let mut params2 = vec![&mut t2];
+        adam_plain.step(&mut params1).unwrap();
+        adam_ams.step(&mut params2).unwrap();
+        // Second step with zero grad
+        let g_zero = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        t1.set_grad(Some(g_zero.clone()));
+        t2.set_grad(Some(g_zero));
+        let mut params1 = vec![&mut t1];
+        let mut params2 = vec![&mut t2];
+        adam_plain.step(&mut params1).unwrap();
+        adam_ams.step(&mut params2).unwrap();
+        let p_plain = t1.data().as_f32_slice().unwrap()[0];
+        let p_ams = t2.data().as_f32_slice().unwrap()[0];
+        assert!(p_ams > p_plain);
+    }
+
+    #[test]
+    fn test_rmsprop_centered_momentum_step() {
+        let mut rmsprop =
+            RMSprop::new(0.1, Some(0.99), Some(1e-8), None, Some(0.9)).with_centered(true);
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
         let grad = Tensor::ones(
             Shape::new(vec![2, 2]),
             DataType::Float32,
@@ -130,13 +260,79 @@ mod tests {
         tensor.set_grad(Some(grad));
 
         let mut params = vec![&mut tensor];
-        let result = sgd.step(&mut params);
+        rmsprop.step(&mut params).unwrap();
+        let data = tensor.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|&v| v < 1.0));
+    }
 
-        // Should return not implemented error for now
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("not yet implemented"));
-        }
+    #[test]
+    fn test_gradient_clipping_by_norm() {
+        let sgd = SGD::new(0.1, None, None)
+            .with_gradient_clipping(GradientClipping::ByNorm { max_norm: 1.0 });
+        let mut tensor = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        let mut grad = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        grad.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 3.0);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        // Apply clipping directly
+        sgd.clip_gradients(&mut params, &GradientClipping::ByNorm { max_norm: 1.0 })
+            .unwrap();
+        let norm = GradientUtils::compute_grad_norm(&[&tensor]).unwrap();
+        assert!(norm <= 1.0001);
+    }
+
+    #[test]
+    fn test_gradient_clipping_by_value() {
+        let sgd = SGD::new(0.1, None, None).with_gradient_clipping(GradientClipping::ByValue {
+            min_value: -1.0,
+            max_value: 1.0,
+        });
+        let mut tensor = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        let mut grad = Tensor::zeros(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let gslice = grad.data_mut().as_f32_slice_mut().unwrap();
+        gslice[0] = -2.0;
+        gslice[1] = 0.5;
+        gslice[2] = 2.0;
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.clip_gradients(
+            &mut params,
+            &GradientClipping::ByValue {
+                min_value: -1.0,
+                max_value: 1.0,
+            },
+        )
+        .unwrap();
+        let g = tensor.grad().unwrap().data().as_f32_slice().unwrap();
+        assert!((g[0] + 1.0).abs() < 1e-6);
+        assert!((g[1] - 0.5).abs() < 1e-6);
+        assert!((g[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sgd_step_float64() {
+        let mut sgd = SGD::new(0.1, None, None);
+        let mut tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float64,
+            Device::cpu(),
+            true,
+        );
+        let grad = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        let data = tensor.data().as_f64_slice().unwrap();
+        assert!(data.iter().all(|&v| (v - 0.9).abs() < 1e-6));
     }
 
     #[test]
@@ -186,5 +382,53 @@ mod tests {
 
         let rmsprop = RMSprop::new(0.01, None, None, None, None);
         assert_eq!(rmsprop.step_count(), 0);
+    }
+
+    #[test]
+    fn test_gradient_clipping_by_norm_no_change() {
+        let sgd = SGD::new(0.1, None, None);
+        let mut tensor = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.clip_gradients(&mut params, &GradientClipping::ByNorm { max_norm: 10.0 })
+            .unwrap();
+        let g = tensor.grad().unwrap().data().as_f32_slice().unwrap();
+        assert!((g[0] - 1.0).abs() < 1e-6 && (g[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sgd_weight_decay() {
+        let mut sgd = SGD::new(0.1, None, Some(0.5));
+        let mut tensor = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        let val = tensor.data().as_f32_slice().unwrap()[0];
+        assert!((val - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_adam_weight_decay() {
+        let mut adam = Adam::new(0.1, None, None, None, Some(0.5));
+        let mut tensor = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        adam.step(&mut params).unwrap();
+        let val = tensor.data().as_f32_slice().unwrap()[0];
+        assert!((val - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_step_without_gradient() {
+        let mut sgd = SGD::new(0.1, None, None);
+        let mut tensor = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut params = vec![&mut tensor];
+        sgd.step(&mut params).unwrap();
+        assert_eq!(sgd.step_count(), 1);
+        let val = tensor.data().as_f32_slice().unwrap()[0];
+        assert!((val - 1.0).abs() < 1e-6);
     }
 }

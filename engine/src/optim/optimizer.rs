@@ -5,7 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use rayon::prelude::*;
 use std::collections::HashMap;
+use super::utils::GradientUtils;
 
 /// Parameter group for managing different learning rates and settings
 #[derive(Debug, Clone)]
@@ -209,31 +211,28 @@ pub trait Optimizer: Send + Sync {
 
     /// Clip gradients by norm
     fn clip_grad_norm(&self, parameters: &mut [&mut Tensor], max_norm: f64) -> Result<()> {
-        // Calculate total norm of all gradients
-        let mut total_norm = 0.0;
-        let mut grad_count = 0;
-
-        for param in parameters.iter() {
-            if let Some(grad) = param.grad() {
-                // For now, we'll use a simple approximation
-                // In a full implementation, we'd compute the actual L2 norm
-                total_norm += grad.numel() as f64;
-                grad_count += 1;
-            }
-        }
-
-        if grad_count == 0 {
-            return Ok(());
-        }
-
-        // Approximate norm calculation (simplified)
-        total_norm = total_norm.sqrt();
+        // Collect immutable references for norm computation
+        let refs: Vec<&Tensor> = parameters.iter().map(|p| &**p).collect();
+        let total_norm = GradientUtils::compute_grad_norm(&refs)?;
 
         if total_norm > max_norm {
-            let _clip_coef = max_norm / total_norm;
-            // In a full implementation, we would scale all gradients by _clip_coef
-            // For now, we'll just log that clipping would occur
-            // Gradient clipping applied with coefficient: _clip_coef
+            let clip_coef = max_norm / (total_norm + 1e-6);
+            parameters.par_iter_mut().for_each(|param| {
+                if let Some(grad) = param.grad_mut() {
+                    match grad.dtype() {
+                        crate::tensor::DataType::Float32 => {
+                            let g = grad.data_mut().as_f32_slice_mut().unwrap();
+                            let coef = clip_coef as f32;
+                            g.par_iter_mut().for_each(|v| *v *= coef);
+                        }
+                        crate::tensor::DataType::Float64 => {
+                            let g = grad.data_mut().as_f64_slice_mut().unwrap();
+                            g.par_iter_mut().for_each(|v| *v *= clip_coef);
+                        }
+                        _ => {}
+                    }
+                }
+            });
         }
 
         Ok(())
@@ -242,13 +241,39 @@ pub trait Optimizer: Send + Sync {
     /// Clip gradients by value
     fn clip_grad_value(
         &self,
-        _parameters: &mut [&mut Tensor],
-        _min_value: f64,
-        _max_value: f64,
+        parameters: &mut [&mut Tensor],
+        min_value: f64,
+        max_value: f64,
     ) -> Result<()> {
-        // In a full implementation, we would clamp all gradient values
-        // For now, we'll just log that clipping would occur
-        // Gradient value clipping applied
+        parameters.par_iter_mut().for_each(|param| {
+            if let Some(grad) = param.grad_mut() {
+                match grad.dtype() {
+                    crate::tensor::DataType::Float32 => {
+                        let g = grad.data_mut().as_f32_slice_mut().unwrap();
+                        let min = min_value as f32;
+                        let max = max_value as f32;
+                        g.par_iter_mut().for_each(|v| {
+                            if *v < min {
+                                *v = min;
+                            } else if *v > max {
+                                *v = max;
+                            }
+                        });
+                    }
+                    crate::tensor::DataType::Float64 => {
+                        let g = grad.data_mut().as_f64_slice_mut().unwrap();
+                        g.par_iter_mut().for_each(|v| {
+                            if *v < min_value {
+                                *v = min_value;
+                            } else if *v > max_value {
+                                *v = max_value;
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
         Ok(())
     }
 
