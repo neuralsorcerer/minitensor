@@ -245,7 +245,15 @@ mod tests {
         backend.deallocate(std::ptr::null_mut(), 128).unwrap();
     }
 
-    nter should be reused from pool
+    #[test]
+    fn test_memory_pool_reuse() {
+        let backend = CpuBackend::initialize().unwrap();
+
+        let ptr1 = backend.allocate(128).unwrap();
+        backend.deallocate(ptr1, 128).unwrap();
+        let ptr2 = backend.allocate(128).unwrap();
+
+        // Pointer should be reused from pool
         assert_eq!(ptr1, ptr2);
 
         backend.deallocate(ptr2, 128).unwrap();
