@@ -20,6 +20,7 @@ pub enum DataType {
 
 impl DataType {
     /// Get the size in bytes of this data type
+    #[inline(always)]
     pub fn size_bytes(&self) -> usize {
         match self {
             DataType::Float32 => 4,
@@ -31,26 +32,31 @@ impl DataType {
     }
 
     /// Alias for size_bytes for compatibility
+    #[inline(always)]
     pub fn size_in_bytes(&self) -> usize {
         self.size_bytes()
     }
 
     /// Check if this is a floating point type
+    #[inline(always)]
     pub fn is_float(&self) -> bool {
         matches!(self, DataType::Float32 | DataType::Float64)
     }
 
     /// Check if this is an integer type
+    #[inline(always)]
     pub fn is_int(&self) -> bool {
         matches!(self, DataType::Int32 | DataType::Int64)
     }
 
     /// Check if this is a boolean type
+    #[inline(always)]
     pub fn is_bool(&self) -> bool {
         matches!(self, DataType::Bool)
     }
 
     /// Get the name of this data type as a string
+    #[inline(always)]
     pub fn name(&self) -> &'static str {
         match self {
             DataType::Float32 => "float32",

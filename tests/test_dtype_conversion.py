@@ -37,3 +37,35 @@ def test_astype_bool_from_float():
     y = x.astype("bool")
     assert y.dtype == "bool"
     assert np.array_equal(y.numpy(), np.array([True, False, True], dtype=bool))
+
+
+def test_int64_to_float32():
+    x = Tensor([1, -2, 3], dtype="int64")
+    y = x.astype("float32")
+    assert y.dtype == "float32"
+    assert np.array_equal(y.numpy(), np.array([1.0, -2.0, 3.0], dtype=np.float32))
+
+
+def test_bool_to_int64_and_float():
+    x = Tensor([True, False, True], dtype="bool")
+    y = x.astype("int64")
+    z = x.astype("float64")
+    assert y.dtype == "int64"
+    assert z.dtype == "float64"
+    assert np.array_equal(y.numpy(), np.array([1, 0, 1], dtype=np.int64))
+    assert np.array_equal(z.numpy(), np.array([1.0, 0.0, 1.0], dtype=np.float64))
+
+
+def test_empty_tensor_conversion():
+    x = Tensor([], dtype="float32")
+    y = x.astype("int32")
+    assert y.dtype == "int32"
+    assert y.numpy().size == 0
+
+
+def test_large_astype_parallel():
+    data = np.arange(2048, dtype=np.float32)
+    x = Tensor(data, dtype="float32")
+    y = x.astype("int32")
+    assert y.dtype == "int32"
+    assert np.array_equal(y.numpy(), data.astype(np.int32))

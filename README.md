@@ -33,12 +33,6 @@ A lightweight, high-performance tensor operations library inspired by <a href="h
 
 ### Installation
 
-**From PyPI:** *(Coming Soon)*
-
-```bash
-pip install minitensor
-```
-
 **From Source:**
 
 ```bash

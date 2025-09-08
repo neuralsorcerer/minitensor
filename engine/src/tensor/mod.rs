@@ -18,6 +18,7 @@ use crate::{
     error::{MinitensorError, Result},
     operations::arithmetic::add,
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Core tensor structure for minitensor
@@ -92,87 +93,104 @@ impl Tensor {
     }
 
     /// Get the tensor's shape
+    #[inline(always)]
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
     /// Get the tensor's strides
+    #[inline(always)]
     pub fn strides(&self) -> &Strides {
         &self.strides
     }
 
     /// Get the tensor's data type
+    #[inline(always)]
     pub fn dtype(&self) -> DataType {
         self.dtype
     }
 
     /// Get the tensor's device
+    #[inline(always)]
     pub fn device(&self) -> Device {
         self.device
     }
 
     /// Check if this tensor requires gradients
+    #[inline(always)]
     pub fn requires_grad(&self) -> bool {
         self.requires_grad
     }
 
     /// Get the tensor's unique ID
+    #[inline(always)]
     pub fn id(&self) -> TensorId {
         self.tensor_id
     }
 
     /// Get the number of dimensions
+    #[inline(always)]
     pub fn ndim(&self) -> usize {
         self.shape.ndim()
     }
 
     /// Get the total number of elements
+    #[inline(always)]
     pub fn numel(&self) -> usize {
         self.shape.numel()
     }
 
     /// Get the size of a specific dimension
+    #[inline(always)]
     pub fn size(&self, dim: usize) -> Result<usize> {
         self.shape.size(dim)
     }
 
     /// Check if the tensor is contiguous in memory
+    #[inline(always)]
     pub fn is_contiguous(&self) -> bool {
         self.strides.is_contiguous(&self.shape)
     }
 
     /// Get a reference to the tensor data
+    #[inline(always)]
     pub fn data(&self) -> &Arc<TensorData> {
         &self.data
     }
 
     /// Set the gradient function for this tensor
+    #[inline(always)]
     pub fn set_grad_fn(&mut self, grad_fn: Option<Arc<dyn GradientFunction>>) {
         self.grad_fn = grad_fn;
     }
 
     /// Get the gradient function for this tensor
+    #[inline(always)]
     pub fn grad_fn(&self) -> Option<&Arc<dyn GradientFunction>> {
         self.grad_fn.as_ref()
     }
 
     /// Enable gradient computation for this tensor
+    #[inline(always)]
     pub fn requires_grad_(mut self, requires_grad: bool) -> Self {
         self.requires_grad = requires_grad;
         self
     }
 
     /// Get the gradient for this tensor
+    #[inline(always)]
     pub fn grad(&self) -> Option<&Arc<Tensor>> {
         self.grad.as_ref()
     }
 
     /// Set the gradient for this tensor
+    #[inline(always)]
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
         self.grad = grad.map(Arc::new);
     }
 
     /// Accumulate gradient for this tensor
+    #[inline]
     pub fn accumulate_grad(&mut self, grad: Tensor) -> Result<()> {
         match &self.grad {
             Some(existing) => {
@@ -187,11 +205,13 @@ impl Tensor {
     }
 
     /// Clear the gradient for this tensor
+    #[inline(always)]
     pub fn zero_grad(&mut self) {
         self.grad = None;
     }
 
     /// Check if this tensor has a gradient
+    #[inline(always)]
     pub fn has_grad(&self) -> bool {
         self.grad.is_some()
     }
@@ -452,91 +472,243 @@ impl Tensor {
         let numel = self.numel();
         let mut new_data = TensorData::zeros_on_device(numel, dtype, self.device);
 
-        // Convert all values through f64 as an intermediate
-        let values: Vec<f64> = match self.dtype {
-            DataType::Float32 => {
+        // Helper macro to cast between slices using parallel iteration for large buffers
+        macro_rules! cast {
+            ($src:expr, $dst:expr, $conv:expr) => {{
+                if numel >= 1024 {
+                    $dst.par_iter_mut().zip($src.par_iter()).for_each(|(d, s)| {
+                        *d = $conv(*s);
+                    });
+                } else {
+                    for (d, &s) in $dst.iter_mut().zip($src.iter()) {
+                        *d = $conv(s);
+                    }
+                }
+            }};
+        }
+
+        match (self.dtype, dtype) {
+            (DataType::Float32, DataType::Float64) => {
                 let src = self.data.as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f32 slice from tensor data")
                 })?;
-                src.iter().map(|&v| v as f64).collect()
-            }
-            DataType::Float64 => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
-                })?;
-                src.to_vec()
-            }
-            DataType::Int32 => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
-                })?;
-                src.iter().map(|&v| v as f64).collect()
-            }
-            DataType::Int64 => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
-                })?;
-                src.iter().map(|&v| v as f64).collect()
-            }
-            DataType::Bool => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
-                })?;
-                src.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect()
-            }
-        };
-
-        match dtype {
-            DataType::Float32 => {
-                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from tensor data",
-                    )
-                })?;
-                for (d, v) in dst.iter_mut().zip(values.iter()) {
-                    *d = *v as f32;
-                }
-            }
-            DataType::Float64 => {
                 let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error(
                         "Failed to get mutable f64 slice from tensor data",
                     )
                 })?;
-                for (d, v) in dst.iter_mut().zip(values.iter()) {
-                    *d = *v;
-                }
+                cast!(src, dst, |v: f32| v as f64);
             }
-            DataType::Int32 => {
+            (DataType::Float32, DataType::Int32) => {
+                let src = self.data.as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
+                })?;
                 let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error(
                         "Failed to get mutable i32 slice from tensor data",
                     )
                 })?;
-                for (d, v) in dst.iter_mut().zip(values.iter()) {
-                    *d = *v as i32;
-                }
+                cast!(src, dst, |v: f32| v as i32);
             }
-            DataType::Int64 => {
+            (DataType::Float32, DataType::Int64) => {
+                let src = self.data.as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
+                })?;
                 let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error(
                         "Failed to get mutable i64 slice from tensor data",
                     )
                 })?;
-                for (d, v) in dst.iter_mut().zip(values.iter()) {
-                    *d = *v as i64;
-                }
+                cast!(src, dst, |v: f32| v as i64);
             }
-            DataType::Bool => {
+            (DataType::Float32, DataType::Bool) => {
+                let src = self.data.as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
+                })?;
                 let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error(
                         "Failed to get mutable bool slice from tensor data",
                     )
                 })?;
-                for (d, v) in dst.iter_mut().zip(values.iter()) {
-                    *d = *v != 0.0;
-                }
+                cast!(src, dst, |v: f32| v != 0.0);
             }
+            (DataType::Float64, DataType::Float32) => {
+                let src = self.data.as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
+                })?;
+                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: f64| v as f32);
+            }
+            (DataType::Float64, DataType::Int32) => {
+                let src = self.data.as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
+                })?;
+                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: f64| v as i32);
+            }
+            (DataType::Float64, DataType::Int64) => {
+                let src = self.data.as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
+                })?;
+                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: f64| v as i64);
+            }
+            (DataType::Float64, DataType::Bool) => {
+                let src = self.data.as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
+                })?;
+                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable bool slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: f64| v != 0.0);
+            }
+            (DataType::Int32, DataType::Float32) => {
+                let src = self.data.as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
+                })?;
+                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i32| v as f32);
+            }
+            (DataType::Int32, DataType::Float64) => {
+                let src = self.data.as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
+                })?;
+                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i32| v as f64);
+            }
+            (DataType::Int32, DataType::Int64) => {
+                let src = self.data.as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
+                })?;
+                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i32| v as i64);
+            }
+            (DataType::Int32, DataType::Bool) => {
+                let src = self.data.as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
+                })?;
+                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable bool slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i32| v != 0);
+            }
+            (DataType::Int64, DataType::Float32) => {
+                let src = self.data.as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
+                })?;
+                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i64| v as f32);
+            }
+            (DataType::Int64, DataType::Float64) => {
+                let src = self.data.as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
+                })?;
+                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i64| v as f64);
+            }
+            (DataType::Int64, DataType::Int32) => {
+                let src = self.data.as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
+                })?;
+                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i64| v as i32);
+            }
+            (DataType::Int64, DataType::Bool) => {
+                let src = self.data.as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
+                })?;
+                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable bool slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: i64| v != 0);
+            }
+            (DataType::Bool, DataType::Float32) => {
+                let src = self.data.as_bool_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
+                })?;
+                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: bool| if v { 1.0 } else { 0.0 });
+            }
+            (DataType::Bool, DataType::Float64) => {
+                let src = self.data.as_bool_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
+                })?;
+                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: bool| if v { 1.0 } else { 0.0 });
+            }
+            (DataType::Bool, DataType::Int32) => {
+                let src = self.data.as_bool_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
+                })?;
+                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i32 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: bool| if v { 1 } else { 0 });
+            }
+            (DataType::Bool, DataType::Int64) => {
+                let src = self.data.as_bool_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
+                })?;
+                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i64 slice from tensor data",
+                    )
+                })?;
+                cast!(src, dst, |v: bool| if v { 1 } else { 0 });
+            }
+            _ => unreachable!("Unhandled dtype conversion"),
         }
 
         Ok(Tensor::new(
@@ -563,15 +735,26 @@ impl Tensor {
             return false;
         }
 
+        let numel = self.numel();
         match self.dtype {
             DataType::Float32 => {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_f32_slice(), other.data.as_f32_slice())
                 {
-                    self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
-                        let diff = (a - b).abs();
-                        diff <= atol as f32 + rtol as f32 * b.abs()
-                    })
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| {
+                                let diff = (a - b).abs();
+                                diff <= atol as f32 + rtol as f32 * b.abs()
+                            })
+                    } else {
+                        self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
+                            let diff = (a - b).abs();
+                            diff <= atol as f32 + rtol as f32 * b.abs()
+                        })
+                    }
                 } else {
                     false
                 }
@@ -580,10 +763,20 @@ impl Tensor {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_f64_slice(), other.data.as_f64_slice())
                 {
-                    self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
-                        let diff = (a - b).abs();
-                        diff <= atol + rtol * b.abs()
-                    })
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| {
+                                let diff = (a - b).abs();
+                                diff <= atol + rtol * b.abs()
+                            })
+                    } else {
+                        self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
+                            let diff = (a - b).abs();
+                            diff <= atol + rtol * b.abs()
+                        })
+                    }
                 } else {
                     false
                 }
@@ -598,12 +791,20 @@ impl Tensor {
             return false;
         }
 
+        let numel = self.numel();
         match self.dtype {
             DataType::Float32 => {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_f32_slice(), other.data.as_f32_slice())
                 {
-                    self_data == other_data
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| a == b)
+                    } else {
+                        self_data == other_data
+                    }
                 } else {
                     false
                 }
@@ -612,7 +813,14 @@ impl Tensor {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_f64_slice(), other.data.as_f64_slice())
                 {
-                    self_data == other_data
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| a == b)
+                    } else {
+                        self_data == other_data
+                    }
                 } else {
                     false
                 }
@@ -621,7 +829,14 @@ impl Tensor {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_i32_slice(), other.data.as_i32_slice())
                 {
-                    self_data == other_data
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| a == b)
+                    } else {
+                        self_data == other_data
+                    }
                 } else {
                     false
                 }
@@ -630,7 +845,14 @@ impl Tensor {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_i64_slice(), other.data.as_i64_slice())
                 {
-                    self_data == other_data
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| a == b)
+                    } else {
+                        self_data == other_data
+                    }
                 } else {
                     false
                 }
@@ -639,7 +861,14 @@ impl Tensor {
                 if let (Some(self_data), Some(other_data)) =
                     (self.data.as_bool_slice(), other.data.as_bool_slice())
                 {
-                    self_data == other_data
+                    if numel >= 1024 {
+                        self_data
+                            .par_iter()
+                            .zip(other_data.par_iter())
+                            .all(|(&a, &b)| a == b)
+                    } else {
+                        self_data == other_data
+                    }
                 } else {
                     false
                 }
@@ -1608,6 +1837,29 @@ mod tests {
         let casted_int_data = casted_int.data().as_i32_slice().unwrap();
         assert_eq!(casted_int_data, &[1, -2]);
         assert_eq!(casted_int.shape(), &shape);
+
+        let casted_bool = tensor.astype(DataType::Bool).unwrap();
+        let casted_bool_data = casted_bool.data().as_bool_slice().unwrap();
+        assert_eq!(casted_bool_data, &[true, true]);
+    }
+
+    #[test]
+    fn test_astype_from_bool() {
+        let data = vec![true, false, true];
+        let shape = Shape::new(vec![3]);
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_bool(data.clone(), Device::cpu())),
+            shape.clone(),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+
+        let to_float = tensor.astype(DataType::Float32).unwrap();
+        assert_eq!(to_float.data().as_f32_slice().unwrap(), &[1.0, 0.0, 1.0]);
+
+        let to_int = tensor.astype(DataType::Int64).unwrap();
+        assert_eq!(to_int.data().as_i64_slice().unwrap(), &[1, 0, 1]);
     }
 
     #[test]
@@ -1675,5 +1927,51 @@ mod tests {
         let transposed = tensor.transpose(1, 1).unwrap();
         assert_eq!(transposed.data().as_f32_slice().unwrap(), &[1.0; 4]);
         assert_eq!(transposed.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_astype_multiple_conversions() {
+        let base = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.5, -2.0, 0.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let as_i32 = base.astype(DataType::Int32).unwrap();
+        assert_eq!(as_i32.data().as_i32_slice().unwrap(), &[1, -2, 0]);
+
+        let as_bool = as_i32.astype(DataType::Bool).unwrap();
+        assert_eq!(
+            as_bool.data().as_bool_slice().unwrap(),
+            &[true, true, false]
+        );
+
+        let as_f64 = as_bool.astype(DataType::Float64).unwrap();
+        assert_eq!(as_f64.data().as_f64_slice().unwrap(), &[1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_astype_parallel_large_buffer() {
+        let size = 2048;
+        let data: Vec<f32> = (0..size).map(|v| v as f32).collect();
+        let tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
+            Shape::new(vec![size]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let converted = tensor.astype(DataType::Int32).unwrap();
+        let expected: Vec<i32> = (0..size).map(|v| v as i32).collect();
+        assert_eq!(
+            converted.data().as_i32_slice().unwrap(),
+            expected.as_slice()
+        );
     }
 }

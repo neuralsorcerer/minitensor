@@ -7,6 +7,7 @@
 use crate::{
     device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
 };
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Tensor data storage with reference counting
@@ -59,38 +60,93 @@ impl TensorData {
 
     /// Create new tensor data with ones on specified device
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
-        let mut data = Self::zeros_on_device(numel, dtype, device);
+        if device.is_cpu() {
+            let size_bytes = numel * dtype.size_bytes();
+            let mut vec = Vec::with_capacity(size_bytes);
+            unsafe { vec.set_len(size_bytes); }
+            let mut data = Self {
+                buffer: TensorBuffer::Owned(vec),
+                layout: MemoryLayout {
+                    dtype,
+                    numel,
+                    is_contiguous: true,
+                    device,
+                },
+                ref_count: AtomicUsize::new(1),
+            };
 
-        // Fill with ones based on data type
-        match dtype {
-            DataType::Float32 => {
-                if let Some(slice) = data.as_f32_slice_mut() {
-                    slice.fill(1.0);
+            // Fill with ones in parallel for large buffers
+            match dtype {
+                DataType::Float32 => {
+                    if let Some(slice) = data.as_f32_slice_mut() {
+                        Self::fill_slice(slice, 1.0);
+                    }
+                }
+                DataType::Float64 => {
+                    if let Some(slice) = data.as_f64_slice_mut() {
+                        Self::fill_slice(slice, 1.0);
+                    }
+                }
+                DataType::Int32 => {
+                    if let Some(slice) = data.as_i32_slice_mut() {
+                        Self::fill_slice(slice, 1);
+                    }
+                }
+                DataType::Int64 => {
+                    if let Some(slice) = data.as_i64_slice_mut() {
+                        Self::fill_slice(slice, 1);
+                    }
+                }
+                DataType::Bool => {
+                    if let Some(slice) = data.as_bool_slice_mut() {
+                        Self::fill_slice(slice, true);
+                    }
                 }
             }
-            DataType::Float64 => {
-                if let Some(slice) = data.as_f64_slice_mut() {
-                    slice.fill(1.0);
+
+            data
+        } else {
+            // For non-CPU devices, fall back to zero initialization
+            // and attempt to fill if the allocation falls back to CPU.
+            let mut data = Self::zeros_on_device(numel, dtype, device);
+            match dtype {
+                DataType::Float32 => {
+                    if let Some(slice) = data.as_f32_slice_mut() {
+                        slice.fill(1.0);
+                    }
+                }
+                DataType::Float64 => {
+                    if let Some(slice) = data.as_f64_slice_mut() {
+                        slice.fill(1.0);
+                    }
+                }
+                DataType::Int32 => {
+                    if let Some(slice) = data.as_i32_slice_mut() {
+                        slice.fill(1);
+                    }
+                }
+                DataType::Int64 => {
+                    if let Some(slice) = data.as_i64_slice_mut() {
+                        slice.fill(1);
+                    }
+                }
+                DataType::Bool => {
+                    if let Some(slice) = data.as_bool_slice_mut() {
+                        slice.fill(true);
+                    }
                 }
             }
-            DataType::Int32 => {
-                if let Some(slice) = data.as_i32_slice_mut() {
-                    slice.fill(1);
-                }
-            }
-            DataType::Int64 => {
-                if let Some(slice) = data.as_i64_slice_mut() {
-                    slice.fill(1);
-                }
-            }
-            DataType::Bool => {
-                if let Some(slice) = data.as_bool_slice_mut() {
-                    slice.fill(true);
-                }
-            }
+            data
         }
+    }
 
-        data
+    #[inline]
+    fn fill_slice<T: Copy + Send + Sync>(slice: &mut [T], value: T) {
+        if slice.len() >= 1024 {
+            slice.par_iter_mut().for_each(|x| *x = value);
+        } else {
+            slice.fill(value);
+        }
     }
 
     /// Create new tensor data with zeros on specified device
@@ -98,8 +154,15 @@ impl TensorData {
         let size_bytes = numel * dtype.size_bytes();
 
         let buffer = if device.is_cpu() {
-            // Use Vec for CPU
-            TensorBuffer::Owned(vec![0u8; size_bytes])
+            // Use an uninitialized Vec and explicitly zero it. This avoids the
+            // double-initialization that `vec![0u8; size_bytes]` may perform on
+            // some platforms and lets the optimizer emit a single `memset`.
+            let mut vec = Vec::with_capacity(size_bytes);
+            unsafe {
+                vec.set_len(size_bytes);
+                std::ptr::write_bytes(vec.as_mut_ptr(), 0, size_bytes);
+            }
+            TensorBuffer::Owned(vec)
         } else {
             // Use custom allocator for GPU
             match global_allocate(size_bytes, device) {
@@ -116,7 +179,12 @@ impl TensorData {
                 }
                 Err(_) => {
                     // Fallback to CPU if GPU allocation fails
-                    TensorBuffer::Owned(vec![0u8; size_bytes])
+                    let mut vec = Vec::with_capacity(size_bytes);
+                    unsafe {
+                        vec.set_len(size_bytes);
+                        std::ptr::write_bytes(vec.as_mut_ptr(), 0, size_bytes);
+                    }
+                    TensorBuffer::Owned(vec)
                 }
             }
         };
@@ -154,10 +222,23 @@ impl TensorData {
 
         // Convert typed data to bytes
         let buffer = if device.is_cpu() {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes).to_vec()
-            };
-            TensorBuffer::Owned(bytes)
+            // For CPU memory we can often avoid an extra allocation by
+            // reinterpreting the `Vec<T>` as a `Vec<u8>`. This is safe for all
+            // `T` except `bool`, which has a special bit-level representation in
+            // Rust. Handle that case explicitly.
+            if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
+                // SAFETY: We have confirmed T == bool, so this transmute is valid
+                let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
+                let bytes: Vec<u8> = bools.into_iter().map(|b| b as u8).collect();
+                TensorBuffer::Owned(bytes)
+            } else {
+                use std::mem::{size_of, ManuallyDrop};
+                let mut data = ManuallyDrop::new(data);
+                let ptr = data.as_mut_ptr() as *mut u8;
+                let len = numel * size_of::<T>();
+                let capacity = data.capacity() * size_of::<T>();
+                unsafe { TensorBuffer::Owned(Vec::from_raw_parts(ptr, len, capacity)) }
+            }
         } else {
             // For GPU, allocate and copy
             match global_allocate(size_bytes, device) {
@@ -173,10 +254,17 @@ impl TensorData {
                 }
                 Err(_) => {
                     // Fallback to CPU
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes).to_vec()
-                    };
-                    TensorBuffer::Owned(bytes)
+                    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
+                        let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
+                        let bytes: Vec<u8> = bools.into_iter().map(|b| b as u8).collect();
+                        TensorBuffer::Owned(bytes)
+                    } else {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes)
+                                .to_vec()
+                        };
+                        TensorBuffer::Owned(bytes)
+                    }
                 }
             }
         };
@@ -239,6 +327,7 @@ impl TensorData {
     }
 
     /// Get the raw buffer as a slice (CPU only)
+    #[inline(always)]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match &self.buffer {
             TensorBuffer::Owned(vec) => Some(vec.as_slice()),
@@ -253,6 +342,7 @@ impl TensorData {
     }
 
     /// Get the raw buffer as a mutable slice (CPU only)
+    #[inline(always)]
     pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
         match &mut self.buffer {
             TensorBuffer::Owned(vec) => Some(vec.as_mut_slice()),
@@ -267,6 +357,7 @@ impl TensorData {
     }
 
     /// Get the raw pointer (for GPU operations)
+    #[inline(always)]
     pub fn as_ptr(&self) -> *const u8 {
         match &self.buffer {
             TensorBuffer::Owned(vec) => vec.as_ptr(),
@@ -275,6 +366,7 @@ impl TensorData {
     }
 
     /// Get the mutable raw pointer (for GPU operations)
+    #[inline(always)]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.buffer {
             TensorBuffer::Owned(vec) => vec.as_mut_ptr(),
@@ -283,31 +375,37 @@ impl TensorData {
     }
 
     /// Get the memory layout
+    #[inline(always)]
     pub fn layout(&self) -> &MemoryLayout {
         &self.layout
     }
 
     /// Get the data type
+    #[inline(always)]
     pub fn dtype(&self) -> DataType {
         self.layout.dtype
     }
 
     /// Get the number of elements
+    #[inline(always)]
     pub fn numel(&self) -> usize {
         self.layout.numel
     }
 
     /// Get the number of elements (alias for numel)
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.layout.numel
     }
 
     /// Check if there are no elements
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.layout.numel == 0
     }
 
     /// Get the size in bytes
+    #[inline(always)]
     pub fn size_bytes(&self) -> usize {
         match &self.buffer {
             TensorBuffer::Owned(vec) => vec.len(),
@@ -316,26 +414,31 @@ impl TensorData {
     }
 
     /// Get the device where data is stored
+    #[inline(always)]
     pub fn device(&self) -> Device {
         self.layout.device
     }
 
     /// Check if the data is contiguous
+    #[inline(always)]
     pub fn is_contiguous(&self) -> bool {
         self.layout.is_contiguous
     }
 
     /// Increment reference count
+    #[inline(always)]
     pub fn inc_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Decrement reference count and return new count
+    #[inline(always)]
     pub fn dec_ref(&self) -> usize {
         self.ref_count.fetch_sub(1, Ordering::Relaxed) - 1
     }
 
     /// Get current reference count
+    #[inline(always)]
     pub fn ref_count(&self) -> usize {
         self.ref_count.load(Ordering::Relaxed)
     }
@@ -343,21 +446,45 @@ impl TensorData {
     /// Create a copy of the tensor data
     pub fn clone_data(&self) -> Self {
         let new_buffer = match &self.buffer {
-            TensorBuffer::Owned(vec) => TensorBuffer::Owned(vec.clone()),
+            TensorBuffer::Owned(vec) => {
+                let mut out = Vec::with_capacity(vec.len());
+                unsafe {
+                    out.set_len(vec.len());
+                    std::ptr::copy_nonoverlapping(vec.as_ptr(), out.as_mut_ptr(), vec.len());
+                }
+                TensorBuffer::Owned(out)
+            }
             TensorBuffer::Raw { ptr, size, device } => {
-                // For GPU memory, we need to allocate new memory and copy
                 if device.is_cpu() {
-                    let slice = unsafe { std::slice::from_raw_parts(*ptr, *size) };
-                    TensorBuffer::Owned(slice.to_vec())
+                    // Raw CPU pointer: copy into a Vec for safety
+                    let mut out = Vec::with_capacity(*size);
+                    unsafe {
+                        out.set_len(*size);
+                        std::ptr::copy_nonoverlapping(*ptr, out.as_mut_ptr(), *size);
+                    }
+                    TensorBuffer::Owned(out)
                 } else {
-                    // For GPU, allocate new memory and copy (simplified)
+                    // For GPU, allocate new memory and copy
                     match global_allocate(*size, *device) {
-                        Ok(new_ptr) => TensorBuffer::Raw {
-                            ptr: new_ptr,
-                            size: *size,
-                            device: *device,
-                        },
-                        Err(_) => TensorBuffer::Owned(vec![0u8; *size]),
+                        Ok(new_ptr) => {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(*ptr, new_ptr, *size);
+                            }
+                            TensorBuffer::Raw {
+                                ptr: new_ptr,
+                                size: *size,
+                                device: *device,
+                            }
+                        }
+                        Err(_) => {
+                            // Fallback to CPU buffer to avoid allocation failure
+                            let mut out = Vec::with_capacity(*size);
+                            unsafe {
+                                out.set_len(*size);
+                                std::ptr::write_bytes(out.as_mut_ptr(), 0, *size);
+                            }
+                            TensorBuffer::Owned(out)
+                        }
                     }
                 }
             }
@@ -371,6 +498,7 @@ impl TensorData {
     }
 
     /// Get typed slice for f32 data (CPU only)
+    #[inline(always)]
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         if self.layout.dtype != DataType::Float32 || !self.layout.device.is_cpu() {
             return None;
@@ -381,6 +509,7 @@ impl TensorData {
     }
 
     /// Get mutable typed slice for f32 data (CPU only)
+    #[inline(always)]
     pub fn as_f32_slice_mut(&mut self) -> Option<&mut [f32]> {
         if self.layout.dtype != DataType::Float32 || !self.layout.device.is_cpu() {
             return None;
@@ -391,6 +520,7 @@ impl TensorData {
     }
 
     /// Get typed slice for f64 data (CPU only)
+    #[inline(always)]
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
         if self.layout.dtype != DataType::Float64 || !self.layout.device.is_cpu() {
             return None;
@@ -401,6 +531,7 @@ impl TensorData {
     }
 
     /// Get mutable typed slice for f64 data (CPU only)
+    #[inline(always)]
     pub fn as_f64_slice_mut(&mut self) -> Option<&mut [f64]> {
         if self.layout.dtype != DataType::Float64 || !self.layout.device.is_cpu() {
             return None;
@@ -411,6 +542,7 @@ impl TensorData {
     }
 
     /// Get typed slice for i32 data (CPU only)
+    #[inline(always)]
     pub fn as_i32_slice(&self) -> Option<&[i32]> {
         if self.layout.dtype != DataType::Int32 || !self.layout.device.is_cpu() {
             return None;
@@ -421,6 +553,7 @@ impl TensorData {
     }
 
     /// Get mutable typed slice for i32 data (CPU only)
+    #[inline(always)]
     pub fn as_i32_slice_mut(&mut self) -> Option<&mut [i32]> {
         if self.layout.dtype != DataType::Int32 || !self.layout.device.is_cpu() {
             return None;
@@ -431,6 +564,7 @@ impl TensorData {
     }
 
     /// Get typed slice for i64 data (CPU only)
+    #[inline(always)]
     pub fn as_i64_slice(&self) -> Option<&[i64]> {
         if self.layout.dtype != DataType::Int64 || !self.layout.device.is_cpu() {
             return None;
@@ -441,6 +575,7 @@ impl TensorData {
     }
 
     /// Get mutable typed slice for i64 data (CPU only)
+    #[inline(always)]
     pub fn as_i64_slice_mut(&mut self) -> Option<&mut [i64]> {
         if self.layout.dtype != DataType::Int64 || !self.layout.device.is_cpu() {
             return None;
@@ -451,6 +586,7 @@ impl TensorData {
     }
 
     /// Get typed slice for bool data (CPU only)
+    #[inline(always)]
     pub fn as_bool_slice(&self) -> Option<&[bool]> {
         if self.layout.dtype != DataType::Bool || !self.layout.device.is_cpu() {
             return None;
@@ -461,6 +597,7 @@ impl TensorData {
     }
 
     /// Get mutable typed slice for bool data (CPU only)
+    #[inline(always)]
     pub fn as_bool_slice_mut(&mut self) -> Option<&mut [bool]> {
         if self.layout.dtype != DataType::Bool || !self.layout.device.is_cpu() {
             return None;
@@ -602,6 +739,18 @@ mod tests {
         assert_eq!(data.as_f32_slice().unwrap(), values.as_slice());
         let bytes = data.as_bytes().unwrap();
         assert_eq!(bytes.len(), 3 * 4);
+    }
+
+    #[test]
+    fn test_from_vec_various_types() {
+        let data_i32 = TensorData::from_vec_i32(vec![1, -2, 3], Device::cpu());
+        assert_eq!(data_i32.as_i32_slice().unwrap(), &[1, -2, 3]);
+
+        let data_i64 = TensorData::from_vec_i64(vec![1, -2, 3], Device::cpu());
+        assert_eq!(data_i64.as_i64_slice().unwrap(), &[1, -2, 3]);
+
+        let data_bool = TensorData::from_vec_bool(vec![true, false, true], Device::cpu());
+        assert_eq!(data_bool.as_bool_slice().unwrap(), &[true, false, true]);
     }
 
     #[test]

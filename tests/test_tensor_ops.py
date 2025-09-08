@@ -106,3 +106,31 @@ def test_exp_extreme_values():
     result = r.numpy()
     assert np.isinf(result[0])
     assert result[1] == 0.0
+
+
+def test_large_ones_initialization():
+    t = mt.Tensor.ones([5000])
+    arr = t.numpy()
+    assert arr.shape == (5000,)
+    assert np.all(arr == 1.0)
+
+
+def test_allclose_parallel():
+    a = mt.Tensor.ones([5000])
+    b = a + mt.Tensor.ones([5000]) * 1e-6
+    assert a.allclose(b, rtol=1e-5, atol=1e-5)
+    c = a + mt.Tensor.ones([5000]) * 1e-2
+    assert not a.allclose(c, rtol=1e-5, atol=1e-5)
+
+
+def test_array_equal_parallel():
+    a = mt.Tensor.ones([5000])
+    b = a.clone()
+    assert a.array_equal(b)
+    c = mt.Tensor.zeros([5000])
+    assert not a.array_equal(c)
+
+
+def test_empty_ones_tensor():
+    t = mt.Tensor.ones([0])
+    assert t.numpy().size == 0

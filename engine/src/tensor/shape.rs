@@ -26,11 +26,13 @@ impl Shape {
     }
 
     /// Get the number of dimensions
+    #[inline(always)]
     pub fn ndim(&self) -> usize {
         self.dims.len()
     }
 
     /// Get the total number of elements
+    #[inline(always)]
     pub fn numel(&self) -> usize {
         if self.dims.is_empty() {
             1 // scalar
@@ -40,6 +42,7 @@ impl Shape {
     }
 
     /// Get the size of a specific dimension
+    #[inline(always)]
     pub fn size(&self, dim: usize) -> Result<usize> {
         self.dims
             .get(dim)
@@ -48,16 +51,19 @@ impl Shape {
     }
 
     /// Get all dimensions as a slice
+    #[inline(always)]
     pub fn dims(&self) -> &[usize] {
         &self.dims
     }
 
     /// Check if this is a scalar shape
+    #[inline(always)]
     pub fn is_scalar(&self) -> bool {
         self.dims.is_empty()
     }
 
     /// Check if shapes are compatible for broadcasting
+    #[inline]
     pub fn is_broadcastable_with(&self, other: &Shape) -> bool {
         let max_ndim = self.ndim().max(other.ndim());
 
@@ -86,6 +92,7 @@ impl Shape {
     }
 
     /// Compute the broadcasted shape with another shape
+    #[inline]
     pub fn broadcast_with(&self, other: &Shape) -> Result<Shape> {
         if !self.is_broadcastable_with(other) {
             return Err(MinitensorError::shape_mismatch(
@@ -143,11 +150,13 @@ pub struct Strides {
 
 impl Strides {
     /// Create new strides from a vector
+    #[inline(always)]
     pub fn new(strides: Vec<usize>) -> Self {
         Self { strides }
     }
 
     /// Create contiguous strides from a shape
+    #[inline]
     pub fn from_shape(shape: &Shape) -> Self {
         let mut strides = Vec::with_capacity(shape.ndim());
         let mut stride = 1;
@@ -162,11 +171,13 @@ impl Strides {
     }
 
     /// Get the strides as a slice
+    #[inline(always)]
     pub fn as_slice(&self) -> &[usize] {
         &self.strides
     }
 
     /// Check if the strides represent a contiguous layout
+    #[inline]
     pub fn is_contiguous(&self, shape: &Shape) -> bool {
         if self.strides.len() != shape.ndim() {
             return false;
@@ -184,6 +195,7 @@ impl Strides {
     }
 
     /// Compute the linear index from multi-dimensional indices
+    #[inline]
     pub fn linear_index(&self, indices: &[usize]) -> usize {
         indices
             .iter()
