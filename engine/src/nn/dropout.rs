@@ -10,8 +10,8 @@ use crate::{
     operations::arithmetic,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rand::distributions::{Bernoulli, Distribution};
-use rand::thread_rng;
+use rand::rng;
+use rand_distr::{Bernoulli, Distribution};
 use std::sync::Arc;
 
 /// Generate a dropout mask with values either `0` or `1/(1-p)`.
@@ -34,7 +34,7 @@ fn generate_dropout_mask(
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
                 let scale = 1.0f32 / keep_prob as f32;
-                let mut rng = thread_rng();
+                let mut rng = rng();
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
                 for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
@@ -58,7 +58,7 @@ fn generate_dropout_mask(
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
                 let scale = 1.0 / keep_prob;
-                let mut rng = thread_rng();
+                let mut rng = rng();
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
                 for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {

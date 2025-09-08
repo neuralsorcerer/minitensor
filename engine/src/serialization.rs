@@ -435,7 +435,12 @@ impl ModelSerializer {
                 })?;
             }
             SerializationFormat::Binary => {
-                bincode::serialize_into(&mut writer, model).map_err(|e| {
+                bincode::serde::encode_into_std_write(
+                    model,
+                    &mut writer,
+                    bincode::config::standard(),
+                )
+                .map_err(|e| {
                     MinitensorError::serialization_error(format!(
                         "Binary serialization failed: {}",
                         e
@@ -466,17 +471,22 @@ impl ModelSerializer {
         let mut reader = BufReader::new(file);
 
         let model = match format {
-            SerializationFormat::Json => serde_json::from_reader(&mut reader).map_err(|e| {
-                MinitensorError::serialization_error(format!("JSON deserialization failed: {}", e))
-            })?,
-            SerializationFormat::Binary => bincode::deserialize_from(&mut reader).map_err(|e| {
+            SerializationFormat::Json =>
+                serde_json::from_reader::<_, SerializedModel>(&mut reader).map_err(|e| {
+                    MinitensorError::serialization_error(format!("JSON deserialization failed: {}", e))
+                })?,
+            SerializationFormat::Binary => bincode::serde::decode_from_std_read(
+                &mut reader,
+                bincode::config::standard(),
+            )
+            .map_err(|e| {
                 MinitensorError::serialization_error(format!(
                     "Binary deserialization failed: {}",
                     e
                 ))
             })?,
             SerializationFormat::MessagePack => {
-                rmp_serde::decode::from_read(&mut reader).map_err(|e| {
+                rmp_serde::decode::from_read::<_, SerializedModel>(&mut reader).map_err(|e| {
                     MinitensorError::serialization_error(format!(
                         "MessagePack deserialization failed: {}",
                         e
@@ -580,7 +590,12 @@ impl DeploymentModel {
         })?;
         let mut writer = BufWriter::new(file);
 
-        bincode::serialize_into(&mut writer, self).map_err(|e| {
+        bincode::serde::encode_into_std_write(
+            self,
+            &mut writer,
+            bincode::config::standard(),
+        )
+        .map_err(|e| {
             MinitensorError::serialization_error(format!(
                 "Deployment model serialization failed: {}",
                 e
@@ -598,9 +613,9 @@ impl DeploymentModel {
         let file = File::open(path).map_err(|e| {
             MinitensorError::serialization_error(format!("Failed to open file: {}", e))
         })?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
 
-        bincode::deserialize_from(reader).map_err(|e| {
+        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(|e| {
             MinitensorError::serialization_error(format!(
                 "Deployment model deserialization failed: {}",
                 e
