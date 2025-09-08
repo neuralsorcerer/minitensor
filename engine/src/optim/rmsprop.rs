@@ -7,12 +7,14 @@
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// RMSprop optimizer with parameter groups
 pub struct RMSprop {
     /// Parameter groups with different learning rates
     param_groups: Vec<ParameterGroup>,
+    /// Fast lookup from parameter id to its group index
+    param_lookup: FxHashMap<TensorId, usize>,
     /// Default learning rate (for backward compatibility)
     default_lr: f64,
     /// Alpha coefficient for moving average
@@ -26,11 +28,11 @@ pub struct RMSprop {
     /// Whether to use centered variant
     centered: bool,
     /// Square average buffers
-    square_avg: HashMap<TensorId, Tensor>,
+    square_avg: FxHashMap<TensorId, Tensor>,
     /// Momentum buffers
-    momentum_buffer: HashMap<TensorId, Tensor>,
+    momentum_buffer: FxHashMap<TensorId, Tensor>,
     /// Gradient average buffers (for centered variant)
-    grad_avg: HashMap<TensorId, Tensor>,
+    grad_avg: FxHashMap<TensorId, Tensor>,
     /// Current step count
     step_count: usize,
     /// Gradient clipping configuration
@@ -48,17 +50,30 @@ impl RMSprop {
     ) -> Self {
         Self {
             param_groups: Vec::new(),
+            param_lookup: FxHashMap::default(),
             default_lr: learning_rate,
             alpha: alpha.unwrap_or(0.99),
             epsilon: epsilon.unwrap_or(1e-8),
             weight_decay: weight_decay.unwrap_or(0.0),
             momentum: momentum.unwrap_or(0.0),
             centered: false,
-            square_avg: HashMap::new(),
-            momentum_buffer: HashMap::new(),
-            grad_avg: HashMap::new(),
+            square_avg: FxHashMap::default(),
+            momentum_buffer: FxHashMap::default(),
+            grad_avg: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
+        }
+    }
+
+    /// Rebuild internal parameter lookup table
+    fn rebuild_param_lookup(&mut self) {
+        self.param_lookup.clear();
+        let total: usize = self.param_groups.iter().map(|g| g.params.len()).sum();
+        self.param_lookup.reserve(total);
+        for (idx, group) in self.param_groups.iter().enumerate() {
+            for &p in &group.params {
+                self.param_lookup.insert(p, idx);
+            }
         }
     }
 
@@ -70,20 +85,23 @@ impl RMSprop {
         momentum: f64,
     ) -> Self {
         let default_lr = param_groups.first().map(|g| g.lr).unwrap_or(0.001);
-        Self {
+        let mut optimizer = Self {
             param_groups,
+            param_lookup: FxHashMap::default(),
             default_lr,
             alpha,
             epsilon,
             weight_decay: 0.0,
             momentum,
             centered: false,
-            square_avg: HashMap::new(),
-            momentum_buffer: HashMap::new(),
-            grad_avg: HashMap::new(),
+            square_avg: FxHashMap::default(),
+            momentum_buffer: FxHashMap::default(),
+            grad_avg: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        }
+        };
+        optimizer.rebuild_param_lookup();
+        optimizer
     }
 
     /// Enable centered variant
@@ -145,26 +163,20 @@ impl RMSprop {
 
     /// Get learning rate for a specific parameter
     fn get_param_lr(&self, param_id: TensorId) -> f64 {
-        // Find parameter group containing this parameter
-        for group in &self.param_groups {
-            if group.params.contains(&param_id) {
-                return group.lr;
-            }
+        if let Some(&idx) = self.param_lookup.get(&param_id) {
+            self.param_groups[idx].lr
+        } else {
+            self.default_lr
         }
-        // Default to global learning rate
-        self.default_lr
     }
 
     /// Get weight decay for a specific parameter
     fn get_param_weight_decay(&self, param_id: TensorId) -> f64 {
-        // Find parameter group containing this parameter
-        for group in &self.param_groups {
-            if group.params.contains(&param_id) {
-                return group.weight_decay;
-            }
+        if let Some(&idx) = self.param_lookup.get(&param_id) {
+            self.param_groups[idx].weight_decay
+        } else {
+            self.weight_decay
         }
-        // Default to global weight decay
-        self.weight_decay
     }
 
     /// Apply RMSprop optimization update
@@ -423,6 +435,10 @@ impl Optimizer for RMSprop {
     }
 
     fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
+        let idx = self.param_groups.len();
+        for &p in &group.params {
+            self.param_lookup.insert(p, idx);
+        }
         self.param_groups.push(group);
         Ok(())
     }

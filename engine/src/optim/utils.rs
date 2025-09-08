@@ -7,6 +7,7 @@
 use super::optimizer::LearningRateScheduler;
 use crate::{error::Result, tensor::Tensor};
 use rayon::prelude::*;
+use smallvec::SmallVec;
 
 /// Utility functions for gradient operations
 pub struct GradientUtils;
@@ -33,7 +34,7 @@ impl GradientUtils {
                             .par_iter()
                             .map(|&v| v * v)
                             .sum::<f64>(),
-                        _ => 0.0
+                        _ => 0.0,
                     }
                 } else {
                     0.0
@@ -45,8 +46,12 @@ impl GradientUtils {
 
     /// Apply gradient clipping by norm to a set of parameters
     pub fn clip_grad_norm(parameters: &mut [&mut Tensor], max_norm: f64) -> Result<f64> {
-        let refs: Vec<&Tensor> = parameters.iter().map(|p| &**p).collect();
+        let mut refs: SmallVec<[&Tensor; 16]> = SmallVec::with_capacity(parameters.len());
+        for p in parameters.iter() {
+            refs.push(&**p);
+        }
         let total_norm = Self::compute_grad_norm(&refs)?;
+        drop(refs);
         if total_norm > max_norm {
             let clip_coef = max_norm / (total_norm + 1e-6);
             parameters.par_iter_mut().for_each(|param| {
@@ -84,21 +89,13 @@ impl GradientUtils {
                         let min = min_value as f32;
                         let max = max_value as f32;
                         g.par_iter_mut().for_each(|v| {
-                            if *v < min {
-                                *v = min;
-                            } else if *v > max {
-                                *v = max;
-                            }
+                            *v = v.clamp(min, max);
                         });
                     }
                     crate::tensor::DataType::Float64 => {
                         let g = grad.data_mut().as_f64_slice_mut().unwrap();
                         g.par_iter_mut().for_each(|v| {
-                            if *v < min_value {
-                                *v = min_value;
-                            } else if *v > max_value {
-                                *v = max_value;
-                            }
+                            *v = v.clamp(min_value, max_value);
                         });
                     }
                     _ => {}

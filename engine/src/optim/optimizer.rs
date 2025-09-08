@@ -4,10 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{autograd::TensorId, error::Result, tensor::Tensor};
-use rayon::prelude::*;
-use std::collections::HashMap;
 use super::utils::GradientUtils;
+use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use rustc_hash::FxHashMap;
 
 /// Parameter group for managing different learning rates and settings
 #[derive(Debug, Clone)]
@@ -19,7 +18,7 @@ pub struct ParameterGroup {
     /// Weight decay for this group
     pub weight_decay: f64,
     /// Additional group-specific options
-    pub options: HashMap<String, f64>,
+    pub options: FxHashMap<String, f64>,
 }
 
 impl ParameterGroup {
@@ -29,7 +28,7 @@ impl ParameterGroup {
             params,
             lr,
             weight_decay: 0.0,
-            options: HashMap::new(),
+            options: FxHashMap::default(),
         }
     }
 
@@ -211,31 +210,7 @@ pub trait Optimizer: Send + Sync {
 
     /// Clip gradients by norm
     fn clip_grad_norm(&self, parameters: &mut [&mut Tensor], max_norm: f64) -> Result<()> {
-        // Collect immutable references for norm computation
-        let refs: Vec<&Tensor> = parameters.iter().map(|p| &**p).collect();
-        let total_norm = GradientUtils::compute_grad_norm(&refs)?;
-
-        if total_norm > max_norm {
-            let clip_coef = max_norm / (total_norm + 1e-6);
-            parameters.par_iter_mut().for_each(|param| {
-                if let Some(grad) = param.grad_mut() {
-                    match grad.dtype() {
-                        crate::tensor::DataType::Float32 => {
-                            let g = grad.data_mut().as_f32_slice_mut().unwrap();
-                            let coef = clip_coef as f32;
-                            g.par_iter_mut().for_each(|v| *v *= coef);
-                        }
-                        crate::tensor::DataType::Float64 => {
-                            let g = grad.data_mut().as_f64_slice_mut().unwrap();
-                            g.par_iter_mut().for_each(|v| *v *= clip_coef);
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        }
-
-        Ok(())
+        GradientUtils::clip_grad_norm(parameters, max_norm).map(|_| ())
     }
 
     /// Clip gradients by value
@@ -245,36 +220,7 @@ pub trait Optimizer: Send + Sync {
         min_value: f64,
         max_value: f64,
     ) -> Result<()> {
-        parameters.par_iter_mut().for_each(|param| {
-            if let Some(grad) = param.grad_mut() {
-                match grad.dtype() {
-                    crate::tensor::DataType::Float32 => {
-                        let g = grad.data_mut().as_f32_slice_mut().unwrap();
-                        let min = min_value as f32;
-                        let max = max_value as f32;
-                        g.par_iter_mut().for_each(|v| {
-                            if *v < min {
-                                *v = min;
-                            } else if *v > max {
-                                *v = max;
-                            }
-                        });
-                    }
-                    crate::tensor::DataType::Float64 => {
-                        let g = grad.data_mut().as_f64_slice_mut().unwrap();
-                        g.par_iter_mut().for_each(|v| {
-                            if *v < min_value {
-                                *v = min_value;
-                            } else if *v > max_value {
-                                *v = max_value;
-                            }
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        });
-        Ok(())
+        GradientUtils::clip_grad_value(parameters, min_value, max_value)
     }
 
     /// Apply learning rate scheduling

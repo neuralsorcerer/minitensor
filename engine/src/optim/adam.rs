@@ -7,12 +7,14 @@
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// Adam optimizer with bias correction and parameter groups
 pub struct Adam {
     /// Parameter groups with different learning rates
     param_groups: Vec<ParameterGroup>,
+    /// Fast lookup from parameter id to its group index
+    param_lookup: FxHashMap<TensorId, usize>,
     /// Default learning rate (for backward compatibility)
     default_lr: f64,
     /// Beta1 coefficient for first moment estimates
@@ -26,11 +28,11 @@ pub struct Adam {
     /// Whether to use AMSGrad variant
     amsgrad: bool,
     /// First moment estimates
-    m: HashMap<TensorId, Tensor>,
+    m: FxHashMap<TensorId, Tensor>,
     /// Second moment estimates
-    v: HashMap<TensorId, Tensor>,
+    v: FxHashMap<TensorId, Tensor>,
     /// Maximum second moment estimates (for AMSGrad)
-    v_hat: HashMap<TensorId, Tensor>,
+    v_hat: FxHashMap<TensorId, Tensor>,
     /// Current step count
     step_count: usize,
     /// Gradient clipping configuration
@@ -48,17 +50,30 @@ impl Adam {
     ) -> Self {
         Self {
             param_groups: Vec::new(),
+            param_lookup: FxHashMap::default(),
             default_lr: learning_rate,
             beta1: beta1.unwrap_or(0.9),
             beta2: beta2.unwrap_or(0.999),
             epsilon: epsilon.unwrap_or(1e-8),
             weight_decay: weight_decay.unwrap_or(0.0),
             amsgrad: false,
-            m: HashMap::new(),
-            v: HashMap::new(),
-            v_hat: HashMap::new(),
+            m: FxHashMap::default(),
+            v: FxHashMap::default(),
+            v_hat: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
+        }
+    }
+
+    /// Rebuild internal parameter lookup table
+    fn rebuild_param_lookup(&mut self) {
+        self.param_lookup.clear();
+        let total: usize = self.param_groups.iter().map(|g| g.params.len()).sum();
+        self.param_lookup.reserve(total);
+        for (idx, group) in self.param_groups.iter().enumerate() {
+            for &p in &group.params {
+                self.param_lookup.insert(p, idx);
+            }
         }
     }
 
@@ -70,20 +85,23 @@ impl Adam {
         epsilon: f64,
     ) -> Self {
         let default_lr = param_groups.first().map(|g| g.lr).unwrap_or(0.001);
-        Self {
+        let mut optimizer = Self {
             param_groups,
+            param_lookup: FxHashMap::default(),
             default_lr,
             beta1,
             beta2,
             epsilon,
             weight_decay: 0.0,
             amsgrad: false,
-            m: HashMap::new(),
-            v: HashMap::new(),
-            v_hat: HashMap::new(),
+            m: FxHashMap::default(),
+            v: FxHashMap::default(),
+            v_hat: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        }
+        };
+        optimizer.rebuild_param_lookup();
+        optimizer
     }
 
     /// Enable AMSGrad variant
@@ -145,26 +163,20 @@ impl Adam {
 
     /// Get learning rate for a specific parameter
     fn get_param_lr(&self, param_id: TensorId) -> f64 {
-        // Find parameter group containing this parameter
-        for group in &self.param_groups {
-            if group.params.contains(&param_id) {
-                return group.lr;
-            }
+        if let Some(&idx) = self.param_lookup.get(&param_id) {
+            self.param_groups[idx].lr
+        } else {
+            self.default_lr
         }
-        // Default to global learning rate
-        self.default_lr
     }
 
     /// Get weight decay for a specific parameter
     fn get_param_weight_decay(&self, param_id: TensorId) -> f64 {
-        // Find parameter group containing this parameter
-        for group in &self.param_groups {
-            if group.params.contains(&param_id) {
-                return group.weight_decay;
-            }
+        if let Some(&idx) = self.param_lookup.get(&param_id) {
+            self.param_groups[idx].weight_decay
+        } else {
+            self.weight_decay
         }
-        // Default to global weight decay
-        self.weight_decay
     }
 
     /// Apply Adam optimization update
@@ -372,6 +384,10 @@ impl Optimizer for Adam {
     }
 
     fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
+        let idx = self.param_groups.len();
+        for &p in &group.params {
+            self.param_lookup.insert(p, idx);
+        }
         self.param_groups.push(group);
         Ok(())
     }

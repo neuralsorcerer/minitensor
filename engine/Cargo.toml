@@ -27,6 +27,7 @@ rayon = { workspace = true }
 wide = { workspace = true }
 matrixmultiply = { workspace = true }
 smallvec = { workspace = true }
+rustc-hash = { workspace = true }
 
 # System information
 num_cpus = { workspace = true }
