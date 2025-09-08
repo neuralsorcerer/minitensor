@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 
 # Ensure we have the minimum Python version
-if sys.version_info < (3, 8):
-    print("Error: minitensor requires Python 3.8 or later")
+if sys.version_info < (3, 10):
+    print("Error: minitensor requires Python 3.10 or later")
     sys.exit(1)
 
 try:
@@ -85,9 +85,6 @@ setup(
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: Apache Software License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
@@ -95,7 +92,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=INSTALL_REQUIRES,
     extras_require=EXTRAS_REQUIRE,
     packages=find_packages(),

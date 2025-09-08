@@ -11,7 +11,7 @@ A lightweight, high-performance tensor operations library inspired by <a href="h
 
 <div align="center">
 
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-fcbc2c.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![rustc 1.85+](https://img.shields.io/badge/rustc-1.85+-blue.svg?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
 [![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml?query=branch%3Amain)
