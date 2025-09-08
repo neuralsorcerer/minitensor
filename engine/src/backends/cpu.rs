@@ -6,12 +6,21 @@
 
 use super::Backend;
 use crate::{device::Device, error::Result};
+use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use std::alloc::{alloc, dealloc, Layout};
+use std::ptr::NonNull;
 
 /// CPU backend for tensor operations
 pub struct CpuBackend {
     device: Device,
+    pool: Mutex<FxHashMap<usize, Vec<NonNull<u8>>>>,
 }
+
+// The memory pool uses raw pointers protected by a mutex. As long as the API
+// is used correctly, it is safe to send across threads.
+unsafe impl Send for CpuBackend {}
+unsafe impl Sync for CpuBackend {}
 
 impl Backend for CpuBackend {
     #[inline(always)]
@@ -28,6 +37,7 @@ impl Backend for CpuBackend {
     fn initialize() -> Result<Self> {
         Ok(Self {
             device: Device::cpu(),
+            pool: Mutex::new(FxHashMap::default()),
         })
     }
 
@@ -35,6 +45,14 @@ impl Backend for CpuBackend {
     fn allocate(&self, size_bytes: usize) -> Result<*mut u8> {
         if size_bytes == 0 {
             return Ok(std::ptr::null_mut());
+        }
+
+        // Try to reuse memory from the pool first to avoid allocator calls.
+        if let Some(ptr) = {
+            let mut pool = self.pool.lock();
+            pool.get_mut(&size_bytes).and_then(|v| v.pop())
+        } {
+            return Ok(ptr.as_ptr());
         }
 
         let layout = unsafe { Layout::from_size_align_unchecked(size_bytes, 64) };
@@ -56,11 +74,14 @@ impl Backend for CpuBackend {
             return Ok(());
         }
 
-        let layout = unsafe { Layout::from_size_align_unchecked(size_bytes, 64) };
+        // Return the memory to the pool for potential reuse. Actual freeing
+        // happens when the backend is dropped.
+        let mut pool = self.pool.lock();
+        // Safety: ptr is not null and size_bytes > 0
+        pool.entry(size_bytes)
+            .or_default()
+            .push(unsafe { NonNull::new_unchecked(ptr) });
 
-        unsafe {
-            dealloc(ptr, layout);
-        }
         Ok(())
     }
 
@@ -98,6 +119,21 @@ impl Backend for CpuBackend {
             std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
         }
         Ok(())
+    }
+}
+
+impl Drop for CpuBackend {
+    fn drop(&mut self) {
+        let mut pool = self.pool.lock();
+        for (size, mut vec) in pool.drain() {
+            if size == 0 {
+                continue;
+            }
+            let layout = unsafe { Layout::from_size_align_unchecked(size, 64) };
+            for ptr in vec.drain(..) {
+                unsafe { dealloc(ptr.as_ptr(), layout) };
+            }
+        }
     }
 }
 
@@ -207,5 +243,48 @@ mod tests {
     fn test_deallocate_null_pointer() {
         let backend = CpuBackend::initialize().unwrap();
         backend.deallocate(std::ptr::null_mut(), 128).unwrap();
+    }
+
+    nter should be reused from pool
+        assert_eq!(ptr1, ptr2);
+
+        backend.deallocate(ptr2, 128).unwrap();
+    }
+
+    #[test]
+    fn test_large_memory_copy() {
+        let backend = CpuBackend::initialize().unwrap();
+        let size = 1 << 20; // 1 MiB
+        let src: Vec<u8> = (0..size as u32).map(|i| (i & 0xFF) as u8).collect();
+        let ptr = backend.allocate(size).unwrap();
+
+        backend.copy_from_host(ptr, &src).unwrap();
+
+        let mut dst = vec![0u8; size];
+        backend.copy_to_host(&mut dst, ptr).unwrap();
+
+        assert_eq!(src, dst);
+        backend.deallocate(ptr, size).unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_pool_usage() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let backend = Arc::new(CpuBackend::initialize().unwrap());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let b = backend.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    let ptr = b.allocate(256).unwrap();
+                    b.deallocate(ptr, 256).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

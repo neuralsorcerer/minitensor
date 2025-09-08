@@ -9,8 +9,8 @@ use crate::{device::Device, error::Result};
 use metal::*;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Metal buffer wrapper for memory management
 pub struct MetalBufferWrapper {
@@ -29,6 +29,7 @@ pub struct MetalBackend {
     library: Arc<RwLock<Option<metal::Library>>>,
     compute_pipelines: Arc<RwLock<FxHashMap<String, metal::ComputePipelineState>>>,
     buffers: Arc<RwLock<FxHashMap<usize, MetalBufferWrapper>>>,
+    buffer_pool: Arc<RwLock<FxHashMap<usize, Vec<metal::Buffer>>>>,
     next_buffer_id: AtomicUsize,
 }
 
@@ -56,7 +57,7 @@ impl MetalBackend {
         Ok(buffer)
     }
 
-    /// Create a Metal buffer with 
+    /// Create a Metal buffer with data
     #[inline(always)]
     pub fn create_buffer_with_data<T>(
         &self,
@@ -132,7 +133,7 @@ impl MetalBackend {
         Ok(pipeline_state)
     }
 
-    /// Get a cached compute pipeline 
+    /// Get a cached compute pipeline
     #[inline(always)]
     pub fn get_compute_pipeline(&self, function_name: &str) -> Option<metal::ComputePipelineState> {
         let pipelines = self.compute_pipelines.read();
@@ -215,7 +216,7 @@ impl MetalBackend {
         self.buffers.read().len()
     }
 
-    /// Execute operation on buffers by 
+    /// Execute operation on buffers
     #[inline(always)]
     pub fn execute_buffer_operation<F, R>(&self, ptr: *const u8, operation: F) -> Result<R>
     where
@@ -298,6 +299,7 @@ impl Backend for MetalBackend {
                 library: Arc::new(RwLock::new(None)),
                 compute_pipelines: Arc::new(RwLock::new(FxHashMap::default())),
                 buffers: Arc::new(RwLock::new(FxHashMap::default())),
+                buffer_pool: Arc::new(RwLock::new(FxHashMap::default())),
                 next_buffer_id: AtomicUsize::new(1),
             })
         }
@@ -316,10 +318,18 @@ impl Backend for MetalBackend {
             return Ok(std::ptr::null_mut());
         }
 
-        let buffer = self.create_buffer(
-            size_bytes as u64,
-            metal::MTLResourceOptions::StorageModeShared,
-        )?;
+        let buffer = {
+            let mut pool = self.buffer_pool.write();
+            if let Some(buf) = pool.get_mut(&size_bytes).and_then(|v| v.pop()) {
+                buf
+            } else {
+                drop(pool);
+                self.create_buffer(
+                    size_bytes as u64,
+                    metal::MTLResourceOptions::StorageModeShared,
+                )?
+            }
+        };
 
         // Create a unique ID to track this buffer
         let buffer_id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
@@ -340,12 +350,16 @@ impl Backend for MetalBackend {
             return Ok(());
         }
 
-        // Remove the buffer from tracking
+        // Remove the buffer from tracking and return to pool
         let buffer_id = ptr as usize;
         let mut buffers = self.buffers.write();
-        buffers.remove(&buffer_id);
+        if let Some(metal_buffer) = buffers.remove(&buffer_id) {
+            let mut pool = self.buffer_pool.write();
+            pool.entry(metal_buffer.size_bytes)
+                .or_default()
+                .push(metal_buffer.buffer);
+        }
 
-        // Metal buffer will be automatically dropped and freed by ARC
         Ok(())
     }
 
@@ -403,6 +417,23 @@ impl Backend for MetalBackend {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for MetalBackend {
+    fn drop(&mut self) {
+        {
+            let mut buffers = self.buffers.write();
+            for (_, buf) in buffers.drain() {
+                drop(buf);
+            }
+        }
+        let mut pool = self.buffer_pool.write();
+        for (_, mut vec) in pool.drain() {
+            for buf in vec.drain(..) {
+                drop(buf);
+            }
+        }
     }
 }
 

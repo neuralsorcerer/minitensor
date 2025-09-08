@@ -17,8 +17,8 @@ use opencl3::types::{cl_float, CL_BLOCKING};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// OpenCL buffer wrapper for memory management
 pub struct OpenCLBuffer {
@@ -38,8 +38,12 @@ pub struct OpenCLBackend {
     programs: Arc<RwLock<FxHashMap<String, Program>>>,
     kernels: Arc<RwLock<FxHashMap<String, Kernel>>>,
     buffers: Arc<RwLock<FxHashMap<usize, OpenCLBuffer>>>,
+    buffer_pool: Arc<RwLock<FxHashMap<usize, Vec<Buffer<cl_float>>>>>,
     next_buffer_id: AtomicUsize,
 }
+
+unsafe impl Send for OpenCLBackend {}
+unsafe impl Sync for OpenCLBackend {}
 
 impl OpenCLBackend {
     /// Get the OpenCL device
@@ -103,7 +107,7 @@ impl OpenCLBackend {
         Ok(buffer)
     }
 
-    /// Build an OpenCL program from 
+    /// Build an OpenCL program
     #[inline(always)]
     pub fn build_program(&self, name: &str, source: &str) -> Result<()> {
         let program =
@@ -350,6 +354,7 @@ impl Backend for OpenCLBackend {
             programs: Arc::new(RwLock::new(FxHashMap::default())),
             kernels: Arc::new(RwLock::new(FxHashMap::default())),
             buffers: Arc::new(RwLock::new(FxHashMap::default())),
+            buffer_pool: Arc::new(RwLock::new(FxHashMap::default())),
             next_buffer_id: AtomicUsize::new(1),
         })
     }
@@ -360,9 +365,17 @@ impl Backend for OpenCLBackend {
             return Ok(std::ptr::null_mut());
         }
 
-        let size_floats =
-            (size_bytes + std::mem::size_of::<f32>() - 1) / std::mem::size_of::<f32>();
-        let buffer = self.create_buffer(size_floats, CL_MEM_READ_WRITE)?;
+        let buffer = {
+            let mut pool = self.buffer_pool.write();
+            if let Some(buf) = pool.get_mut(&size_bytes).and_then(|v| v.pop()) {
+                buf
+            } else {
+                let size_floats =
+                    (size_bytes + std::mem::size_of::<f32>() - 1) / std::mem::size_of::<f32>();
+                drop(pool);
+                self.create_buffer(size_floats, CL_MEM_READ_WRITE)?
+            }
+        };
 
         // Create a unique ID to track this buffer
         let buffer_id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
@@ -383,12 +396,16 @@ impl Backend for OpenCLBackend {
             return Ok(());
         }
 
-        // Remove the buffer from tracking
+        // Remove the buffer from tracking and return to pool
         let buffer_id = ptr as usize;
         let mut buffers = self.buffers.write();
-        buffers.remove(&buffer_id);
+        if let Some(opencl_buffer) = buffers.remove(&buffer_id) {
+            let mut pool = self.buffer_pool.write();
+            pool.entry(opencl_buffer.size_bytes)
+                .or_default()
+                .push(opencl_buffer.buffer);
+        }
 
-        // OpenCL buffer will be automatically dropped and freed
         Ok(())
     }
 
@@ -484,6 +501,23 @@ impl Backend for OpenCLBackend {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for OpenCLBackend {
+    fn drop(&mut self) {
+        {
+            let mut buffers = self.buffers.write();
+            for (_, buf) in buffers.drain() {
+                drop(buf);
+            }
+        }
+        let mut pool = self.buffer_pool.write();
+        for (_, mut vec) in pool.drain() {
+            for buf in vec.drain(..) {
+                drop(buf);
+            }
+        }
     }
 }
 

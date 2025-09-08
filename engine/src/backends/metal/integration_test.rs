@@ -454,4 +454,26 @@ mod tests {
             println!("Metal only available on macOS, skipping test");
         }
     }
+
+    #[test]
+    fn test_metal_memory_pool_reuse() {
+        #[cfg(target_os = "macos")]
+        {
+            if !MetalBackend::is_available() {
+                println!("Metal not available, skipping test");
+                return;
+            }
+
+            let backend = MetalBackend::initialize().unwrap();
+            let ptr1 = backend.allocate(256).unwrap();
+            backend.deallocate(ptr1, 256).unwrap();
+            let ptr2 = backend.allocate(256).unwrap();
+            assert_eq!(ptr1, ptr2);
+            backend.deallocate(ptr2, 256).unwrap();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            println!("Metal only available on macOS, skipping test");
+        }
+    }
 }

@@ -309,4 +309,22 @@ mod tests {
         let backend = OpenCLBackend::initialize().unwrap();
         backend.deallocate(std::ptr::null_mut(), 128).unwrap();
     }
+
+    #[test]
+    fn test_opencl_memory_pool_reuse() {
+        if !OpenCLBackend::is_available() {
+            println!("OpenCL not available, skipping test");
+            return;
+        }
+
+        let backend = OpenCLBackend::initialize().unwrap();
+
+        let ptr1 = backend.allocate(256).unwrap();
+        backend.deallocate(ptr1, 256).unwrap();
+        let ptr2 = backend.allocate(256).unwrap();
+
+        assert_eq!(ptr1, ptr2);
+
+        backend.deallocate(ptr2, 256).unwrap();
+    }
 }

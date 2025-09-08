@@ -22,6 +22,8 @@ pub struct CudaBackend {
     cuda_device: Arc<CudaDevice>,
     execution_context: Arc<Mutex<CudaExecutionContext>>,
     kernels: Arc<RwLock<FxHashMap<String, cudarc::driver::CudaFunction>>>,
+    allocations: Mutex<FxHashMap<usize, CudaSlice<u8>>>,
+    pool: Mutex<FxHashMap<usize, Vec<CudaSlice<u8>>>>,
 }
 
 impl CudaBackend {
@@ -31,7 +33,7 @@ impl CudaBackend {
         &self.cuda_device
     }
 
-    /// Get the execution 
+    /// Get the execution
     #[inline(always)]
     pub fn execution_context(&self) -> &Arc<Mutex<CudaExecutionContext>> {
         &self.execution_context
@@ -60,14 +62,14 @@ impl CudaBackend {
         Ok(())
     }
 
-    /// Get a loaded kernel 
+    /// Get a loaded kernel
     #[inline(always)]
     pub fn get_kernel(&self, name: &str) -> Option<cudarc::driver::CudaFunction> {
         let kernels = self.kernels.read();
         kernels.get(name).cloned()
     }
 
-    /// Allocate device memory and return a 
+    /// Allocate device memory
     #[inline(always)]
     pub fn allocate_slice<T>(&self, len: usize) -> Result<CudaSlice<T>>
     where
@@ -161,6 +163,8 @@ impl Backend for CudaBackend {
             cuda_device,
             execution_context,
             kernels: Arc::new(RwLock::new(FxHashMap::default())),
+            allocations: Mutex::new(FxHashMap::default()),
+            pool: Mutex::new(FxHashMap::default()),
         })
     }
 
@@ -170,11 +174,25 @@ impl Backend for CudaBackend {
             return Ok(std::ptr::null_mut());
         }
 
-        let ptr = self.cuda_device.alloc::<u8>(size_bytes).map_err(|e| {
-            crate::error::MinitensorError::memory_error(format!("CUDA allocation failed: {}", e))
-        })?;
+        let slice = {
+            let mut pool = self.pool.lock();
+            if let Some(s) = pool.get_mut(&size_bytes).and_then(|v| v.pop()) {
+                s
+            } else {
+                drop(pool);
+                self.cuda_device.alloc::<u8>(size_bytes).map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "CUDA allocation failed: {}",
+                        e
+                    ))
+                })?
+            }
+        };
 
-        Ok(ptr.device_ptr() as *mut u8)
+        let ptr = slice.device_ptr() as *mut u8;
+        let mut allocs = self.allocations.lock();
+        allocs.insert(ptr as usize, slice);
+        Ok(ptr)
     }
 
     #[inline(always)]
@@ -183,8 +201,12 @@ impl Backend for CudaBackend {
             return Ok(());
         }
 
-        // Note: cudarc handles deallocation automatically when CudaSlice is dropped
-        // This is a simplified implementation - in practice, we'd need to track allocations
+        let mut allocs = self.allocations.lock();
+        if let Some(slice) = allocs.remove(&(ptr as usize)) {
+            let mut pool = self.pool.lock();
+            pool.entry(slice.len()).or_default().push(slice);
+        }
+
         Ok(())
     }
 
@@ -242,6 +264,23 @@ impl Backend for CudaBackend {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for CudaBackend {
+    fn drop(&mut self) {
+        {
+            let mut allocs = self.allocations.lock();
+            for (_, slice) in allocs.drain() {
+                drop(slice);
+            }
+        }
+        let mut pool = self.pool.lock();
+        for (_, mut vec) in pool.drain() {
+            for slice in vec.drain(..) {
+                drop(slice);
+            }
+        }
     }
 }
 
@@ -651,9 +690,7 @@ mod tests {
             .copy_from_host(std::ptr::null_mut(), &[1u8])
             .is_err());
         let mut buf = [0u8; 1];
-        assert!(backend
-            .copy_to_host(&mut buf, std::ptr::null())
-            .is_err());
+        assert!(backend.copy_to_host(&mut buf, std::ptr::null()).is_err()););
     }
 
     #[test]
@@ -692,5 +729,22 @@ mod tests {
 
         let backend = CudaBackend::initialize().unwrap();
         backend.deallocate(std::ptr::null_mut(), 128).unwrap();
+    }
+
+    #[test]
+    fn test_cuda_memory_pool_reuse() {
+        if !CudaBackend::is_available() {
+            return;
+        }
+
+        let backend = CudaBackend::initialize().unwrap();
+
+        let ptr1 = backend.allocate(256).unwrap();
+        backend.deallocate(ptr1, 256).unwrap();
+        let ptr2 = backend.allocate(256).unwrap();
+
+        assert_eq!(ptr1, ptr2);
+
+        backend.deallocate(ptr2, 256).unwrap();
     }
 }
