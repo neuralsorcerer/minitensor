@@ -34,8 +34,8 @@ num_cpus = { workspace = true }
 libc = { workspace = true }
 
 # Random number generation
-rand = "0.9"
-rand_distr = "0.5"
+rand = { workspace = true }
+rand_distr = { workspace = true }
 
 # BLAS integration (optional for now)
 blas-src = { version = "0.12.1", features = ["openblas"], optional = true }

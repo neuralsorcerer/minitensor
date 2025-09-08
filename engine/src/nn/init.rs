@@ -9,7 +9,7 @@ use crate::{
     error::Result,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rand::rng;
+let mut rng = thread_rng();
 use rand_distr::{Distribution, Normal, Uniform};
 use std::sync::Arc;
 
@@ -121,10 +121,10 @@ pub fn init_uniform(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
-    let mut rng = rng();
+    let mut rng = thread_rng();
     let data = match dtype {
         DataType::Float32 => {
-            let dist = Uniform::new(a as f32, b as f32).unwrap();
+            let dist = Uniform::new(a as f32, b as f32);
             let mut vec = vec![0.0f32; numel];
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
@@ -132,7 +132,7 @@ pub fn init_uniform(
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
-            let dist = Uniform::new(a, b).unwrap();
+            let dist = Uniform::new(a, b);
             let mut vec = vec![0.0f64; numel];
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
@@ -140,7 +140,7 @@ pub fn init_uniform(
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
-            let dist = Uniform::new(a as i32, b as i32).unwrap();
+            let dist = Uniform::new(a as i32, b as i32);
             let mut vec = vec![0i32; numel];
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
@@ -148,7 +148,7 @@ pub fn init_uniform(
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
-            let dist = Uniform::new(a as i64, b as i64).unwrap();
+            let dist = Uniform::new(a as i64, b as i64);
             let mut vec = vec![0i64; numel];
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
@@ -156,7 +156,7 @@ pub fn init_uniform(
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
-            let dist = Uniform::new(0.0, 1.0).unwrap();
+            let dist = Uniform::new(0.0, 1.0);
             let mut vec = vec![false; numel];
             for v in &mut vec {
                 *v = dist.sample(&mut rng) > 0.5
@@ -183,7 +183,7 @@ pub fn init_normal(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
-    let mut rng = rng();
+    let mut rng = thread_rng();
     let data = match dtype {
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
