@@ -13,9 +13,9 @@ homepage = "https://github.com/neuralsorcerer/minitensor"
 
 [workspace.dependencies]
 # Core dependencies
-ndarray = "0.15"
+ndarray = "0.16"
 num-traits = "0.2"
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 
@@ -28,20 +28,20 @@ rayon = "1.7"
 wide = "0.7"
 matrixmultiply = { version = "0.3", features = ["threading"] }
 smallvec = "1.11"
-rustc-hash = "1.1"
+rustc-hash = "2.1"
 
 # GPU backends
-cudarc = "0.9"
-metal = "0.27"
-opencl3 = "0.9"
+cudarc = "0.17"
+metal = "0.32"
+opencl3 = "0.12"
 
 # System information
 num_cpus = "1.16"
 libc = "0.2"
 
 # Python bindings
-pyo3 = { version = "0.20", features = ["extension-module", "auto-initialize"] }
-numpy = "0.20"
+pyo3 = { version = "0.26", features = ["extension-module", "auto-initialize"] }
+numpy = "0.26"
 
 [workspace.metadata.maturin]
 python-source = "py/src"

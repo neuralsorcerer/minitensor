@@ -18,8 +18,8 @@ pyo3 = { workspace = true }
 numpy = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-rand = "0.8"
-rand_distr = "0.4"
+rand = "0.9"
+rand_distr = "0.5"
 
 [build-dependencies]
-pyo3-build-config = { version = "0.20", features = ["resolve-config"] }
+pyo3-build-config = { version = "0.26", features = ["resolve-config"] }
