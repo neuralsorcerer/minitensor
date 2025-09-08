@@ -57,5 +57,13 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Add serialization module
     serialization::register_serialization_module(py, m)?;
 
+    // Autograd helpers
+    m.add_function(wrap_pyfunction!(get_gradient, m)?)?;
+
     Ok(())
+}
+
+#[pyfunction]
+fn get_gradient(tensor: &PyTensor) -> PyResult<Option<PyTensor>> {
+    Ok(engine::autograd::get_gradient(tensor.tensor()).map(PyTensor::from_tensor))
 }

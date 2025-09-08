@@ -91,7 +91,6 @@ def test_conv_bias_broadcasting():
     np.testing.assert_allclose(out.numpy(), expected)
 
 
-@pytest.mark.skip(reason="Python autograd gradients currently unavailable")
 def test_broadcast_backward_add():
     dev = mt.device("cpu")
     a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)
@@ -103,7 +102,6 @@ def test_broadcast_backward_add():
     np.testing.assert_allclose(b.grad.numpy(), np.array([2.0, 2.0, 2.0], dtype=np.float32))
 
 
-@pytest.mark.skip(reason="Python autograd gradients currently unavailable")
 def test_broadcast_backward_mul():
     dev = mt.device("cpu")
     a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)

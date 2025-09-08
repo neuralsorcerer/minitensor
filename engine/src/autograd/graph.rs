@@ -4,12 +4,12 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::GradientFunction;
-use crate::{tensor::Tensor, error::Result};
+use super::{GradientFunction, TensorId};
+use crate::{tensor::Tensor, error::Result, operations::arithmetic};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::Arc;
 
 /// Statistics about the computation graph
 #[derive(Debug, Clone)]
@@ -24,51 +24,14 @@ pub struct GraphStats {
     pub has_cycles: bool,
 }
 
-/// Unique identifier for tensors in the computation graph
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TensorId(u64);
-
-impl TensorId {
-    /// Create a new unique tensor ID
-    pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Get the raw ID value
-    pub fn raw(&self) -> u64 {
-        self.0
-    }
-    
-    /// Create a TensorId from a raw value (for testing purposes)
-    #[cfg(test)]
-    pub fn from_raw(id: u64) -> Self {
-        Self(id)
-    }
-    
-    /// Reset the global counter (for testing purposes)
-    #[cfg(test)]
-    pub fn reset_counter() {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        COUNTER.store(0, Ordering::Relaxed);
-    }
-}
-
-impl std::fmt::Display for TensorId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TensorId({})", self.0)
-    }
-}
-
 /// Node in the computation graph
-#[derive(Debug)]
 pub struct GraphNode {
     /// Tensor ID
     pub tensor_id: TensorId,
     /// Gradient function for backward pass
     pub grad_fn: Option<Arc<dyn GradientFunction>>,
     /// Input tensor IDs
-    pub inputs: Vec<TensorId>,
+    pub inputs: SmallVec<[TensorId; 4]>,
     /// Whether this node requires gradients
     pub requires_grad: bool,
     /// Optional name for debugging
@@ -82,9 +45,10 @@ impl GraphNode {
         grad_fn: Option<Arc<dyn GradientFunction>>,
         requires_grad: bool,
     ) -> Self {
-        let inputs = grad_fn.as_ref()
-            .map(|f| f.inputs().to_vec())
-            .unwrap_or_default();
+        let mut inputs: SmallVec<[TensorId; 4]> = SmallVec::new();
+        if let Some(f) = grad_fn.as_ref() {
+            inputs.extend_from_slice(f.input_ids());
+        }
             
         Self {
             tensor_id,
@@ -116,7 +80,6 @@ impl GraphNode {
 }
 
 /// Computation graph for automatic differentiation
-#[derive(Debug)]
 pub struct ComputationGraph {
     /// Nodes in the graph
     nodes: FxHashMap<TensorId, GraphNode>,
@@ -143,11 +106,20 @@ impl ComputationGraph {
     
     /// Add a tensor to the computation graph with explicit gradient requirement
     pub fn add_tensor_with_grad_req(
-        &mut self, 
-        tensor_id: TensorId, 
+        &mut self,
+        tensor_id: TensorId,
         grad_fn: Option<Arc<dyn GradientFunction>>,
         requires_grad: bool,
     ) {
+        if let Some(ref f) = grad_fn {
+            for &input_id in f.input_ids() {
+                self
+                    .nodes
+                    .entry(input_id)
+                    .or_insert_with(|| GraphNode::new(input_id, None, true));
+            }
+        }
+
         let node = GraphNode::new(tensor_id, grad_fn, requires_grad);
         self.nodes.insert(tensor_id, node);
         self.update_topological_order();
@@ -242,29 +214,19 @@ impl ComputationGraph {
                 }
                 
                 // Take the gradient for this node out of the map to avoid cloning
-                if let Some(mut grad_output) = self.gradients.remove(&node_id) {
+                if let Some(grad_output) = self.gradients.remove(&node_id) {
                     // If this node has a gradient function, compute gradients for inputs
                     if let Some(grad_fn) = &node.grad_fn {
-                        match grad_fn.backward(&grad_output) {
-                            Ok(input_grads) => {
-                                // Accumulate gradients for input tensors
-                                for (i, input_grad) in input_grads.into_iter().enumerate() {
-                                    if let Some(grad) = input_grad {
-                                        let input_id = grad_fn.inputs()[i];
-                                        
-                                        match self.gradients.entry(input_id) {
-                                            Entry::Occupied(mut e) => {
-                                                let new_grad = e.get().add(&grad)?;
-                                                *e.get_mut() = new_grad;
-                                            }
-                                            Entry::Vacant(e) => {
-                                                e.insert(grad);
-                                            }
-                                        }
-                                    }
+                        let input_grads = grad_fn.backward(&grad_output)?;
+                        for (input_id, grad) in input_grads {
+                            match self.gradients.entry(input_id) {
+                                Entry::Occupied(mut e) => {
+                                    arithmetic::add_inplace(e.get_mut(), &grad)?;
+                                }
+                                Entry::Vacant(e) => {
+                                    e.insert(grad);
                                 }
                             }
-                            Err(e) => return Err(e),
                         }
                     }
                     // Re-insert the gradient for this node so it is available in the
@@ -395,7 +357,7 @@ impl Default for ComputationGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autograd::function::AddBackward;
+    use crate::autograd::AddBackward;
 
     #[test]
     fn test_tensor_id() {
@@ -403,15 +365,6 @@ mod tests {
         let id2 = TensorId::new();
         
         assert_ne!(id1, id2);
-        assert_ne!(id1.raw(), id2.raw());
-        // Don't test exact values since counter is global
-        assert!(id2.raw() > id1.raw());
-    }
-
-    #[test]
-    fn test_tensor_id_display() {
-        let id = TensorId::from_raw(42);
-        assert_eq!(format!("{}", id), "TensorId(42)");
     }
 
     #[test]

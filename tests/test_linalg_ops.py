@@ -75,3 +75,39 @@ def test_matmul_inf_nan_propagation():
     b = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
     result = a.matmul(b).numpy()
     assert np.isnan(result[0]).all()
+
+
+def test_matmul_backward_batched():
+    dev = mt.device("cpu")
+    a = mt.Tensor(np.arange(24, dtype=np.float32).reshape(2, 3, 4), requires_grad=True, device=dev)
+    b = mt.Tensor(np.arange(32, dtype=np.float32).reshape(2, 4, 4), requires_grad=True, device=dev)
+    c = a.matmul(b)
+    c.sum().backward()
+    expected_a = np.matmul(
+        np.ones_like(c.numpy()), np.swapaxes(b.numpy(), -1, -2)
+    )
+    expected_b = np.matmul(
+        np.swapaxes(a.numpy(), -1, -2), np.ones_like(c.numpy())
+    )
+    np.testing.assert_allclose(a.grad.numpy(), expected_a)
+    np.testing.assert_allclose(b.grad.numpy(), expected_b)
+
+
+def test_matmul_backward_requires_grad_flags():
+    dev = mt.device("cpu")
+    a = mt.Tensor(np.arange(4, dtype=np.float32).reshape(2, 2), requires_grad=True, device=dev)
+    b = mt.Tensor(np.arange(4, dtype=np.float32).reshape(2, 2), requires_grad=False, device=dev)
+    c = a.matmul(b)
+    c.sum().backward()
+    assert a.grad is not None
+    assert b.grad is None
+
+
+def test_transpose_backward_permutation():
+    dev = mt.device("cpu")
+    x = mt.Tensor(np.arange(24, dtype=np.float32).reshape(2, 3, 4), requires_grad=True, device=dev)
+    y = x.permute(1, 2, 0)
+    grad = mt.Tensor(np.ones((3, 4, 2), dtype=np.float32), device=dev)
+    y.backward(grad)
+    expected = np.transpose(grad.numpy(), (2, 0, 1))
+    np.testing.assert_allclose(x.grad.numpy(), expected)

@@ -162,6 +162,8 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs: lhs.detach(),
             rhs: rhs.detach(),
             input_ids: [lhs.id(), rhs.id()],
+            lhs_requires_grad: lhs.requires_grad(),
+            rhs_requires_grad: rhs.requires_grad(),
         });
 
         let mut output_with_grad = output;

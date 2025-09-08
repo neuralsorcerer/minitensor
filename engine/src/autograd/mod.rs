@@ -10,10 +10,10 @@ use crate::{
     operations::{activation, arithmetic, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+pub mod graph;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -37,99 +37,31 @@ impl Default for TensorId {
     }
 }
 
+impl std::fmt::Display for TensorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TensorId({})", self.0)
+    }
+}
+
 /// Trait for gradient functions in the computation graph
 pub trait GradientFunction: Send + Sync {
     /// Compute gradients for inputs given the output gradient
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>>;
 
     /// Get the input tensor IDs that this function depends on
-    fn input_ids(&self) -> Vec<TensorId>;
-}
+    fn input_ids(&self) -> &[TensorId];
 
-/// Computation graph for automatic differentiation
-pub struct ComputationGraph {
-    nodes: FxHashMap<TensorId, Arc<dyn GradientFunction>>,
-}
-
-impl ComputationGraph {
-    /// Create a new computation graph
-    pub fn new() -> Self {
-        Self {
-            nodes: FxHashMap::default(),
+    /// Name of the gradient function used for debugging and introspection
+    fn name(&self) -> &'static str {
+        let full = std::any::type_name::<Self>();
+        match full.rsplit("::").next() {
+            Some(name) => name,
+            None => full,
         }
     }
-
-    /// Add a node to the computation graph
-    pub fn add_node(&mut self, tensor_id: TensorId, grad_fn: Arc<dyn GradientFunction>) {
-        self.nodes.insert(tensor_id, grad_fn);
-    }
-
-    /// Get a reference to the nodes in the computation graph
-    pub fn nodes(&self) -> &FxHashMap<TensorId, Arc<dyn GradientFunction>> {
-        &self.nodes
-    }
-
-    /// Perform backward pass from the given tensor
-    pub fn backward(
-        &self,
-        output_tensor: &Tensor,
-        grad_output: Option<Tensor>,
-    ) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(self.nodes.len());
-
-        // Initialize with output gradient
-        let initial_grad = match grad_output {
-            Some(grad) => grad,
-            None => {
-                if output_tensor.numel() != 1 {
-                    return Err(MinitensorError::gradient_error(
-                        "Gradient can only be implicitly created for scalar tensors",
-                    ));
-                }
-                Tensor::ones(
-                    output_tensor.shape().clone(),
-                    output_tensor.dtype(),
-                    output_tensor.device(),
-                    false,
-                )
-            }
-        };
-
-        // Iterative depth-first traversal using a stack stored on the stack
-        // via SmallVec to avoid heap allocations for typical graph sizes.
-        let mut stack: SmallVec<[(TensorId, Tensor); 16]> = SmallVec::new();
-        stack.reserve(self.nodes.len().saturating_sub(1));
-        stack.push((output_tensor.id(), initial_grad));
-
-        while let Some((tensor_id, grad_output)) = stack.pop() {
-            // Propagate gradients to inputs before storing them. This allows us to
-            // insert the gradient into the map without cloning in the common case
-            // where this is the first contribution for `tensor_id`.
-            if let Some(grad_fn) = self.nodes.get(&tensor_id) {
-                let input_grads = grad_fn.backward(&grad_output)?;
-                stack.extend(input_grads.into_iter());
-            }
-
-            match gradients.entry(tensor_id) {
-                Entry::Occupied(mut e) => {
-                    crate::operations::arithmetic::add_inplace(e.get_mut(), &grad_output)?;
-                }
-                Entry::Vacant(e) => {
-                    e.insert(grad_output);
-                }
-            }
-        }
-
-        Ok(gradients)
-    }
 }
 
-impl Default for ComputationGraph {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use graph::ComputationGraph;
 
 // Thread-local computation graph to avoid cross-test interference
 thread_local! {
@@ -139,13 +71,11 @@ thread_local! {
 
 /// Add a tensor and its gradient function to the global computation graph
 pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>) -> Result<()> {
-    if let Some(grad_fn) = grad_fn {
-        GLOBAL_GRAPH.with(|graph| {
-            if let Ok(mut g) = graph.try_borrow_mut() {
-                g.add_node(tensor.id(), grad_fn);
-            }
-        });
-    }
+    GLOBAL_GRAPH.with(|graph| {
+        if let Ok(mut g) = graph.try_borrow_mut() {
+            g.add_tensor_with_grad_req(tensor.id(), grad_fn, tensor.requires_grad());
+        }
+    });
     Ok(())
 }
 
@@ -154,13 +84,36 @@ pub fn backward(
     tensor: &Tensor,
     grad_output: Option<Tensor>,
 ) -> Result<FxHashMap<TensorId, Tensor>> {
-    GLOBAL_GRAPH.with(|graph| graph.borrow().backward(tensor, grad_output))
+    GLOBAL_GRAPH.with(|graph| {
+        let grad = match grad_output {
+            Some(g) => g,
+            None => {
+                if tensor.numel() != 1 {
+                    return Err(MinitensorError::gradient_error(
+                        "Gradient can only be implicitly created for scalar tensors",
+                    ));
+                }
+                Tensor::ones(
+                    tensor.shape().clone(),
+                    tensor.dtype(),
+                    tensor.device(),
+                    false,
+                )
+            }
+        };
+        graph.borrow_mut().backward(tensor.id(), Some(grad))
+    })
+}
+
+/// Get the gradient for a tensor from the last backward pass
+pub fn get_gradient(tensor: &Tensor) -> Option<Tensor> {
+    GLOBAL_GRAPH.with(|graph| graph.borrow().get_gradient(tensor.id()).cloned())
 }
 
 /// Clear the global computation graph
 pub fn clear_graph() -> Result<()> {
     GLOBAL_GRAPH.with(|graph| {
-        graph.borrow_mut().nodes.clear();
+        *graph.borrow_mut() = ComputationGraph::new();
     });
     Ok(())
 }
@@ -192,8 +145,8 @@ impl GradientFunction for AddBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -221,8 +174,8 @@ impl GradientFunction for SubBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -251,8 +204,8 @@ impl GradientFunction for MulBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -294,8 +247,8 @@ impl GradientFunction for DivBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -313,8 +266,8 @@ impl GradientFunction for NegBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -323,33 +276,48 @@ pub struct MatMulBackward {
     pub lhs: Tensor,
     pub rhs: Tensor,
     pub input_ids: [TensorId; 2],
+    pub lhs_requires_grad: bool,
+    pub rhs_requires_grad: bool,
 }
 
 impl GradientFunction for MatMulBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
+        gradients.reserve(
+            (self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize),
+        );
 
-        if self.lhs.ndim() != 2 || self.rhs.ndim() != 2 {
-            return Err(MinitensorError::not_implemented(
-                "MatMulBackward currently supports only 2D tensors".to_string(),
+        if self.lhs.ndim() < 2 || self.rhs.ndim() < 2 {
+            return Err(MinitensorError::invalid_operation(
+                "MatMulBackward requires tensors with at least 2 dimensions",
             ));
         }
 
-        let rhs_t = crate::operations::linalg::transpose(&self.rhs.detach(), 0, 1)?;
-        let lhs_grad = crate::operations::linalg::matmul(grad_output, &rhs_t)?;
+        if self.lhs_requires_grad {
+            let rhs_t = crate::operations::linalg::transpose(
+                &self.rhs,
+                self.rhs.ndim() - 2,
+                self.rhs.ndim() - 1,
+            )?;
+            let lhs_grad = crate::operations::linalg::matmul(grad_output, &rhs_t)?;
+            gradients.insert(self.input_ids[0], lhs_grad);
+        }
 
-        let lhs_t = crate::operations::linalg::transpose(&self.lhs.detach(), 0, 1)?;
-        let rhs_grad = crate::operations::linalg::matmul(&lhs_t, grad_output)?;
-
-        gradients.insert(self.input_ids[0], lhs_grad);
-        gradients.insert(self.input_ids[1], rhs_grad);
+        if self.rhs_requires_grad {
+            let lhs_t = crate::operations::linalg::transpose(
+                &self.lhs,
+                self.lhs.ndim() - 2,
+                self.lhs.ndim() - 1,
+            )?;
+            let rhs_grad = crate::operations::linalg::matmul(&lhs_t, grad_output)?;
+            gradients.insert(self.input_ids[1], rhs_grad);
+        }
 
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -364,21 +332,37 @@ impl GradientFunction for TransposeBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        // Transpose gradient: transpose back
-        if self.dims.len() == 2 {
-            let grad_input =
-                crate::operations::linalg::transpose(grad_output, self.dims[0], self.dims[1])?;
-            gradients.insert(self.input_id, grad_input);
+        // Transpose gradient: transpose back. Support both simple swaps and
+        // arbitrary dimension permutations by applying the inverse permutation.
+        let grad_input = if self.dims.len() == 2 {
+            crate::operations::linalg::transpose(grad_output, self.dims[0], self.dims[1])?
         } else {
-            // For now, just pass through the gradient
-            gradients.insert(self.input_id, grad_output.clone());
-        }
+            let mut inverse = vec![0; self.dims.len()];
+            for (i, &d) in self.dims.iter().enumerate() {
+                inverse[d] = i;
+            }
+            let mut grad = grad_output.clone();
+            let mut current: Vec<usize> = (0..inverse.len()).collect();
+            for i in 0..inverse.len() {
+                let j = current
+                    .iter()
+                    .position(|&x| x == inverse[i])
+                    .expect("invalid permutation");
+                if i != j {
+                    grad = crate::operations::linalg::transpose(&grad, i, j)?;
+                    current.swap(i, j);
+                }
+            }
+            grad
+        };
+
+        gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -422,8 +406,8 @@ impl GradientFunction for SumBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -447,8 +431,8 @@ impl GradientFunction for ExpBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -477,8 +461,8 @@ impl GradientFunction for LogBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -501,8 +485,8 @@ impl GradientFunction for SinBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -526,8 +510,8 @@ impl GradientFunction for CosBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -557,8 +541,8 @@ impl GradientFunction for TanBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -588,8 +572,8 @@ impl GradientFunction for TanhBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -619,8 +603,8 @@ impl GradientFunction for SigmoidBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -842,8 +826,8 @@ impl GradientFunction for PowBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -936,8 +920,8 @@ impl GradientFunction for ReluBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -1041,8 +1025,8 @@ impl GradientFunction for LeakyReluBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -1070,8 +1054,8 @@ impl GradientFunction for SoftmaxBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -1094,8 +1078,8 @@ impl GradientFunction for ReshapeBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_id]
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -1145,8 +1129,8 @@ impl GradientFunction for MSELossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1189,8 +1173,8 @@ impl GradientFunction for MAELossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1308,8 +1292,8 @@ impl GradientFunction for HuberLossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1388,8 +1372,8 @@ impl GradientFunction for CrossEntropyLossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1432,8 +1416,8 @@ impl GradientFunction for BCELossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1485,8 +1469,8 @@ impl GradientFunction for KLDivLossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1533,8 +1517,8 @@ impl GradientFunction for FocalLossBackward {
         Ok(gradients)
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        vec![self.input_ids[0], self.input_ids[1]]
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 
@@ -1697,8 +1681,8 @@ mod tests {
             input_ids: [TensorId::new(), TensorId::new()],
         });
 
-        graph.add_node(tensor_id, grad_fn);
-        assert!(graph.nodes.contains_key(&tensor_id));
+        graph.add_tensor_with_grad_req(tensor_id, Some(grad_fn), true);
+        assert!(graph.nodes().contains_key(&tensor_id));
     }
 
     #[test]
@@ -1800,6 +1784,8 @@ mod tests {
             lhs: lhs.clone(),
             rhs: rhs.clone(),
             input_ids,
+            lhs_requires_grad: true,
+            rhs_requires_grad: true,
         };
         let grad_output = Tensor::ones(
             Shape::new(vec![2, 2]),
@@ -1812,5 +1798,138 @@ mod tests {
         let expected_lhs = crate::operations::linalg::matmul(&grad_output, &rhs_t).unwrap();
         let lhs_grad = grads.get(&input_ids[0]).unwrap();
         assert!(lhs_grad.allclose(&expected_lhs, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_matmul_backward_batched() {
+        let lhs = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                (0..12).map(|x| x as f32).collect(),
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let rhs = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                (0..24).map(|x| x as f32).collect(),
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 3, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let input_ids = [TensorId::new(), TensorId::new()];
+        let grad_fn = MatMulBackward {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            input_ids,
+            lhs_requires_grad: true,
+            rhs_requires_grad: true,
+        };
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 2, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        let rhs_t = crate::operations::linalg::transpose(&rhs, rhs.ndim() - 2, rhs.ndim() - 1).unwrap();
+        let expected_lhs = crate::operations::linalg::matmul(&grad_output, &rhs_t).unwrap();
+        assert!(grads
+            .get(&input_ids[0])
+            .unwrap()
+            .allclose(&expected_lhs, 1e-6, 1e-6));
+        let lhs_t = crate::operations::linalg::transpose(&lhs, lhs.ndim() - 2, lhs.ndim() - 1).unwrap();
+        let expected_rhs = crate::operations::linalg::matmul(&lhs_t, &grad_output).unwrap();
+        assert!(grads
+            .get(&input_ids[1])
+            .unwrap()
+            .allclose(&expected_rhs, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_matmul_backward_requires_grad_flags() {
+        let lhs = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, 2.0, 3.0, 4.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let rhs = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![5.0, 6.0, 7.0, 8.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let ids = [TensorId::new(), TensorId::new()];
+        let grad_fn = MatMulBackward {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            input_ids: ids,
+            lhs_requires_grad: true,
+            rhs_requires_grad: false,
+        };
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        assert!(grads.contains_key(&ids[0]));
+        assert!(!grads.contains_key(&ids[1]));
+    }
+
+    #[test]
+    fn test_transpose_backward_permutation() {
+        let _input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                (0..24).map(|x| x as f32).collect(),
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 3, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let dims = vec![1, 2, 0];
+        let grad_fn = TransposeBackward {
+            dims: dims.clone(),
+            input_id: TensorId::new(),
+        };
+        let grad_output = Tensor::ones(
+            Shape::new(vec![3, 4, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        let grad_input = grads.values().next().unwrap();
+        let mut inverse = vec![0; dims.len()];
+        for (i, &d) in dims.iter().enumerate() {
+            inverse[d] = i;
+        }
+        let mut expected = grad_output.clone();
+        let mut current: Vec<usize> = (0..inverse.len()).collect();
+        for i in 0..inverse.len() {
+            let j = current.iter().position(|&x| x == inverse[i]).unwrap();
+            if i != j {
+                expected = crate::operations::linalg::transpose(&expected, i, j).unwrap();
+                current.swap(i, j);
+            }
+        }
+        assert!(grad_input.allclose(&expected, 1e-6, 1e-6));
     }
 }

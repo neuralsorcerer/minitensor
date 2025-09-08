@@ -231,8 +231,8 @@ impl GradientFunction for CustomOpBackward {
         )
     }
 
-    fn input_ids(&self) -> Vec<TensorId> {
-        self.input_ids.clone()
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }
 

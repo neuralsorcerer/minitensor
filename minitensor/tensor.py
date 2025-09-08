@@ -121,8 +121,8 @@ class Tensor:
 
     @property
     def grad(self) -> Optional["Tensor"]:
-        """Get gradient tensor."""
-        rust_grad = self._tensor.grad
+        """Get gradient tensor from the global autograd graph."""
+        rust_grad = _minitensor_core.get_gradient(self._tensor)
         if rust_grad is not None:
             result = Tensor.__new__(Tensor)
             result._tensor = rust_grad
@@ -376,13 +376,9 @@ class Tensor:
     ):
         """Compute gradients via backpropagation."""
         if gradient is None:
-            if self.numel() != 1:
-                raise RuntimeError(
-                    "grad can be implicitly created only for scalar outputs"
-                )
-            gradient = Tensor(1.0, dtype=self.dtype, device=self.device)
-
-        self._tensor.backward(gradient._tensor)
+            self._tensor.backward(None)
+        else:
+            self._tensor.backward(gradient._tensor)
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
         """Set requires_grad flag in-place."""

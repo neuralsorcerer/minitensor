@@ -4,7 +4,7 @@
 
 </div>
 <h3 align="center">
-A lightweight, high-performance tensor operations and automatic differentiation library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
+A lightweight, high-performance tensor operations library with automatic differentiation, inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> and powered by Rust backend.
 </h3>
 
 ---
@@ -219,7 +219,7 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 ```bibtex
 @software{minitensor2025,
   author = {Soumyadip Sarkar},
-  title = {MiniTensor: A lightweight, high-performance tensor operations library},
+  title = {MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
   url = {http://github.com/neuralsorcerer/minitensor},
   year = {2025},
 }
