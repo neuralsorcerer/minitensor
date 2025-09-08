@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+import pytest
 
 from minitensor.tensor import Tensor
 
@@ -60,6 +61,17 @@ def test_empty_tensor_conversion():
     x = Tensor([], dtype="float32")
     y = x.astype("int32")
     assert y.dtype == "int32"
+    assert y.numpy().size == 0
+
+
+@pytest.mark.parametrize("src_dtype", ["float32", "float64", "int32", "int64", "bool"])
+@pytest.mark.parametrize("target_dtype", ["float32", "float64", "int32", "int64", "bool"])
+def test_empty_tensor_all_dtype_conversions(src_dtype, target_dtype):
+    if src_dtype == target_dtype:
+        pytest.skip("identity conversion")
+    x = Tensor([], dtype=src_dtype)
+    y = x.astype(target_dtype)
+    assert y.dtype == target_dtype
     assert y.numpy().size == 0
 
 

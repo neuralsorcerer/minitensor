@@ -333,7 +333,11 @@ impl TensorData {
             TensorBuffer::Owned(vec) => Some(vec.as_slice()),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
-                    Some(unsafe { std::slice::from_raw_parts(*ptr, *size) })
+                    if *size == 0 {
+                        Some(&[])
+                    } else {
+                        Some(unsafe { std::slice::from_raw_parts(*ptr, *size) })
+                    }
                 } else {
                     None // GPU memory not directly accessible
                 }
@@ -348,7 +352,11 @@ impl TensorData {
             TensorBuffer::Owned(vec) => Some(vec.as_mut_slice()),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
-                    Some(unsafe { std::slice::from_raw_parts_mut(*ptr, *size) })
+                    if *size == 0 {
+                        Some(&mut [])
+                    } else {
+                        Some(unsafe { std::slice::from_raw_parts_mut(*ptr, *size) })
+                    }
                 } else {
                     None // GPU memory not directly accessible
                 }
@@ -505,6 +513,11 @@ impl TensorData {
         }
 
         let ptr = self.as_ptr() as *const f32;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<f32>::dangling().as_ptr()
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
     }
 
@@ -516,6 +529,11 @@ impl TensorData {
         }
 
         let ptr = self.as_mut_ptr() as *mut f32;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<f32>::dangling().as_ptr() as *mut f32
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
     }
 
@@ -527,6 +545,11 @@ impl TensorData {
         }
 
         let ptr = self.as_ptr() as *const f64;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<f64>::dangling().as_ptr()
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
     }
 
@@ -538,6 +561,11 @@ impl TensorData {
         }
 
         let ptr = self.as_mut_ptr() as *mut f64;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<f64>::dangling().as_ptr() as *mut f64
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
     }
 
@@ -549,6 +577,11 @@ impl TensorData {
         }
 
         let ptr = self.as_ptr() as *const i32;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<i32>::dangling().as_ptr()
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
     }
 
@@ -560,6 +593,11 @@ impl TensorData {
         }
 
         let ptr = self.as_mut_ptr() as *mut i32;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<i32>::dangling().as_ptr() as *mut i32
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
     }
 
@@ -571,6 +609,11 @@ impl TensorData {
         }
 
         let ptr = self.as_ptr() as *const i64;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<i64>::dangling().as_ptr()
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
     }
 
@@ -582,6 +625,11 @@ impl TensorData {
         }
 
         let ptr = self.as_mut_ptr() as *mut i64;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<i64>::dangling().as_ptr() as *mut i64
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
     }
 
@@ -593,6 +641,11 @@ impl TensorData {
         }
 
         let ptr = self.as_ptr() as *const bool;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<bool>::dangling().as_ptr()
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
     }
 
@@ -604,6 +657,11 @@ impl TensorData {
         }
 
         let ptr = self.as_mut_ptr() as *mut bool;
+        let ptr = if self.layout.numel == 0 {
+            std::ptr::NonNull::<bool>::dangling().as_ptr() as *mut bool
+        } else {
+            ptr
+        };
         Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
     }
 }
