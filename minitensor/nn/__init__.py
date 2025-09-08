@@ -92,6 +92,17 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
             def __getattr__(self, name):
                 return getattr(self._layer, name)
 
+            def summary(self, name: str | None = None):
+                """Return a layer summary with a default name.
+
+                The underlying Rust ``Module`` requires a name argument.  Provide
+                a sensible default matching the Python class name when none is
+                supplied to mirror the PyTorch API.
+                """
+                if name is None:
+                    name = self.__class__.__name__
+                return self._layer.summary(name)
+
         globals()["DenseLayer"] = DenseLayer
 
     if "BatchNorm1d" in globals():
@@ -116,6 +127,11 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
             def __getattr__(self, name):
                 return getattr(self._layer, name)
 
+            def summary(self, name: str | None = None):
+                if name is None:
+                    name = self.__class__.__name__
+                return self._layer.summary(name)
+
         globals()["BatchNorm1d"] = BatchNorm1d
 
     if "BatchNorm2d" in globals():
@@ -139,6 +155,11 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
 
             def __getattr__(self, name):
                 return getattr(self._layer, name)
+
+            def summary(self, name: str | None = None):
+                if name is None:
+                    name = self.__class__.__name__
+                return self._layer.summary(name)
 
         globals()["BatchNorm2d"] = BatchNorm2d
 # When the core is missing we simply expose an empty namespace so that importing
