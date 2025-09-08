@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
-from minitensor.tensor import Tensor
+
 from minitensor import nn
+from minitensor.tensor import Tensor
 
 
 def test_relu_forward():
@@ -29,5 +30,7 @@ def test_gelu_forward():
     layer = nn.GELU()
     y = layer.forward(x._tensor)
     arr = x.numpy()
-    expected = 0.5 * arr * (1.0 + np.tanh(np.sqrt(2 / np.pi) * (arr + 0.044715 * arr ** 3)))
+    expected = (
+        0.5 * arr * (1.0 + np.tanh(np.sqrt(2 / np.pi) * (arr + 0.044715 * arr**3)))
+    )
     np.testing.assert_allclose(y.numpy(), expected, rtol=1e-5, atol=1e-5)

@@ -19,8 +19,8 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
-from typing import Optional, Union
 import math
+from typing import Optional, Union
 
 from .tensor import Tensor
 

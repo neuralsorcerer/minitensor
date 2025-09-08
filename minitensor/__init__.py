@@ -13,12 +13,12 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
+import sys
+
 from . import functional, nn, optim
 
 # Re-export core classes and functions
 from .tensor import Tensor
-
-import sys
 
 try:
     from . import numpy_compat
@@ -31,10 +31,9 @@ try:
         execute_custom_op_py,
         is_custom_op_registered_py,
         list_custom_ops_py,
-        register_example_custom_ops,
-        unregister_custom_op_py,
-        plugins as _plugins,
     )
+    from ._core import plugins as _plugins
+    from ._core import register_example_custom_ops, unregister_custom_op_py
 
     plugins = _plugins
     sys.modules[__name__ + ".plugins"] = plugins

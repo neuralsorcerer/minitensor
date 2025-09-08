@@ -10,10 +10,10 @@ use crate::{device::Device, error::Result};
 pub trait Allocator: Send + Sync {
     /// Allocate memory of the given size
     fn allocate(&mut self, _size: usize) -> Result<*mut u8>;
-    
+
     /// Deallocate previously allocated memory
     fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()>;
-    
+
     /// Get the device this allocator operates on
     fn device(&self) -> Device;
 }
@@ -45,7 +45,9 @@ impl CpuAllocator {
     /// Create a new CPU allocator
     #[inline]
     pub fn new() -> Self {
-        Self { device: Device::cpu() }
+        Self {
+            device: Device::cpu(),
+        }
     }
 }
 
@@ -68,14 +70,14 @@ impl CudaAllocator {
 #[cfg(feature = "cuda")]
 impl Allocator for CudaAllocator {
     fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
-                Err(crate::error::MinitensorError::backend_error(
-            "CUDA allocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "CUDA allocator not yet implemented",
         ))
     }
 
     fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
-                Err(crate::error::MinitensorError::backend_error(
-            "CUDA deallocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "CUDA deallocator not yet implemented",
         ))
     }
 
@@ -97,14 +99,14 @@ impl MetalAllocator {
 #[cfg(feature = "metal")]
 impl Allocator for MetalAllocator {
     fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
-                Err(crate::error::MinitensorError::backend_error(
-            "Metal allocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "Metal allocator not yet implemented",
         ))
     }
 
     fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
-                Err(crate::error::MinitensorError::backend_error(
-            "Metal deallocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "Metal deallocator not yet implemented",
         ))
     }
 
@@ -126,14 +128,14 @@ impl OpenCLAllocator {
 #[cfg(feature = "opencl")]
 impl Allocator for OpenCLAllocator {
     fn allocate(&mut self, size: usize) -> Result<*mut u8> {
-                Err(crate::error::MinitensorError::backend_error(
-            "OpenCL allocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "OpenCL allocator not yet implemented",
         ))
     }
 
     fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
-                Err(crate::error::MinitensorError::backend_error(
-            "OpenCL deallocator not yet implemented"
+        Err(crate::error::MinitensorError::backend_error(
+            "OpenCL deallocator not yet implemented",
         ))
     }
 
@@ -150,18 +152,20 @@ impl Allocator for CpuAllocator {
         }
 
         if size > isize::MAX as usize {
-            return Err(crate::error::MinitensorError::memory_error(
-                format!("Invalid memory layout for size {}", size),
-            ));
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "Invalid memory layout for size {}",
+                size
+            )));
         }
 
         let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(size, 1) };
         let ptr = unsafe { std::alloc::alloc(layout) };
-        
+
         if ptr.is_null() {
-            Err(crate::error::MinitensorError::memory_error(
-                format!("Failed to allocate {} bytes", size)
-            ))
+            Err(crate::error::MinitensorError::memory_error(format!(
+                "Failed to allocate {} bytes",
+                size
+            )))
         } else {
             Ok(ptr)
         }
@@ -174,14 +178,15 @@ impl Allocator for CpuAllocator {
         }
 
         if size > isize::MAX as usize {
-            return Err(crate::error::MinitensorError::memory_error(
-                format!("Invalid memory layout for size {}", size),
-            ));
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "Invalid memory layout for size {}",
+                size
+            )));
         }
 
         let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(size, 1) };
         unsafe { std::alloc::dealloc(ptr, layout) };
-        
+
         Ok(())
     }
 

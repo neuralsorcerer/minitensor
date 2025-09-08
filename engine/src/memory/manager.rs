@@ -116,10 +116,10 @@ mod tests {
     fn test_unified_memory_manager() {
         let mut manager = UnifiedMemoryManager::new();
         let device = Device::cpu();
-        
+
         let ptr = manager.allocate(1024, device).unwrap();
         assert!(!ptr.is_null());
-        
+
         manager.deallocate(ptr, 1024, device).unwrap();
 
         // stats should track allocations
@@ -132,11 +132,11 @@ mod tests {
     #[test]
     fn test_global_memory_manager() {
         init_memory_manager();
-        
+
         let device = Device::cpu();
         let ptr = global_allocate(512, device).unwrap();
         assert!(!ptr.is_null());
-        
+
         global_deallocate(ptr, 512, device).unwrap();
 
         // Zero-sized allocations should be handled gracefully

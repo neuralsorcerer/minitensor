@@ -61,6 +61,7 @@ def test_dtype_mismatch_error():
     with pytest.raises(TypeError):
         _ = a + b
 
+
 def test_empty_tensor_arithmetic():
     a = mt.Tensor([]).reshape([0])
     b = mt.Tensor([]).reshape([0])

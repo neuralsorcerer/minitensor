@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import pytest
-from minitensor.tensor import Tensor
+
 from minitensor.nn import DenseLayer
+from minitensor.tensor import Tensor
+
 
 def test_dense_layer_forward_and_stats():
     layer = DenseLayer(3, 2)
@@ -20,6 +22,7 @@ def test_dense_layer_forward_and_stats():
     assert mem["bytes_by_dtype"]["Float32"] == (3 * 2 + 2) * 4
     summary = layer.summary()
     assert "Total Parameters" in summary
+
 
 def test_dense_layer_forward_shape_error():
     layer = DenseLayer(3, 2)

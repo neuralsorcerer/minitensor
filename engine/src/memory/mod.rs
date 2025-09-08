@@ -11,8 +11,8 @@
 //! previously allocated blocks to reduce system allocator pressure.
 
 pub mod allocator;
-pub mod pool;
 pub mod manager;
+pub mod pool;
 
 pub use allocator::{Allocator, CpuAllocator};
 pub use manager::{global_allocate, global_deallocate, init_memory_manager, UnifiedMemoryManager};

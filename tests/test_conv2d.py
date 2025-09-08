@@ -6,7 +6,10 @@
 
 import numpy as np
 import pytest
-from minitensor import Tensor, functional as F
+
+from minitensor import Tensor
+from minitensor import functional as F
+
 
 def test_conv2d_basic():
     x = Tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
@@ -21,8 +24,7 @@ def test_conv2d_padding_stride():
     w = Tensor(np.array([1, 0, 0, 1], dtype=np.float32).reshape(1, 1, 2, 2))
     y = F.conv2d(x, w, stride=2, padding=1)
     np.testing.assert_allclose(
-        y.numpy(),
-        np.array([[[[1.0, 3.0, 0.0], [9.0, 17.0, 8.0], [0.0, 14.0, 16.0]]]])
+        y.numpy(), np.array([[[[1.0, 3.0, 0.0], [9.0, 17.0, 8.0], [0.0, 14.0, 16.0]]]])
     )
 
 

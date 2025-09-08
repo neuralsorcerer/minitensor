@@ -80,7 +80,7 @@ impl MemoryPool {
         Ok((rounded, idx))
     }
 
-        /// Allocate memory from the pool.
+    /// Allocate memory from the pool.
     #[inline]
     pub fn allocate(&mut self, size: usize) -> Result<*mut u8> {
         if size == 0 {
@@ -104,7 +104,7 @@ impl MemoryPool {
         if ptr.is_null() || size == 0 {
             return Ok(());
         }
-        
+
         let (rounded, idx) = Self::bucket_for(size)?;
         self.allocated_blocks = self.allocated_blocks.saturating_sub(1);
         self.allocated_bytes = self.allocated_bytes.saturating_sub(rounded);

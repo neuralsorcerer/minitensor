@@ -41,5 +41,5 @@ def test_tensor_pow_dtype_mismatch_error():
 def test_negative_base_fractional_power_clamps_zero():
     base = Tensor([-1.0], dtype="float32")
     exp = Tensor([0.5], dtype="float32")
-    y = base ** exp
+    y = base**exp
     assert y.numpy()[0] == 0.0

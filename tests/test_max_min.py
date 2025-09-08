@@ -6,6 +6,7 @@
 
 import numpy as np
 import pytest
+
 import minitensor as mt
 
 

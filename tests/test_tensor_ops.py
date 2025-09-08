@@ -100,6 +100,7 @@ def test_mul_overflow_results_infinity():
     res = a * b
     assert np.isinf(res.numpy()).all()
 
+
 def test_exp_extreme_values():
     t = mt.Tensor([1000.0, -1000.0])
     r = t.exp()

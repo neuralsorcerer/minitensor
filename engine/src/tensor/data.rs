@@ -63,7 +63,9 @@ impl TensorData {
         if device.is_cpu() {
             let size_bytes = numel * dtype.size_bytes();
             let mut vec = Vec::with_capacity(size_bytes);
-            unsafe { vec.set_len(size_bytes); }
+            unsafe {
+                vec.set_len(size_bytes);
+            }
             let mut data = Self {
                 buffer: TensorBuffer::Owned(vec),
                 layout: MemoryLayout {

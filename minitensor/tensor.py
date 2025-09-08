@@ -22,7 +22,6 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-
 # Mapping between NumPy dtypes and Tensor dtype strings
 _TENSOR_TO_NP_DTYPE = {
     "float32": np.dtype(np.float32),
@@ -394,7 +393,7 @@ class Tensor:
     def __neg__(self) -> "Tensor":
         """Unary negation returning a Tensor."""
         return self.__mul__(-1)
-    
+
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             # Scalar addition
@@ -523,7 +522,7 @@ class Tensor:
             result_shape = self.shape[:-1] + (other.shape[-1],)
             np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
             return Tensor(np.zeros(result_shape, dtype=np_dtype), dtype=self.dtype)
-        
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.matmul(other._tensor)
         return result
@@ -556,7 +555,7 @@ class Tensor:
                 return Tensor(np.array(0, dtype=np_dtype), dtype=self.dtype)
             else:  # bool
                 return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
-        
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.sum(dim, keepdim)
         return result
@@ -576,7 +575,7 @@ class Tensor:
         if dim is None and self.numel() == 0:
             if np.issubdtype(np_dtype, np.floating):
                 return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
-        
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.mean(dim, keepdim)
         return result
@@ -603,7 +602,7 @@ class Tensor:
                 self.isnan().all().numpy()
             ):
                 return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
-        
+
             result = Tensor.__new__(Tensor)
             result._tensor = self._tensor.max(dim, keepdim)
             return result
@@ -667,7 +666,7 @@ class Tensor:
                 self.isnan().all().numpy()
             ):
                 return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
-        
+
             result = Tensor.__new__(Tensor)
             result._tensor = self._tensor.min(dim, keepdim)
             return result
@@ -970,6 +969,7 @@ class Tensor:
     # Indexing and slicing (simplified)
     def __getitem__(self, key):
         """Tensor indexing and slicing."""
+
         def _check_slice(k):
             if isinstance(k, slice):
                 if k.step not in (None, 1):

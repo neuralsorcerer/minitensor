@@ -1250,12 +1250,7 @@ impl Tensor {
             DataType::Float32 => {
                 let slice = data.as_f32_slice_mut().unwrap();
                 let val_slice = value.data().as_f32_slice().unwrap();
-                for (idx, &val) in val_slice
-                    .iter()
-                    .cycle()
-                    .take(out_shape.numel())
-                    .enumerate()
-                {
+                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1270,12 +1265,7 @@ impl Tensor {
             DataType::Float64 => {
                 let slice = data.as_f64_slice_mut().unwrap();
                 let val_slice = value.data().as_f64_slice().unwrap();
-                for (idx, &val) in val_slice
-                    .iter()
-                    .cycle()
-                    .take(out_shape.numel())
-                    .enumerate()
-                {
+                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1290,12 +1280,7 @@ impl Tensor {
             DataType::Int32 => {
                 let slice = data.as_i32_slice_mut().unwrap();
                 let val_slice = value.data().as_i32_slice().unwrap();
-                for (idx, &val) in val_slice
-                    .iter()
-                    .cycle()
-                    .take(out_shape.numel())
-                    .enumerate()
-                {
+                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1310,12 +1295,7 @@ impl Tensor {
             DataType::Int64 => {
                 let slice = data.as_i64_slice_mut().unwrap();
                 let val_slice = value.data().as_i64_slice().unwrap();
-                for (idx, &val) in val_slice
-                    .iter()
-                    .cycle()
-                    .take(out_shape.numel())
-                    .enumerate()
-                {
+                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1330,12 +1310,7 @@ impl Tensor {
             DataType::Bool => {
                 let slice = data.as_bool_slice_mut().unwrap();
                 let val_slice = value.data().as_bool_slice().unwrap();
-                for (idx, &val) in val_slice
-                    .iter()
-                    .cycle()
-                    .take(out_shape.numel())
-                    .enumerate()
-                {
+                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
                     let mut rem = idx;
                     let mut src_idx = offset;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
@@ -1900,7 +1875,12 @@ mod tests {
 
     #[test]
     fn test_add_scalar_broadcasting() {
-        let a = Tensor::ones(Shape::new(vec![2, 3]), DataType::Float32, Device::cpu(), false);
+        let a = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let scalar = Tensor::ones(Shape::scalar(), DataType::Float32, Device::cpu(), false);
         let result = a.add(&scalar).unwrap();
         assert_eq!(result.data().as_f32_slice().unwrap(), &[2.0; 6]);
@@ -1909,8 +1889,18 @@ mod tests {
 
     #[test]
     fn test_add_incompatible_shapes_error() {
-        let a = Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
-        let b = Tensor::ones(Shape::new(vec![3, 1]), DataType::Float32, Device::cpu(), false);
+        let a = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let b = Tensor::ones(
+            Shape::new(vec![3, 1]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         assert!(a.add(&b).is_err());
     }
 
@@ -1951,15 +1941,23 @@ mod tests {
 
     #[test]
     fn test_transpose_out_of_bounds() {
-        let tensor =
-            Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
+        let tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         assert!(tensor.transpose(0, 2).is_err());
     }
 
     #[test]
     fn test_transpose_same_dim_noop() {
-        let tensor =
-            Tensor::ones(Shape::new(vec![2, 2]), DataType::Float32, Device::cpu(), false);
+        let tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
         let transposed = tensor.transpose(1, 1).unwrap();
         assert_eq!(transposed.data().as_f32_slice().unwrap(), &[1.0; 4]);
         assert_eq!(transposed.shape().dims(), &[2, 2]);

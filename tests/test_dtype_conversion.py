@@ -65,7 +65,9 @@ def test_empty_tensor_conversion():
 
 
 @pytest.mark.parametrize("src_dtype", ["float32", "float64", "int32", "int64", "bool"])
-@pytest.mark.parametrize("target_dtype", ["float32", "float64", "int32", "int64", "bool"])
+@pytest.mark.parametrize(
+    "target_dtype", ["float32", "float64", "int32", "int64", "bool"]
+)
 def test_empty_tensor_all_dtype_conversions(src_dtype, target_dtype):
     if src_dtype == target_dtype:
         pytest.skip("identity conversion")
