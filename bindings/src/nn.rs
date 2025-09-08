@@ -857,9 +857,9 @@ impl PyConv2d {
     fn new(
         in_channels: usize,
         out_channels: usize,
-        kernel_size: &PyAny,
-        stride: Option<&PyAny>,
-        padding: Option<&PyAny>,
+        kernel_size: &Bound<PyAny>,
+        stride: Option<&Bound<PyAny>>,
+        padding: Option<&Bound<PyAny>>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
@@ -1042,7 +1042,7 @@ impl PySequential {
 }
 
 /// Helper function to parse data type string
-fn parse_tuple2(obj: &PyAny) -> PyResult<(usize, usize)> {
+fn parse_tuple2(obj: &Bound<PyAny>) -> PyResult<(usize, usize)> {
     if let Ok(val) = obj.extract::<usize>() {
         Ok((val, val))
     } else {
@@ -1323,7 +1323,7 @@ impl PyFocalLoss {
 }
 
 /// Register neural network module with Python
-pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()> {
+pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyResult<()> {
     let nn_module = Pyo3Module::new(py, "nn")?;
 
     // Add layer classes
@@ -1344,9 +1344,9 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PySequential>()?;
 
     // Add functional APIs
-    nn_module.add_function(wrap_pyfunction!(conv2d, nn_module)?)?;
-    nn_module.add_function(wrap_pyfunction!(batch_norm, nn_module)?)?;
-    nn_module.add_function(wrap_pyfunction!(cross_entropy, nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(batch_norm, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(cross_entropy, &nn_module)?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;
@@ -1356,6 +1356,6 @@ pub fn register_nn_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()
     nn_module.add_class::<PyBCELoss>()?;
     nn_module.add_class::<PyFocalLoss>()?;
 
-    parent_module.add_submodule(nn_module)?;
+    parent_module.add_submodule(&nn_module)?;
     Ok(())
 }

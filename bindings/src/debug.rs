@@ -272,9 +272,9 @@ impl PyTimer {
     fn __exit__(
         &mut self,
         py: Python,
-        _exc_type: Option<&PyAny>,
-        _exc_value: Option<&PyAny>,
-        _traceback: Option<&PyAny>,
+        _exc_type: Option<&Bound<PyAny>>,
+        _exc_value: Option<&Bound<PyAny>>,
+        _traceback: Option<&Bound<PyAny>>,
     ) -> PyResult<bool> {
         let duration = self.start_time.elapsed();
         let duration_ms = duration.as_secs_f64() * 1000.0;
@@ -301,7 +301,7 @@ fn timer(operation: String, profiler: Option<Py<PyOperationProfiler>>) -> PyTime
 }
 
 /// Module initialization
-pub fn init_debug_module(_py: Python, m: &PyModule) -> PyResult<()> {
+pub fn init_debug_module(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyTensorInfo>()?;
     m.add_class::<PyTensorDebugger>()?;
     m.add_class::<PyMemoryTracker>()?;

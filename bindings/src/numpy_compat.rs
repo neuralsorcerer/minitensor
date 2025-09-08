@@ -15,7 +15,7 @@ use pyo3::types::PyList;
 
 /// NumPy-style array creation functions
 #[pymodule]
-pub fn numpy_compat(_py: Python, m: &PyModule) -> PyResult<()> {
+pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Array creation functions
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
     m.add_function(wrap_pyfunction!(ones_like, m)?)?;
@@ -87,25 +87,25 @@ fn full_like(tensor: &PyTensor, fill_value: f64, dtype: Option<&str>) -> PyResul
 
 /// Concatenate tensors along an axis
 #[pyfunction]
-fn concatenate(tensors: &PyList, axis: Option<usize>) -> PyResult<PyTensor> {
+fn concatenate(tensors: &Bound<PyList>, axis: Option<usize>) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, axis)
 }
 
 /// Stack tensors along a new axis
 #[pyfunction]
-fn stack(tensors: &PyList, axis: Option<usize>) -> PyResult<PyTensor> {
+fn stack(tensors: &Bound<PyList>, axis: Option<usize>) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, axis)
 }
 
 /// Stack tensors vertically (row-wise)
 #[pyfunction]
-fn vstack(tensors: &PyList) -> PyResult<PyTensor> {
+fn vstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, Some(0))
 }
 
 /// Stack tensors horizontally (column-wise)
 #[pyfunction]
-fn hstack(tensors: &PyList) -> PyResult<PyTensor> {
+fn hstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, Some(1))
 }
 

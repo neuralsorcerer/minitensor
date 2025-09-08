@@ -22,4 +22,4 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 
 [build-dependencies]
-pyo3-build-config = { version = "0.20", features = ["resolve-config"] }
+pyo3-build-config = { version = "0.26", features = ["resolve-config"] }

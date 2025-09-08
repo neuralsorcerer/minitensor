@@ -345,7 +345,7 @@ impl PyRMSprop {
 }
 
 /// Register optimizer module with Python
-pub fn register_optim_module(py: Python, parent_module: &Pyo3Module) -> PyResult<()> {
+pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyResult<()> {
     let optim_module = Pyo3Module::new(py, "optim")?;
 
     // Add optimizer classes
@@ -354,6 +354,6 @@ pub fn register_optim_module(py: Python, parent_module: &Pyo3Module) -> PyResult
     optim_module.add_class::<PyAdam>()?;
     optim_module.add_class::<PyRMSprop>()?;
 
-    parent_module.add_submodule(optim_module)?;
+    parent_module.add_submodule(&optim_module)?;
     Ok(())
 }

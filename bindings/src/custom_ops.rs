@@ -29,7 +29,7 @@ fn unregister_custom_op_py(name: &str) -> PyResult<()> {
 
 /// Execute a custom operation
 #[pyfunction]
-fn execute_custom_op_py(name: &str, inputs: &PyList) -> PyResult<PyTensor> {
+fn execute_custom_op_py(name: &str, inputs: &Bound<PyList>) -> PyResult<PyTensor> {
     // Convert Python list to vector of tensor references
     let mut tensor_refs = Vec::new();
     let mut tensors = Vec::new();
@@ -69,7 +69,7 @@ fn is_custom_op_registered_py(name: &str) -> PyResult<bool> {
 }
 
 /// Initialize the custom operations module
-pub fn init_custom_ops_module(_py: Python, parent_module: &PyModule) -> PyResult<()> {
+pub fn init_custom_ops_module(_py: Python, parent_module: &Bound<PyModule>) -> PyResult<()> {
     // Add functions to parent module
     parent_module.add_function(wrap_pyfunction!(
         register_example_custom_ops,

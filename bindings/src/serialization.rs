@@ -487,7 +487,7 @@ fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
     PyModelSerializer::load(path, format.as_ref())
 }
 
-pub fn register_serialization_module(py: Python, parent_module: &PyModule) -> PyResult<()> {
+pub fn register_serialization_module(py: Python, parent_module: &Bound<PyModule>) -> PyResult<()> {
     let serialization_module = PyModule::new(py, "serialization")?;
 
     // Add classes
@@ -500,9 +500,9 @@ pub fn register_serialization_module(py: Python, parent_module: &PyModule) -> Py
     serialization_module.add_class::<PyDeploymentModel>()?;
 
     // Add convenience functions
-    serialization_module.add_function(wrap_pyfunction!(save_model, serialization_module)?)?;
-    serialization_module.add_function(wrap_pyfunction!(load_model, serialization_module)?)?;
+    serialization_module.add_function(wrap_pyfunction!(save_model, &serialization_module)?)?;
+    serialization_module.add_function(wrap_pyfunction!(load_model, &serialization_module)?)?;
 
-    parent_module.add_submodule(serialization_module)?;
+    parent_module.add_submodule(&serialization_module)?;
     Ok(())
 }

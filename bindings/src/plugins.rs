@@ -136,12 +136,22 @@ impl PyPluginInfo {
 
 /// Python interface for creating custom plugins
 #[pyclass(name = "CustomPlugin")]
-#[derive(Clone)]
 pub struct PyCustomPlugin {
     info: PluginInfo,
     initialize_fn: Option<PyObject>,
     cleanup_fn: Option<PyObject>,
     custom_operations_fn: Option<PyObject>,
+}
+
+impl Clone for PyCustomPlugin {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| Self {
+            info: self.info.clone(),
+            initialize_fn: self.initialize_fn.as_ref().map(|f| f.clone_ref(py)),
+            cleanup_fn: self.cleanup_fn.as_ref().map(|f| f.clone_ref(py)),
+            custom_operations_fn: self.custom_operations_fn.as_ref().map(|f| f.clone_ref(py)),
+        })
+    }
 }
 
 #[pymethods]
@@ -289,9 +299,12 @@ impl PyPluginRegistry {
                     py,
                     PyCustomPlugin {
                         info: plugin.info.clone(),
-                        initialize_fn: plugin.initialize_fn.clone(),
-                        cleanup_fn: plugin.cleanup_fn.clone(),
-                        custom_operations_fn: plugin.custom_operations_fn.clone(),
+                        initialize_fn: plugin.initialize_fn.as_ref().map(|f| f.clone_ref(py)),
+                        cleanup_fn: plugin.cleanup_fn.as_ref().map(|f| f.clone_ref(py)),
+                        custom_operations_fn: plugin
+                            .custom_operations_fn
+                            .as_ref()
+                            .map(|f| f.clone_ref(py)),
                     },
                 )
                 .map_err(|e| e)
@@ -337,8 +350,16 @@ impl PyCustomLayer {
     }
 
     fn get_parameter(&self, name: &str) -> PyResult<PyObject> {
-        self.parameters.get(name).cloned().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Parameter '{}' not found", name))
+        Python::with_gil(|py| {
+            self.parameters
+                .get(name)
+                .map(|t| t.clone_ref(py))
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                        "Parameter '{}' not found",
+                        name
+                    ))
+                })
         })
     }
 
@@ -351,7 +372,7 @@ impl PyCustomLayer {
         &self.name
     }
 
-    fn forward(&self, py: Python, inputs: &PyList) -> PyResult<PyObject> {
+    fn forward(&self, py: Python, inputs: &Bound<PyList>) -> PyResult<PyObject> {
         if let Some(forward_fn) = &self.forward_fn {
             forward_fn.call1(py, (inputs,))
         } else {
@@ -484,7 +505,7 @@ impl PyPluginBuilder {
     }
 }
 
-pub fn register_plugin_module(_py: Python, m: &PyModule) -> PyResult<()> {
+pub fn register_plugin_module(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyVersionInfo>()?;
     m.add_class::<PyPluginInfo>()?;
     m.add_class::<PyCustomPlugin>()?;

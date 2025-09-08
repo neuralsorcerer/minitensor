@@ -24,7 +24,7 @@ use tensor::PyTensor;
 
 /// Python module for minitensor core
 #[pymodule]
-fn _core(py: Python, m: &PyModule) -> PyResult<()> {
+fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Add version information
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -38,21 +38,21 @@ fn _core(py: Python, m: &PyModule) -> PyResult<()> {
 
     // Add debugging utilities
     let debug_module = PyModule::new(py, "debug")?;
-    debug::init_debug_module(py, debug_module)?;
-    m.add_submodule(debug_module)?;
+    debug::init_debug_module(py, &debug_module)?;
+    m.add_submodule(&debug_module)?;
 
     // Add NumPy compatibility functions
     let numpy_module = PyModule::new(py, "numpy_compat")?;
-    numpy_compat::numpy_compat(py, numpy_module)?;
-    m.add_submodule(numpy_module)?;
+    numpy_compat::numpy_compat(py, &numpy_module)?;
+    m.add_submodule(&numpy_module)?;
 
     // Add custom operations functions
     custom_ops::init_custom_ops_module(py, m)?;
 
     // Add plugin system
     let plugins_module = PyModule::new(py, "plugins")?;
-    plugins::register_plugin_module(py, plugins_module)?;
-    m.add_submodule(plugins_module)?;
+    plugins::register_plugin_module(py, &plugins_module)?;
+    m.add_submodule(&plugins_module)?;
 
     // Add serialization module
     serialization::register_serialization_module(py, m)?;

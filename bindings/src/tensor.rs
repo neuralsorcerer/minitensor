@@ -8,7 +8,8 @@ use crate::device::PyDevice;
 use crate::error::_convert_error;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor, TensorIndex};
-use numpy::{PyArray, PyArrayDyn};
+use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
+use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PyTuple};
@@ -43,7 +44,7 @@ impl PyTensor {
     /// Create a new tensor from Python data
     #[new]
     fn new(
-        data: &PyAny,
+        data: &Bound<PyAny>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
@@ -392,7 +393,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn pow(&self, exponent: &PyAny) -> PyResult<Self> {
+    fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
             let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
             Ok(Self { inner: result })
@@ -448,7 +449,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn __pow__(&self, exponent: &PyAny, _mod: Option<&PyAny>) -> PyResult<Self> {
+    fn __pow__(&self, exponent: &Bound<PyAny>, _mod: Option<&Bound<PyAny>>) -> PyResult<Self> {
         self.pow(exponent)
     }
 
@@ -510,7 +511,7 @@ impl PyTensor {
     fn __str__(&self) -> String {
         if self.inner.numel() <= 100 {
             match self.tolist() {
-                Ok(data) => Python::with_gil(|py| format!("tensor({})", data.as_ref(py))),
+                Ok(datadata) => Python::with_gil(|py| format!("tensor({})", data.bind(py))),
                 Err(_) => self.__repr__(),
             }
         } else {
@@ -569,13 +570,13 @@ impl PyTensor {
         }
     }
 
-    fn __getitem__(&self, key: &PyAny) -> PyResult<Self> {
+    fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
         let indices = parse_indices(key, self.inner.shape().dims())?;
         let result = self.inner.index(&indices).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    fn __setitem__(&mut self, key: &PyAny, value: &PyAny) -> PyResult<()> {
+    fn __setitem__(&mut self, key: &Bound<PyAny>, value: &Bound<PyAny>) -> PyResult<()> {
         let indices = parse_indices(key, self.inner.shape().dims())?;
         let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner
@@ -705,21 +706,21 @@ impl PyTensor {
     }
 
     #[staticmethod]
-    fn from_numpy(array: &PyAny, requires_grad: Option<bool>) -> PyResult<Self> {
+    fn from_numpy(array: &Bound<PyAny>, requires_grad: Option<bool>) -> PyResult<Self> {
         let requires_grad = requires_grad.unwrap_or(false);
         let tensor = convert_numpy_to_tensor(array, requires_grad)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
-    fn from_numpy_shared(array: &PyAny, requires_grad: Option<bool>) -> PyResult<Self> {
+    fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: Option<bool>) -> PyResult<Self> {
         // For now, same as from_numpy - true zero-copy would require more complex memory management
         Self::from_numpy(array, requires_grad)
     }
 
     /// Concatenate tensors along an axis
     #[staticmethod]
-    pub fn concatenate(tensors: &PyList, _axis: Option<usize>) -> PyResult<PyTensor> {
+    pub fn concatenate(tensors: &Bound<PyList>, _axis: Option<usize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot concatenate empty list of tensors",
@@ -741,7 +742,7 @@ impl PyTensor {
 
     /// Stack tensors along a new axis
     #[staticmethod]
-    pub fn stack(tensors: &PyList, _axis: Option<usize>) -> PyResult<PyTensor> {
+    pub fn stack(tensors: &Bound<PyList>, _axis: Option<usize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot stack empty list of tensors",
@@ -809,7 +810,7 @@ fn parse_dtype(dtype_str: &str) -> PyResult<DataType> {
 }
 
 fn convert_python_data_to_tensor(
-    data: &PyAny,
+    data: &Bound<PyAny>,
     dtype: DataType,
     device: Device,
     requires_grad: bool,
@@ -861,12 +862,12 @@ fn convert_python_data_to_tensor(
     ))
 }
 
-fn flatten_python_data(list: &PyList) -> PyResult<(Vec<usize>, Vec<f32>)> {
+fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<f32>)> {
     let mut shape = vec![];
     let mut flat_data = vec![];
 
     fn process_nested(
-        item: &PyAny,
+        item: &Bound<PyAny>,
         shape: &mut Vec<usize>,
         flat_data: &mut Vec<f32>,
         depth: usize,
@@ -875,8 +876,8 @@ fn flatten_python_data(list: &PyList) -> PyResult<(Vec<usize>, Vec<f32>)> {
             if depth >= shape.len() {
                 shape.push(nested_list.len());
             }
-            for nested_item in nested_list {
-                process_nested(nested_item, shape, flat_data, depth + 1)?;
+            for nested_item in nested_list.iter() {
+                process_nested(&nested_item, shape, flat_data, depth + 1)?;
             }
         } else if let Ok(val) = item.extract::<f64>() {
             flat_data.push(val as f32);
@@ -889,14 +890,14 @@ fn flatten_python_data(list: &PyList) -> PyResult<(Vec<usize>, Vec<f32>)> {
     }
 
     shape.push(list.len());
-    for item in list {
-        process_nested(item, &mut shape, &mut flat_data, 1)?;
+    for item in list.iter() {
+        process_nested(&item, &mut shape, &mut flat_data, 1)?;
     }
 
     Ok((shape, flat_data))
 }
 
-fn parse_index(item: &PyAny, dim_size: usize) -> PyResult<TensorIndex> {
+fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
     if let Ok(i) = item.extract::<isize>() {
         let mut idx = i;
         if idx < 0 {
@@ -908,12 +909,11 @@ fn parse_index(item: &PyAny, dim_size: usize) -> PyResult<TensorIndex> {
         Ok(TensorIndex::Index(idx as usize))
     } else if let Ok(slice) = item.downcast::<PySlice>() {
         use std::convert::TryInto;
-        use std::os::raw::c_long;
 
-        let dim_size: c_long = dim_size
+        let dim_size_isize: isize = dim_size
             .try_into()
             .map_err(|_| PyValueError::new_err("dim_size too large"))?;
-        let indices = slice.indices(dim_size)?;
+        let indices = slice.indices(dim_size_isize)?;
         Ok(TensorIndex::Slice {
             start: indices.start as usize,
             end: indices.stop as usize,
@@ -930,7 +930,7 @@ fn parse_index(item: &PyAny, dim_size: usize) -> PyResult<TensorIndex> {
     }
 }
 
-fn parse_indices(key: &PyAny, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
+fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
     if let Ok(tup) = key.downcast::<PyTuple>() {
         if tup.len() > shape.len() {
             return Err(PyIndexError::new_err("Too many indices"));
@@ -938,7 +938,7 @@ fn parse_indices(key: &PyAny, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
         let mut result = Vec::new();
         for (i, dim) in shape.iter().enumerate() {
             if i < tup.len() {
-                result.push(parse_index(tup.get_item(i)?, *dim)?);
+                result.push(parse_index(&tup.get_item(i)?, *dim)?);
             } else {
                 result.push(TensorIndex::Slice {
                     start: 0,
@@ -961,7 +961,7 @@ fn parse_indices(key: &PyAny, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
     }
 }
 
-fn convert_numpy_to_tensor(array: &PyAny, requires_grad: bool) -> PyResult<Tensor> {
+fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Tensor> {
     if let Ok(array_f32) = array.downcast::<PyArrayDyn<f32>>() {
         let readonly = array_f32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
@@ -1067,7 +1067,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
             } else {
                 PyArray::from_slice(py, data).reshape(shape)?
             };
-            Ok(array.to_object(py))
+            Ok(array.into_any().unbind())
         }
         DataType::Float64 => {
             let data = tensor.data().as_f64_slice().ok_or_else(|| {
@@ -1079,7 +1079,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
             } else {
                 PyArray::from_slice(py, data).reshape(shape)?
             };
-            Ok(array.to_object(py))
+            Ok(array.into_any().unbind())
         }
         DataType::Int32 => {
             let data = tensor.data().as_i32_slice().ok_or_else(|| {
@@ -1091,7 +1091,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
             } else {
                 PyArray::from_slice(py, data).reshape(shape)?
             };
-            Ok(array.to_object(py))
+            Ok(array.into_any().unbind())
         }
         DataType::Int64 => {
             let data = tensor.data().as_i64_slice().ok_or_else(|| {
@@ -1103,7 +1103,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
             } else {
                 PyArray::from_slice(py, data).reshape(shape)?
             };
-            Ok(array.to_object(py))
+            Ok(array.into_any().unbind())
         }
         DataType::Bool => {
             let data = tensor.data().as_bool_slice().ok_or_else(|| {
@@ -1115,7 +1115,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyR
             } else {
                 PyArray::from_slice(py, data).reshape(shape)?
             };
-            Ok(array.to_object(py))
+            Ok(array.into_any().unbind())
         }
     }
 }
@@ -1128,35 +1128,35 @@ fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<PyObje
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f32 data")
             })?;
             let list: Vec<f32> = data.to_vec();
-            Ok(list.to_object(py))
+            Ok(list.into_py_any(py)?)
         }
         DataType::Float64 => {
             let data = tensor.data().as_f64_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f64 data")
             })?;
             let list: Vec<f64> = data.to_vec();
-            Ok(list.to_object(py))
+            Ok(list.into_py_any(py)?)
         }
         DataType::Int32 => {
             let data = tensor.data().as_i32_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i32 data")
             })?;
             let list: Vec<i32> = data.to_vec();
-            Ok(list.to_object(py))
+            Ok(list.into_py_any(py)?)
         }
         DataType::Int64 => {
             let data = tensor.data().as_i64_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i64 data")
             })?;
             let list: Vec<i64> = data.to_vec();
-            Ok(list.to_object(py))
+            Ok(list.into_py_any(py)?)
         }
         DataType::Bool => {
             let data = tensor.data().as_bool_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get bool data")
             })?;
             let list: Vec<bool> = data.to_vec();
-            Ok(list.to_object(py))
+            Ok(list.into_py_any(py)?)
         }
     }
 }
@@ -1174,7 +1174,7 @@ fn create_random_tensor(
         DataType::Float32 => {
             if let Some(slice) = tensor_data.as_f32_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 if normal {
                     use rand_distr::{Distribution, Normal};
                     let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
@@ -1183,7 +1183,7 @@ fn create_random_tensor(
                     }
                 } else {
                     for val in slice.iter_mut() {
-                        *val = rng.gen::<f32>();
+                        *val = rng.random::<f32>();
                     }
                 }
             }
@@ -1191,7 +1191,7 @@ fn create_random_tensor(
         DataType::Float64 => {
             if let Some(slice) = tensor_data.as_f64_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 if normal {
                     use rand_distr::{Distribution, Normal};
                     let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
@@ -1200,7 +1200,7 @@ fn create_random_tensor(
                     }
                 } else {
                     for val in slice.iter_mut() {
-                        *val = rng.gen::<f64>();
+                        *val = rng.random::<f64>();
                     }
                 }
             }
@@ -1208,7 +1208,7 @@ fn create_random_tensor(
         DataType::Int32 => {
             if let Some(slice) = tensor_data.as_i32_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 if normal {
                     use rand_distr::{Distribution, Normal};
                     let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
@@ -1217,7 +1217,7 @@ fn create_random_tensor(
                     }
                 } else {
                     for val in slice.iter_mut() {
-                        *val = rng.gen::<i32>();
+                        *val = rng.random::<i32>();
                     }
                 }
             }
@@ -1225,7 +1225,7 @@ fn create_random_tensor(
         DataType::Int64 => {
             if let Some(slice) = tensor_data.as_i64_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 if normal {
                     use rand_distr::{Distribution, Normal};
                     let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
@@ -1234,7 +1234,7 @@ fn create_random_tensor(
                     }
                 } else {
                     for val in slice.iter_mut() {
-                        *val = rng.gen::<i64>();
+                        *val = rng.random::<i64>();
                     }
                 }
             }
@@ -1242,9 +1242,9 @@ fn create_random_tensor(
         DataType::Bool => {
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 for val in slice.iter_mut() {
-                    *val = rng.gen::<bool>();
+                    *val = rng.random::<bool>();
                 }
             }
         }
