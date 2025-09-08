@@ -29,11 +29,7 @@ jobs:
           cache: pip
 
       - name: Set up Rust (stable)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies (Python + Rust bindings)
         shell: bash
