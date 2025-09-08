@@ -9,7 +9,7 @@ use crate::{
     error::Result,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-let mut rng = thread_rng();
+use rand::thread_rng;
 use rand_distr::{Distribution, Normal, Uniform};
 use std::sync::Arc;
 
