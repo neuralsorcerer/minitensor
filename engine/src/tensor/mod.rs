@@ -735,6 +735,19 @@ impl Tensor {
             return false;
         }
 
+        // Fast path: byte-for-byte equality check for contiguous CPU tensors
+        if self.device.is_cpu()
+            && other.device.is_cpu()
+            && self.is_contiguous()
+            && other.is_contiguous()
+        {
+            if let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
+                if a == b {
+                    return true;
+                }
+            }
+        }
+
         let numel = self.numel();
         match self.dtype {
             DataType::Float32 => {
@@ -789,6 +802,17 @@ impl Tensor {
     pub fn array_equal(&self, other: &Tensor) -> bool {
         if self.shape != other.shape || self.dtype != other.dtype {
             return false;
+        }
+
+        // Fast path for contiguous CPU tensors using raw bytes comparison
+        if self.device.is_cpu()
+            && other.device.is_cpu()
+            && self.is_contiguous()
+            && other.is_contiguous()
+        {
+            if let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
+                return a == b;
+            }
         }
 
         let numel = self.numel();
@@ -1973,5 +1997,64 @@ mod tests {
             converted.data().as_i32_slice().unwrap(),
             expected.as_slice()
         );
+    }
+
+    #[test]
+    fn test_array_equal_fast_path() {
+        let t1 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let t2 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert!(t1.array_equal(&t2));
+        assert!(t1.allclose(&t2, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_array_equal_mismatch() {
+        let t1 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let t2 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.1], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert!(!t1.array_equal(&t2));
+        assert!(!t1.allclose(&t2, 1e-5, 1e-5));
+    }
+
+    #[test]
+    fn test_array_equal_zero_sized() {
+        let empty1 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![], Device::cpu())),
+            Shape::new(vec![0]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let empty2 = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![], Device::cpu())),
+            Shape::new(vec![0]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert!(empty1.array_equal(&empty2));
     }
 }
