@@ -18,6 +18,22 @@ def test_scalar_broadcasting_addition():
     np.testing.assert_allclose(c.numpy(), expected)
 
 
+def test_scalar_broadcasting_subtraction():
+    a = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    b = mt.Tensor(1.0)
+    c = a - b
+    expected = np.array([[0.0, 1.0], [2.0, 3.0]])
+    np.testing.assert_allclose(c.numpy(), expected)
+
+
+def test_scalar_broadcasting_division():
+    a = mt.Tensor([[2.0, 4.0], [6.0, 8.0]])
+    b = mt.Tensor(2.0)
+    c = a / b
+    expected = np.array([[1.0, 2.0], [3.0, 4.0]])
+    np.testing.assert_allclose(c.numpy(), expected)
+
+
 def test_broadcast_incompatible_shapes_error():
     a = mt.Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     b = mt.Tensor([1.0, 2.0])
@@ -63,3 +79,37 @@ def test_conv_bias_broadcasting():
         3, dtype=np.float32
     ).reshape(1, 3, 1, 1)
     np.testing.assert_allclose(out.numpy(), expected)
+
+
+def test_conv_bias_broadcasting():
+    inp = mt.Tensor(np.ones((2, 3, 4, 4), dtype=np.float32))
+    bias = mt.Tensor(np.arange(3, dtype=np.float32).reshape(3, 1, 1))
+    out = inp + bias
+    expected = np.ones((2, 3, 4, 4), dtype=np.float32) + np.arange(
+        3, dtype=np.float32
+    ).reshape(1, 3, 1, 1)
+    np.testing.assert_allclose(out.numpy(), expected)
+
+
+@pytest.mark.skip(reason="Python autograd gradients currently unavailable")
+def test_broadcast_backward_add():
+    dev = mt.device("cpu")
+    a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)
+    b = mt.Tensor(np.arange(3, dtype=np.float32), requires_grad=True, device=dev)
+    c = a + b
+    grad = mt.Tensor(1.0, device=dev)
+    c.sum().backward(grad)
+    np.testing.assert_allclose(a.grad.numpy(), np.ones((2, 3), dtype=np.float32))
+    np.testing.assert_allclose(b.grad.numpy(), np.array([2.0, 2.0, 2.0], dtype=np.float32))
+
+
+@pytest.mark.skip(reason="Python autograd gradients currently unavailable")
+def test_broadcast_backward_mul():
+    dev = mt.device("cpu")
+    a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)
+    b = mt.Tensor(np.arange(3, dtype=np.float32) + 1, requires_grad=True, device=dev)
+    c = a * b
+    grad = mt.Tensor(1.0, device=dev)
+    c.sum().backward(grad)
+    np.testing.assert_allclose(a.grad.numpy(), np.tile(np.arange(1, 4, dtype=np.float32), (2, 1)))
+    np.testing.assert_allclose(b.grad.numpy(), np.array([3.0, 7.0, 11.0], dtype=np.float32))

@@ -10,7 +10,7 @@ use crate::{
     operations::{activation, arithmetic},
     tensor::{DataType, Shape, Tensor},
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// Example: Custom Swish activation function (x * sigmoid(x))
@@ -25,7 +25,7 @@ pub fn create_swish_op() -> Result<Arc<dyn CustomOp>> {
             |_grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
                 // Swish gradient: sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
                 // For simplicity, we'll approximate this
-                let mut gradients = HashMap::new();
+                let mut gradients = FxHashMap::default();
 
                 if let (
                     Some(&input_id),
@@ -77,7 +77,7 @@ pub fn create_gelu_op() -> Result<Arc<dyn CustomOp>> {
         })
         .backward(
             |_grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-                let mut gradients = HashMap::new();
+                let mut gradients = FxHashMap::default();
 
                 if let (
                     Some(&input_id),
@@ -117,7 +117,7 @@ pub fn create_mish_op() -> Result<Arc<dyn CustomOp>> {
         })
         .backward(
             |grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-                let mut gradients = HashMap::new();
+                let mut gradients = FxHashMap::default();
 
                 if let (
                     Some(&input_id),
@@ -153,7 +153,7 @@ pub fn create_power_op() -> Result<Arc<dyn CustomOp>> {
         })
         .backward(
             |_grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-                let mut gradients = HashMap::new();
+                let mut gradients = FxHashMap::default();
 
                 // Power gradient: d/dx(x^y) = y * x^(y-1), d/dy(x^y) = x^y * ln(x)
                 // Simplified implementation
@@ -211,7 +211,7 @@ pub fn create_layer_norm_op() -> Result<Arc<dyn CustomOp>> {
         })
         .backward(
             |grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-                let mut gradients = HashMap::new();
+                let mut gradients = FxHashMap::default();
 
                 // Layer norm has gradients for input, weight, and bias
                 for (i, &input_id) in input_ids.iter().enumerate() {

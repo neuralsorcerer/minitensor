@@ -56,6 +56,13 @@ def test_np_negative_returns_tensor():
     assert np.array_equal(result.numpy(), np.array([-1, 2, -3]))
 
 
+def test_unary_minus_tensor():
+    t = Tensor([1, -2, 3])
+    result = -t
+    assert isinstance(result, Tensor)
+    assert np.array_equal(result.numpy(), np.array([-1, 2, -3]))
+
+
 def test_np_trig_dispatches_to_tensor():
     t = Tensor([0.0, np.pi / 2, np.pi])
     sin_result = np.sin(t)
@@ -68,6 +75,14 @@ def test_np_trig_dispatches_to_tensor():
     np.testing.assert_allclose(
         cos_result.numpy(), np.cos([0.0, np.pi / 2, np.pi]), rtol=1e-6, atol=1e-6
     )
+
+
+def test_np_power_dispatches_to_tensor():
+    a = Tensor([2.0, 3.0], dtype="float32")
+    b = Tensor([3.0, 2.0], dtype="float32")
+    result = np.power(a, b)
+    assert isinstance(result, Tensor)
+    np.testing.assert_allclose(result.numpy(), np.array([8.0, 9.0], dtype=np.float32))
 
 
 def test_np_add_dtype_promotion():

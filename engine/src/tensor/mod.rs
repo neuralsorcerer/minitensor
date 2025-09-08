@@ -276,6 +276,12 @@ impl Tensor {
         transpose(self, dim0, dim1)
     }
 
+    /// Unary negation
+    pub fn neg(&self) -> Result<Self> {
+        use crate::operations::arithmetic::neg;
+        neg(self)
+    }
+
     /// Add two tensors element-wise
     pub fn add(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::arithmetic::add;

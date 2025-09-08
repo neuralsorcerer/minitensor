@@ -4,7 +4,7 @@
 
 </div>
 <h3 align="center">
-A lightweight, high-performance tensor operations library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
+A lightweight, high-performance tensor operations and automatic differentiation library inspired by <a href="https://github.com/pytorch/pytorch">PyTorch</a> with Rust backend.
 </h3>
 
 ---

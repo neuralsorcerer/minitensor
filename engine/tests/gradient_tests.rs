@@ -50,6 +50,76 @@ fn test_mul_backward_correct() {
 }
 
 #[test]
+fn test_sub_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let a = create_test_tensor_f32(vec![5.0, 7.0], vec![2], true);
+    let b = create_test_tensor_f32(vec![3.0, 2.0], vec![2], true);
+    let diff = arithmetic::sub(&a, &b).unwrap();
+    let grad_output = Tensor::ones(
+        diff.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&diff, Some(grad_output)).unwrap();
+    let grad_a = grads.get(&a.id()).unwrap();
+    let grad_b = grads.get(&b.id()).unwrap();
+    assert_eq!(grad_a.data().as_f32_slice().unwrap(), &[1.0, 1.0]);
+    assert_eq!(grad_b.data().as_f32_slice().unwrap(), &[-1.0, -1.0]);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_div_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let a = create_test_tensor_f32(vec![4.0, 9.0], vec![2], true);
+    let b = create_test_tensor_f32(vec![2.0, 3.0], vec![2], true);
+    let quo = arithmetic::div(&a, &b).unwrap();
+    let grad_output = Tensor::ones(quo.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&quo, Some(grad_output)).unwrap();
+    let grad_a = grads.get(&a.id()).unwrap();
+    let grad_b = grads.get(&b.id()).unwrap();
+    let ga = grad_a.data().as_f32_slice().unwrap();
+    let gb = grad_b.data().as_f32_slice().unwrap();
+    assert_relative_eq!(ga[0], 0.5f32, epsilon = 1e-6);
+    assert_relative_eq!(ga[1], 1.0 / 3.0, epsilon = 1e-6);
+    assert_relative_eq!(gb[0], -1.0, epsilon = 1e-6); // -4 / 4
+    assert_relative_eq!(gb[1], -1.0, epsilon = 1e-6); // -9 / 9
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_neg_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let x = create_test_tensor_f32(vec![1.0, -2.0], vec![2], true);
+    let y = arithmetic::neg(&x).unwrap();
+    let grad_output = Tensor::ones(y.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&y, Some(grad_output)).unwrap();
+    let grad_x = grads.get(&x.id()).unwrap();
+    assert_eq!(grad_x.data().as_f32_slice().unwrap(), &[-1.0, -1.0]);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_cos_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(vec![0.0, std::f32::consts::FRAC_PI_2], vec![2], true);
+    let output = activation::cos(&input).unwrap();
+    let grad_output = Tensor::ones(
+        output.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&output, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    let vals = grad_input.data().as_f32_slice().unwrap();
+    assert_relative_eq!(vals[0], 0.0, epsilon = 1e-6);
+    assert_relative_eq!(vals[1], -1.0, epsilon = 1e-6);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
 fn test_z_leaky_relu_backward_correct() {
     autograd::clear_graph().unwrap();
     let input = create_test_tensor_f32(vec![-1.0, 0.0, 1.0], vec![3], true);
@@ -140,6 +210,97 @@ fn test_mul_backward_broadcasting() {
     let grad_b = grads.get(&b.id()).unwrap();
     assert_eq!(grad_a.data().as_f32_slice().unwrap(), &[30.0, 30.0, 30.0]);
     assert_eq!(grad_b.data().as_f32_slice().unwrap(), &[6.0, 6.0]);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_sub_backward_broadcasting() {
+    autograd::clear_graph().unwrap();
+    let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3, 1], true);
+    let b = create_test_tensor_f32(vec![10.0, 20.0], vec![1, 2], true);
+    let diff = arithmetic::sub(&a, &b).unwrap();
+    let grad_output = Tensor::ones(
+        diff.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&diff, Some(grad_output)).unwrap();
+    let grad_a = grads.get(&a.id()).unwrap();
+    let grad_b = grads.get(&b.id()).unwrap();
+    assert_eq!(grad_a.data().as_f32_slice().unwrap(), &[2.0, 2.0, 2.0]);
+    assert_eq!(grad_b.data().as_f32_slice().unwrap(), &[-3.0, -3.0]);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_div_backward_broadcasting() {
+    autograd::clear_graph().unwrap();
+    let a = create_test_tensor_f32(vec![2.0, 4.0, 6.0], vec![3, 1], true);
+    let b = create_test_tensor_f32(vec![2.0, 4.0], vec![1, 2], true);
+    let quo = arithmetic::div(&a, &b).unwrap();
+    let grad_output = Tensor::ones(quo.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&quo, Some(grad_output)).unwrap();
+    let grad_a = grads.get(&a.id()).unwrap();
+    let grad_b = grads.get(&b.id()).unwrap();
+    let ga = grad_a.data().as_f32_slice().unwrap();
+    let gb = grad_b.data().as_f32_slice().unwrap();
+    assert_relative_eq!(ga[0], 0.5 + 0.25, epsilon = 1e-6); // sum over columns 1/2 + 1/4
+    assert_relative_eq!(ga[1], 0.5 + 0.25, epsilon = 1e-6);
+    assert_relative_eq!(ga[2], 0.5 + 0.25, epsilon = 1e-6);
+    assert_relative_eq!(gb[0], -3.0, epsilon = 1e-6);
+    assert_relative_eq!(gb[1], -0.75, epsilon = 1e-6);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_pow_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let base = create_test_tensor_f32(vec![2.0, 3.0], vec![2], true);
+    let exp = create_test_tensor_f32(vec![3.0, 2.0], vec![2], true);
+    let out = activation::pow(&base, &exp).unwrap();
+    let grad_output = Tensor::ones(out.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&out, Some(grad_output)).unwrap();
+    let grad_base = grads.get(&base.id()).unwrap();
+    let grad_exp = grads.get(&exp.id()).unwrap();
+    let gb = grad_base.data().as_f32_slice().unwrap();
+    let ge = grad_exp.data().as_f32_slice().unwrap();
+    assert_relative_eq!(gb[0], 3.0 * 2.0f32.powf(2.0), epsilon = 1e-6);
+    assert_relative_eq!(gb[1], 2.0 * 3.0f32.powf(1.0), epsilon = 1e-6);
+    assert_relative_eq!(ge[0], 8.0 * 2.0f32.ln(), epsilon = 1e-6);
+    assert_relative_eq!(ge[1], 9.0 * 3.0f32.ln(), epsilon = 1e-6);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_powf_backward_correct() {
+    autograd::clear_graph().unwrap();
+    let base = create_test_tensor_f32(vec![2.0, 3.0], vec![2], true);
+    let out = activation::powf(&base, 3.0).unwrap();
+    let grad_output = Tensor::ones(out.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&out, Some(grad_output)).unwrap();
+    let grad_base = grads.get(&base.id()).unwrap();
+    let gb = grad_base.data().as_f32_slice().unwrap();
+    assert_relative_eq!(gb[0], 3.0 * 2.0f32.powf(2.0), epsilon = 1e-6);
+    assert_relative_eq!(gb[1], 3.0 * 3.0f32.powf(2.0), epsilon = 1e-6);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_broadcast_backward_multiple_axes() {
+    autograd::clear_graph().unwrap();
+    // b is broadcast across both axes
+    let a = create_test_tensor_f32(vec![1.0; 6], vec![2, 3], true);
+    let b = create_test_tensor_f32(vec![2.0], vec![1, 1], true);
+    let sum = arithmetic::add(&a, &b).unwrap();
+    let grad_output = Tensor::ones(sum.shape().clone(), DataType::Float32, Device::cpu(), false);
+    let grads = autograd::backward(&sum, Some(grad_output)).unwrap();
+    let grad_a = grads.get(&a.id()).unwrap();
+    let grad_b = grads.get(&b.id()).unwrap();
+    assert_eq!(grad_a.shape().dims(), &[2, 3]);
+    assert_eq!(grad_b.shape().dims(), &[1, 1]);
+    let slice = grad_b.data().as_f32_slice().unwrap();
+    assert!((slice[0] - 6.0).abs() < 1e-6);
     autograd::clear_graph().unwrap();
 }
 

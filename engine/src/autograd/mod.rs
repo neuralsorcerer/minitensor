@@ -11,9 +11,9 @@ use crate::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ impl Default for TensorId {
 /// Trait for gradient functions in the computation graph
 pub trait GradientFunction: Send + Sync {
     /// Compute gradients for inputs given the output gradient
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>>;
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>>;
 
     /// Get the input tensor IDs that this function depends on
     fn input_ids(&self) -> Vec<TensorId>;
@@ -48,14 +48,14 @@ pub trait GradientFunction: Send + Sync {
 
 /// Computation graph for automatic differentiation
 pub struct ComputationGraph {
-    nodes: HashMap<TensorId, Arc<dyn GradientFunction>>,
+    nodes: FxHashMap<TensorId, Arc<dyn GradientFunction>>,
 }
 
 impl ComputationGraph {
     /// Create a new computation graph
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: FxHashMap::default(),
         }
     }
 
@@ -65,7 +65,7 @@ impl ComputationGraph {
     }
 
     /// Get a reference to the nodes in the computation graph
-    pub fn nodes(&self) -> &HashMap<TensorId, Arc<dyn GradientFunction>> {
+    pub fn nodes(&self) -> &FxHashMap<TensorId, Arc<dyn GradientFunction>> {
         &self.nodes
     }
 
@@ -74,8 +74,9 @@ impl ComputationGraph {
         &self,
         output_tensor: &Tensor,
         grad_output: Option<Tensor>,
-    ) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(self.nodes.len());
+    ) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(self.nodes.len());
 
         // Initialize with output gradient
         let initial_grad = match grad_output {
@@ -112,8 +113,7 @@ impl ComputationGraph {
 
             match gradients.entry(tensor_id) {
                 Entry::Occupied(mut e) => {
-                    let new_grad = crate::operations::arithmetic::add(e.get(), &grad_output)?;
-                    *e.get_mut() = new_grad;
+                    crate::operations::arithmetic::add_inplace(e.get_mut(), &grad_output)?;
                 }
                 Entry::Vacant(e) => {
                     e.insert(grad_output);
@@ -150,7 +150,10 @@ pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>)
 }
 
 /// Perform backward pass from the given tensor using the global computation graph
-pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<HashMap<TensorId, Tensor>> {
+pub fn backward(
+    tensor: &Tensor,
+    grad_output: Option<Tensor>,
+) -> Result<FxHashMap<TensorId, Tensor>> {
     GLOBAL_GRAPH.with(|graph| graph.borrow().backward(tensor, grad_output))
 }
 
@@ -171,8 +174,9 @@ pub struct AddBackward {
 }
 
 impl GradientFunction for AddBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         // For addition, gradients flow through unchanged, but we need to handle broadcasting
         let lhs_shape = Shape::new(self.input_shapes[0].clone());
@@ -193,6 +197,35 @@ impl GradientFunction for AddBackward {
     }
 }
 
+/// Gradient function for subtraction operation
+pub struct SubBackward {
+    pub input_shapes: [Vec<usize>; 2],
+    pub input_ids: [TensorId; 2],
+}
+
+impl GradientFunction for SubBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+
+        let lhs_shape = Shape::new(self.input_shapes[0].clone());
+        let rhs_shape = Shape::new(self.input_shapes[1].clone());
+
+        let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
+        let rhs_base = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
+        let rhs_grad = arithmetic::neg(&rhs_base)?;
+
+        gradients.insert(self.input_ids[0], lhs_grad);
+        gradients.insert(self.input_ids[1], rhs_grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> Vec<TensorId> {
+        vec![self.input_ids[0], self.input_ids[1]]
+    }
+}
+
 /// Gradient function for multiplication operation
 pub struct MulBackward {
     pub lhs: Tensor,
@@ -201,8 +234,9 @@ pub struct MulBackward {
 }
 
 impl GradientFunction for MulBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         // d/dx(x*y) = y and d/dy(x*y) = x
         let lhs_term = arithmetic::mul(grad_output, &self.rhs.detach())?;
@@ -230,8 +264,9 @@ pub struct DivBackward {
 }
 
 impl GradientFunction for DivBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         // d/dx(x/y) = 1 / y
         let rhs_inv = arithmetic::div(
@@ -250,13 +285,7 @@ impl GradientFunction for DivBackward {
         let num = arithmetic::mul(grad_output, &self.lhs.detach())?;
         let rhs_sq = arithmetic::mul(&self.rhs.detach(), &self.rhs.detach())?;
         let rhs_term = arithmetic::div(&num, &rhs_sq)?;
-        let zero = Tensor::zeros(
-            rhs_term.shape().clone(),
-            rhs_term.dtype(),
-            rhs_term.device(),
-            false,
-        );
-        let rhs_term = arithmetic::sub(&zero, &rhs_term)?; // negate
+        let rhs_term = arithmetic::neg(&rhs_term)?;
         let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
 
         gradients.insert(self.input_ids[0], lhs_grad);
@@ -270,6 +299,25 @@ impl GradientFunction for DivBackward {
     }
 }
 
+/// Gradient function for negation
+pub struct NegBackward {
+    pub input_id: TensorId,
+}
+
+impl GradientFunction for NegBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        let grad = arithmetic::neg(grad_output)?;
+        gradients.insert(self.input_id, grad);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> Vec<TensorId> {
+        vec![self.input_id]
+    }
+}
+
 /// Gradient function for matrix multiplication
 pub struct MatMulBackward {
     pub lhs: Tensor,
@@ -278,8 +326,9 @@ pub struct MatMulBackward {
 }
 
 impl GradientFunction for MatMulBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         if self.lhs.ndim() != 2 || self.rhs.ndim() != 2 {
             return Err(MinitensorError::not_implemented(
@@ -311,8 +360,9 @@ pub struct TransposeBackward {
 }
 
 impl GradientFunction for TransposeBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // Transpose gradient: transpose back
         if self.dims.len() == 2 {
@@ -341,8 +391,9 @@ pub struct SumBackward {
 }
 
 impl GradientFunction for SumBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         let mut grad = grad_output.clone();
         if !self.keepdim {
@@ -385,8 +436,9 @@ pub struct ExpBackward {
 }
 
 impl GradientFunction for ExpBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(exp(x)) = exp(x) * grad_output
         let grad = arithmetic::mul(&self.output, grad_output)?;
@@ -407,8 +459,9 @@ pub struct LogBackward {
 }
 
 impl GradientFunction for LogBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(log(x)) = 1/x * grad_output
         let ones = Tensor::ones(
@@ -436,8 +489,9 @@ pub struct SinBackward {
 }
 
 impl GradientFunction for SinBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(sin(x)) = cos(x) * grad_output
         let cos_x = self.input.cos()?;
@@ -459,14 +513,14 @@ pub struct CosBackward {
 }
 
 impl GradientFunction for CosBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(cos(x)) = -sin(x) * grad_output
         let sin_x = self.input.sin()?;
         let mul = arithmetic::mul(&sin_x, grad_output)?;
-        let zeros = Tensor::zeros(mul.shape().clone(), mul.dtype(), mul.device(), false);
-        let grad = arithmetic::sub(&zeros, &mul)?;
+        let grad = arithmetic::neg(&mul)?;
         gradients.insert(self.input_id, grad);
 
         Ok(gradients)
@@ -484,8 +538,9 @@ pub struct TanBackward {
 }
 
 impl GradientFunction for TanBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(tan(x)) = (1 + tan²(x)) * grad_output
         let tan_sq = arithmetic::mul(&self.output, &self.output)?;
@@ -514,8 +569,9 @@ pub struct TanhBackward {
 }
 
 impl GradientFunction for TanhBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(tanh(x)) = (1 - tanh²(x)) * grad_output
         let y2 = arithmetic::mul(&self.output, &self.output)?;
@@ -544,8 +600,9 @@ pub struct SigmoidBackward {
 }
 
 impl GradientFunction for SigmoidBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // d/dx(sigmoid(x)) = sigmoid(x) * (1 - sigmoid(x)) * grad_output
         let ones = Tensor::ones(
@@ -578,8 +635,9 @@ pub struct PowBackward {
 }
 
 impl GradientFunction for PowBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         match self.output.dtype() {
             DataType::Float32 => {
@@ -796,8 +854,9 @@ pub struct ReluBackward {
 }
 
 impl GradientFunction for ReluBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         let mut grad_data = TensorData::zeros_on_device(
             grad_output.numel(),
@@ -890,8 +949,9 @@ pub struct LeakyReluBackward {
 }
 
 impl GradientFunction for LeakyReluBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         let mut grad_data = TensorData::zeros_on_device(
             grad_output.numel(),
@@ -994,8 +1054,9 @@ pub struct SoftmaxBackward {
 }
 
 impl GradientFunction for SoftmaxBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // Softmax gradient: y * (grad_output - sum(grad_output * y, dim))
         let y = self.output.detach();
@@ -1021,8 +1082,9 @@ pub struct ReshapeBackward {
 }
 
 impl GradientFunction for ReshapeBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // Reshape gradient: reshape back to original shape
         let original_shape = Shape::new(self.input_shape.clone());
@@ -1049,8 +1111,9 @@ pub struct MSELossBackward {
 }
 
 impl GradientFunction for MSELossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         // Base gradient: 2 * (predictions - targets)
         let two = create_scalar_tensor(2.0, self.diff.dtype(), self.diff.device())?;
@@ -1074,8 +1137,7 @@ impl GradientFunction for MSELossBackward {
 
         // Multiply by upstream gradient
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let neg_one = create_scalar_tensor(-1.0, pred_grad.dtype(), pred_grad.device())?;
-        let target_grad = arithmetic::mul(&pred_grad, &neg_one)?;
+        let target_grad = arithmetic::neg(&pred_grad)?;
 
         gradients.insert(self.input_ids[0], pred_grad);
         gradients.insert(self.input_ids[1], target_grad);
@@ -1098,8 +1160,9 @@ pub struct MAELossBackward {
 }
 
 impl GradientFunction for MAELossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         let mut base_grad = self.sign.clone();
         match self.reduction.as_str() {
@@ -1118,8 +1181,7 @@ impl GradientFunction for MAELossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let neg_one = create_scalar_tensor(-1.0, pred_grad.dtype(), pred_grad.device())?;
-        let target_grad = arithmetic::mul(&pred_grad, &neg_one)?;
+        let target_grad = arithmetic::neg(&pred_grad)?;
 
         gradients.insert(self.input_ids[0], pred_grad);
         gradients.insert(self.input_ids[1], target_grad);
@@ -1143,8 +1205,9 @@ pub struct HuberLossBackward {
 }
 
 impl GradientFunction for HuberLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         let numel = self.diff.numel();
         let dtype = self.diff.dtype();
@@ -1237,8 +1300,7 @@ impl GradientFunction for HuberLossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let neg_one = create_scalar_tensor(-1.0, dtype, device)?;
-        let target_grad = arithmetic::mul(&pred_grad, &neg_one)?;
+        let target_grad = arithmetic::neg(&pred_grad)?;
 
         gradients.insert(self.input_ids[0], pred_grad);
         gradients.insert(self.input_ids[1], target_grad);
@@ -1262,8 +1324,9 @@ pub struct CrossEntropyLossBackward {
 }
 
 impl GradientFunction for CrossEntropyLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // Compute base gradient: softmax(predictions) - targets
         let mut base_grad =
@@ -1341,8 +1404,9 @@ pub struct BCELossBackward {
 }
 
 impl GradientFunction for BCELossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // BCE gradient: (predictions - targets) / (predictions * (1 - predictions))
         let one = Tensor::ones(
@@ -1384,13 +1448,13 @@ pub struct KLDivLossBackward {
 }
 
 impl GradientFunction for KLDivLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(2);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
 
         // Gradient w.r.t predictions: -(targets / predictions)
         let mut pred_grad = arithmetic::div(&self.targets, &self.predictions)?;
-        let neg_one = create_scalar_tensor(-1.0, pred_grad.dtype(), pred_grad.device())?;
-        pred_grad = arithmetic::mul(&pred_grad, &neg_one)?;
+        pred_grad = arithmetic::neg(&pred_grad)?;
         if self.reduction == "mean" {
             let n = self.predictions.numel() as f64;
             let scale = create_scalar_tensor(1.0 / n, pred_grad.dtype(), pred_grad.device())?;
@@ -1439,8 +1503,9 @@ pub struct FocalLossBackward {
 }
 
 impl GradientFunction for FocalLossBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
-        let mut gradients = HashMap::with_capacity(1);
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
 
         // Compute base gradient similar to cross entropy
         let p = self.softmax_predictions.detach();
@@ -1582,11 +1647,13 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
 
     let grad_dims = grad_output.shape().dims();
     let target_dims = target_shape.dims();
-    let mut axes_to_sum: SmallVec<[usize; 8]> = SmallVec::new();
-
     let extra = grad_dims.len() - target_dims.len();
-    axes_to_sum.extend(0..extra);
 
+    // Use a stack-allocated small vector and pre-allocate enough capacity to
+    // hold all potential broadcast axes. This avoids repeated reallocations for
+    // higher dimensional tensors.
+    let mut axes_to_sum: SmallVec<[usize; 8]> = SmallVec::with_capacity(grad_dims.len());
+    axes_to_sum.extend(0..extra);
     for i in 0..target_dims.len() {
         let gdim = grad_dims[extra + i];
         let tdim = target_dims[i];
@@ -1595,14 +1662,13 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
         }
     }
 
-    let mut grad = if axes_to_sum.is_empty() {
-        grad_output.clone()
-    } else {
-        reduction::sum(grad_output, Some(axes_to_sum.into_vec()), true)?
+    let mut grad = grad_output.clone();
+    for &axis in axes_to_sum.iter() {
+        grad = reduction::sum_along_dim(&grad, axis, true)?;
     };
 
     if grad.shape() != target_shape {
-        grad = shape_ops::reshape(&grad, target_shape.clone())?;
+        grad = grad.view(target_shape.clone())?;
     }
 
     Ok(grad)
@@ -1612,6 +1678,7 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::tensor::DataType;
 
     #[test]
     fn test_tensor_id_generation() {
@@ -1650,6 +1717,60 @@ mod tests {
         let gradients = grad_fn.backward(&grad_output).unwrap();
 
         assert_eq!(gradients.len(), 2);
+    }
+
+    #[test]
+    fn test_reduce_gradient_for_broadcasting() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = Shape::new(vec![2, 1]);
+        let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
+        assert_eq!(reduced.shape().dims(), &[2, 1]);
+        let slice = reduced.data().as_f32_slice().unwrap();
+        assert!(slice.iter().all(|&x| (x - 3.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_reduce_gradient_multiple_axes() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = Shape::new(vec![1, 1]);
+        let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
+        assert_eq!(reduced.shape().dims(), &[1, 1]);
+        let slice = reduced.data().as_f32_slice().unwrap();
+        assert!((slice[0] - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_backward_broadcast_addition() {
+        clear_graph().unwrap();
+
+        let a = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let b = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        let out = arithmetic::add(&a, &b).unwrap();
+
+        let grad = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = backward(&out, Some(grad)).unwrap();
+
+        let grad_a = grads.get(&a.id()).unwrap();
+        let grad_b = grads.get(&b.id()).unwrap();
+        assert_eq!(grad_a.shape().dims(), &[2, 3]);
+        assert_eq!(grad_b.shape().dims(), &[3]);
+        let slice_b = grad_b.data().as_f32_slice().unwrap();
+        assert!(slice_b.iter().all(|&x| (x - 2.0).abs() < 1e-6));
     }
 
     #[test]

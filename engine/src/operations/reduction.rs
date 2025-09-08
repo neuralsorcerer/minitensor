@@ -778,7 +778,8 @@ fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+#[inline]
+pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
         return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
     }

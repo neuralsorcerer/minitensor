@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, AddBackward, DivBackward, MulBackward},
+    autograd::{add_to_graph, AddBackward, DivBackward, MulBackward, NegBackward, SubBackward},
     error::{MinitensorError, Result},
     operations::simd::{
         can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
@@ -16,6 +16,8 @@ use crate::{
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
+
+const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -83,6 +85,131 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 }
 
+/// In-place element-wise addition used for gradient accumulation
+pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
+    if lhs.shape() != rhs.shape() {
+        return Err(MinitensorError::shape_mismatch(
+            lhs.shape().dims().to_vec(),
+            rhs.shape().dims().to_vec(),
+        ));
+    }
+    if lhs.dtype() != rhs.dtype() {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", lhs.dtype()),
+            format!("{:?}", rhs.dtype()),
+        ));
+    }
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+    if std::sync::Arc::strong_count(lhs.data()) > 1 {
+        // Fallback to out-of-place addition if data is shared
+        let tmp = add(lhs, rhs)?;
+        *lhs = tmp;
+        return Ok(());
+    }
+
+    match lhs.dtype() {
+        DataType::Float32 => {
+            let lhs_slice = lhs.data_mut().as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice from lhs tensor")
+            })?;
+            let rhs_slice = rhs.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
+            })?;
+            let len = lhs_slice.len();
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    lhs_slice[i] += rhs_slice[i];
+                }
+            } else {
+                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
+                let rhs_ptr = rhs_slice.as_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let lhs_ptr = lhs_ptr as *mut f32;
+                    let rhs_ptr = rhs_ptr as *const f32;
+                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
+                });
+            }
+        }
+        DataType::Float64 => {
+            let lhs_slice = lhs.data_mut().as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice from lhs tensor")
+            })?;
+            let rhs_slice = rhs.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
+            })?;
+            let len = lhs_slice.len();
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    lhs_slice[i] += rhs_slice[i];
+                }
+            } else {
+                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
+                let rhs_ptr = rhs_slice.as_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let lhs_ptr = lhs_ptr as *mut f64;
+                    let rhs_ptr = rhs_ptr as *const f64;
+                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
+                });
+            }
+        }
+        DataType::Int32 => {
+            let lhs_slice = lhs.data_mut().as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice from lhs tensor")
+            })?;
+            let rhs_slice = rhs.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
+            })?;
+            let len = lhs_slice.len();
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    lhs_slice[i] += rhs_slice[i];
+                }
+            } else {
+                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
+                let rhs_ptr = rhs_slice.as_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let lhs_ptr = lhs_ptr as *mut i32;
+                    let rhs_ptr = rhs_ptr as *const i32;
+                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
+                });
+            }
+        }
+        DataType::Int64 => {
+            let lhs_slice = lhs.data_mut().as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice from lhs tensor")
+            })?;
+            let rhs_slice = rhs.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
+            })?;
+            let len = lhs_slice.len();
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    lhs_slice[i] += rhs_slice[i];
+                }
+            } else {
+                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
+                let rhs_ptr = rhs_slice.as_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let lhs_ptr = lhs_ptr as *mut i64;
+                    let rhs_ptr = rhs_ptr as *const i64;
+                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
+                });
+            }
+        }
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "In-place addition not supported for boolean tensors",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Element-wise subtraction with broadcasting support
 pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Check device compatibility
@@ -130,9 +257,9 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         lhs.requires_grad() || rhs.requires_grad(),
     );
 
-    // Set up gradient function if needed (subtraction uses same gradient as addition)
+    // Set up gradient function if needed
     if output.requires_grad() {
-        let grad_fn = Arc::new(AddBackward {
+        let grad_fn = Arc::new(SubBackward {
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_ids: [lhs.id(), rhs.id()],
         });
@@ -278,6 +405,112 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         add_to_graph(&output_with_grad, Some(grad_fn))?;
 
         Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Element-wise negation
+pub fn neg(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from tensor")
+            })?;
+            let output = output_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = -i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = -i;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from tensor")
+            })?;
+            let output = output_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = -i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = -i;
+                }
+            }
+        }
+        DataType::Int32 => {
+            let input = tensor.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i32 slice from tensor")
+            })?;
+            let output = output_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice from output")
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = -i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = -i;
+                }
+            }
+        }
+        DataType::Int64 => {
+            let input = tensor.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i64 slice from tensor")
+            })?;
+            let output = output_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice from output")
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = -i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = -i;
+                }
+            }
+        }
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Negation not supported for boolean tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(NegBackward {
+            input_id: tensor.id(),
+        });
+        let mut out_with_grad = output;
+        out_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&out_with_grad, Some(grad_fn))?;
+        Ok(out_with_grad)
     } else {
         Ok(output)
     }
@@ -1073,6 +1306,14 @@ mod tests {
     }
 
     #[test]
+    fn test_neg_basic() {
+        let a = create_test_tensor_f32(vec![1.0, -2.0, 3.5], vec![3], false);
+        let result = neg(&a).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[-1.0, 2.0, -3.5]);
+    }
+
+    #[test]
     fn test_gradient_tracking() {
         let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], true);
         let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], true);
@@ -1176,6 +1417,7 @@ mod tests {
         assert!(sub(&a, &b).is_err());
         assert!(mul(&a, &b).is_err());
         assert!(div(&a, &b).is_err());
+        assert!(neg(&a).is_err());
     }
 
     #[test]

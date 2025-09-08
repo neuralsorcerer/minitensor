@@ -12,7 +12,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, RwLock};
 
 // Type aliases to keep function signatures manageable and avoid repeated
@@ -25,7 +25,7 @@ type BackwardFn = Arc<
             &[Vec<usize>],
             &[DataType],
             &[Device],
-        ) -> Result<HashMap<TensorId, Tensor>>
+        ) -> Result<FxHashMap<TensorId, Tensor>>
         + Send
         + Sync,
 >;
@@ -67,14 +67,14 @@ pub trait CustomOp: Send + Sync {
 
 /// Registry for custom operations
 pub struct CustomOpRegistry {
-    operations: RwLock<HashMap<String, Arc<dyn CustomOp>>>,
+    operations: RwLock<FxHashMap<String, Arc<dyn CustomOp>>>,
 }
 
 impl CustomOpRegistry {
     /// Create a new custom operation registry
     pub fn new() -> Self {
         Self {
-            operations: RwLock::new(HashMap::new()),
+            operations: RwLock::new(FxHashMap::default()),
         }
     }
 
@@ -221,7 +221,7 @@ pub struct CustomOpBackward {
 }
 
 impl GradientFunction for CustomOpBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<HashMap<TensorId, Tensor>> {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         (self.backward_fn)(
             grad_output,
             &self.input_ids,
@@ -281,7 +281,7 @@ impl CustomOpBuilder {
                 &[Vec<usize>],
                 &[DataType],
                 &[Device],
-            ) -> Result<HashMap<TensorId, Tensor>>
+            ) -> Result<FxHashMap<TensorId, Tensor>>
             + Send
             + Sync
             + 'static,

@@ -7,7 +7,8 @@
 use super::GradientFunction;
 use crate::{tensor::Tensor, error::Result};
 use smallvec::SmallVec;
-use std::collections::{HashMap, hash_map::Entry, VecDeque};
+use std::collections::hash_map::Entry;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 /// Statistics about the computation graph
@@ -118,20 +119,20 @@ impl GraphNode {
 #[derive(Debug)]
 pub struct ComputationGraph {
     /// Nodes in the graph
-    nodes: HashMap<TensorId, GraphNode>,
+    nodes: FxHashMap<TensorId, GraphNode>,
     /// Topological ordering for backward pass
     topological_order: Vec<TensorId>,
     /// Gradients computed during backward pass
-    gradients: HashMap<TensorId, Tensor>,
+    gradients: FxHashMap<TensorId, Tensor>,
 }
 
 impl ComputationGraph {
     /// Create a new empty computation graph
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
+            nodes: FxHashMap::default(),
             topological_order: Vec::new(),
-            gradients: HashMap::new(),
+            gradients: FxHashMap::default(),
         }
     }
 
@@ -170,9 +171,10 @@ impl ComputationGraph {
     fn update_topological_order(&mut self) {
         self.topological_order.clear();
 
-        let mut dependents: HashMap<TensorId, SmallVec<[TensorId; 4]>> =
-            HashMap::with_capacity(self.nodes.len());
-        let mut in_degree: HashMap<TensorId, usize> = HashMap::with_capacity(self.nodes.len());
+        let mut dependents: FxHashMap<TensorId, SmallVec<[TensorId; 4]>> = FxHashMap::default();
+        dependents.reserve(self.nodes.len());
+        let mut in_degree: FxHashMap<TensorId, usize> = FxHashMap::default();
+        in_degree.reserve(self.nodes.len());
 
         for &node_id in self.nodes.keys() {
             in_degree.entry(node_id).or_insert(0);
@@ -188,14 +190,17 @@ impl ComputationGraph {
             }
         }
 
-        let mut queue: VecDeque<TensorId> = in_degree
+        let mut queue: Vec<TensorId> = in_degree
             .iter()
             .filter(|(_, &degree)| degree == 0)
             .map(|(&id, _)| id)
             .collect();
         
+        let mut idx = 0;
         let mut order: Vec<TensorId> = Vec::with_capacity(self.nodes.len());
-        while let Some(current_id) = queue.pop_front() {
+        while idx < queue.len() {
+            let current_id = queue[idx];
+            idx += 1;
             order.push(current_id);
 
             if let Some(deps) = dependents.get(&current_id) {
@@ -203,7 +208,7 @@ impl ComputationGraph {
                     if let Some(degree) = in_degree.get_mut(&dependent_id) {
                         *degree -= 1;
                         if *degree == 0 {
-                            queue.push_back(dependent_id);
+                            queue.push(dependent_id);
                         }
                     }
                 }
@@ -214,7 +219,7 @@ impl ComputationGraph {
     }
 
     /// Perform backward pass from a given tensor
-    pub fn backward(&mut self, start_tensor: TensorId, gradient: Option<Tensor>) -> Result<HashMap<TensorId, Tensor>> {
+    pub fn backward(&mut self, start_tensor: TensorId, gradient: Option<Tensor>) -> Result<FxHashMap<TensorId, Tensor>> {
         // Clear previous gradients and ensure sufficient capacity for accumulation
         self.gradients.clear();
         self.gradients.reserve(self.nodes.len());
@@ -376,7 +381,7 @@ impl ComputationGraph {
     }
 
     /// Get all nodes in the computation graph
-    pub fn nodes(&self) -> &HashMap<TensorId, GraphNode> {
+    pub fn nodes(&self) -> &FxHashMap<TensorId, GraphNode> {
         &self.nodes
     }
 }
@@ -559,6 +564,27 @@ mod tests {
         });
         graph.add_tensor(result, Some(add_fn));
         assert!(graph.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cycle_detection() {
+        let mut graph = ComputationGraph::new();
+        let a = TensorId::new();
+        let b = TensorId::new();
+
+        let add_a = Arc::new(AddBackward {
+            input_shapes: [vec![1], vec![1]],
+            input_ids: [b, b],
+        });
+        let add_b = Arc::new(AddBackward {
+            input_shapes: [vec![1], vec![1]],
+            input_ids: [a, a],
+        });
+
+        graph.add_tensor(a, Some(add_a));
+        graph.add_tensor(b, Some(add_b));
+
+        assert!(graph.has_cycles());
     }
 
     #[test]

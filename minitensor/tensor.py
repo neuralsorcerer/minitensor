@@ -397,6 +397,9 @@ class Tensor:
     def __neg__(self) -> "Tensor":
         """Unary negation returning a Tensor."""
         return self.__mul__(-1)
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.__neg__()
+        return result
 
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
