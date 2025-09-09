@@ -414,7 +414,6 @@ class Tensor:
     # Arithmetic operations with broadcasting support
     def __neg__(self) -> "Tensor":
         """Unary negation returning a Tensor."""
-        return self.__mul__(-1)
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__neg__()
         return result
@@ -563,6 +562,28 @@ class Tensor:
         else:
             return self.matmul(other)
 
+    def cross(self, other: "Tensor", axis: int = -1) -> "Tensor":
+        """Compute the 3D cross product with another tensor.
+
+        Args:
+            other: The tensor to compute the cross product with. If a plain
+                Python value is provided it will be converted to a ``Tensor``
+                with the same dtype as ``self``.
+            axis: The axis along which to compute the cross product. Defaults
+                to the last dimension.
+
+        Returns:
+            Tensor: The resulting cross product tensor.
+        """
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = _minitensor_core.numpy_compat.cross(
+            self._tensor, other._tensor, axis=axis
+        )
+        return result
+
     # Reduction operations
     def sum(
         self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False
@@ -580,9 +601,22 @@ class Tensor:
                 return Tensor(np.array(0, dtype=np_dtype), dtype=self.dtype)
             else:  # bool
                 return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
+        if dim is None or len(dim) <= 1:
+            result = Tensor.__new__(Tensor)
+            result._tensor = self._tensor.sum(dim, keepdim)
+            return result
+
+        dims = sorted(dim)
+        current = self._tensor
+        if keepdim:
+            for d in dims:
+                current = current.sum([d], True)
+        else:
+            for d in reversed(dims):
+                current = current.sum([d], False)
 
         result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.sum(dim, keepdim)
+        result._tensor = current
         return result
 
     def mean(
@@ -836,38 +870,62 @@ class Tensor:
         return self.softmax(dim).log()
 
     # Comparison operations
-    def eq(self, other: "Tensor") -> "Tensor":
+    def eq(self, other: Any) -> "Tensor":
         """Element-wise equality comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.eq(other._tensor)
         return result
 
-    def ne(self, other: "Tensor") -> "Tensor":
+    def ne(self, other: Any) -> "Tensor":
         """Element-wise not-equal comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.ne(other._tensor)
         return result
 
-    def lt(self, other: "Tensor") -> "Tensor":
+    def lt(self, other: Any) -> "Tensor":
         """Element-wise less-than comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.lt(other._tensor)
         return result
 
-    def le(self, other: "Tensor") -> "Tensor":
+    def le(self, other: Any) -> "Tensor":
         """Element-wise less-than-or-equal comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.le(other._tensor)
         return result
 
-    def gt(self, other: "Tensor") -> "Tensor":
+    def gt(self, other: Any) -> "Tensor":
         """Element-wise greater-than comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.gt(other._tensor)
         return result
 
-    def ge(self, other: "Tensor") -> "Tensor":
+    def ge(self, other: Any) -> "Tensor":
         """Element-wise greater-than-or-equal comparison."""
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype)
+        elif other.dtype != self.dtype:
+            raise TypeError("Cannot compare tensors with different dtypes")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.ge(other._tensor)
         return result
@@ -903,24 +961,50 @@ class Tensor:
     # Python special methods for comparisons
     def __eq__(self, other: object) -> "Tensor":
         if not isinstance(other, Tensor):
-            return NotImplemented
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.eq(other)
 
     def __ne__(self, other: object) -> "Tensor":
         if not isinstance(other, Tensor):
-            return NotImplemented
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.ne(other)
 
-    def __lt__(self, other: "Tensor") -> "Tensor":
+    def __lt__(self, other: object) -> "Tensor":
+        if not isinstance(other, Tensor):
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.lt(other)
 
-    def __le__(self, other: "Tensor") -> "Tensor":
+    def __le__(self, other: object) -> "Tensor":
+        if not isinstance(other, Tensor):
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.le(other)
 
-    def __gt__(self, other: "Tensor") -> "Tensor":
+    def __gt__(self, other: object) -> "Tensor":
+        if not isinstance(other, Tensor):
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.gt(other)
 
-    def __ge__(self, other: "Tensor") -> "Tensor":
+    def __ge__(self, other: object) -> "Tensor":
+        if not isinstance(other, Tensor):
+            try:
+                other = Tensor(other, dtype=self.dtype)
+            except Exception:
+                return NotImplemented
         return self.ge(other)
 
     # Utility methods

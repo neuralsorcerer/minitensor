@@ -141,6 +141,11 @@ def stack(tensors, axis=0):
     return numpy_compat.stack(tensors, axis)
 
 
+def cross(a, b, axis=-1):
+    """Compute the 3D cross product (NumPy compatibility)."""
+    return numpy_compat.cross(a, b, axis=axis)
+
+
 # Device management
 def device(device_str):
     """Create a device object."""
@@ -175,6 +180,7 @@ __all__ = [
     "asarray",
     "concatenate",
     "stack",
+    "cross",
     "device",
     "cpu",
     "cuda",
