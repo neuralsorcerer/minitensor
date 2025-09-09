@@ -283,9 +283,7 @@ pub struct MatMulBackward {
 impl GradientFunction for MatMulBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        gradients.reserve(
-            (self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize),
-        );
+        gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
 
         if self.lhs.ndim() < 2 || self.rhs.ndim() < 2 {
             return Err(MinitensorError::invalid_operation(
@@ -401,6 +399,62 @@ impl GradientFunction for SumBackward {
             false,
         );
         let grad_input = arithmetic::mul(&ones, &grad)?;
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for product reduction
+pub struct ProdBackward {
+    pub input: Tensor,
+    pub result: Tensor,
+    pub input_id: TensorId,
+    pub dims: Option<Vec<usize>>,
+    pub keepdim: bool,
+}
+
+impl GradientFunction for ProdBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let mut grad = grad_output.clone();
+        if !self.keepdim {
+            if let Some(dims) = &self.dims {
+                let mut shape = grad.shape().dims().to_vec();
+                let mut sorted = dims.clone();
+                sorted.sort_unstable();
+                for &d in &sorted {
+                    shape.insert(d, 1);
+                }
+                grad = shape_ops::reshape(&grad, Shape::new(shape))?;
+            } else {
+                grad = shape_ops::reshape(&grad, Shape::new(vec![1; self.input.ndim()]))?;
+            }
+        }
+
+        let mut prod = self.result.clone();
+        if !self.keepdim {
+            if let Some(dims) = &self.dims {
+                let mut shape = prod.shape().dims().to_vec();
+                let mut sorted = dims.clone();
+                sorted.sort_unstable();
+                for &d in &sorted {
+                    shape.insert(d, 1);
+                }
+                prod = shape_ops::reshape(&prod, Shape::new(shape))?;
+            } else {
+                prod = shape_ops::reshape(&prod, Shape::new(vec![1; self.input.ndim()]))?;
+            }
+        }
+
+        let div = arithmetic::div(&prod, &self.input)?;
+        let grad_input = arithmetic::mul(&grad, &div)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
@@ -1649,7 +1703,7 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
     let mut grad = grad_output.clone();
     for &axis in axes_to_sum.iter() {
         grad = reduction::sum_along_dim(&grad, axis, true)?;
-    };
+    }
 
     if grad.shape() != target_shape {
         grad = grad.view(target_shape.clone())?;
@@ -1837,13 +1891,15 @@ mod tests {
             false,
         );
         let grads = grad_fn.backward(&grad_output).unwrap();
-        let rhs_t = crate::operations::linalg::transpose(&rhs, rhs.ndim() - 2, rhs.ndim() - 1).unwrap();
+        let rhs_t =
+            crate::operations::linalg::transpose(&rhs, rhs.ndim() - 2, rhs.ndim() - 1).unwrap();
         let expected_lhs = crate::operations::linalg::matmul(&grad_output, &rhs_t).unwrap();
         assert!(grads
             .get(&input_ids[0])
             .unwrap()
             .allclose(&expected_lhs, 1e-6, 1e-6));
-        let lhs_t = crate::operations::linalg::transpose(&lhs, lhs.ndim() - 2, lhs.ndim() - 1).unwrap();
+        let lhs_t =
+            crate::operations::linalg::transpose(&lhs, lhs.ndim() - 2, lhs.ndim() - 1).unwrap();
         let expected_rhs = crate::operations::linalg::matmul(&lhs_t, &grad_output).unwrap();
         assert!(grads
             .get(&input_ids[1])

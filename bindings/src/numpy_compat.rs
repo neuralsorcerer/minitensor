@@ -7,6 +7,7 @@
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::operations::arithmetic::{mul, sub};
+use engine::operations::reduction::sum as tensor_sum;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
 use engine::TensorIndex;
@@ -44,6 +45,7 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mean, m)?)?;
     m.add_function(wrap_pyfunction!(tensor_std, m)?)?;
     m.add_function(wrap_pyfunction!(var, m)?)?;
+    m.add_function(wrap_pyfunction!(prod, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
     m.add_function(wrap_pyfunction!(max, m)?)?;
     m.add_function(wrap_pyfunction!(min, m)?)?;
@@ -130,14 +132,13 @@ fn vsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
 /// Dot product of two tensors
 #[pyfunction]
 fn dot(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
-    // For 1D tensors, compute inner product
-    // For 2D tensors, use matrix multiplication
+    // For 1D tensors, compute inner product using Rust operations directly
+    // to minimize Python-level overhead. For higher dimensions, use matmul.
     if a.ndim() == 1 && b.ndim() == 1 {
-        // Inner product for 1D tensors
-        let product = a.__mul__(b)?;
-        product.sum(None, Some(false))
+        let product = mul(a.tensor(), b.tensor()).map_err(_convert_error)?;
+        let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(summed))
     } else {
-        // Matrix multiplication for higher dimensions
         a.matmul(b)
     }
 }
@@ -300,6 +301,12 @@ fn tensor_std(
 #[pyfunction]
 fn var(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.var(axis, keepdims)
+}
+
+/// Compute product along axis
+#[pyfunction]
+fn prod(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+    tensor.prod(axis.map(|a| vec![a]), keepdims)
 }
 
 /// Compute sum along axis

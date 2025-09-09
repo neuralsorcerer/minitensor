@@ -334,6 +334,12 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    pub fn prod(&self, dim: Option<Vec<usize>>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.prod(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     pub fn mean(&self, dim: Option<Vec<usize>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.mean(dim, keepdim).map_err(_convert_error)?;

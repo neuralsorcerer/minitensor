@@ -300,6 +300,12 @@ impl Tensor {
         sum(self, dim, keepdim)
     }
 
+    /// Product reduction
+    pub fn prod(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::prod;
+        prod(self, dim, keepdim)
+    }
+
     /// Mean reduction
     pub fn mean(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::mean;

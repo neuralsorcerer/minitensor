@@ -585,6 +585,44 @@ class Tensor:
         return result
 
     # Reduction operations
+    def prod(
+        self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False
+    ) -> "Tensor":
+        """Product along specified dimensions."""
+        if isinstance(dim, int):
+            dim = [dim]
+        elif isinstance(dim, tuple):
+            dim = list(dim)
+        if dim is not None:
+            ndim = self.ndim
+            dim = [d + ndim if d < 0 else d for d in dim]
+            for d in dim:
+                if d < 0 or d >= ndim:
+                    raise IndexError("Dimension out of range")
+        if dim is None and self.numel() == 0:
+            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+            if np.issubdtype(np_dtype, np.floating) or np.issubdtype(
+                np_dtype, np.integer
+            ):
+                return Tensor(np.array(1, dtype=np_dtype), dtype=self.dtype)
+            else:
+                raise ValueError("Prod not supported for boolean tensors")
+        if dim is None or len(dim) <= 1:
+            result = Tensor.__new__(Tensor)
+            result._tensor = self._tensor.prod(dim, keepdim)
+            return result
+        dims = sorted(dim)
+        current = self._tensor
+        if keepdim:
+            for d in dims:
+                current = current.prod([d], True)
+        else:
+            for d in reversed(dims):
+                current = current.prod([d], False)
+        result = Tensor.__new__(Tensor)
+        result._tensor = current
+        return result
+    
     def sum(
         self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False
     ) -> "Tensor":

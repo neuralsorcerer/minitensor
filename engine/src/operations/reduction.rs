@@ -5,9 +5,12 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, SumBackward},
+    autograd::{add_to_graph, ProdBackward, SumBackward},
     error::{MinitensorError, Result},
-    operations::simd::{simd_sum_f32, simd_sum_f64, simd_sum_i32, simd_sum_i64},
+    operations::simd::{
+        simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
+        simd_sum_i32, simd_sum_i64,
+    },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -78,6 +81,80 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Te
         let grad_fn = Arc::new(SumBackward {
             input_id: tensor.id(),
             input_shape: tensor.shape().dims().to_vec(),
+            dims: dims_clone,
+            keepdim,
+        });
+        let mut result_with_grad = result;
+        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result_with_grad, Some(grad_fn))?;
+        Ok(result_with_grad)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Product reduction along specified dimensions
+pub fn prod(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
+    let mut dim = dim;
+    if let Some(ref mut dims) = dim {
+        dims.sort_unstable();
+        dims.dedup();
+    }
+    let dims_clone = dim.clone();
+
+    let result = match dim {
+        None => {
+            let result_shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+
+            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+            match tensor.dtype() {
+                DataType::Float32 => prod_all_f32(tensor, &mut result_data)?,
+                DataType::Float64 => prod_all_f64(tensor, &mut result_data)?,
+                DataType::Int32 => prod_all_i32(tensor, &mut result_data)?,
+                DataType::Int64 => prod_all_i64(tensor, &mut result_data)?,
+                DataType::Bool => {
+                    return Err(MinitensorError::invalid_operation(
+                        "Prod not supported for boolean tensors",
+                    ))
+                }
+            }
+
+            Tensor::new(
+                Arc::new(result_data),
+                result_shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            )
+        }
+        Some(dims) => {
+            if dims.is_empty() {
+                tensor.clone()
+            } else {
+                let mut result = tensor.clone();
+                if keepdim {
+                    for &d in &dims {
+                        result = prod_along_dim(&result, d, true)?;
+                    }
+                } else {
+                    for &d in dims.iter().rev() {
+                        result = prod_along_dim(&result, d, false)?;
+                    }
+                }
+                result
+            }
+        }
+    };
+
+    if result.requires_grad() {
+        let grad_fn = Arc::new(ProdBackward {
+            input: tensor.detach(),
+            result: result.clone(),
+            input_id: tensor.id(),
             dims: dims_clone,
             keepdim,
         });
@@ -711,6 +788,86 @@ pub fn var(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor>
 
 // Helper functions for type-specific operations
 
+fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let prod: f32 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_prod_f32).product::<f32>()
+    } else {
+        simd_prod_f32(data)
+    };
+
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+
+    result_slice[0] = prod;
+    Ok(())
+}
+
+fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let prod: f64 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_prod_f64).product::<f64>()
+    } else {
+        simd_prod_f64(data)
+    };
+
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+
+    result_slice[0] = prod;
+    Ok(())
+}
+
+fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_i32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+
+    let prod: i32 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_prod_i32).product::<i32>()
+    } else {
+        simd_prod_i32(data)
+    };
+
+    let result_slice = result_data
+        .as_i32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
+
+    result_slice[0] = prod;
+    Ok(())
+}
+
+fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_i64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+
+    let prod: i64 = if data.len() >= 1024 {
+        data.par_chunks(8192).map(simd_prod_i64).product::<i64>()
+    } else {
+        simd_prod_i64(data)
+    };
+
+    let result_slice = result_data
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+
+    result_slice[0] = prod;
+    Ok(())
+}
+
 fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
@@ -888,20 +1045,23 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         }
     } else {
         let dim_size = input_shape[dim];
-        let outer = input_shape[..dim].iter().product::<usize>();
         let inner = input_shape[dim + 1..].iter().product::<usize>();
         let outer_stride = dim_size * inner;
 
-        for o in 0..outer {
-            for r in 0..inner {
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
                 let mut sum_val = 0f32;
-                for d in 0..dim_size {
-                    let idx = o * outer_stride + d * inner + r;
-                    sum_val += input_data[idx];
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    sum_val += input_data[base];
+                    base += inner;
                 }
-                result_slice[o * inner + r] = sum_val;
-            }
-        }
+                *out = sum_val;
+            });
     }
 
     Ok(())
@@ -964,20 +1124,23 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         }
     } else {
         let dim_size = input_shape[dim];
-        let outer = input_shape[..dim].iter().product::<usize>();
         let inner = input_shape[dim + 1..].iter().product::<usize>();
         let outer_stride = dim_size * inner;
 
-        for o in 0..outer {
-            for r in 0..inner {
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
                 let mut sum_val = 0f64;
-                for d in 0..dim_size {
-                    let idx = o * outer_stride + d * inner + r;
-                    sum_val += input_data[idx];
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    sum_val += input_data[base];
+                    base += inner;
                 }
-                result_slice[o * inner + r] = sum_val;
-            }
-        }
+                *out = sum_val;
+            });
     }
 
     Ok(())
@@ -1040,20 +1203,23 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         }
     } else {
         let dim_size = input_shape[dim];
-        let outer = input_shape[..dim].iter().product::<usize>();
         let inner = input_shape[dim + 1..].iter().product::<usize>();
         let outer_stride = dim_size * inner;
 
-        for o in 0..outer {
-            for r in 0..inner {
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
                 let mut sum_val = 0i32;
-                for d in 0..dim_size {
-                    let idx = o * outer_stride + d * inner + r;
-                    sum_val += input_data[idx];
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    sum_val += input_data[base];
+                    base += inner;
                 }
-                result_slice[o * inner + r] = sum_val;
-            }
-        }
+                *out = sum_val;
+            });
     }
 
     Ok(())
@@ -1116,21 +1282,179 @@ fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         }
     } else {
         let dim_size = input_shape[dim];
-        let outer = input_shape[..dim].iter().product::<usize>();
         let inner = input_shape[dim + 1..].iter().product::<usize>();
         let outer_stride = dim_size * inner;
 
-        for o in 0..outer {
-            for r in 0..inner {
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
                 let mut sum_val = 0i64;
-                for d in 0..dim_size {
-                    let idx = o * outer_stride + d * inner + r;
-                    sum_val += input_data[idx];
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    sum_val += input_data[base];
+                    base += inner;
                 }
-                result_slice[o * inner + r] = sum_val;
-            }
+                *out = sum_val;
+            });
+    }
+
+    Ok(())
+}
+
+#[inline]
+pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let input_shape = tensor.shape().dims();
+    let mut output_shape = input_shape.to_vec();
+    if keepdim {
+        output_shape[dim] = 1;
+    } else {
+        output_shape.remove(dim);
+    }
+    let output_shape_obj = Shape::new(output_shape);
+    let mut result_data =
+        TensorData::zeros_on_device(output_shape_obj.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => prod_along_dim_f32(tensor, &mut result_data, dim)?,
+        DataType::Float64 => prod_along_dim_f64(tensor, &mut result_data, dim)?,
+        DataType::Int32 => prod_along_dim_i32(tensor, &mut result_data, dim)?,
+        DataType::Int64 => prod_along_dim_i64(tensor, &mut result_data, dim)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Prod not supported for boolean tensors",
+            ))
         }
     }
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        output_shape_obj,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
+fn prod_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+    let input_shape = tensor.shape().dims();
+    let dim_size = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    let outer_stride = dim_size * inner;
+    result_slice
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let o = idx / inner;
+            let r = idx % inner;
+            let mut prod_val = 1f32;
+            let mut base = o * outer_stride + r;
+            for _ in 0..dim_size {
+                prod_val *= input_data[base];
+                base += inner;
+            }
+            *out = prod_val;
+        });
+    Ok(())
+}
+
+fn prod_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+    let input_shape = tensor.shape().dims();
+    let dim_size = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    let outer_stride = dim_size * inner;
+    result_slice
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let o = idx / inner;
+            let r = idx % inner;
+            let mut prod_val = 1f64;
+            let mut base = o * outer_stride + r;
+            for _ in 0..dim_size {
+                prod_val *= input_data[base];
+                base += inner;
+            }
+            *out = prod_val;
+        });
+    Ok(())
+}
+
+fn prod_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_i32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+    let result_slice = result_data
+        .as_i32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
+    let input_shape = tensor.shape().dims();
+    let dim_size = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    let outer_stride = dim_size * inner;
+    result_slice
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let o = idx / inner;
+            let r = idx % inner;
+            let mut prod_val = 1i32;
+            let mut base = o * outer_stride + r;
+            for _ in 0..dim_size {
+                prod_val *= input_data[base];
+                base += inner;
+            }
+            *out = prod_val;
+        });
+    Ok(())
+}
+
+fn prod_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_i64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+    let result_slice = result_data
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+    let input_shape = tensor.shape().dims();
+    let dim_size = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    let outer_stride = dim_size * inner;
+    result_slice
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let o = idx / inner;
+            let r = idx % inner;
+            let mut prod_val = 1i64;
+            let mut base = o * outer_stride + r;
+            for _ in 0..dim_size {
+                prod_val *= input_data[base];
+                base += inner;
+            }
+            *out = prod_val;
+        });
 
     Ok(())
 }
@@ -2253,6 +2577,23 @@ mod tests {
         let res_keep = sum(&t, Some(vec![0, 1]), true).unwrap();
         assert_eq!(res_keep.shape().dims(), &[1, 1]);
         assert_eq!(res_keep.data().as_f32_slice().unwrap()[0], 10.0);
+    }
+
+    #[test]
+    fn test_prod_global_and_keepdim() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let p = prod(&t, None, false).unwrap();
+        assert_eq!(p.data().as_f32_slice().unwrap()[0], 24.0);
+        let p_keep = prod(&t, None, true).unwrap();
+        assert_eq!(p_keep.shape().dims(), &[1, 1]);
+        assert_eq!(p_keep.data().as_f32_slice().unwrap()[0], 24.0);
+    }
+
+    #[test]
+    fn test_prod_along_dim() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let res = prod(&t, Some(vec![0]), false).unwrap();
+        assert_eq!(res.data().as_f32_slice().unwrap(), &[3.0, 8.0]);
     }
 
     #[test]

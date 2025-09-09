@@ -262,6 +262,78 @@ pub fn simd_sum_i64(data: &[i64]) -> i64 {
     total
 }
 
+/// Unrolled product for f32 slices to leverage auto-vectorization
+pub fn simd_prod_f32(data: &[f32]) -> f32 {
+    let mut prods = [1f32; 8];
+    let chunks = data.chunks_exact(8);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        prods[0] *= chunk[0];
+        prods[1] *= chunk[1];
+        prods[2] *= chunk[2];
+        prods[3] *= chunk[3];
+        prods[4] *= chunk[4];
+        prods[5] *= chunk[5];
+        prods[6] *= chunk[6];
+        prods[7] *= chunk[7];
+    }
+    let mut total: f32 = prods.iter().product();
+    total *= rem.iter().copied().product::<f32>();
+    total
+}
+
+/// Unrolled product for f64 slices to leverage auto-vectorization
+pub fn simd_prod_f64(data: &[f64]) -> f64 {
+    let mut prods = [1f64; 4];
+    let chunks = data.chunks_exact(4);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        prods[0] *= chunk[0];
+        prods[1] *= chunk[1];
+        prods[2] *= chunk[2];
+        prods[3] *= chunk[3];
+    }
+    let mut total: f64 = prods.iter().product();
+    total *= rem.iter().copied().product::<f64>();
+    total
+}
+
+/// Unrolled product for i32 slices to leverage auto-vectorization
+pub fn simd_prod_i32(data: &[i32]) -> i32 {
+    let mut prods = [1i32; 8];
+    let chunks = data.chunks_exact(8);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        prods[0] *= chunk[0];
+        prods[1] *= chunk[1];
+        prods[2] *= chunk[2];
+        prods[3] *= chunk[3];
+        prods[4] *= chunk[4];
+        prods[5] *= chunk[5];
+        prods[6] *= chunk[6];
+        prods[7] *= chunk[7];
+    }
+    let mut total: i32 = prods.iter().product();
+    total *= rem.iter().copied().product::<i32>();
+    total
+}
+
+/// Unrolled product for i64 slices to leverage auto-vectorization
+pub fn simd_prod_i64(data: &[i64]) -> i64 {
+    let mut prods = [1i64; 4];
+    let chunks = data.chunks_exact(4);
+    let rem = chunks.remainder();
+    for chunk in chunks {
+        prods[0] *= chunk[0];
+        prods[1] *= chunk[1];
+        prods[2] *= chunk[2];
+        prods[3] *= chunk[3];
+    }
+    let mut total: i64 = prods.iter().product();
+    total *= rem.iter().copied().product::<i64>();
+    total
+}
+
 fn simd_sub_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     for i in 0..lhs.len() {
         output[i] = lhs[i] - rhs[i];

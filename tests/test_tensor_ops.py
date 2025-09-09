@@ -42,6 +42,14 @@ def test_sum_keepdim():
     np.testing.assert_allclose(s_no.numpy(), np.array([3.0, 7.0]))
 
 
+def test_prod_keepdim():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    p = t.prod(dim=[1], keepdim=True)
+    np.testing.assert_allclose(p.numpy(), np.array([[2.0], [12.0]]))
+    p_no = t.prod(dim=[1], keepdim=False)
+    np.testing.assert_allclose(p_no.numpy(), np.array([2.0, 12.0]))
+
+
 def test_mean_int_error():
     t = mt.Tensor([[1, 2], [3, 4]], dtype="int32")
     with pytest.raises(ValueError):
@@ -66,6 +74,12 @@ def test_sum_multiple_dims():
     np.testing.assert_allclose(r.numpy(), np.array(10.0, dtype=np.float32))
     r_keep = t.sum(dim=[0, 1], keepdim=True)
     np.testing.assert_allclose(r_keep.numpy(), np.array([[10.0]], dtype=np.float32))
+
+
+def test_prod_all():
+    t = mt.Tensor([1.0, 2.0, 3.0])
+    p = t.prod()
+    np.testing.assert_allclose(p.numpy(), np.array(6.0, dtype=np.float32))
 
 
 def test_mean_negative_dim():
