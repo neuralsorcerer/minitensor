@@ -82,6 +82,14 @@ def test_prod_all():
     np.testing.assert_allclose(p.numpy(), np.array(6.0, dtype=np.float32))
 
 
+def test_bool_prod():
+    t = mt.Tensor([[True, True], [True, False]], dtype="bool")
+    p_all = t.prod()
+    np.testing.assert_array_equal(p_all.numpy(), np.array(False))
+    p_dim = t.prod(dim=[1], keepdim=False)
+    np.testing.assert_array_equal(p_dim.numpy(), np.array([True, False]))
+
+
 def test_mean_negative_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     r = t.mean(dim=[-1])
@@ -110,6 +118,32 @@ def test_empty_tensor_reductions():
     m = t.mean()
     np.testing.assert_allclose(s.numpy(), np.array([0.0], dtype=np.float32))
     assert np.isinf(m.numpy())
+
+
+def test_cumsum_and_backward():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+    c0 = t.cumsum(0)
+    c1 = t.cumsum(1)
+    np.testing.assert_allclose(c0.numpy(), np.cumsum(t.numpy(), axis=0))
+    np.testing.assert_allclose(c1.numpy(), np.cumsum(t.numpy(), axis=1))
+    c0.sum().backward()
+    np.testing.assert_allclose(t.grad.numpy(), np.array([[2.0, 2.0], [1.0, 1.0]], dtype=np.float32))
+
+
+def test_cumprod_and_backward():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+    p0 = t.cumprod(0)
+    p1 = t.cumprod(1)
+    np.testing.assert_allclose(p0.numpy(), np.cumprod(t.numpy(), axis=0))
+    np.testing.assert_allclose(p1.numpy(), np.cumprod(t.numpy(), axis=1))
+    p0.sum().backward()
+    np.testing.assert_allclose(t.grad.numpy(), np.array([[4.0, 5.0], [1.0, 2.0]], dtype=np.float32))
+
+
+def test_cumprod_backward_with_zero():
+    t = mt.Tensor([1.0, 0.0, 2.0], requires_grad=True)
+    t.cumprod(0).sum().backward()
+    np.testing.assert_allclose(t.grad.numpy(), np.array([1.0, 3.0, 0.0], dtype=np.float32))
 
 
 def test_sum_with_nan_propagation():

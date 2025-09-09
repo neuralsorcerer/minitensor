@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, ProdBackward, SumBackward},
+    autograd::{add_to_graph, CumsumBackward, CumprodBackward, ProdBackward, SumBackward},
     error::{MinitensorError, Result},
     operations::simd::{
         simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
@@ -116,19 +116,16 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<T
                 DataType::Float64 => prod_all_f64(tensor, &mut result_data)?,
                 DataType::Int32 => prod_all_i32(tensor, &mut result_data)?,
                 DataType::Int64 => prod_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => {
-                    return Err(MinitensorError::invalid_operation(
-                        "Prod not supported for boolean tensors",
-                    ))
-                }
+                DataType::Bool => prod_all_bool(tensor, &mut result_data)?,
             }
 
+            let requires_grad = tensor.requires_grad() && tensor.dtype() != DataType::Bool;
             Tensor::new(
                 Arc::new(result_data),
                 result_shape,
                 tensor.dtype(),
                 tensor.device(),
-                tensor.requires_grad(),
+                requires_grad,
             )
         }
         Some(dims) => {
@@ -165,6 +162,164 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<T
     } else {
         Ok(result)
     }
+}
+
+/// Cumulative sum along a specified dimension
+pub fn cumsum(tensor: &Tensor, dim: usize) -> Result<Tensor> {
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut result_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => cumsum_f32(tensor, &mut result_data, dim)?,
+        DataType::Float64 => cumsum_f64(tensor, &mut result_data, dim)?,
+        DataType::Int32 => cumsum_i32(tensor, &mut result_data, dim)?,
+        DataType::Int64 => cumsum_i64(tensor, &mut result_data, dim)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Cumsum not supported for boolean tensors",
+            ))
+        }
+    }
+
+    let result = Tensor::new(
+        Arc::new(result_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if result.requires_grad() {
+        let grad_fn = Arc::new(CumsumBackward {
+            input_id: tensor.id(),
+            dim,
+        });
+        let mut result_with_grad = result;
+        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result_with_grad, Some(grad_fn))?;
+        Ok(result_with_grad)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Backward helper for cumulative sum
+pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut result_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => cumsum_backward_f32(tensor, &mut result_data, dim)?,
+        DataType::Float64 => cumsum_backward_f64(tensor, &mut result_data, dim)?,
+        DataType::Int32 => cumsum_backward_i32(tensor, &mut result_data, dim)?,
+        DataType::Int64 => cumsum_backward_i64(tensor, &mut result_data, dim)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Cumsum not supported for boolean tensors",
+            ))
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
+}
+
+/// Cumulative product along a specified dimension
+pub fn cumprod(tensor: &Tensor, dim: usize) -> Result<Tensor> {
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut result_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => cumprod_f32(tensor, &mut result_data, dim)?,
+        DataType::Float64 => cumprod_f64(tensor, &mut result_data, dim)?,
+        DataType::Int32 => cumprod_i32(tensor, &mut result_data, dim)?,
+        DataType::Int64 => cumprod_i64(tensor, &mut result_data, dim)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Cumprod not supported for boolean tensors",
+            ))
+        }
+    }
+
+    let requires_grad =
+        tensor.requires_grad() && matches!(tensor.dtype(), DataType::Float32 | DataType::Float64);
+
+    let result = Tensor::new(
+        Arc::new(result_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        requires_grad,
+    );
+
+    if result.requires_grad() {
+        let grad_fn = Arc::new(CumprodBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+            output: result.clone(),
+            dim,
+        });
+        let mut result_with_grad = result;
+        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result_with_grad, Some(grad_fn))?;
+        Ok(result_with_grad)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Backward helper for cumulative product
+pub fn cumprod_backward(
+    input: &Tensor,
+    output: &Tensor,
+    grad: &Tensor,
+    dim: usize,
+) -> Result<Tensor> {
+    if dim >= input.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()));
+    }
+
+    let mut result_data =
+        TensorData::zeros_on_device(input.numel(), input.dtype(), input.device());
+
+    match input.dtype() {
+        DataType::Float32 => {
+            cumprod_backward_f32(input, output, grad, &mut result_data, dim)?
+        }
+        DataType::Float64 => {
+            cumprod_backward_f64(input, output, grad, &mut result_data, dim)?
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Cumprod backward only supported for floating point tensors",
+            ))
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    ))
 }
 
 /// Mean reduction along specified dimensions
@@ -868,6 +1023,22 @@ fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
+fn prod_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+
+    let prod = data.par_iter().all(|&x| x);
+
+    let result_slice = result_data
+        .as_bool_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
+
+    result_slice[0] = prod;
+    Ok(())
+}
+
 fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
@@ -1326,19 +1497,16 @@ pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tens
         DataType::Float64 => prod_along_dim_f64(tensor, &mut result_data, dim)?,
         DataType::Int32 => prod_along_dim_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => prod_along_dim_i64(tensor, &mut result_data, dim)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Prod not supported for boolean tensors",
-            ))
-        }
+        DataType::Bool => prod_along_dim_bool(tensor, &mut result_data, dim)?,
     }
 
+    let requires_grad = tensor.requires_grad() && tensor.dtype() != DataType::Bool;
     Ok(Tensor::new(
         Arc::new(result_data),
         output_shape_obj,
         tensor.dtype(),
         tensor.device(),
-        tensor.requires_grad(),
+        requires_grad,
     ))
 }
 
@@ -1454,6 +1622,39 @@ fn prod_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize)
                 base += inner;
             }
             *out = prod_val;
+        });
+
+    Ok(())
+}
+
+fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+    let result_slice = result_data
+        .as_bool_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
+    let input_shape = tensor.shape().dims();
+    let dim_size = input_shape[dim];
+    let inner = input_shape[dim + 1..].iter().product::<usize>();
+    let outer_stride = dim_size * inner;
+    result_slice
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, out)| {
+            let o = idx / inner;
+            let r = idx % inner;
+            let mut val = true;
+            let mut base = o * outer_stride + r;
+            for _ in 0..dim_size {
+                val &= input_data[base];
+                if !val {
+                    break;
+                }
+                base += inner;
+            }
+            *out = val;
         });
 
     Ok(())
@@ -2455,6 +2656,510 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
         false,
     ))
 }
+
+macro_rules! cumprod_forward {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+            let input_data = tensor
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let output = result_data
+                .$get_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            let shape = tensor.shape().dims();
+
+            if tensor.ndim() == 1 {
+                if dim != 0 {
+                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                }
+                let mut acc: $t = 1 as $t;
+                for i in 0..input_data.len() {
+                    acc *= input_data[i];
+                    output[i] = acc;
+                }
+            } else if tensor.ndim() == 2 {
+                let rows = shape[0];
+                let cols = shape[1];
+                match dim {
+                    0 => {
+                        let out_ptr = output.as_mut_ptr() as usize;
+                        (0..cols).into_par_iter().for_each(|c| {
+                            let out_ptr = out_ptr as *mut $t;
+                            let mut acc: $t = 1 as $t;
+                            for r in 0..rows {
+                                let idx = r * cols + c;
+                                acc *= input_data[idx];
+                                unsafe { *out_ptr.add(idx) = acc; }
+                            }
+                        });
+                    }
+                    1 => {
+                        input_data
+                            .par_chunks_exact(cols)
+                            .zip(output.par_chunks_mut(cols))
+                            .for_each(|(in_row, out_row)| {
+                                let mut acc: $t = 1 as $t;
+                                for i in 0..cols {
+                                    acc *= in_row[i];
+                                    out_row[i] = acc;
+                                }
+                            });
+                    }
+                    _ => {
+                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
+                    }
+                }
+            } else {
+                let dim_size = shape[dim];
+                let inner = shape[dim + 1..].iter().product::<usize>();
+                let outer = shape[..dim].iter().product::<usize>();
+                let total = outer * inner;
+                let out_ptr = output.as_mut_ptr() as usize;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_ptr = out_ptr as *mut $t;
+                    let o = idx / inner;
+                    let r = idx % inner;
+                    let mut acc: $t = 1 as $t;
+                    let mut base = o * dim_size * inner + r;
+                    for _ in 0..dim_size {
+                        acc *= input_data[base];
+                        unsafe { *out_ptr.add(base) = acc; }
+                        base += inner;
+                    }
+                });
+            }
+            Ok(())
+        }
+    };
+}
+
+macro_rules! cumprod_backward {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+        fn $name(
+            input: &Tensor,
+            output: &Tensor,
+            grad: &Tensor,
+            result_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
+            let input_data = input
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let out_data = output
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let grad_data = grad
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let output = result_data
+                .$get_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            let shape = input.shape().dims();
+
+            if input.ndim() == 1 {
+                if dim != 0 {
+                    return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()));
+                }
+                let len = input_data.len();
+                // count zeros and index
+                let mut zero_count = 0;
+                let mut zero_idx = 0;
+                for i in 0..len {
+                    if input_data[i] == 0 as $t {
+                        zero_count += 1;
+                        if zero_count == 1 {
+                            zero_idx = i;
+                        }
+                    }
+                }
+                if zero_count == 0 {
+                    let mut s: $t = 0 as $t;
+                    for i in (0..len).rev() {
+                        s += grad_data[i] * out_data[i];
+                        output[i] = s / input_data[i];
+                    }
+                } else if zero_count == 1 {
+                    let mut s: $t = 0 as $t;
+                    for i in (0..zero_idx).rev() {
+                        s += grad_data[i] * out_data[i];
+                        output[i] = s / input_data[i];
+                    }
+                    let mut prefix: $t = 1 as $t;
+                    for i in 0..zero_idx {
+                        prefix *= input_data[i];
+                    }
+                    let mut prod_suffix: $t = 1 as $t;
+                    let mut grad_zero: $t = 0 as $t;
+                    for j in zero_idx..len {
+                        grad_zero += grad_data[j] * prod_suffix;
+                        if j + 1 < len {
+                            prod_suffix *= input_data[j + 1];
+                        }
+                    }
+                    output[zero_idx] = grad_zero * prefix;
+                    for i in zero_idx + 1..len {
+                        output[i] = 0 as $t;
+                    }
+                } else {
+                    for i in 0..len {
+                        output[i] = 0 as $t;
+                    }
+                }
+            } else if input.ndim() == 2 {
+                let rows = shape[0];
+                let cols = shape[1];
+                match dim {
+                    0 => {
+                        for c in 0..cols {
+                            let mut zero_count = 0;
+                            let mut zero_idx = 0;
+                            for r in 0..rows {
+                                let idx = r * cols + c;
+                                if input_data[idx] == 0 as $t {
+                                    zero_count += 1;
+                                    if zero_count == 1 {
+                                        zero_idx = r;
+                                    }
+                                }
+                            }
+                            if zero_count == 0 {
+                                let mut s: $t = 0 as $t;
+                                for r in (0..rows).rev() {
+                                    let idx = r * cols + c;
+                                    s += grad_data[idx] * out_data[idx];
+                                    output[idx] = s / input_data[idx];
+                                }
+                            } else if zero_count == 1 {
+                                let mut s: $t = 0 as $t;
+                                for r in (0..zero_idx).rev() {
+                                    let idx = r * cols + c;
+                                    s += grad_data[idx] * out_data[idx];
+                                    output[idx] = s / input_data[idx];
+                                }
+                                let mut prefix: $t = 1 as $t;
+                                for r in 0..zero_idx {
+                                    prefix *= input_data[r * cols + c];
+                                }
+                                let mut prod_suffix: $t = 1 as $t;
+                                let mut grad_zero: $t = 0 as $t;
+                                for r in zero_idx..rows {
+                                    let idx = r * cols + c;
+                                    grad_zero += grad_data[idx] * prod_suffix;
+                                    if r + 1 < rows {
+                                        prod_suffix *= input_data[(r + 1) * cols + c];
+                                    }
+                                }
+                                let zero_index = zero_idx * cols + c;
+                                output[zero_index] = grad_zero * prefix;
+                                for r in zero_idx + 1..rows {
+                                    let idx = r * cols + c;
+                                    output[idx] = 0 as $t;
+                                }
+                            } else {
+                                for r in 0..rows {
+                                    let idx = r * cols + c;
+                                    output[idx] = 0 as $t;
+                                }
+                            }
+                        }
+                    }
+                    1 => {
+                        for r in 0..rows {
+                            let base = r * cols;
+                            let mut zero_count = 0;
+                            let mut zero_idx = 0;
+                            for c in 0..cols {
+                                let idx = base + c;
+                                if input_data[idx] == 0 as $t {
+                                    zero_count += 1;
+                                    if zero_count == 1 {
+                                        zero_idx = c;
+                                    }
+                                }
+                            }
+                            if zero_count == 0 {
+                                let mut s: $t = 0 as $t;
+                                for c in (0..cols).rev() {
+                                    let idx = base + c;
+                                    s += grad_data[idx] * out_data[idx];
+                                    output[idx] = s / input_data[idx];
+                                }
+                            } else if zero_count == 1 {
+                                let mut s: $t = 0 as $t;
+                                for c in (0..zero_idx).rev() {
+                                    let idx = base + c;
+                                    s += grad_data[idx] * out_data[idx];
+                                    output[idx] = s / input_data[idx];
+                                }
+                                let mut prefix: $t = 1 as $t;
+                                for c in 0..zero_idx {
+                                    prefix *= input_data[base + c];
+                                }
+                                let mut prod_suffix: $t = 1 as $t;
+                                let mut grad_zero: $t = 0 as $t;
+                                for c in zero_idx..cols {
+                                    let idx = base + c;
+                                    grad_zero += grad_data[idx] * prod_suffix;
+                                    if c + 1 < cols {
+                                        prod_suffix *= input_data[base + c + 1];
+                                    }
+                                }
+                                output[base + zero_idx] = grad_zero * prefix;
+                                for c in zero_idx + 1..cols {
+                                    output[base + c] = 0 as $t;
+                                }
+                            } else {
+                                for c in 0..cols {
+                                    output[base + c] = 0 as $t;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()))
+                    }
+                }
+            } else {
+                let dim_size = shape[dim];
+                let inner = shape[dim + 1..].iter().product::<usize>();
+                let outer = shape[..dim].iter().product::<usize>();
+                let total = outer * inner;
+                for idx in 0..total {
+                    let o = idx / inner;
+                    let r = idx % inner;
+                    let base = o * dim_size * inner + r;
+                    let mut zero_count = 0;
+                    let mut zero_idx = 0;
+                    for d in 0..dim_size {
+                        let i = base + d * inner;
+                        if input_data[i] == 0 as $t {
+                            zero_count += 1;
+                            if zero_count == 1 {
+                                zero_idx = d;
+                            }
+                        }
+                    }
+                    if zero_count == 0 {
+                        let mut s: $t = 0 as $t;
+                        for d in (0..dim_size).rev() {
+                            let i = base + d * inner;
+                            s += grad_data[i] * out_data[i];
+                            output[i] = s / input_data[i];
+                        }
+                    } else if zero_count == 1 {
+                        let mut s: $t = 0 as $t;
+                        for d in (0..zero_idx).rev() {
+                            let i = base + d * inner;
+                            s += grad_data[i] * out_data[i];
+                            output[i] = s / input_data[i];
+                        }
+                        let mut prefix: $t = 1 as $t;
+                        for d in 0..zero_idx {
+                            prefix *= input_data[base + d * inner];
+                        }
+                        let mut prod_suffix: $t = 1 as $t;
+                        let mut grad_zero: $t = 0 as $t;
+                        for d in zero_idx..dim_size {
+                            let i = base + d * inner;
+                            grad_zero += grad_data[i] * prod_suffix;
+                            if d + 1 < dim_size {
+                                prod_suffix *= input_data[base + (d + 1) * inner];
+                            }
+                        }
+                        let zero_index = base + zero_idx * inner;
+                        output[zero_index] = grad_zero * prefix;
+                        for d in zero_idx + 1..dim_size {
+                            output[base + d * inner] = 0 as $t;
+                        }
+                    } else {
+                        for d in 0..dim_size {
+                            output[base + d * inner] = 0 as $t;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    };
+}
+
+macro_rules! cumsum_forward {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+            let input_data = tensor
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let output = result_data
+                .$get_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            let shape = tensor.shape().dims();
+
+            if tensor.ndim() == 1 {
+                if dim != 0 {
+                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                }
+                let mut acc: $t = 0 as $t;
+                for i in 0..input_data.len() {
+                    acc += input_data[i];
+                    output[i] = acc;
+                }
+            } else if tensor.ndim() == 2 {
+                let rows = shape[0];
+                let cols = shape[1];
+                match dim {
+                    0 => {
+                        let out_ptr = output.as_mut_ptr() as usize;
+                        (0..cols).into_par_iter().for_each(|c| {
+                            let out_ptr = out_ptr as *mut $t;
+                            let mut acc: $t = 0 as $t;
+                            for r in 0..rows {
+                                let idx = r * cols + c;
+                                acc += input_data[idx];
+                                unsafe { *out_ptr.add(idx) = acc; }
+                            }
+                        });
+                    }
+                    1 => {
+                        input_data
+                            .par_chunks_exact(cols)
+                            .zip(output.par_chunks_mut(cols))
+                            .for_each(|(in_row, out_row)| {
+                                let mut acc: $t = 0 as $t;
+                                for i in 0..cols {
+                                    acc += in_row[i];
+                                    out_row[i] = acc;
+                                }
+                            });
+                    }
+                    _ => {
+                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
+                    }
+                }
+            } else {
+                let dim_size = shape[dim];
+                let inner = shape[dim + 1..].iter().product::<usize>();
+                let outer = shape[..dim].iter().product::<usize>();
+                let total = outer * inner;
+                let out_ptr = output.as_mut_ptr() as usize;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_ptr = out_ptr as *mut $t;
+                    let o = idx / inner;
+                    let r = idx % inner;
+                    let mut acc: $t = 0 as $t;
+                    let mut base = o * dim_size * inner + r;
+                    for _ in 0..dim_size {
+                        acc += input_data[base];
+                        unsafe { *out_ptr.add(base) = acc; }
+                        base += inner;
+                    }
+                });
+            }
+            Ok(())
+        }
+    };
+}
+
+macro_rules! cumsum_backward {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+            let input_data = tensor
+                .data()
+                .$get()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let output = result_data
+                .$get_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            let shape = tensor.shape().dims();
+
+            if tensor.ndim() == 1 {
+                if dim != 0 {
+                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                }
+                let mut acc: $t = 0 as $t;
+                for i in (0..input_data.len()).rev() {
+                    acc += input_data[i];
+                    output[i] = acc;
+                }
+            } else if tensor.ndim() == 2 {
+                let rows = shape[0];
+                let cols = shape[1];
+                match dim {
+                    0 => {
+                        let out_ptr = output.as_mut_ptr() as usize;
+                        (0..cols).into_par_iter().for_each(|c| {
+                            let out_ptr = out_ptr as *mut $t;
+                            let mut acc: $t = 0 as $t;
+                            for r in (0..rows).rev() {
+                                let idx = r * cols + c;
+                                acc += input_data[idx];
+                                unsafe { *out_ptr.add(idx) = acc; }
+                            }
+                        });
+                    }
+                    1 => {
+                        input_data
+                            .par_chunks_exact(cols)
+                            .zip(output.par_chunks_mut(cols))
+                            .for_each(|(in_row, out_row)| {
+                                let mut acc: $t = 0 as $t;
+                                for i in (0..cols).rev() {
+                                    acc += in_row[i];
+                                    out_row[i] = acc;
+                                }
+                            });
+                    }
+                    _ => {
+                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
+                    }
+                }
+            } else {
+                let dim_size = shape[dim];
+                let inner = shape[dim + 1..].iter().product::<usize>();
+                let outer = shape[..dim].iter().product::<usize>();
+                let total = outer * inner;
+                let out_ptr = output.as_mut_ptr() as usize;
+                (0..total).into_par_iter().for_each(|idx| {
+                    let out_ptr = out_ptr as *mut $t;
+                    let o = idx / inner;
+                    let r = idx % inner;
+                    let mut acc: $t = 0 as $t;
+                    let mut base = o * dim_size * inner + r + (dim_size - 1) * inner;
+                    for _ in 0..dim_size {
+                        acc += input_data[base];
+                        unsafe { *out_ptr.add(base) = acc; }
+                        if base >= inner {
+                            base -= inner;
+                        }
+                    }
+                });
+            }
+            Ok(())
+        }
+    };
+}
+
+cumprod_forward!(cumprod_f32, as_f32_slice, as_f32_slice_mut, f32);
+cumprod_forward!(cumprod_f64, as_f64_slice, as_f64_slice_mut, f64);
+cumprod_forward!(cumprod_i32, as_i32_slice, as_i32_slice_mut, i32);
+cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64);
+
+cumprod_backward!(cumprod_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
+cumprod_backward!(cumprod_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
+
+cumsum_forward!(cumsum_f32, as_f32_slice, as_f32_slice_mut, f32);
+cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64);
+cumsum_forward!(cumsum_i32, as_i32_slice, as_i32_slice_mut, i32);
+cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64);
+
+cumsum_backward!(cumsum_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
+cumsum_backward!(cumsum_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
+cumsum_backward!(cumsum_backward_i32, as_i32_slice, as_i32_slice_mut, i32);
+cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
 
 #[cfg(test)]
 mod tests {

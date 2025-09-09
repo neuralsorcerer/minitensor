@@ -465,6 +465,52 @@ impl GradientFunction for ProdBackward {
     }
 }
 
+/// Gradient function for cumulative sum operation
+pub struct CumsumBackward {
+    pub input_id: TensorId,
+    pub dim: usize,
+}
+
+/// Gradient function for cumulative product operation
+pub struct CumprodBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub output: Tensor,
+    pub dim: usize,
+}
+
+impl GradientFunction for CumprodBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let grad_input = reduction::cumprod_backward(&self.input, &self.output, grad_output, self.dim)?;
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+impl GradientFunction for CumsumBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let grad_input = reduction::cumsum_backward(grad_output, self.dim)?;
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 // Gradient functions for activation functions
 
 /// Gradient function for exponential

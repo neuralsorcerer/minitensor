@@ -412,8 +412,11 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
 /// Element-wise negation
 pub fn neg(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    let mut output_data = TensorData::uninitialized_on_device(
+        tensor.shape().numel(),
+        tensor.dtype(),
+        tensor.device(),
+    );
 
     match tensor.dtype() {
         DataType::Float32 => {

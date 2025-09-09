@@ -358,6 +358,16 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    pub fn cumsum(&self, dim: usize) -> PyResult<Self> {
+        let result = self.inner.cumsum(dim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn cumprod(&self, dim: usize) -> PyResult<Self> {
+        let result = self.inner.cumprod(dim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     pub fn max(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.max(axis, keepdims).map_err(_convert_error)?;
@@ -1295,7 +1305,7 @@ fn create_eye_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     let shape = Shape::new(vec![n, m]);
-    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
+    let mut tensor_data = TensorData::zeros_on_device(shape.numel(), dtype, device);
 
     match dtype {
         DataType::Float32 => {

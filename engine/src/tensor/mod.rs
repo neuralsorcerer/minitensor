@@ -334,6 +334,18 @@ impl Tensor {
         any(self, dim, keepdim)
     }
 
+    /// Cumulative sum along a dimension
+    pub fn cumsum(&self, dim: usize) -> Result<Self> {
+        use crate::operations::reduction::cumsum;
+        cumsum(self, dim)
+    }
+
+    /// Cumulative product along a dimension
+    pub fn cumprod(&self, dim: usize) -> Result<Self> {
+        use crate::operations::reduction::cumprod;
+        cumprod(self, dim)
+    }
+
     /// Maximum value
     pub fn max(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::max;

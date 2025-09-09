@@ -607,19 +607,23 @@ class Tensor:
                 return Tensor(np.array(1, dtype=np_dtype), dtype=self.dtype)
             else:
                 raise ValueError("Prod not supported for boolean tensors")
-        # Fallback implementation using NumPy since the core module doesn't
-        # currently expose a dedicated product reduction. This uses NumPy's
-        # highly optimised routines and then converts the result back into a
-        # Tensor, ensuring correct dtype handling.
-        array = self.numpy()
-        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-        if dim is None:
-            result_array = np.prod(array, dtype=np_dtype, keepdims=keepdim)
+        if dim is None or len(dim) <= 1:
+            result = Tensor.__new__(Tensor)
+            result._tensor = self._tensor.prod(dim, keepdim)
+            return result
+
+        dims = sorted(dim)
+        current = self._tensor
+        if keepdim:
+            for d in dims:
+                current = current.prod([d], True)
         else:
-            result_array = np.prod(
-                array, axis=tuple(dim), dtype=np_dtype, keepdims=keepdim
-            )
-        return Tensor(result_array, dtype=self.dtype)
+            for d in reversed(dims):
+                current = current.prod([d], False)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = current
+        return result
     
     def sum(
         self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False
@@ -1082,6 +1086,24 @@ class Tensor:
                 raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.any(dim, keepdim)
+        return result
+
+    def cumsum(self, dim: int) -> "Tensor":
+        """Cumulative sum along a dimension."""
+        dim = dim + self.ndim if dim < 0 else dim
+        if dim < 0 or dim >= self.ndim:
+            raise IndexError("Dimension out of range")
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.cumsum(dim)
+        return result
+
+    def cumprod(self, dim: int) -> "Tensor":
+        """Cumulative product along a dimension."""
+        dim = dim + self.ndim if dim < 0 else dim
+        if dim < 0 or dim >= self.ndim:
+            raise IndexError("Dimension out of range")
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.cumprod(dim)
         return result
 
     def clamp(
