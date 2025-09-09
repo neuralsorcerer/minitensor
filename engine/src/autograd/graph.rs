@@ -5,10 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{GradientFunction, TensorId};
-use crate::{tensor::Tensor, error::Result, operations::arithmetic};
+use crate::{error::Result, operations::arithmetic, tensor::Tensor};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// Statistics about the computation graph
@@ -72,10 +72,7 @@ impl GraphNode {
     
     /// Get the operation name from the gradient function
     pub fn operation_name(&self) -> &str {
-        self.grad_fn
-            .as_ref()
-            .map(|f| f.name())
-            .unwrap_or("leaf")
+        self.grad_fn.as_ref().map(|f| f.name()).unwrap_or("leaf")
     }
 }
 
@@ -87,6 +84,8 @@ pub struct ComputationGraph {
     topological_order: Vec<TensorId>,
     /// Gradients computed during backward pass
     gradients: FxHashMap<TensorId, Tensor>,
+    /// Whether the cached topological order is stale
+    needs_order_update: bool,
 }
 
 impl ComputationGraph {
@@ -96,6 +95,7 @@ impl ComputationGraph {
             nodes: FxHashMap::default(),
             topological_order: Vec::new(),
             gradients: FxHashMap::default(),
+            needs_order_update: false,
         }
     }
 
@@ -113,8 +113,7 @@ impl ComputationGraph {
     ) {
         if let Some(ref f) = grad_fn {
             for &input_id in f.input_ids() {
-                self
-                    .nodes
+                self.nodes
                     .entry(input_id)
                     .or_insert_with(|| GraphNode::new(input_id, None, true));
             }
@@ -122,7 +121,7 @@ impl ComputationGraph {
 
         let node = GraphNode::new(tensor_id, grad_fn, requires_grad);
         self.nodes.insert(tensor_id, node);
-        self.update_topological_order();
+        self.needs_order_update = true;
     }
     
     /// Add a named tensor to the computation graph (for debugging)
@@ -133,65 +132,99 @@ impl ComputationGraph {
         requires_grad: bool,
         name: impl Into<String>,
     ) {
-        let node = GraphNode::new(tensor_id, grad_fn, requires_grad)
-            .with_name(name);
+        let node = GraphNode::new(tensor_id, grad_fn, requires_grad).with_name(name);
         self.nodes.insert(tensor_id, node);
-        self.update_topological_order();
+        self.needs_order_update = true;
     }
 
-    /// Update the topological ordering of nodes using Kahn's algorithm
+    /// Update the topological ordering of nodes using a non-recursive DFS.
+    /// This avoids building explicit dependent lists and minimizes allocations
+    /// compared to Kahn's algorithm while still detecting cycles.
     fn update_topological_order(&mut self) {
         self.topological_order.clear();
+        self.topological_order.reserve(self.nodes.len());
 
-        let mut dependents: FxHashMap<TensorId, SmallVec<[TensorId; 4]>> = FxHashMap::default();
-        dependents.reserve(self.nodes.len());
-        let mut in_degree: FxHashMap<TensorId, usize> = FxHashMap::default();
-        in_degree.reserve(self.nodes.len());
+        // 0 = unvisited, 1 = visiting, 2 = visited
+        let mut state: FxHashMap<TensorId, u8> = FxHashMap::default();
+        state.reserve(self.nodes.len());
+        let mut stack: Vec<(TensorId, usize)> = Vec::with_capacity(self.nodes.len());
+        let mut has_cycle = false;
 
         for &node_id in self.nodes.keys() {
-            in_degree.entry(node_id).or_insert(0);
-        }
-        
-        for node in self.nodes.values() {
-            for &input_id in &node.inputs {
-                dependents
-                    .entry(input_id)
-                    .or_insert_with(SmallVec::new)
-                    .push(node.tensor_id);
-                *in_degree.entry(node.tensor_id).or_insert(0) += 1;
+            if state.get(&node_id).copied().unwrap_or(0) != 0 {
+                continue;
             }
-        }
-
-        let mut queue: Vec<TensorId> = in_degree
-            .iter()
-            .filter(|(_, &degree)| degree == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        
-        let mut idx = 0;
-        let mut order: Vec<TensorId> = Vec::with_capacity(self.nodes.len());
-        while idx < queue.len() {
-            let current_id = queue[idx];
-            idx += 1;
-            order.push(current_id);
-
-            if let Some(deps) = dependents.get(&current_id) {
-                for &dependent_id in deps {
-                    if let Some(degree) = in_degree.get_mut(&dependent_id) {
-                        *degree -= 1;
-                        if *degree == 0 {
-                            queue.push(dependent_id);
-                        }
+            stack.push((node_id, 0));
+            while let Some((current_id, idx)) = stack.last_mut() {
+                match state.get(current_id).copied().unwrap_or(0) {
+                    0 => {
+                        state.insert(*current_id, 1);
                     }
+                    1 => {}
+                    2 => {
+                        stack.pop();
+                        continue;
+                    }
+                    _ => unreachable!(),
+                }
+
+                let inputs = if let Some(node) = self.nodes.get(current_id) {
+                    &node.inputs
+                } else {
+                    state.insert(*current_id, 2);
+                    stack.pop();
+                    continue;
+                };
+
+        if *idx < inputs.len() {
+                    let next = inputs[*idx];
+                    *idx += 1;
+                    if !self.nodes.contains_key(&next) {
+                        continue;
+                    }
+                    match state.get(&next).copied().unwrap_or(0) {
+                        0 => stack.push((next, 0)),
+                        1 => {
+                            has_cycle = true;
+                            break;
+                        }
+                        2 => {}
+                        _ => unreachable!(),
+                    }
+                } else {
+                    state.insert(*current_id, 2);
+                    self.topological_order.push(*current_id);
+                    stack.pop();
                 }
             }
+            if has_cycle {
+                break;
+            }
         }
-        
-        self.topological_order = order.into_iter().rev().collect();
+
+        if has_cycle {
+            self.topological_order.clear();
+        } else {
+            // We collected nodes from inputs to outputs; reverse for backward pass
+            self.topological_order.reverse();
+        }
+
+        self.needs_order_update = false;
+    }
+
+    fn ensure_topological_order(&mut self) {
+        if self.needs_order_update {
+            self.update_topological_order();
+        }
     }
 
     /// Perform backward pass from a given tensor
-    pub fn backward(&mut self, start_tensor: TensorId, gradient: Option<Tensor>) -> Result<FxHashMap<TensorId, Tensor>> {
+    pub fn backward(
+        &mut self,
+        start_tensor: TensorId,
+        gradient: Option<Tensor>,
+    ) -> Result<FxHashMap<TensorId, Tensor>> {
+        self.ensure_topological_order();
         // Clear previous gradients and ensure sufficient capacity for accumulation
         self.gradients.clear();
         self.gradients.reserve(self.nodes.len());
@@ -201,7 +234,7 @@ impl ComputationGraph {
             self.gradients.insert(start_tensor, grad);
         } else {
             return Err(crate::error::MinitensorError::gradient_error(
-                "Initial gradient must be provided"
+                "Initial gradient must be provided",
             ));
         }
         
@@ -240,11 +273,11 @@ impl ComputationGraph {
     }
     
     /// Validate the computation graph for correctness
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&mut self) -> Result<()> {
         // Check for cycles
         if self.has_cycles() {
             return Err(crate::error::MinitensorError::gradient_error(
-                "Computation graph contains cycles"
+                "Computation graph contains cycles",
             ));
         }
         
@@ -252,10 +285,10 @@ impl ComputationGraph {
         for node in self.nodes.values() {
             for &input_id in &node.inputs {
                 if !self.nodes.contains_key(&input_id) {
-                    return Err(crate::error::MinitensorError::gradient_error(
-                        format!("Node {} references non-existent input {}", 
-                               node.tensor_id, input_id)
-                    ));
+                    return Err(crate::error::MinitensorError::gradient_error(format!(
+                        "Node {} references non-existent input {}",
+                        node.tensor_id, input_id
+                    )));
                 }
             }
         }
@@ -284,7 +317,8 @@ impl ComputationGraph {
     }
     
     /// Get the topological order of tensor IDs
-    pub fn topological_order(&self) -> &[TensorId] {
+    pub fn topological_order(&mut self) -> &[TensorId] {
+        self.ensure_topological_order();
         &self.topological_order
     }
     
@@ -303,8 +337,8 @@ impl ComputationGraph {
     }
     
     /// Check if there are cycles in the computation graph
-    pub fn has_cycles(&self) -> bool {
-        // A cycle exists when the topological order doesn't include all nodes
+    pub fn has_cycles(&mut self) -> bool {
+        self.ensure_topological_order();
         self.topological_order.len() != self.nodes.len()
     }
     
@@ -317,19 +351,21 @@ impl ComputationGraph {
             // Remove any gradients
             self.gradients.remove(&tensor_id);
             
-            // Update topological order since dependencies may have changed
-            self.update_topological_order();
+            // Mark order as stale since dependencies changed
+            self.needs_order_update = true;
         }
     }
     
     /// Get statistics about the computation graph
-    pub fn stats(&self) -> GraphStats {
-        let leaf_nodes = self.nodes
+    pub fn stats(&mut self) -> GraphStats {
+        let leaf_nodes = self
+            .nodes
             .values()
             .filter(|node| node.inputs.is_empty())
             .count();
             
-        let grad_enabled_nodes = self.nodes
+        let grad_enabled_nodes = self
+            .nodes
             .values()
             .filter(|node| node.requires_grad)
             .count();
@@ -538,12 +574,15 @@ mod tests {
         graph.add_tensor(b, Some(add_b));
 
         assert!(graph.has_cycles());
+        assert!(graph.validate().is_err());
+        assert!(graph.stats().has_cycles);
+        assert!(graph.topological_order().is_empty());
     }
 
     #[test]
     fn test_backward_pass() {
-        use crate::tensor::{Tensor, DataType, Shape};
         use crate::device::Device;
+        use crate::tensor::{DataType, Shape, Tensor};
         
         let mut graph = ComputationGraph::new();
         
@@ -576,8 +615,8 @@ mod tests {
 
     #[test]
     fn test_gradient_accumulation_in_graph() {
-        use crate::tensor::{Tensor, DataType, Shape};
         use crate::device::Device;
+        use crate::tensor::{DataType, Shape, Tensor};
         
         let mut graph = ComputationGraph::new();
         
@@ -628,5 +667,42 @@ mod tests {
         
         // 'a' should appear in the gradients (accumulated from both paths)
         assert!(gradients.get(&a).is_some());
+    }
+
+    #[test]
+    fn test_stats_zero_grad_and_removal() {
+        use crate::device::Device;
+        use crate::tensor::{DataType, Shape, Tensor};
+
+        let mut graph = ComputationGraph::new();
+        let a = TensorId::new();
+        let b = TensorId::new();
+        graph.add_tensor(a, None);
+        graph.add_tensor(b, None);
+
+        let c = TensorId::new();
+        let add_fn = Arc::new(AddBackward {
+            input_shapes: [vec![2], vec![2]],
+            input_ids: [a, b],
+        });
+        graph.add_tensor(c, Some(add_fn));
+
+        let stats = graph.stats();
+        assert_eq!(stats.total_nodes, 3);
+        assert_eq!(stats.leaf_nodes, 2);
+        assert_eq!(stats.grad_enabled_nodes, 3);
+
+        let grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        graph.backward(c, Some(grad)).unwrap();
+        assert!(graph.get_gradient(c).is_some());
+        graph.zero_grad();
+        assert!(graph.get_gradient(c).is_none());
+
+        let order_before = graph.topological_order().to_vec();
+        graph.remove_tensor(b);
+        let order_after = graph.topological_order().to_vec();
+        assert!(!graph.contains_tensor(b));
+        assert!(!order_after.contains(&b));
+        assert!(order_after.len() < order_before.len());
     }
 }
