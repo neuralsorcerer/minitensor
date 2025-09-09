@@ -73,9 +73,12 @@ fn ones_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
 
 /// Create an uninitialized tensor with the same shape and dtype as input
 #[pyfunction]
+#[pyo3(signature = (tensor, dtype=None))]
 fn empty_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    // For now, create zeros (proper empty would require uninitialized memory)
-    zeros_like(tensor, dtype)
+    let shape = tensor.shape();
+    let tensor_dtype = tensor.dtype();
+    let dtype_str = dtype.unwrap_or(&tensor_dtype);
+    PyTensor::empty(shape, Some(dtype_str), None, Some(false))
 }
 
 /// Create a tensor filled with a value, same shape and dtype as input

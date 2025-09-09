@@ -203,6 +203,47 @@ impl TensorData {
         }
     }
 
+    /// Create new tensor data with uninitialized contents on specified device
+    pub fn uninitialized_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
+        let size_bytes = numel * dtype.size_bytes();
+
+        let buffer = if device.is_cpu() {
+            // Allocate vector without initializing memory for maximum performance
+            let mut vec = Vec::with_capacity(size_bytes);
+            unsafe {
+                vec.set_len(size_bytes);
+            }
+            TensorBuffer::Owned(vec)
+        } else {
+            match global_allocate(size_bytes, device) {
+                Ok(ptr) => TensorBuffer::Raw {
+                    ptr,
+                    size: size_bytes,
+                    device,
+                },
+                Err(_) => {
+                    // Fallback to CPU allocation if GPU allocation fails
+                    let mut vec = Vec::with_capacity(size_bytes);
+                    unsafe {
+                        vec.set_len(size_bytes);
+                    }
+                    TensorBuffer::Owned(vec)
+                }
+            }
+        };
+
+        Self {
+            buffer,
+            layout: MemoryLayout {
+                dtype,
+                numel,
+                is_contiguous: true,
+                device,
+            },
+            ref_count: AtomicUsize::new(1),
+        }
+    }
+
     /// Create new tensor data from raw bytes on CPU
     pub fn from_bytes(buffer: Vec<u8>, dtype: DataType, numel: usize) -> Self {
         Self {

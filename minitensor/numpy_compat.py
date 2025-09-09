@@ -18,10 +18,20 @@ def cross(a, b, axis=-1):
     return result
 
 
+def empty_like(a, dtype=None):
+    rust_a = getattr(a, "_tensor", a)
+    rust_result = _numpy_compat.empty_like(rust_a, dtype)
+    result = Tensor.__new__(Tensor)
+    result._tensor = rust_result
+    return result
+
+
 # Re-export remaining public symbols from the Rust implementation
 __all__ = [
-    name for name in dir(_numpy_compat) if not name.startswith("_") and name != "cross"
-] + ["cross"]
+    name
+    for name in dir(_numpy_compat)
+    if not name.startswith("_") and name not in {"cross", "empty_like"}
+] + ["cross", "empty_like"]
 for name in __all__:
-    if name != "cross":
+    if name not in {"cross", "empty_like"}:
         globals()[name] = getattr(_numpy_compat, name)

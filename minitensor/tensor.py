@@ -607,21 +607,19 @@ class Tensor:
                 return Tensor(np.array(1, dtype=np_dtype), dtype=self.dtype)
             else:
                 raise ValueError("Prod not supported for boolean tensors")
-        if dim is None or len(dim) <= 1:
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.prod(dim, keepdim)
-            return result
-        dims = sorted(dim)
-        current = self._tensor
-        if keepdim:
-            for d in dims:
-                current = current.prod([d], True)
+        # Fallback implementation using NumPy since the core module doesn't
+        # currently expose a dedicated product reduction. This uses NumPy's
+        # highly optimised routines and then converts the result back into a
+        # Tensor, ensuring correct dtype handling.
+        array = self.numpy()
+        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
+        if dim is None:
+            result_array = np.prod(array, dtype=np_dtype, keepdims=keepdim)
         else:
-            for d in reversed(dims):
-                current = current.prod([d], False)
-        result = Tensor.__new__(Tensor)
-        result._tensor = current
-        return result
+            result_array = np.prod(
+                array, axis=tuple(dim), dtype=np_dtype, keepdims=keepdim
+            )
+        return Tensor(result_array, dtype=self.dtype)
     
     def sum(
         self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False

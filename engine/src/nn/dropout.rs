@@ -28,7 +28,8 @@ fn generate_dropout_mask(
 
     match dtype {
         DataType::Float32 => {
-            let mut data = vec![0.0f32; numel];
+            let mut data = Vec::with_capacity(numel);
+            unsafe { data.set_len(numel); }
             if keep_prob >= 1.0 {
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
@@ -37,10 +38,10 @@ fn generate_dropout_mask(
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
                 for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
-                    if b {
-                        *v = scale;
-                    }
+                    *v = if b { scale } else { 0.0 };
                 }
+            } else {
+                data.fill(0.0);
             }
             let td = TensorData::from_vec_f32(data, device);
             Ok(Tensor::new(
@@ -52,7 +53,8 @@ fn generate_dropout_mask(
             ))
         }
         DataType::Float64 => {
-            let mut data = vec![0.0f64; numel];
+            let mut data = Vec::with_capacity(numel);
+            unsafe { data.set_len(numel); }
             if keep_prob >= 1.0 {
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
@@ -61,10 +63,10 @@ fn generate_dropout_mask(
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
                 for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
-                    if b {
-                        *v = scale;
-                    }
+                    *v = if b { scale } else { 0.0 };
                 }
+            } else {
+                data.fill(0.0);
             }
             let td = TensorData::from_vec_f64(data, device);
             Ok(Tensor::new(

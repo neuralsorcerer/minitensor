@@ -69,7 +69,7 @@ where
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform exponential based on data type
     match tensor.dtype() {
@@ -114,7 +114,7 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
 pub fn log(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform logarithm based on data type
     match tensor.dtype() {
@@ -159,7 +159,7 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
 pub fn sin(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform sine based on data type
     match tensor.dtype() {
@@ -204,7 +204,7 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
 pub fn cos(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform cosine based on data type
     match tensor.dtype() {
@@ -249,7 +249,7 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
 pub fn tan(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform tangent based on data type
     match tensor.dtype() {
@@ -294,7 +294,7 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
 pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform tanh based on data type
     match tensor.dtype() {
@@ -339,7 +339,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
 pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform sigmoid based on data type
     match tensor.dtype() {
@@ -406,7 +406,8 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     }
 
     // Create output tensor data
-    let mut output_data = TensorData::zeros_on_device(base.numel(), base.dtype(), base.device());
+    let mut output_data =
+        TensorData::uninitialized_on_device(base.numel(), base.dtype(), base.device());
 
     match base.dtype() {
         DataType::Float32 => {
@@ -475,7 +476,8 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
 /// Element-wise power with scalar exponent and gradient support
 pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
     // Create exponent tensor filled with scalar value
-    let mut exp_data = TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    let mut exp_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
     match tensor.dtype() {
         DataType::Float32 => {
             let slice = exp_data.as_f32_slice_mut().ok_or_else(|| {
@@ -517,7 +519,7 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
 pub fn relu(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform ReLU based on data type while capturing mask of positive inputs
     let mask = match tensor.dtype() {
@@ -564,7 +566,7 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
 pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform LeakyReLU based on data type and capture mask of positive inputs
     let mask = match tensor.dtype() {
@@ -616,7 +618,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     // Perform softmax based on data type
     match tensor.dtype() {
@@ -1186,7 +1188,7 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
 /// Absolute value function
 pub fn abs(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => abs_f32(tensor, &mut output_data)?,
@@ -1220,7 +1222,7 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
 /// Clip tensor values to range
 pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => clip_f32(tensor, &mut output_data, min_val, max_val)?,
@@ -1248,7 +1250,7 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
 /// Round tensor values
 pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => round_f32(tensor, &mut output_data, decimals)?,
@@ -1274,7 +1276,7 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
 /// Floor tensor values
 pub fn floor(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => floor_f32(tensor, &mut output_data)?,
@@ -1300,7 +1302,7 @@ pub fn floor(tensor: &Tensor) -> Result<Tensor> {
 /// Ceiling tensor values
 pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => ceil_f32(tensor, &mut output_data)?,

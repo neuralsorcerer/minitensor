@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from minitensor.tensor import Tensor
+from minitensor.numpy_compat import empty_like
 
 
 def test_eye_int32():
@@ -42,6 +43,13 @@ def test_randn_int32_dtype():
     assert x.dtype == "int32"
     assert arr.dtype == np.int32
     assert arr.shape == (3,)
+
+
+def test_empty_like_shape_and_dtype():
+    a = Tensor.ones([2, 3], dtype="float32")
+    b = empty_like(a)
+    assert b.shape == a.shape
+    assert b.dtype == a.dtype
 
 
 def test_mixed_type_creation_error():

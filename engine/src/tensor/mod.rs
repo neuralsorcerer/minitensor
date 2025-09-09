@@ -80,6 +80,16 @@ impl Tensor {
         }
     }
 
+    /// Create a tensor with uninitialized data
+    pub fn empty(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Self {
+        let data = Arc::new(TensorData::uninitialized_on_device(
+            shape.numel(),
+            dtype,
+            device,
+        ));
+        Self::new(data, shape, dtype, device, requires_grad)
+    }
+
     /// Create a tensor filled with zeros
     pub fn zeros(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Self {
         let data = Arc::new(TensorData::zeros_on_device(shape.numel(), dtype, device));

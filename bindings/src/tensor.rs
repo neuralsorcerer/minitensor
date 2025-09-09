@@ -603,6 +603,22 @@ impl PyTensor {
 
     // Static tensor creation methods
     #[staticmethod]
+    pub fn empty(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let requires_grad = requires_grad.unwrap_or(false);
+
+        let shape = Shape::new(shape);
+        let tensor = Tensor::empty(shape, dtype, device, requires_grad);
+        Ok(Self { inner: tensor })
+    }
+
+    #[staticmethod]
     pub fn zeros(
         shape: Vec<usize>,
         dtype: Option<&str>,
@@ -1180,7 +1196,7 @@ fn create_random_tensor(
     requires_grad: bool,
     normal: bool,
 ) -> PyResult<Tensor> {
-    let mut tensor_data = TensorData::zeros_on_device(shape.numel(), dtype, device);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
 
     match dtype {
         DataType::Float32 => {
@@ -1279,7 +1295,7 @@ fn create_eye_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     let shape = Shape::new(vec![n, m]);
-    let mut tensor_data = TensorData::zeros_on_device(shape.numel(), dtype, device);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
 
     match dtype {
         DataType::Float32 => {
@@ -1336,7 +1352,7 @@ fn create_full_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     let shape = Shape::new(shape);
-    let mut tensor_data = TensorData::zeros_on_device(shape.numel(), dtype, device);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
 
     match dtype {
         DataType::Float32 => {
@@ -1391,7 +1407,7 @@ fn create_arange_tensor(
 
     let num_elements = ((end - start) / step).ceil() as usize;
     let shape = Shape::new(vec![num_elements]);
-    let mut tensor_data = TensorData::zeros_on_device(shape.numel(), dtype, device);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
 
     match dtype {
         DataType::Float32 => {

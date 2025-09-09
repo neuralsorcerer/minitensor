@@ -42,7 +42,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
 
     // Perform element-wise addition based on data type
     match lhs.dtype() {
@@ -233,7 +233,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
 
     // Perform element-wise subtraction based on data type
     match lhs.dtype() {
@@ -299,7 +299,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
 
     // Perform element-wise multiplication based on data type
     match lhs.dtype() {
@@ -366,7 +366,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
 
     // Perform element-wise division based on data type
     match lhs.dtype() {
@@ -413,7 +413,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// Element-wise negation
 pub fn neg(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
 
     match tensor.dtype() {
         DataType::Float32 => {
