@@ -484,7 +484,8 @@ impl GradientFunction for CumprodBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let grad_input = reduction::cumprod_backward(&self.input, &self.output, grad_output, self.dim)?;
+        let grad_input =
+            reduction::cumprod_backward(&self.input, &self.output, grad_output, self.dim)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
@@ -1142,12 +1143,56 @@ impl GradientFunction for SoftmaxBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        // Softmax gradient: y * (grad_output - sum(grad_output * y, dim))
-        let y = self.output.detach();
-        let grad_y = arithmetic::mul(grad_output, &y)?;
-        let sum = reduction::sum(&grad_y, Some(vec![self.dim]), true)?;
-        let sub = arithmetic::sub(grad_output, &sum)?;
-        let grad_input = arithmetic::mul(&y, &sub)?;
+        // Allocate gradient buffer
+        let mut grad_data = TensorData::zeros_on_device(
+            self.output.numel(),
+            self.output.dtype(),
+            self.output.device(),
+        );
+
+        match grad_output.dtype() {
+            DataType::Float32 => {
+                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
+                })?;
+                let y = self.output.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from softmax output")
+                })?;
+                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from grad_data",
+                    )
+                })?;
+                softmax_backward_f32(go, y, grad_slice, self.output.shape().dims(), self.dim);
+            }
+            DataType::Float64 => {
+                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
+                })?;
+                let y = self.output.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from softmax output")
+                })?;
+                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from grad_data",
+                    )
+                })?;
+                softmax_backward_f64(go, y, grad_slice, self.output.shape().dims(), self.dim);
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "Softmax backward only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let grad_input = Tensor::new(
+            Arc::new(grad_data),
+            self.output.shape().clone(),
+            self.output.dtype(),
+            self.output.device(),
+            grad_output.requires_grad(),
+        );
 
         gradients.insert(self.input_id, grad_input);
 
@@ -1156,6 +1201,116 @@ impl GradientFunction for SoftmaxBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
+    }
+}
+
+fn softmax_backward_f32(
+    grad_output: &[f32],
+    y: &[f32],
+    grad_input: &mut [f32],
+    dims: &[usize],
+    dim: usize,
+) {
+    let dim_size = dims[dim];
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+    if grad_output.len() < PAR_THRESHOLD {
+        for ((go_block, y_block), out_block) in grad_output
+            .chunks(group)
+            .zip(y.chunks(group))
+            .zip(grad_input.chunks_mut(group))
+        {
+            for a in 0..after {
+                let base = a;
+                let mut dot = 0.0f32;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    dot += go_block[idx] * y_block[idx];
+                }
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                }
+            }
+        }
+    } else {
+        grad_output
+            .par_chunks(group)
+            .zip(y.par_chunks(group))
+            .zip(grad_input.par_chunks_mut(group))
+            .for_each(|((go_block, y_block), out_block)| {
+                for a in 0..after {
+                    let base = a;
+                    let mut dot = 0.0f32;
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        dot += go_block[idx] * y_block[idx];
+                    }
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                    }
+                }
+            });
+    }
+}
+
+fn softmax_backward_f64(
+    grad_output: &[f64],
+    y: &[f64],
+    grad_input: &mut [f64],
+    dims: &[usize],
+    dim: usize,
+) {
+    let dim_size = dims[dim];
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+    if grad_output.len() < PAR_THRESHOLD {
+        for ((go_block, y_block), out_block) in grad_output
+            .chunks(group)
+            .zip(y.chunks(group))
+            .zip(grad_input.chunks_mut(group))
+        {
+            for a in 0..after {
+                let base = a;
+                let mut dot = 0.0f64;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    dot += go_block[idx] * y_block[idx];
+                }
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                }
+            }
+        }
+    } else {
+        grad_output
+            .par_chunks(group)
+            .zip(y.par_chunks(group))
+            .zip(grad_input.par_chunks_mut(group))
+            .for_each(|((go_block, y_block), out_block)| {
+                for a in 0..after {
+                    let base = a;
+                    let mut dot = 0.0f64;
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        dot += go_block[idx] * y_block[idx];
+                    }
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                    }
+                }
+            });
     }
 }
 
@@ -1746,10 +1901,11 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
         }
     }
 
-    let mut grad = grad_output.clone();
-    for &axis in axes_to_sum.iter() {
-        grad = reduction::sum_along_dim(&grad, axis, true)?;
+    if axes_to_sum.is_empty() {
+        return Ok(grad_output.clone());
     }
+
+    let mut grad = reduction::sum(grad_output, Some(axes_to_sum.into_vec()), true)?;
 
     if grad.shape() != target_shape {
         grad = grad.view(target_shape.clone())?;
@@ -1831,6 +1987,101 @@ mod tests {
         assert_eq!(reduced.shape().dims(), &[1, 1]);
         let slice = reduced.data().as_f32_slice().unwrap();
         assert!((slice[0] - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_reduce_gradient_with_leading_and_inner_axes() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![4, 2, 3, 5]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = Shape::new(vec![2, 1, 5]);
+        let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
+        assert_eq!(reduced.shape().dims(), &[2, 1, 5]);
+        let slice = reduced.data().as_f32_slice().unwrap();
+        assert!(slice.iter().all(|&x| (x - 12.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn test_reduce_gradient_noop_for_same_shape() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 3, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = grad_output.shape().clone();
+        let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
+        assert_eq!(reduced.shape().dims(), &[2, 3, 4]);
+        assert!(reduced.allclose(&grad_output, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_softmax_backward_dim1() {
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let softmax_out = activation::softmax(&input, Some(1)).unwrap();
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let grad_y = arithmetic::mul(&grad_output, &softmax_out).unwrap();
+        let sum = reduction::sum(&grad_y, Some(vec![1]), true).unwrap();
+        let sub = arithmetic::sub(&grad_output, &sum).unwrap();
+        let expected = arithmetic::mul(&softmax_out, &sub).unwrap();
+
+        let grad_fn = SoftmaxBackward {
+            input_id: TensorId::new(),
+            output: softmax_out.clone(),
+            dim: 1,
+        };
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        let grad_input = grads.values().next().unwrap();
+        assert!(grad_input.allclose(&expected, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_softmax_backward_dim0_f64() {
+        let data: Vec<f64> = (1..=6).map(|v| v as f64).collect();
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_f64(data, Device::cpu())),
+            Shape::new(vec![2, 3]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let softmax_out = activation::softmax(&input, Some(0)).unwrap();
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 3]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let grad_y = arithmetic::mul(&grad_output, &softmax_out).unwrap();
+        let sum = reduction::sum(&grad_y, Some(vec![0]), true).unwrap();
+        let sub = arithmetic::sub(&grad_output, &sum).unwrap();
+        let expected = arithmetic::mul(&softmax_out, &sub).unwrap();
+
+        let grad_fn = SoftmaxBackward {
+            input_id: TensorId::new(),
+            output: softmax_out.clone(),
+            dim: 0,
+        };
+        let grads = grad_fn.backward(&grad_output).unwrap();
+        let grad_input = grads.values().next().unwrap();
+        assert!(grad_input.allclose(&expected, 1e-6, 1e-6));
     }
 
     #[test]
