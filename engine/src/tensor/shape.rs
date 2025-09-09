@@ -16,11 +16,13 @@ pub struct Shape {
 
 impl Shape {
     /// Create a new shape from dimensions
+    #[inline(always)]
     pub fn new(dims: Vec<usize>) -> Self {
         Self { dims }
     }
 
     /// Create a scalar shape (0 dimensions)
+    #[inline(always)]
     pub fn scalar() -> Self {
         Self { dims: vec![] }
     }
@@ -63,7 +65,7 @@ impl Shape {
     }
 
     /// Check if shapes are compatible for broadcasting
-    #[inline]
+    #[inline(always)]
     pub fn is_broadcastable_with(&self, other: &Shape) -> bool {
         let max_ndim = self.ndim().max(other.ndim());
 
@@ -92,7 +94,7 @@ impl Shape {
     }
 
     /// Compute the broadcasted shape with another shape
-    #[inline]
+    #[inline(always)]
     pub fn broadcast_with(&self, other: &Shape) -> Result<Shape> {
         if !self.is_broadcastable_with(other) {
             return Err(MinitensorError::shape_mismatch(
@@ -131,12 +133,14 @@ impl fmt::Display for Shape {
 }
 
 impl From<Vec<usize>> for Shape {
+    #[inline(always)]
     fn from(dims: Vec<usize>) -> Self {
         Self::new(dims)
     }
 }
 
 impl From<&[usize]> for Shape {
+    #[inline(always)]
     fn from(dims: &[usize]) -> Self {
         Self::new(dims.to_vec())
     }
@@ -156,7 +160,7 @@ impl Strides {
     }
 
     /// Create contiguous strides from a shape
-    #[inline]
+    #[inline(always)]
     pub fn from_shape(shape: &Shape) -> Self {
         let mut strides = Vec::with_capacity(shape.ndim());
         let mut stride = 1;
@@ -177,7 +181,7 @@ impl Strides {
     }
 
     /// Check if the strides represent a contiguous layout
-    #[inline]
+    #[inline(always)]
     pub fn is_contiguous(&self, shape: &Shape) -> bool {
         if self.strides.len() != shape.ndim() {
             return false;
@@ -195,7 +199,7 @@ impl Strides {
     }
 
     /// Compute the linear index from multi-dimensional indices
-    #[inline]
+    #[inline(always)]
     pub fn linear_index(&self, indices: &[usize]) -> usize {
         indices
             .iter()

@@ -59,6 +59,7 @@ pub enum TensorIndex {
 
 impl Tensor {
     /// Create a new tensor with the given data, shape, and properties
+    #[inline(always)]
     pub fn new(
         data: Arc<TensorData>,
         shape: Shape,
@@ -81,6 +82,7 @@ impl Tensor {
     }
 
     /// Create a tensor with uninitialized data
+    #[inline(always)]
     pub fn empty(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Self {
         let data = Arc::new(TensorData::uninitialized_on_device(
             shape.numel(),
@@ -91,12 +93,14 @@ impl Tensor {
     }
 
     /// Create a tensor filled with zeros
+    #[inline(always)]
     pub fn zeros(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Self {
         let data = Arc::new(TensorData::zeros_on_device(shape.numel(), dtype, device));
         Self::new(data, shape, dtype, device, requires_grad)
     }
 
     /// Create a tensor filled with ones
+    #[inline(always)]
     pub fn ones(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Self {
         let data = Arc::new(TensorData::ones_on_device(shape.numel(), dtype, device));
         Self::new(data, shape, dtype, device, requires_grad)
@@ -261,6 +265,7 @@ impl Tensor {
     }
 
     /// Create a view of this tensor with a new shape
+    #[inline(always)]
     pub fn view(&self, new_shape: Shape) -> Result<Self> {
         if new_shape.numel() != self.numel() {
             return Err(MinitensorError::shape_mismatch(
@@ -276,101 +281,132 @@ impl Tensor {
     }
 
     /// Reshape the tensor to a new shape
+    #[inline(always)]
     pub fn reshape(&self, new_shape: Shape) -> Result<Self> {
         self.view(new_shape)
     }
 
+    /// Flatten the tensor into a one-dimensional view.
+    /// This operation avoids data copies when possible.
+    #[inline(always)]
+    pub fn flatten(&self) -> Result<Self> {
+        let len = self.numel();
+        self.reshape(Shape::new(vec![len]))
+    }
+
+    /// Alias for [`flatten`](Self::flatten) following NumPy naming.
+    #[inline(always)]
+    pub fn ravel(&self) -> Result<Self> {
+        self.flatten()
+    }
+
     /// Transpose two dimensions of the tensor
+    #[inline(always)]
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Result<Self> {
         use crate::operations::linalg::transpose;
         transpose(self, dim0, dim1)
     }
 
     /// Unary negation
+    #[inline(always)]
     pub fn neg(&self) -> Result<Self> {
         use crate::operations::arithmetic::neg;
         neg(self)
     }
 
     /// Add two tensors element-wise
+    #[inline(always)]
     pub fn add(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::arithmetic::add;
         add(self, other)
     }
 
     /// Matrix multiplication
+    #[inline(always)]
     pub fn matmul(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::linalg::matmul;
         matmul(self, other)
     }
 
     /// Sum reduction
+    #[inline(always)]
     pub fn sum(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::sum;
         sum(self, dim, keepdim)
     }
 
     /// Product reduction
+    #[inline(always)]
     pub fn prod(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::prod;
         prod(self, dim, keepdim)
     }
 
     /// Mean reduction
+    #[inline(always)]
     pub fn mean(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::mean;
         mean(self, dim, keepdim)
     }
 
     /// Logical all reduction
+    #[inline(always)]
     pub fn all(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::all;
         all(self, dim, keepdim)
     }
 
     /// Logical any reduction
+    #[inline(always)]
     pub fn any(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::any;
         any(self, dim, keepdim)
     }
 
     /// Cumulative sum along a dimension
+    #[inline(always)]
     pub fn cumsum(&self, dim: usize) -> Result<Self> {
         use crate::operations::reduction::cumsum;
         cumsum(self, dim)
     }
 
     /// Cumulative product along a dimension
+    #[inline(always)]
     pub fn cumprod(&self, dim: usize) -> Result<Self> {
         use crate::operations::reduction::cumprod;
         cumprod(self, dim)
     }
 
     /// Maximum value
+    #[inline(always)]
     pub fn max(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::max;
         max(self, dim, keepdim)
     }
 
     /// Minimum value
+    #[inline(always)]
     pub fn min(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::min;
         min(self, dim, keepdim)
     }
 
     /// Argument of maximum value
+    #[inline(always)]
     pub fn argmax(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::argmax;
         argmax(self, dim, keepdim)
     }
 
     /// Argument of minimum value
+    #[inline(always)]
     pub fn argmin(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::argmin;
         argmin(self, dim, keepdim)
     }
 
     /// Element-wise equality comparison
+    #[inline(always)]
     pub fn eq(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::comparison::eq;
         eq(self, other)
@@ -383,108 +419,126 @@ impl Tensor {
     }
 
     /// Element-wise less-than comparison
+    #[inline(always)]
     pub fn lt(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::comparison::lt;
         lt(self, other)
     }
 
     /// Element-wise less-than-or-equal comparison
+    #[inline(always)]
     pub fn le(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::comparison::le;
         le(self, other)
     }
 
     /// Element-wise greater-than comparison
+    #[inline(always)]
     pub fn gt(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::comparison::gt;
         gt(self, other)
     }
 
     /// Element-wise greater-than-or-equal comparison
+    #[inline(always)]
     pub fn ge(&self, other: &Tensor) -> Result<Self> {
         use crate::operations::comparison::ge;
         ge(self, other)
     }
 
     /// Standard deviation
+    #[inline(always)]
     pub fn std(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::std;
         std(self, dim, keepdim)
     }
 
     /// Variance
+    #[inline(always)]
     pub fn var(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::var;
         var(self, dim, keepdim)
     }
 
     /// Exponential function
+    #[inline(always)]
     pub fn exp(&self) -> Result<Self> {
         use crate::operations::activation::exp;
         exp(self)
     }
 
     /// Natural logarithm
+    #[inline(always)]
     pub fn log(&self) -> Result<Self> {
         use crate::operations::activation::log;
         log(self)
     }
 
     /// Sine function
+    #[inline(always)]
     pub fn sin(&self) -> Result<Self> {
         use crate::operations::activation::sin;
         sin(self)
     }
 
     /// Cosine function
+    #[inline(always)]
     pub fn cos(&self) -> Result<Self> {
         use crate::operations::activation::cos;
         cos(self)
     }
 
     /// Tangent function
+    #[inline(always)]
     pub fn tan(&self) -> Result<Self> {
         use crate::operations::activation::tan;
         tan(self)
     }
 
     /// Hyperbolic tangent
+    #[inline(always)]
     pub fn tanh(&self) -> Result<Self> {
         use crate::operations::activation::tanh;
         tanh(self)
     }
 
     /// Sigmoid activation
+    #[inline(always)]
     pub fn sigmoid(&self) -> Result<Self> {
         use crate::operations::activation::sigmoid;
         sigmoid(self)
     }
 
     /// ReLU activation
+    #[inline(always)]
     pub fn relu(&self) -> Result<Self> {
         use crate::operations::activation::relu;
         relu(self)
     }
 
     /// Softmax activation
+    #[inline(always)]
     pub fn softmax(&self, dim: Option<usize>) -> Result<Self> {
         use crate::operations::activation::softmax;
         softmax(self, dim)
     }
 
     /// Absolute value
+    #[inline(always)]
     pub fn abs(&self) -> Result<Self> {
         use crate::operations::activation::abs;
         abs(self)
     }
 
     /// Square root
+    #[inline(always)]
     pub fn sqrt(&self) -> Result<Self> {
         use crate::operations::activation::sqrt;
         sqrt(self)
     }
 
     /// Raise tensor elements to a scalar power
+    #[inline(always)]
     pub fn powf(&self, exponent: f64) -> Result<Self> {
         use crate::operations::activation::powf;
         powf(self, exponent)
@@ -497,6 +551,7 @@ impl Tensor {
     }
 
     /// Move tensor to device
+    #[inline(always)]
     pub fn to(&self, device: Device) -> Result<Self> {
         if self.device == device {
             return Ok(self.clone());
@@ -510,6 +565,7 @@ impl Tensor {
     }
 
     /// Convert tensor to a different data type
+    #[inline(always)]
     pub fn astype(&self, dtype: DataType) -> Result<Self> {
         if self.dtype == dtype {
             return Ok(self.clone());
@@ -767,6 +823,7 @@ impl Tensor {
     }
 
     /// Detach tensor from computation graph
+    #[inline(always)]
     pub fn detach(&self) -> Self {
         let mut detached = self.clone();
         detached.requires_grad = false;
@@ -776,6 +833,7 @@ impl Tensor {
     }
 
     /// Check if tensors are approximately equal
+    #[inline(always)]
     pub fn allclose(&self, other: &Tensor, rtol: f64, atol: f64) -> bool {
         if self.shape != other.shape || self.dtype != other.dtype {
             return false;
@@ -845,6 +903,7 @@ impl Tensor {
     }
 
     /// Check if tensors are exactly equal
+    #[inline(always)]
     pub fn array_equal(&self, other: &Tensor) -> bool {
         if self.shape != other.shape || self.dtype != other.dtype {
             return false;
@@ -947,6 +1006,7 @@ impl Tensor {
     }
 
     /// Squeeze dimensions of size 1
+    #[inline(always)]
     pub fn squeeze(&self) -> Result<Self> {
         let new_dims: Vec<usize> = self
             .shape
@@ -961,6 +1021,7 @@ impl Tensor {
     }
 
     /// Squeeze specific dimension if it has size 1
+    #[inline(always)]
     pub fn squeeze_dim(&self, dim: usize) -> Result<Self> {
         if dim >= self.ndim() {
             return Err(MinitensorError::index_error(dim as isize, 0, self.ndim()));
@@ -977,6 +1038,7 @@ impl Tensor {
     }
 
     /// Add dimension of size 1
+    #[inline(always)]
     pub fn unsqueeze(&self, dim: usize) -> Result<Self> {
         if dim > self.ndim() {
             return Err(MinitensorError::index_error(
@@ -993,6 +1055,7 @@ impl Tensor {
     }
 
     /// Flatten tensor from start_dim to end_dim
+    #[inline(always)]
     pub fn flatten_range(&self, start_dim: usize, end_dim: usize) -> Result<Self> {
         if start_dim >= self.ndim() || end_dim >= self.ndim() || start_dim > end_dim {
             return Err(MinitensorError::invalid_argument(
@@ -1020,6 +1083,7 @@ impl Tensor {
     }
 
     /// Basic tensor indexing and slicing
+    #[inline(always)]
     pub fn index(&self, indices: &[TensorIndex]) -> Result<Self> {
         if indices.len() > self.ndim() {
             return Err(MinitensorError::invalid_argument(
@@ -1220,6 +1284,7 @@ impl Tensor {
     }
 
     /// Assign values to tensor slice
+    #[inline(always)]
     pub fn index_assign(&mut self, indices: &[TensorIndex], value: &Tensor) -> Result<()> {
         if indices.len() > self.ndim() {
             return Err(MinitensorError::invalid_argument(
@@ -1361,6 +1426,7 @@ impl Tensor {
     }
 
     /// Check if tensor contains NaN values
+    #[inline(always)]
     pub fn has_nan(&self) -> bool {
         match self.dtype {
             DataType::Float32 => {
@@ -1382,6 +1448,7 @@ impl Tensor {
     }
 
     /// Check if tensor contains infinite values
+    #[inline(always)]
     pub fn has_inf(&self) -> bool {
         match self.dtype {
             DataType::Float32 => {
@@ -1403,6 +1470,7 @@ impl Tensor {
     }
 
     /// Element-wise check for NaN values
+    #[inline(always)]
     pub fn isnan(&self) -> Result<Tensor> {
         let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
         match self.dtype {
@@ -1444,6 +1512,7 @@ impl Tensor {
     }
 
     /// Element-wise check for infinite values
+    #[inline(always)]
     pub fn isinf(&self) -> Result<Tensor> {
         let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
         match self.dtype {
@@ -1485,6 +1554,7 @@ impl Tensor {
     }
 
     /// Element-wise check for finite values
+    #[inline(always)]
     pub fn isfinite(&self) -> Result<Tensor> {
         let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
         match self.dtype {
@@ -1532,6 +1602,7 @@ impl Tensor {
     }
 
     /// Clamp tensor values between optional minimum and maximum
+    #[inline(always)]
     pub fn clamp(&self, min: Option<f64>, max: Option<f64>) -> Result<Tensor> {
         if min.is_none() && max.is_none() {
             return Ok(self.clone());
@@ -1626,6 +1697,7 @@ impl Tensor {
     }
 
     /// Get the maximum value in the tensor
+    #[inline(always)]
     pub fn max_value(&self) -> Option<f64> {
         match self.dtype {
             DataType::Float32 => self
@@ -1653,6 +1725,7 @@ impl Tensor {
     }
 
     /// Get the minimum value in the tensor
+    #[inline(always)]
     pub fn min_value(&self) -> Option<f64> {
         match self.dtype {
             DataType::Float32 => self
@@ -1680,6 +1753,7 @@ impl Tensor {
     }
 
     /// Get memory usage in bytes
+    #[inline(always)]
     pub fn memory_usage_bytes(&self) -> usize {
         let element_size = match self.dtype {
             DataType::Float32 => 4,
@@ -1697,6 +1771,7 @@ impl Tensor {
     }
 
     /// Check if this tensor is a leaf node in the computation graph
+    #[inline(always)]
     pub fn is_leaf(&self) -> bool {
         self.grad_fn.is_none()
     }

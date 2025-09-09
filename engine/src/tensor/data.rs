@@ -49,16 +49,19 @@ pub struct MemoryLayout {
 
 impl TensorData {
     /// Create new tensor data with zeros on CPU
+    #[inline(always)]
     pub fn zeros(numel: usize, dtype: DataType) -> Self {
         Self::zeros_on_device(numel, dtype, Device::cpu())
     }
 
     /// Create new tensor data with ones on CPU
+    #[inline(always)]
     pub fn ones(numel: usize, dtype: DataType) -> Self {
         Self::ones_on_device(numel, dtype, Device::cpu())
     }
 
     /// Create new tensor data with ones on specified device
+    #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
         if device.is_cpu() {
             let size_bytes = numel * dtype.size_bytes();
@@ -142,7 +145,7 @@ impl TensorData {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn fill_slice<T: Copy + Send + Sync>(slice: &mut [T], value: T) {
         if slice.len() >= 1024 {
             slice.par_iter_mut().for_each(|x| *x = value);
@@ -152,6 +155,7 @@ impl TensorData {
     }
 
     /// Create new tensor data with zeros on specified device
+    #[inline(always)]
     pub fn zeros_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
         let size_bytes = numel * dtype.size_bytes();
 
@@ -204,6 +208,7 @@ impl TensorData {
     }
 
     /// Create new tensor data with uninitialized contents on specified device
+    #[inline(always)]
     pub fn uninitialized_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
         let size_bytes = numel * dtype.size_bytes();
 
@@ -245,6 +250,7 @@ impl TensorData {
     }
 
     /// Create new tensor data from raw bytes on CPU
+    #[inline(always)]
     pub fn from_bytes(buffer: Vec<u8>, dtype: DataType, numel: usize) -> Self {
         Self {
             buffer: TensorBuffer::Owned(buffer),
@@ -259,6 +265,7 @@ impl TensorData {
     }
 
     /// Create tensor data from a vector of typed values
+    #[inline(always)]
     pub fn from_vec<T: Copy + 'static>(data: Vec<T>, dtype: DataType, device: Device) -> Self {
         let numel = data.len();
         let size_bytes = numel * std::mem::size_of::<T>();
@@ -325,31 +332,37 @@ impl TensorData {
     }
 
     /// Create tensor data from a vector of f32 values
+    #[inline(always)]
     pub fn from_vec_f32(data: Vec<f32>, device: Device) -> Self {
         Self::from_vec(data, DataType::Float32, device)
     }
 
     /// Create tensor data from a vector of f64 values
+    #[inline(always)]
     pub fn from_vec_f64(data: Vec<f64>, device: Device) -> Self {
         Self::from_vec(data, DataType::Float64, device)
     }
 
     /// Create tensor data from a vector of i32 values
+    #[inline(always)]
     pub fn from_vec_i32(data: Vec<i32>, device: Device) -> Self {
         Self::from_vec(data, DataType::Int32, device)
     }
 
     /// Create tensor data from a vector of i64 values
+    #[inline(always)]
     pub fn from_vec_i64(data: Vec<i64>, device: Device) -> Self {
         Self::from_vec(data, DataType::Int64, device)
     }
 
     /// Create tensor data from a vector of bool values
+    #[inline(always)]
     pub fn from_vec_bool(data: Vec<bool>, device: Device) -> Self {
         Self::from_vec(data, DataType::Bool, device)
     }
 
     /// Create tensor data from raw pointer (for GPU or external memory)
+    #[inline(always)]
     pub fn from_raw_ptr(
         ptr: *mut u8,
         size: usize,
