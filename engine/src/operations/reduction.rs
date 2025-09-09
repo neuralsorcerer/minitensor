@@ -887,9 +887,21 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
             }
         }
     } else {
-        return Err(MinitensorError::not_implemented(
-            "Sum along dimension for >2D tensors not yet implemented",
-        ));
+        let dim_size = input_shape[dim];
+        let outer = input_shape[..dim].iter().product::<usize>();
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        for o in 0..outer {
+            for r in 0..inner {
+                let mut sum_val = 0f32;
+                for d in 0..dim_size {
+                    let idx = o * outer_stride + d * inner + r;
+                    sum_val += input_data[idx];
+                }
+                result_slice[o * inner + r] = sum_val;
+            }
+        }
     }
 
     Ok(())
@@ -951,9 +963,21 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
             }
         }
     } else {
-        return Err(MinitensorError::not_implemented(
-            "Sum along dimension for >2D tensors not yet implemented",
-        ));
+        let dim_size = input_shape[dim];
+        let outer = input_shape[..dim].iter().product::<usize>();
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        for o in 0..outer {
+            for r in 0..inner {
+                let mut sum_val = 0f64;
+                for d in 0..dim_size {
+                    let idx = o * outer_stride + d * inner + r;
+                    sum_val += input_data[idx];
+                }
+                result_slice[o * inner + r] = sum_val;
+            }
+        }
     }
 
     Ok(())
@@ -1015,9 +1039,21 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
             }
         }
     } else {
-        return Err(MinitensorError::not_implemented(
-            "Sum along dimension for >2D tensors not yet implemented",
-        ));
+        let dim_size = input_shape[dim];
+        let outer = input_shape[..dim].iter().product::<usize>();
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        for o in 0..outer {
+            for r in 0..inner {
+                let mut sum_val = 0i32;
+                for d in 0..dim_size {
+                    let idx = o * outer_stride + d * inner + r;
+                    sum_val += input_data[idx];
+                }
+                result_slice[o * inner + r] = sum_val;
+            }
+        }
     }
 
     Ok(())
@@ -1079,9 +1115,21 @@ fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
             }
         }
     } else {
-        return Err(MinitensorError::not_implemented(
-            "Sum along dimension for >2D tensors not yet implemented",
-        ));
+        let dim_size = input_shape[dim];
+        let outer = input_shape[..dim].iter().product::<usize>();
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        for o in 0..outer {
+            for r in 0..inner {
+                let mut sum_val = 0i64;
+                for d in 0..dim_size {
+                    let idx = o * outer_stride + d * inner + r;
+                    sum_val += input_data[idx];
+                }
+                result_slice[o * inner + r] = sum_val;
+            }
+        }
     }
 
     Ok(())

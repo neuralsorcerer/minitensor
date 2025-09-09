@@ -54,10 +54,10 @@ def test_backward_non_scalar_error():
         t.backward()
 
 
-def test_sum_negative_dim_error():
+def test_sum_negative_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
-    with pytest.raises(OverflowError):
-        t.sum(dim=[-1])
+    r = t.sum(dim=[-1])
+    np.testing.assert_allclose(r.numpy(), np.array([3.0, 7.0]))
 
 
 def test_sum_multiple_dims():
@@ -68,11 +68,25 @@ def test_sum_multiple_dims():
     np.testing.assert_allclose(r_keep.numpy(), np.array([[10.0]], dtype=np.float32))
 
 
+def test_mean_negative_dim():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    r = t.mean(dim=[-1])
+    np.testing.assert_allclose(r.numpy(), np.array([1.5, 3.5]))
+
+
 def test_any_all_keepdim():
     t = mt.Tensor([[1.0, 0.0], [0.0, 2.0]])
     any_res = t.any(dim=1, keepdim=True)
     all_res = t.all(dim=0)
     np.testing.assert_array_equal(any_res.numpy(), np.array([[True], [True]]))
+    np.testing.assert_array_equal(all_res.numpy(), np.array([False, False]))
+
+
+def test_any_all_negative_dim():
+    t = mt.Tensor([[1.0, 0.0], [0.0, 2.0]])
+    any_res = t.any(dim=-1)
+    all_res = t.all(dim=-2)
+    np.testing.assert_array_equal(any_res.numpy(), np.array([True, True]))
     np.testing.assert_array_equal(all_res.numpy(), np.array([False, False]))
 
 

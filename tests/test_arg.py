@@ -15,6 +15,12 @@ def test_argmax_dim():
     assert np.array_equal(result.numpy(), np.array([1, 2], dtype=np.int64))
 
 
+def test_argmax_negative_dim():
+    x = Tensor([[1.0, 5.0, 3.0], [4.0, 2.0, 6.0]], dtype="float32")
+    result = x.argmax(dim=-1)
+    assert np.array_equal(result.numpy(), np.array([1, 2], dtype=np.int64))
+
+
 def test_argmin_dim_keepdim():
     x = Tensor([[1.0, 5.0, 3.0], [4.0, 2.0, 6.0]], dtype="float32")
     result = x.argmin(dim=1, keepdim=True)
@@ -33,3 +39,9 @@ def test_argmin_all_equal_returns_zero():
     x = Tensor([2.0, 2.0, 2.0], dtype="float32")
     result = x.argmin()
     assert result.numpy().item() == 0
+
+
+def test_argmin_negative_dim():
+    x = Tensor([[1.0, 5.0, 3.0], [4.0, 2.0, 6.0]], dtype="float32")
+    result = x.argmin(dim=-2)
+    assert np.array_equal(result.numpy(), np.array([0, 1, 0], dtype=np.int64))
