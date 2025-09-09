@@ -282,8 +282,9 @@ impl GpuDevice {
     /// Get estimated memory bandwidth in GB/s
     #[inline]
     pub fn memory_bandwidth(&self) -> f64 {
-        self.capabilities.memory_bandwidth.unwrap_or_else(|| {
-            match self.device_type {
+        self.capabilities
+            .memory_bandwidth
+            .unwrap_or_else(|| match self.device_type {
                 DeviceType::Cuda => {
                     if self.memory_size > 32 * 1024 * 1024 * 1024 {
                         900.0
@@ -298,8 +299,7 @@ impl GpuDevice {
                 DeviceType::Metal => 400.0,
                 DeviceType::OpenCL => 300.0,
                 DeviceType::Cpu => 50.0,
-            }
-        })
+            })
     }
 
     /// Check if this device is suitable for a given workload

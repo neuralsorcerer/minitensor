@@ -242,7 +242,7 @@ impl PyTensor {
         let result = neg(&self.inner).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
-    
+
     fn __add__(&self, other: &PyTensor) -> PyResult<Self> {
         let result = self.inner.add(&other.inner).map_err(_convert_error)?;
         Ok(Self { inner: result })

@@ -29,7 +29,9 @@ fn generate_dropout_mask(
     match dtype {
         DataType::Float32 => {
             let mut data = Vec::with_capacity(numel);
-            unsafe { data.set_len(numel); }
+            unsafe {
+                data.set_len(numel);
+            }
             if keep_prob >= 1.0 {
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
@@ -54,7 +56,9 @@ fn generate_dropout_mask(
         }
         DataType::Float64 => {
             let mut data = Vec::with_capacity(numel);
-            unsafe { data.set_len(numel); }
+            unsafe {
+                data.set_len(numel);
+            }
             if keep_prob >= 1.0 {
                 data.fill(1.0);
             } else if keep_prob > 0.0 {

@@ -49,7 +49,7 @@ impl GraphNode {
         if let Some(f) = grad_fn.as_ref() {
             inputs.extend_from_slice(f.input_ids());
         }
-            
+
         Self {
             tensor_id,
             grad_fn,
@@ -58,18 +58,18 @@ impl GraphNode {
             name: None,
         }
     }
-    
+
     /// Set a name for this node (for debugging)
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
-    
+
     /// Check if this is a leaf node (no inputs)
     pub fn is_leaf(&self) -> bool {
         self.inputs.is_empty()
     }
-    
+
     /// Get the operation name from the gradient function
     pub fn operation_name(&self) -> &str {
         self.grad_fn.as_ref().map(|f| f.name()).unwrap_or("leaf")
@@ -103,7 +103,7 @@ impl ComputationGraph {
     pub fn add_tensor(&mut self, tensor_id: TensorId, grad_fn: Option<Arc<dyn GradientFunction>>) {
         self.add_tensor_with_grad_req(tensor_id, grad_fn, true);
     }
-    
+
     /// Add a tensor to the computation graph with explicit gradient requirement
     pub fn add_tensor_with_grad_req(
         &mut self,
@@ -123,7 +123,7 @@ impl ComputationGraph {
         self.nodes.insert(tensor_id, node);
         self.needs_order_update = true;
     }
-    
+
     /// Add a named tensor to the computation graph (for debugging)
     pub fn add_named_tensor(
         &mut self,
@@ -176,7 +176,7 @@ impl ComputationGraph {
                     continue;
                 };
 
-        if *idx < inputs.len() {
+                if *idx < inputs.len() {
                     let next = inputs[*idx];
                     *idx += 1;
                     if !self.nodes.contains_key(&next) {
@@ -228,7 +228,7 @@ impl ComputationGraph {
         // Clear previous gradients and ensure sufficient capacity for accumulation
         self.gradients.clear();
         self.gradients.reserve(self.nodes.len());
-        
+
         // Set the initial gradient
         if let Some(grad) = gradient {
             self.gradients.insert(start_tensor, grad);
@@ -237,7 +237,7 @@ impl ComputationGraph {
                 "Initial gradient must be provided",
             ));
         }
-        
+
         // Process nodes in topological order (outputs to inputs)
         for &node_id in &self.topological_order {
             if let Some(node) = self.nodes.get(&node_id) {
@@ -245,7 +245,7 @@ impl ComputationGraph {
                 if !node.requires_grad {
                     continue;
                 }
-                
+
                 // Take the gradient for this node out of the map to avoid cloning
                 if let Some(grad_output) = self.gradients.remove(&node_id) {
                     // If this node has a gradient function, compute gradients for inputs
@@ -268,10 +268,10 @@ impl ComputationGraph {
                 }
             }
         }
-        
+
         Ok(self.gradients.clone())
     }
-    
+
     /// Validate the computation graph for correctness
     pub fn validate(&mut self) -> Result<()> {
         // Check for cycles
@@ -280,7 +280,7 @@ impl ComputationGraph {
                 "Computation graph contains cycles",
             ));
         }
-        
+
         // Validate that all input references exist
         for node in self.nodes.values() {
             for &input_id in &node.inputs {
@@ -292,7 +292,7 @@ impl ComputationGraph {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -315,18 +315,18 @@ impl ComputationGraph {
     pub fn contains_tensor(&self, tensor_id: TensorId) -> bool {
         self.nodes.contains_key(&tensor_id)
     }
-    
+
     /// Get the topological order of tensor IDs
     pub fn topological_order(&mut self) -> &[TensorId] {
         self.ensure_topological_order();
         &self.topological_order
     }
-    
+
     /// Get a node by tensor ID
     pub fn get_node(&self, tensor_id: TensorId) -> Option<&GraphNode> {
         self.nodes.get(&tensor_id)
     }
-    
+
     /// Get all nodes that depend on a given tensor
     pub fn get_dependents(&self, tensor_id: TensorId) -> Vec<TensorId> {
         self.nodes
@@ -335,27 +335,27 @@ impl ComputationGraph {
             .map(|node| node.tensor_id)
             .collect()
     }
-    
+
     /// Check if there are cycles in the computation graph
     pub fn has_cycles(&mut self) -> bool {
         self.ensure_topological_order();
         self.topological_order.len() != self.nodes.len()
     }
-    
+
     /// Remove a tensor and its dependencies from the graph
     pub fn remove_tensor(&mut self, tensor_id: TensorId) {
         if self.nodes.remove(&tensor_id).is_some() {
             // Remove from topological order
             self.topological_order.retain(|&id| id != tensor_id);
-            
+
             // Remove any gradients
             self.gradients.remove(&tensor_id);
-            
+
             // Mark order as stale since dependencies changed
             self.needs_order_update = true;
         }
     }
-    
+
     /// Get statistics about the computation graph
     pub fn stats(&mut self) -> GraphStats {
         let leaf_nodes = self
@@ -363,13 +363,13 @@ impl ComputationGraph {
             .values()
             .filter(|node| node.inputs.is_empty())
             .count();
-            
+
         let grad_enabled_nodes = self
             .nodes
             .values()
             .filter(|node| node.requires_grad)
             .count();
-            
+
         GraphStats {
             total_nodes: self.nodes.len(),
             leaf_nodes,
@@ -399,7 +399,7 @@ mod tests {
     fn test_tensor_id() {
         let id1 = TensorId::new();
         let id2 = TensorId::new();
-        
+
         assert_ne!(id1, id2);
     }
 
@@ -407,12 +407,12 @@ mod tests {
     fn test_computation_graph_basic() {
         let mut graph = ComputationGraph::new();
         let tensor_id = TensorId::new();
-        
+
         assert_eq!(graph.num_nodes(), 0);
         assert!(!graph.contains_tensor(tensor_id));
-        
+
         graph.add_tensor(tensor_id, None);
-        
+
         assert_eq!(graph.num_nodes(), 1);
         assert!(graph.contains_tensor(tensor_id));
         assert!(!graph.has_cycles());
@@ -421,13 +421,13 @@ mod tests {
     #[test]
     fn test_computation_graph_with_dependencies() {
         let mut graph = ComputationGraph::new();
-        
+
         // Create leaf nodes
         let leaf1 = TensorId::new();
         let leaf2 = TensorId::new();
         graph.add_tensor(leaf1, None);
         graph.add_tensor(leaf2, None);
-        
+
         // Create operation node that depends on leaves
         let result = TensorId::new();
         let add_fn = Arc::new(AddBackward {
@@ -435,14 +435,14 @@ mod tests {
             input_ids: [leaf1, leaf2],
         });
         graph.add_tensor(result, Some(add_fn));
-        
+
         assert_eq!(graph.num_nodes(), 3);
         assert!(graph.contains_tensor(result));
-        
+
         // Check dependencies
         let dependents = graph.get_dependents(leaf1);
         assert!(dependents.contains(&result));
-        
+
         let node = graph.get_node(result).unwrap();
         assert!(node.inputs.contains(&leaf1));
         assert!(node.inputs.contains(&leaf2));
@@ -452,34 +452,34 @@ mod tests {
     #[test]
     fn test_topological_ordering() {
         let mut graph = ComputationGraph::new();
-        
+
         // Create a simple computation: c = a + b
         let a = TensorId::new();
         let b = TensorId::new();
         let c = TensorId::new();
-        
+
         graph.add_tensor(a, None);
         graph.add_tensor(b, None);
-        
+
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, b],
         });
         graph.add_tensor(c, Some(add_fn));
-        
+
         let topo_order = graph.topological_order();
-        
+
         // Verify all nodes are present
         assert_eq!(topo_order.len(), 3);
         assert!(topo_order.contains(&a));
         assert!(topo_order.contains(&b));
         assert!(topo_order.contains(&c));
-        
+
         // Get positions in the topological order
         let c_pos = topo_order.iter().position(|&id| id == c).unwrap();
         let a_pos = topo_order.iter().position(|&id| id == a).unwrap();
         let b_pos = topo_order.iter().position(|&id| id == b).unwrap();
-        
+
         // The topological order is designed for backward pass: c should come before a and b
         // since we process from outputs to inputs during backpropagation
         assert!(c_pos < a_pos);
@@ -489,19 +489,19 @@ mod tests {
     #[test]
     fn test_graph_stats() {
         let mut graph = ComputationGraph::new();
-        
+
         let leaf1 = TensorId::new();
         let leaf2 = TensorId::new();
         graph.add_tensor(leaf1, None);
         graph.add_tensor(leaf2, None);
-        
+
         let result = TensorId::new();
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [leaf1, leaf2],
         });
         graph.add_tensor(result, Some(add_fn));
-        
+
         let stats = graph.stats();
         assert_eq!(stats.total_nodes, 3);
         assert_eq!(stats.leaf_nodes, 2);
@@ -513,12 +513,12 @@ mod tests {
     fn test_graph_node() {
         let tensor_id = TensorId::new();
         let node = GraphNode::new(tensor_id, None, true);
-        
+
         assert_eq!(node.tensor_id, tensor_id);
         assert!(node.requires_grad);
         assert!(node.is_leaf());
         assert_eq!(node.operation_name(), "leaf");
-        
+
         let named_node = node.with_name("test_tensor");
         assert_eq!(named_node.name, Some("test_tensor".to_string()));
     }
@@ -527,10 +527,10 @@ mod tests {
     fn test_remove_tensor() {
         let mut graph = ComputationGraph::new();
         let tensor_id = TensorId::new();
-        
+
         graph.add_tensor(tensor_id, None);
         assert!(graph.contains_tensor(tensor_id));
-        
+
         graph.remove_tensor(tensor_id);
         assert!(!graph.contains_tensor(tensor_id));
         assert_eq!(graph.num_nodes(), 0);
@@ -539,12 +539,12 @@ mod tests {
     #[test]
     fn test_graph_validation() {
         let mut graph = ComputationGraph::new();
-        
+
         // Valid graph should pass validation
         let leaf = TensorId::new();
         graph.add_tensor(leaf, None);
         assert!(graph.validate().is_ok());
-        
+
         // Test with proper dependencies
         let result = TensorId::new();
         let add_fn = Arc::new(AddBackward {
@@ -583,15 +583,15 @@ mod tests {
     fn test_backward_pass() {
         use crate::device::Device;
         use crate::tensor::{DataType, Shape, Tensor};
-        
+
         let mut graph = ComputationGraph::new();
-        
+
         // Create leaf tensors
         let a = TensorId::new();
         let b = TensorId::new();
         graph.add_tensor(a, None);
         graph.add_tensor(b, None);
-        
+
         // Create operation: c = a + b
         let c = TensorId::new();
         let add_fn = Arc::new(AddBackward {
@@ -599,14 +599,14 @@ mod tests {
             input_ids: [a, b],
         });
         graph.add_tensor(c, Some(add_fn));
-        
+
         // Create gradient tensor
         let grad_shape = Shape::new(vec![2]);
         let grad_c = Tensor::ones(grad_shape, DataType::Float32, Device::cpu(), false);
-        
+
         // Perform backward pass
         let gradients = graph.backward(c, Some(grad_c)).unwrap();
-        
+
         // Should have gradients for a and b
         assert!(gradients.contains_key(&a));
         assert!(gradients.contains_key(&b));
@@ -617,9 +617,9 @@ mod tests {
     fn test_gradient_accumulation_in_graph() {
         use crate::device::Device;
         use crate::tensor::{DataType, Shape, Tensor};
-        
+
         let mut graph = ComputationGraph::new();
-        
+
         // Create a more complex graph: d = (a + b) + (a + c)
         // This should accumulate gradients for 'a'
         let a = TensorId::new();
@@ -628,7 +628,7 @@ mod tests {
         graph.add_tensor(a, None);
         graph.add_tensor(b, None);
         graph.add_tensor(c, None);
-        
+
         // First addition: temp1 = a + b
         let temp1 = TensorId::new();
         let add_fn1 = Arc::new(AddBackward {
@@ -636,7 +636,7 @@ mod tests {
             input_ids: [a, b],
         });
         graph.add_tensor(temp1, Some(add_fn1));
-        
+
         // Second addition: temp2 = a + c
         let temp2 = TensorId::new();
         let add_fn2 = Arc::new(AddBackward {
@@ -644,7 +644,7 @@ mod tests {
             input_ids: [a, c],
         });
         graph.add_tensor(temp2, Some(add_fn2));
-        
+
         // Final addition: d = temp1 + temp2
         let d = TensorId::new();
         let add_fn3 = Arc::new(AddBackward {
@@ -652,19 +652,19 @@ mod tests {
             input_ids: [temp1, temp2],
         });
         graph.add_tensor(d, Some(add_fn3));
-        
+
         // Create gradient tensor
         let grad_shape = Shape::new(vec![2]);
         let grad_d = Tensor::ones(grad_shape, DataType::Float32, Device::cpu(), false);
-        
+
         // Perform backward pass
         let gradients = graph.backward(d, Some(grad_d)).unwrap();
-        
+
         // Should have gradients for all tensors
         assert!(gradients.contains_key(&a));
         assert!(gradients.contains_key(&b));
         assert!(gradients.contains_key(&c));
-        
+
         // 'a' should appear in the gradients (accumulated from both paths)
         assert!(gradients.get(&a).is_some());
     }

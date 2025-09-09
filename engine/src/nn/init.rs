@@ -125,7 +125,9 @@ pub fn init_uniform(
         DataType::Float32 => {
             let dist = Uniform::new(a as f32, b as f32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -134,7 +136,9 @@ pub fn init_uniform(
         DataType::Float64 => {
             let dist = Uniform::new(a, b).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -143,7 +147,9 @@ pub fn init_uniform(
         DataType::Int32 => {
             let dist = Uniform::new(a as i32, b as i32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -152,7 +158,9 @@ pub fn init_uniform(
         DataType::Int64 => {
             let dist = Uniform::new(a as i64, b as i64).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -161,7 +169,9 @@ pub fn init_uniform(
         DataType::Bool => {
             let dist = Uniform::new(0.0, 1.0).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng) > 0.5
             }
@@ -192,7 +202,9 @@ pub fn init_normal(
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -201,7 +213,9 @@ pub fn init_normal(
         DataType::Float64 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng);
             }
@@ -210,7 +224,9 @@ pub fn init_normal(
         DataType::Int32 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng).round() as i32;
             }
@@ -219,7 +235,9 @@ pub fn init_normal(
         DataType::Int64 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng).round() as i64;
             }
@@ -228,7 +246,9 @@ pub fn init_normal(
         DataType::Bool => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe { vec.set_len(numel); }
+            unsafe {
+                vec.set_len(numel);
+            }
             for v in &mut vec {
                 *v = dist.sample(&mut rng) > 0.0;
             }

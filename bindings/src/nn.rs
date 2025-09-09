@@ -1050,16 +1050,12 @@ impl PySequential {
             for layer in layers {
                 sequential.add_layer(layer.to_layer());
             }
-        }     
+        }
         Ok((Self, PyModule::from_sequential(sequential)))
     }
 
     /// Add a layer to the sequential container
-    fn add_module(
-        mut slf: PyRefMut<Self>,
-        _name: &str,
-        module: PyRef<PyModule>,
-    ) -> PyResult<()> {
+    fn add_module(mut slf: PyRefMut<Self>, _name: &str, module: PyRef<PyModule>) -> PyResult<()> {
         let base = slf.as_mut();
         if let ModuleType::Sequential(seq) = &mut base.inner {
             seq.add_layer(module.to_layer());

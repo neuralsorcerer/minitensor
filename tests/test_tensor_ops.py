@@ -127,7 +127,9 @@ def test_cumsum_and_backward():
     np.testing.assert_allclose(c0.numpy(), np.cumsum(t.numpy(), axis=0))
     np.testing.assert_allclose(c1.numpy(), np.cumsum(t.numpy(), axis=1))
     c0.sum().backward()
-    np.testing.assert_allclose(t.grad.numpy(), np.array([[2.0, 2.0], [1.0, 1.0]], dtype=np.float32))
+    np.testing.assert_allclose(
+        t.grad.numpy(), np.array([[2.0, 2.0], [1.0, 1.0]], dtype=np.float32)
+    )
 
 
 def test_cumprod_and_backward():
@@ -137,13 +139,17 @@ def test_cumprod_and_backward():
     np.testing.assert_allclose(p0.numpy(), np.cumprod(t.numpy(), axis=0))
     np.testing.assert_allclose(p1.numpy(), np.cumprod(t.numpy(), axis=1))
     p0.sum().backward()
-    np.testing.assert_allclose(t.grad.numpy(), np.array([[4.0, 5.0], [1.0, 2.0]], dtype=np.float32))
+    np.testing.assert_allclose(
+        t.grad.numpy(), np.array([[4.0, 5.0], [1.0, 2.0]], dtype=np.float32)
+    )
 
 
 def test_cumprod_backward_with_zero():
     t = mt.Tensor([1.0, 0.0, 2.0], requires_grad=True)
     t.cumprod(0).sum().backward()
-    np.testing.assert_allclose(t.grad.numpy(), np.array([1.0, 3.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        t.grad.numpy(), np.array([1.0, 3.0, 0.0], dtype=np.float32)
+    )
 
 
 def test_sum_with_nan_propagation():

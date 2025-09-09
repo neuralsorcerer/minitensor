@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, CumsumBackward, CumprodBackward, ProdBackward, SumBackward},
+    autograd::{add_to_graph, CumprodBackward, CumsumBackward, ProdBackward, SumBackward},
     error::{MinitensorError, Result},
     operations::simd::{
         simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
@@ -296,16 +296,11 @@ pub fn cumprod_backward(
         return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()));
     }
 
-    let mut result_data =
-        TensorData::zeros_on_device(input.numel(), input.dtype(), input.device());
+    let mut result_data = TensorData::zeros_on_device(input.numel(), input.dtype(), input.device());
 
     match input.dtype() {
-        DataType::Float32 => {
-            cumprod_backward_f32(input, output, grad, &mut result_data, dim)?
-        }
-        DataType::Float64 => {
-            cumprod_backward_f64(input, output, grad, &mut result_data, dim)?
-        }
+        DataType::Float32 => cumprod_backward_f32(input, output, grad, &mut result_data, dim)?,
+        DataType::Float64 => cumprod_backward_f64(input, output, grad, &mut result_data, dim)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Cumprod backward only supported for floating point tensors",
@@ -2690,7 +2685,9 @@ macro_rules! cumprod_forward {
                             for r in 0..rows {
                                 let idx = r * cols + c;
                                 acc *= input_data[idx];
-                                unsafe { *out_ptr.add(idx) = acc; }
+                                unsafe {
+                                    *out_ptr.add(idx) = acc;
+                                }
                             }
                         });
                     }
@@ -2706,9 +2703,7 @@ macro_rules! cumprod_forward {
                                 }
                             });
                     }
-                    _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
-                    }
+                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
                 }
             } else {
                 let dim_size = shape[dim];
@@ -2724,7 +2719,9 @@ macro_rules! cumprod_forward {
                     let mut base = o * dim_size * inner + r;
                     for _ in 0..dim_size {
                         acc *= input_data[base];
-                        unsafe { *out_ptr.add(base) = acc; }
+                        unsafe {
+                            *out_ptr.add(base) = acc;
+                        }
                         base += inner;
                     }
                 });
@@ -2919,9 +2916,7 @@ macro_rules! cumprod_backward {
                             }
                         }
                     }
-                    _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()))
-                    }
+                    _ => return Err(MinitensorError::index_error(dim as isize, 0, input.ndim())),
                 }
             } else {
                 let dim_size = shape[dim];
@@ -3020,7 +3015,9 @@ macro_rules! cumsum_forward {
                             for r in 0..rows {
                                 let idx = r * cols + c;
                                 acc += input_data[idx];
-                                unsafe { *out_ptr.add(idx) = acc; }
+                                unsafe {
+                                    *out_ptr.add(idx) = acc;
+                                }
                             }
                         });
                     }
@@ -3036,9 +3033,7 @@ macro_rules! cumsum_forward {
                                 }
                             });
                     }
-                    _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
-                    }
+                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
                 }
             } else {
                 let dim_size = shape[dim];
@@ -3054,7 +3049,9 @@ macro_rules! cumsum_forward {
                     let mut base = o * dim_size * inner + r;
                     for _ in 0..dim_size {
                         acc += input_data[base];
-                        unsafe { *out_ptr.add(base) = acc; }
+                        unsafe {
+                            *out_ptr.add(base) = acc;
+                        }
                         base += inner;
                     }
                 });
@@ -3097,7 +3094,9 @@ macro_rules! cumsum_backward {
                             for r in (0..rows).rev() {
                                 let idx = r * cols + c;
                                 acc += input_data[idx];
-                                unsafe { *out_ptr.add(idx) = acc; }
+                                unsafe {
+                                    *out_ptr.add(idx) = acc;
+                                }
                             }
                         });
                     }
@@ -3113,9 +3112,7 @@ macro_rules! cumsum_backward {
                                 }
                             });
                     }
-                    _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()))
-                    }
+                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
                 }
             } else {
                 let dim_size = shape[dim];
@@ -3131,7 +3128,9 @@ macro_rules! cumsum_backward {
                     let mut base = o * dim_size * inner + r + (dim_size - 1) * inner;
                     for _ in 0..dim_size {
                         acc += input_data[base];
-                        unsafe { *out_ptr.add(base) = acc; }
+                        unsafe {
+                            *out_ptr.add(base) = acc;
+                        }
                         if base >= inner {
                             base -= inner;
                         }

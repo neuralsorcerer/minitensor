@@ -5,13 +5,13 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::error::_convert_error;
+#[cfg(feature = "dynamic-loading")]
+use engine::load_plugin as engine_load_plugin;
 use engine::{
     get_plugin_info as engine_get_plugin_info, is_plugin_loaded as engine_is_plugin_loaded,
     list_plugins as engine_list_plugins, unload_plugin as engine_unload_plugin, PluginInfo,
     VersionInfo,
 };
-#[cfg(feature = "dynamic-loading")]
-use engine::load_plugin as engine_load_plugin;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::collections::HashMap;

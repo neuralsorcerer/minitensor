@@ -224,10 +224,7 @@ mod tests {
             system.device_memory(&Device::cuda(Some(1))),
             Some(4 * 1024 * 1024 * 1024)
         );
-        assert_eq!(
-            system.device_memory(&Device::cuda(Some(2))),
-            None
-        );
+        assert_eq!(system.device_memory(&Device::cuda(Some(2))), None);
         assert_eq!(
             system.device_memory(&Device::cpu()),
             Some(16 * 1024 * 1024 * 1024)

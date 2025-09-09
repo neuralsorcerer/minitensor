@@ -7,8 +7,8 @@
 import numpy as np
 import pytest
 
-from minitensor.tensor import Tensor
 from minitensor.numpy_compat import empty_like
+from minitensor.tensor import Tensor
 
 
 def test_eye_int32():

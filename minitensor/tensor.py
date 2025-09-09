@@ -624,7 +624,7 @@ class Tensor:
         result = Tensor.__new__(Tensor)
         result._tensor = current
         return result
-    
+
     def sum(
         self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False
     ) -> "Tensor":

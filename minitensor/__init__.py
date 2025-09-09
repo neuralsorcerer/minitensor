@@ -18,7 +18,7 @@ import sys
 from . import functional, nn, optim
 
 # Re-export core classes and functions
-from .tensor import Tensor, set_default_dtype, get_default_dtype
+from .tensor import Tensor, get_default_dtype, set_default_dtype
 
 try:
     from . import numpy_compat
@@ -160,7 +160,6 @@ def cpu():
 def cuda(device_id=0):
     """Get CUDA device."""
     return device(f"cuda:{device_id}")
-
 
 
 __all__ = [

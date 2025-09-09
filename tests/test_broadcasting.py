@@ -93,21 +93,31 @@ def test_conv_bias_broadcasting():
 
 def test_broadcast_backward_add():
     dev = mt.device("cpu")
-    a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)
+    a = mt.Tensor(
+        np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev
+    )
     b = mt.Tensor(np.arange(3, dtype=np.float32), requires_grad=True, device=dev)
     c = a + b
     grad = mt.Tensor(1.0, device=dev)
     c.sum().backward(grad)
     np.testing.assert_allclose(a.grad.numpy(), np.ones((2, 3), dtype=np.float32))
-    np.testing.assert_allclose(b.grad.numpy(), np.array([2.0, 2.0, 2.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        b.grad.numpy(), np.array([2.0, 2.0, 2.0], dtype=np.float32)
+    )
 
 
 def test_broadcast_backward_mul():
     dev = mt.device("cpu")
-    a = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev)
+    a = mt.Tensor(
+        np.arange(6, dtype=np.float32).reshape(2, 3), requires_grad=True, device=dev
+    )
     b = mt.Tensor(np.arange(3, dtype=np.float32) + 1, requires_grad=True, device=dev)
     c = a * b
     grad = mt.Tensor(1.0, device=dev)
     c.sum().backward(grad)
-    np.testing.assert_allclose(a.grad.numpy(), np.tile(np.arange(1, 4, dtype=np.float32), (2, 1)))
-    np.testing.assert_allclose(b.grad.numpy(), np.array([3.0, 5.0, 7.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        a.grad.numpy(), np.tile(np.arange(1, 4, dtype=np.float32), (2, 1))
+    )
+    np.testing.assert_allclose(
+        b.grad.numpy(), np.array([3.0, 5.0, 7.0], dtype=np.float32)
+    )

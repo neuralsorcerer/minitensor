@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+
 import minitensor as mt
+
 
 def test_eq_with_scalar():
     a = mt.Tensor([1.0, 2.0, 3.0])
@@ -13,11 +15,13 @@ def test_eq_with_scalar():
     expected = np.array([False, True, False])
     np.testing.assert_array_equal(res, expected)
 
+
 def test_lt_with_list():
     a = mt.Tensor([1, 2, 3])
     res = a < [2, 2, 4]
     expected = np.array([True, False, True])
     np.testing.assert_array_equal(res.numpy(), expected)
+
 
 def test_gt_with_numpy_array():
     a = mt.Tensor([1.0, 2.0, 3.0])
@@ -25,6 +29,7 @@ def test_gt_with_numpy_array():
     res = a.gt(b)
     expected = np.array([False, True, False])
     np.testing.assert_array_equal(res.numpy(), expected)
+
 
 def test_negation_uses_backend():
     a = mt.Tensor([1.0, -2.0, 3.0])

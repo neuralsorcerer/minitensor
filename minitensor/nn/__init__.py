@@ -87,7 +87,9 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
                 device=None,
                 dtype=None,
             ) -> None:
-                self._layer = _DenseLayer(in_features, out_features, bias, device, dtype)
+                self._layer = _DenseLayer(
+                    in_features, out_features, bias, device, dtype
+                )
 
             def __getattr__(self, name):
                 return getattr(self._layer, name)
