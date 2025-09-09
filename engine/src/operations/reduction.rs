@@ -20,11 +20,6 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Te
     if let Some(ref mut dims) = dim {
         dims.sort_unstable();
         dims.dedup();
-        if dims.len() > 1 {
-            return Err(MinitensorError::invalid_operation(
-                "Sum currently supports only a single dimension",
-            ));
-        }
     }
     let dims_clone = dim.clone();
 
@@ -2202,9 +2197,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sum_multi_dim_error() {
+    fn test_sum_multi_dim() {
         let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-        assert!(sum(&t, Some(vec![0, 1]), false).is_err());
+        let res = sum(&t, Some(vec![0, 1]), false).unwrap();
+        assert!(res.shape().is_scalar());
+        assert_eq!(res.data().as_f32_slice().unwrap()[0], 10.0);
+        let res_keep = sum(&t, Some(vec![0, 1]), true).unwrap();
+        assert_eq!(res_keep.shape().dims(), &[1, 1]);
+        assert_eq!(res_keep.data().as_f32_slice().unwrap()[0], 10.0);
     }
 
     #[test]
