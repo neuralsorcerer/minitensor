@@ -60,10 +60,12 @@ def test_sum_negative_dim_error():
         t.sum(dim=[-1])
 
 
-def test_sum_multiple_dims_not_implemented():
+def test_sum_multiple_dims():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
-    with pytest.raises(NotImplementedError):
-        t.sum(dim=[0, 1])
+    r = t.sum(dim=[0, 1])
+    np.testing.assert_allclose(r.numpy(), np.array(10.0, dtype=np.float32))
+    r_keep = t.sum(dim=[0, 1], keepdim=True)
+    np.testing.assert_allclose(r_keep.numpy(), np.array([[10.0]], dtype=np.float32))
 
 
 def test_any_all_keepdim():
@@ -107,6 +109,15 @@ def test_exp_extreme_values():
     result = r.numpy()
     assert np.isinf(result[0])
     assert result[1] == 0.0
+
+
+def test_set_default_dtype():
+    mt.set_default_dtype("float64")
+    try:
+        t = mt.Tensor([1.0, 2.0])
+        assert t.dtype == "float64"
+    finally:
+        mt.set_default_dtype("float32")
 
 
 def test_large_ones_initialization():

@@ -15,7 +15,14 @@ use std::sync::Arc;
 
 /// Sum reduction along specified dimensions
 pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
+    // Normalize and deduplicate dimensions
+    let mut dim = dim;
+    if let Some(ref mut dims) = dim {
+        dims.sort_unstable();
+        dims.dedup();
+    }
     let dims_clone = dim.clone();
+
     let result = match dim {
         None => {
             // Sum all elements
@@ -51,12 +58,18 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Te
             // Sum along specific dimensions
             if dims.is_empty() {
                 tensor.clone()
-            } else if dims.len() == 1 {
-                sum_along_dim(tensor, dims[0], keepdim)?
             } else {
-                return Err(MinitensorError::not_implemented(
-                    "Multi-dimensional reduction not yet implemented",
-                ));
+                let mut result = tensor.clone();
+                if keepdim {
+                    for &d in &dims {
+                        result = sum_along_dim(&result, d, true)?;
+                    }
+                } else {
+                    for &d in dims.iter().rev() {
+                        result = sum_along_dim(&result, d, false)?;
+                    }
+                }
+                result
             }
         }
     };
@@ -829,13 +842,16 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
 
     let input_shape = tensor.shape().dims();
-    let _dim_size = input_shape[dim];
 
-    if tensor.ndim() == 2 {
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = simd_sum_f32(input_data);
+    } else if tensor.ndim() == 2 {
         let cols = input_shape[1];
         match dim {
             0 => {
-                // Column-wise sum using parallel fold/reduce to minimize indexing overhead
                 let sums = input_data
                     .par_chunks_exact(cols)
                     .fold(
@@ -890,9 +906,13 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
 
     let input_shape = tensor.shape().dims();
-    let _dim_size = input_shape[dim];
 
-    if tensor.ndim() == 2 {
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = simd_sum_f64(input_data);
+    } else if tensor.ndim() == 2 {
         let cols = input_shape[1];
         match dim {
             0 => {
@@ -950,9 +970,13 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
 
     let input_shape = tensor.shape().dims();
-    let _dim_size = input_shape[dim];
 
-    if tensor.ndim() == 2 {
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = simd_sum_i32(input_data);
+    } else if tensor.ndim() == 2 {
         let cols = input_shape[1];
         match dim {
             0 => {
@@ -1010,9 +1034,13 @@ fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
 
     let input_shape = tensor.shape().dims();
-    let _dim_size = input_shape[dim];
 
-    if tensor.ndim() == 2 {
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = simd_sum_i64(input_data);
+    } else if tensor.ndim() == 2 {
         let cols = input_shape[1];
         match dim {
             0 => {

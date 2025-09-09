@@ -33,6 +33,27 @@ _TENSOR_TO_NP_DTYPE = {
 
 _NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
 
+# Global default dtype management
+_DEFAULT_DTYPE = "float32"
+_VALID_DTYPES = set(_TENSOR_TO_NP_DTYPE.keys())
+
+
+def set_default_dtype(dtype: str) -> None:
+    """Set the global default data type for new tensors."""
+    if dtype not in _VALID_DTYPES:
+        raise ValueError(f"Unsupported dtype '{dtype}'")
+    global _DEFAULT_DTYPE
+    _DEFAULT_DTYPE = dtype
+
+
+def get_default_dtype() -> str:
+    """Get the current global default data type."""
+    return _DEFAULT_DTYPE
+
+
+def _resolve_dtype(dtype: Optional[str]) -> str:
+    return dtype if dtype is not None else _DEFAULT_DTYPE
+
 
 class Tensor:
     """
@@ -96,6 +117,7 @@ class Tensor:
             self._tensor = data._tensor.clone()
         else:
             # Create new tensor from data
+            dtype = _resolve_dtype(dtype)
             self._tensor = _minitensor_core.Tensor(data, dtype, device, requires_grad)
 
     # Core properties
@@ -1004,13 +1026,14 @@ class Tensor:
     @staticmethod
     def zeros(
         *shape: Union[int, Sequence[int]],
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with zeros."""
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
             shape = shape[0]
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.zeros(
             list(shape), dtype, device, requires_grad
@@ -1020,13 +1043,14 @@ class Tensor:
     @staticmethod
     def ones(
         *shape: Union[int, Sequence[int]],
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with ones."""
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
             shape = shape[0]
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.ones(
             list(shape), dtype, device, requires_grad
@@ -1037,11 +1061,12 @@ class Tensor:
     def full(
         shape: Sequence[int],
         fill_value: float,
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with a specific value."""
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.full(
             list(shape), fill_value, dtype, device, requires_grad
@@ -1051,13 +1076,14 @@ class Tensor:
     @staticmethod
     def rand(
         *shape: Union[int, Sequence[int]],
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with random values from uniform distribution [0, 1)."""
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
             shape = shape[0]
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.rand(
             list(shape), dtype, device, requires_grad
@@ -1067,13 +1093,14 @@ class Tensor:
     @staticmethod
     def randn(
         *shape: Union[int, Sequence[int]],
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with random values from standard normal distribution."""
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
             shape = shape[0]
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.randn(
             list(shape), dtype, device, requires_grad
@@ -1084,11 +1111,12 @@ class Tensor:
     def eye(
         n: int,
         m: Optional[int] = None,
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create an identity matrix."""
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.eye(n, m, dtype, device, requires_grad)
         return result
@@ -1098,7 +1126,7 @@ class Tensor:
         start: float,
         end: Optional[float] = None,
         step: float = 1.0,
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
@@ -1106,6 +1134,7 @@ class Tensor:
         if end is None:
             end = start
             start = 0.0
+        dtype = _resolve_dtype(dtype)
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.arange(
             start, end, step, dtype, device, requires_grad
@@ -1117,7 +1146,7 @@ class Tensor:
         start: float,
         end: float,
         steps: int,
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
@@ -1125,6 +1154,7 @@ class Tensor:
         if steps <= 1:
             raise ValueError("Number of steps must be greater than 1")
         step = (end - start) / (steps - 1)
+        dtype = _resolve_dtype(dtype)
         return Tensor.arange(start, end + step / 2, step, dtype, device, requires_grad)
 
     @staticmethod
@@ -1133,11 +1163,12 @@ class Tensor:
         end: float,
         steps: int,
         base: float = 10.0,
-        dtype: str = "float32",
+        dtype: Optional[str] = None,
         device=None,
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with logarithmically spaced values."""
+        dtype = _resolve_dtype(dtype)
         linear = Tensor.linspace(start, end, steps, dtype, device, requires_grad)
         return Tensor(base) ** linear
 
@@ -1166,7 +1197,7 @@ def tensor(
 
 def zeros(
     *shape: Union[int, Sequence[int]],
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1176,7 +1207,7 @@ def zeros(
 
 def ones(
     *shape: Union[int, Sequence[int]],
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1187,7 +1218,7 @@ def ones(
 def full(
     shape: Sequence[int],
     fill_value: float,
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1199,7 +1230,7 @@ def full(
 
 def rand(
     *shape: Union[int, Sequence[int]],
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1209,7 +1240,7 @@ def rand(
 
 def randn(
     *shape: Union[int, Sequence[int]],
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1220,7 +1251,7 @@ def randn(
 def eye(
     n: int,
     m: Optional[int] = None,
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1232,7 +1263,7 @@ def arange(
     start: float,
     end: Optional[float] = None,
     step: float = 1.0,
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1246,7 +1277,7 @@ def linspace(
     start: float,
     end: float,
     steps: int,
-    dtype: str = "float32",
+    dtype: Optional[str] = None,
     device=None,
     requires_grad: bool = False,
 ) -> Tensor:
@@ -1274,4 +1305,6 @@ __all__ = [
     "arange",
     "linspace",
     "from_numpy",
+    "set_default_dtype",
+    "get_default_dtype",
 ]

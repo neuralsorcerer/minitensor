@@ -18,7 +18,7 @@ import sys
 from . import functional, nn, optim
 
 # Re-export core classes and functions
-from .tensor import Tensor
+from .tensor import Tensor, set_default_dtype, get_default_dtype
 
 try:
     from . import numpy_compat
@@ -156,18 +156,6 @@ def cuda(device_id=0):
     """Get CUDA device."""
     return device(f"cuda:{device_id}")
 
-
-# Utility functions
-def set_default_dtype(dtype):
-    """Set the default tensor data type."""
-    # This would be implemented in the engine
-    pass
-
-
-def get_default_dtype():
-    """Get the default tensor data type."""
-    # This would be implemented in the engine
-    return "float32"
 
 
 __all__ = [
