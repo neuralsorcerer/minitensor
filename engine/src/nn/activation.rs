@@ -69,6 +69,7 @@ fn cached_scalar<'a>(
 ///
 /// Applies the rectified linear unit function element-wise:
 /// ReLU(x) = max(0, x)
+#[derive(Clone)]
 pub struct ReLU;
 
 impl ReLU {
@@ -102,6 +103,7 @@ impl Layer for ReLU {
 ///
 /// Applies the sigmoid function element-wise:
 /// Sigmoid(x) = 1 / (1 + exp(-x))
+#[derive(Clone)]
 pub struct Sigmoid;
 
 impl Sigmoid {
@@ -135,6 +137,7 @@ impl Layer for Sigmoid {
 ///
 /// Applies the hyperbolic tangent function element-wise:
 /// Tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+#[derive(Clone)]
 pub struct Tanh;
 
 impl Tanh {
@@ -169,6 +172,7 @@ impl Layer for Tanh {
 /// Applies the softmax function to an n-dimensional input tensor
 /// rescaling them so that the elements of the n-dimensional output tensor
 /// lie in the range [0,1] and sum to 1.
+#[derive(Clone)]
 pub struct Softmax {
     dim: Option<usize>,
 }
@@ -214,6 +218,7 @@ impl Layer for Softmax {
 ///
 /// Applies the leaky rectified linear unit function element-wise:
 /// LeakyReLU(x) = max(negative_slope * x, x)
+#[derive(Clone)]
 pub struct LeakyReLU {
     negative_slope: f64,
 }
@@ -259,6 +264,7 @@ impl Layer for LeakyReLU {
 ///
 /// Applies the exponential linear unit function element-wise:
 /// ELU(x) = max(0, x) + min(0, alpha * (exp(x) - 1))
+#[derive(Clone)]
 pub struct ELU {
     alpha: f64,
     alpha_tensor: Option<Tensor>,
@@ -330,6 +336,7 @@ impl Layer for ELU {
 /// Applies the Gaussian Error Linear Unit function:
 /// GELU(x) = x * theta(x)
 /// where theta(x) is the Cumulative Distribution Function for Gaussian Distribution.
+#[derive(Clone)]
 pub struct GELU {
     half: Option<Tensor>,
     one: Option<Tensor>,

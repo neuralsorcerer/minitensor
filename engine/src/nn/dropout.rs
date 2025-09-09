@@ -90,6 +90,7 @@ fn generate_dropout_mask(
 /// This has proven to be an effective technique for regularization and preventing
 /// the co-adaptation of neurons as described in the paper "Improving neural networks
 /// by preventing co-adaptation of feature detectors".
+#[derive(Clone)]
 pub struct Dropout {
     p: f64,
     training: bool,
@@ -198,6 +199,7 @@ impl Layer for Dropout {
 /// e.g., the j-th channel of the i-th sample in the batched input is a 2D tensor).
 /// Each channel will be zeroed out independently on every forward call with
 /// probability p using samples from a Bernoulli distribution.
+#[derive(Clone)]
 pub struct Dropout2d {
     p: f64,
     training: bool,

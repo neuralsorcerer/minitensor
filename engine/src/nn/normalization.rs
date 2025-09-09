@@ -42,6 +42,7 @@ fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> 
 ///
 /// The mean and standard-deviation are calculated per-dimension over the mini-batches
 /// and γ and β are learnable parameter vectors of size C (where C is the input size).
+#[derive(Clone)]
 pub struct BatchNorm1d {
     weight: Tensor,       // γ (gamma) - learnable scale parameter
     bias: Tensor,         // β (beta) - learnable shift parameter
@@ -285,6 +286,7 @@ impl Layer for BatchNorm1d {
 ///
 /// Applies Batch Normalization over a 4D input (a mini-batch of 2D inputs
 /// with additional channel dimension).
+#[derive(Clone)]
 pub struct BatchNorm2d {
     weight: Tensor,
     bias: Tensor,

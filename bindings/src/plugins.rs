@@ -10,6 +10,8 @@ use engine::{
     list_plugins as engine_list_plugins, unload_plugin as engine_unload_plugin, PluginInfo,
     VersionInfo,
 };
+#[cfg(feature = "dynamic-loading")]
+use engine::load_plugin as engine_load_plugin;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::collections::HashMap;
@@ -209,10 +211,19 @@ impl PyCustomPlugin {
 
 /// Plugin system functions
 #[pyfunction]
-fn load_plugin(_path: &str) -> PyResult<()> {
-    Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-        "Dynamic plugin loading is not available in this build",
-    ))
+#[cfg_attr(not(feature = "dynamic-loading"), allow(unused_variables))]
+fn load_plugin(path: &str) -> PyResult<()> {
+    #[cfg(feature = "dynamic-loading")]
+    {
+        engine_load_plugin(path).map_err(_convert_error)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "dynamic-loading"))]
+    {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Dynamic plugin loading is not available in this build",
+        ))
+    }
 }
 
 #[pyfunction]

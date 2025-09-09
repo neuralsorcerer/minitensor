@@ -20,6 +20,11 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Te
     if let Some(ref mut dims) = dim {
         dims.sort_unstable();
         dims.dedup();
+        if dims.len() > 1 {
+            return Err(MinitensorError::invalid_operation(
+                "Sum currently supports only a single dimension",
+            ));
+        }
     }
     let dims_clone = dim.clone();
 

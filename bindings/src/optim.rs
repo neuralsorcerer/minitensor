@@ -4,9 +4,11 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::error::_convert_error;
+use crate::tensor::PyTensor;
 use engine::optim::{Adam, Optimizer, RMSprop, SGD};
 use pyo3::prelude::*;
-use pyo3::types::PyModule as Pyo3Module;
+use pyo3::types::{PyList, PyModule as Pyo3Module};
 
 /// Base class for optimizers
 #[pyclass(name = "Optimizer", subclass)]
@@ -22,22 +24,47 @@ enum OptimizerType {
 
 #[pymethods]
 impl PyOptimizer {
-    /// Perform a single optimization step (placeholder)
-    fn step(&mut self) -> PyResult<()> {
-        // For now, this is a placeholder implementation
-        // In a full implementation, we would need to handle parameter updates
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Optimizer step not yet implemented",
-        ))
+    /// Perform a single optimization step on the provided parameters.
+    fn step(&mut self, parameters: &Bound<PyList>) -> PyResult<()> {
+        // Borrow all tensors mutably so we can pass raw tensor references to the
+        // underlying Rust optimizers. We first collect the PyRefMut guards to
+        // ensure the lifetimes of the borrows outlive the optimizer call.
+        let mut borrowed: Vec<PyRefMut<PyTensor>> = Vec::with_capacity(parameters.len());
+        for obj in parameters.iter() {
+            borrowed.push(obj.extract::<PyRefMut<PyTensor>>()?);
+        }
+
+        // Extract mutable references to the inner Tensor objects.
+        let mut tensor_refs: Vec<&mut engine::tensor::Tensor> =
+            borrowed.iter_mut().map(|t| t.tensor_mut()).collect();
+
+        // Dispatch to the correct optimizer implementation.
+        let result = match &mut self.inner {
+            OptimizerType::SGD(opt) => opt.step(tensor_refs.as_mut_slice()),
+            OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
+            OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
+        };
+
+        result.map_err(_convert_error)
     }
 
-    /// Zero all gradients (placeholder)
-    fn zero_grad(&self) -> PyResult<()> {
-        // For now, this is a placeholder implementation
-        // In a full implementation, we would zero gradients for all tracked parameters
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Optimizer zero_grad not yet implemented",
-        ))
+    /// Zero out gradients for the provided parameters.
+    fn zero_grad(&self, parameters: &Bound<PyList>) -> PyResult<()> {
+        let mut borrowed: Vec<PyRefMut<PyTensor>> = Vec::with_capacity(parameters.len());
+        for obj in parameters.iter() {
+            borrowed.push(obj.extract::<PyRefMut<PyTensor>>()?);
+        }
+
+        let mut tensor_refs: Vec<&mut engine::tensor::Tensor> =
+            borrowed.iter_mut().map(|t| t.tensor_mut()).collect();
+
+        let result = match &self.inner {
+            OptimizerType::SGD(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
+            OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
+            OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
+        };
+
+        result.map_err(_convert_error)
     }
 
     /// Get learning rate

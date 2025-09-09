@@ -20,6 +20,7 @@ use std::collections::HashMap;
 /// Applies a 2D convolution over an input signal composed of several input planes.
 /// Input shape: (N, C_in, H_in, W_in)
 /// Output shape: (N, C_out, H_out, W_out)
+#[derive(Clone)]
 pub struct Conv2d {
     weight: Tensor,
     bias: Option<Tensor>,

@@ -23,3 +23,6 @@ rand_distr = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { version = "0.26", features = ["resolve-config"] }
+
+[features]
+dynamic-loading = []

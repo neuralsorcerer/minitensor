@@ -571,6 +571,25 @@ impl PyModule {
             inner: ModuleType::Dropout2d(dropout),
         }
     }
+
+    pub fn to_layer(&self) -> Box<dyn Layer> {
+        match &self.inner {
+            ModuleType::DenseLayer(layer) => Box::new(layer.clone()),
+            ModuleType::ReLU(layer) => Box::new(layer.clone()),
+            ModuleType::Sigmoid(layer) => Box::new(layer.clone()),
+            ModuleType::Tanh(layer) => Box::new(layer.clone()),
+            ModuleType::Softmax(layer) => Box::new(layer.clone()),
+            ModuleType::LeakyReLU(layer) => Box::new(layer.clone()),
+            ModuleType::ELU(layer) => Box::new(layer.clone()),
+            ModuleType::GELU(layer) => Box::new(layer.clone()),
+            ModuleType::Sequential(_) => panic!("Nested Sequential modules are not supported"),
+            ModuleType::Conv2d(layer) => Box::new(layer.clone()),
+            ModuleType::BatchNorm1d(layer) => Box::new(layer.clone()),
+            ModuleType::BatchNorm2d(layer) => Box::new(layer.clone()),
+            ModuleType::Dropout(layer) => Box::new(layer.clone()),
+            ModuleType::Dropout2d(layer) => Box::new(layer.clone()),
+        }
+    }
 }
 
 /// DenseLayer (fully connected) layer
@@ -1024,20 +1043,32 @@ pub struct PySequential;
 impl PySequential {
     /// Create a new Sequential container
     #[new]
-    fn new(_layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<(Self, PyModule)> {
-        // For now, create an empty sequential
-        // In a full implementation, we'd convert the Python modules to Rust layers
-        let sequential = Sequential::new();
+    #[pyo3(signature = (layers=None))]
+    fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<(Self, PyModule)> {
+        let mut sequential = Sequential::new();
+        if let Some(layers) = layers {
+            for layer in layers {
+                sequential.add_layer(layer.to_layer());
+            }
+        }     
         Ok((Self, PyModule::from_sequential(sequential)))
     }
 
     /// Add a layer to the sequential container
-    fn add_module(&mut self, _name: &str, _module: PyRef<PyModule>) -> PyResult<()> {
-        // This would require a more complex implementation to handle dynamic layer addition
-        // For now, we'll return a not implemented error
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "Dynamic layer addition not yet implemented",
-        ))
+    fn add_module(
+        mut slf: PyRefMut<Self>,
+        _name: &str,
+        module: PyRef<PyModule>,
+    ) -> PyResult<()> {
+        let base = slf.as_mut();
+        if let ModuleType::Sequential(seq) = &mut base.inner {
+            seq.add_layer(module.to_layer());
+            Ok(())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
     }
 }
 

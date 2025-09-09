@@ -20,6 +20,7 @@ use std::collections::HashMap;
 ///
 /// Applies a dense layer transformation: y = xW^T + b
 /// where W is the weight matrix and b is the bias vector
+#[derive(Clone)]
 pub struct DenseLayer {
     weight: Tensor,
     bias: Option<Tensor>,
