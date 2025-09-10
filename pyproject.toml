@@ -8,7 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "minitensor"
-description = "A lightweight, high-performance tensor operations library built with Rust backend."
+description = "A lightweight, high-performance tensor operations library."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
