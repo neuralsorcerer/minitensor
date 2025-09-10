@@ -33,7 +33,10 @@ try:
         list_custom_ops_py,
     )
     from ._core import plugins as _plugins
-    from ._core import register_example_custom_ops, unregister_custom_op_py
+    from ._core import (
+        register_example_custom_ops,
+        unregister_custom_op_py,
+    )
 
     plugins = _plugins
     sys.modules[__name__ + ".plugins"] = plugins
