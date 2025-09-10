@@ -14,3 +14,11 @@ repos:
     rev: 6.0.1
     hooks:
       - id: isort
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        types: [rust]
