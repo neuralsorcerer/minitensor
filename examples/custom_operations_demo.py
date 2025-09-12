@@ -139,7 +139,7 @@ def demo_automatic_differentiation():
     print(f"Swish output requires grad: {swish_out.requires_grad}")
 
     # Compute loss
-    loss = swish_out.sum()
+    loss = swish_out.sum(dim=[0, 1], keepdim=False)
     print(f"Loss: {loss}")
     print(f"Loss requires grad: {loss.requires_grad}")
 

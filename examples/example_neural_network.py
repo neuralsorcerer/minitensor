@@ -42,6 +42,44 @@ def create_simple_network():
         return False
 
 
+def train_network():
+    """Run a minimal training loop on random data."""
+    try:
+        import minitensor as mt
+        from minitensor import nn, optim
+
+        print("Running training demo...")
+
+        x = mt.randn(64, 784)
+        y = mt.randn(64, 10)
+
+        model = nn.Sequential(
+            [
+                nn.DenseLayer(784, 128),
+                nn.ReLU(),
+                nn.DenseLayer(128, 10),
+            ]
+        )
+
+        criterion = nn.MSELoss()
+        optimizer = optim.SGD(0.01, 0.0, 0.0, False)
+        params = model.parameters()
+
+        for epoch in range(5):
+            preds = model(x)
+            loss = criterion(preds, y)
+            optimizer.zero_grad(params)
+            loss.backward()
+            optimizer.step(params)
+            loss_val = float(loss.numpy().ravel()[0])
+            print(f"Epoch {epoch+1}: loss {loss_val:.4f}")
+
+        return True
+    except Exception as e:
+        print(f"Training failed: {e}")
+        return False
+
+
 def create_loss_and_optimizer():
     """Create loss function and optimizer."""
     try:
@@ -53,8 +91,8 @@ def create_loss_and_optimizer():
         criterion = nn.CrossEntropyLoss()
         print(f"Created loss function: {criterion}")
 
-        # Create optimizer (placeholder - would normally pass model parameters)
-        optimizer = optim.Adam(learning_rate=0.001)
+        # Create optimizer (would normally pass model parameters)
+        optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
         print(f"Created optimizer: {optimizer}")
 
         return True
@@ -162,6 +200,7 @@ def main():
     print("=" * 40)
 
     examples = [
+        ("Training Loop", train_network),
         ("Simple Network Creation", create_simple_network),
         ("Loss and Optimizer", create_loss_and_optimizer),
         ("Tensor Operations", demonstrate_tensor_operations),

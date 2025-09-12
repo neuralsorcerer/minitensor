@@ -16,6 +16,8 @@ available in the core.
 
 from typing import List
 
+from ..tensor import Tensor
+
 try:  # pragma: no cover - tested via public API
     from .. import _core as _minitensor_core  # type: ignore
 except Exception:  # pylint: disable=broad-except
@@ -29,12 +31,30 @@ __all__: List[str] = []
 if _minitensor_core is not None and hasattr(_minitensor_core, "optim"):
     _optim = _minitensor_core.optim
 
-    def _export(name: str) -> None:
-        obj = getattr(_optim, name, None)
-        if obj is not None:
-            globals()[name] = obj
-            __all__.append(name)
+    def _wrap_optimizer(cls):
+        class WrappedOpt:
+            def __init__(self, *args, **kwargs):
+                self._opt = cls(*args, **kwargs)
 
-    for _name in ["Optimizer", "SGD", "Adam", "RMSprop"]:
-        _export(_name)
+            def _unwrap(self, params):
+                return [p._tensor if isinstance(p, Tensor) else p for p in params]
+
+            def zero_grad(self, params):
+                self._opt.zero_grad(self._unwrap(params))
+
+            def step(self, params):
+                self._opt.step(self._unwrap(params))
+
+        WrappedOpt.__name__ = cls.__name__
+        return WrappedOpt
+
+    for _name in dir(_optim):
+        if _name.startswith("_"):
+            continue
+        obj = getattr(_optim, _name)
+        if isinstance(obj, type):
+            globals()[_name] = _wrap_optimizer(obj)
+        else:
+            globals()[_name] = obj
+        __all__.append(_name)
 # If the core is missing nothing is exported which keeps imports harmless.

@@ -6,14 +6,16 @@
 
 """Linear regression training example for Minitensor.
 
-This script demonstrates a full training loop using gradient descent
-on a synthetic dataset. All tensor computations are handled by the
-Rust backend, while the training loop is written in Python.
+This script demonstrates a complete training loop using the high level
+``nn`` modules and ``optim`` optimisers on a synthetic dataset.
+All tensor computations are handled by the Rust backend, while the
+training loop is written in Python.
 """
 
 from __future__ import annotations
 
 import minitensor as mt
+from minitensor import nn, optim
 
 
 def main() -> None:  # pragma: no cover - example script
@@ -23,35 +25,29 @@ def main() -> None:  # pragma: no cover - example script
     noise = 0.1 * mt.randn(n_samples, 1)
     y = 2.0 * x - 3.0 + noise
 
-    # Model parameters
-    w = mt.randn(1, 1, requires_grad=True)
-    b = mt.zeros(1, requires_grad=True)
+    model = nn.DenseLayer(1, 1)
+    criterion = nn.MSELoss()
+    optimizer = optim.SGD(0.1, 0.0, 0.0, False)
+    params = model.parameters()
 
-    lr = 0.1
     epochs = 100
 
     for epoch in range(epochs):
-        # Forward pass
-        preds = x.matmul(w) + b
-        diff = preds - y
-        loss = (diff * diff).mean()
-
-        # Compute gradients manually
-        grad_w = x.transpose().matmul(2 * diff) / n_samples
-        grad_b = (2 * diff).mean()
-
-        # Gradient descent update
-        w = (w - lr * grad_w).detach().requires_grad_()
-        b = (b - lr * grad_b).detach().requires_grad_()
+        preds = model(x)
+        loss = criterion(preds, y)
+        optimizer.zero_grad(params)
+        loss.backward()
+        optimizer.step(params)
 
         if (epoch + 1) % 20 == 0:
             loss_val = float(loss.numpy().ravel()[0])
             print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f}")
 
+    # Fetch updated parameters after training
+    params = model.parameters()
     print("Trained parameters:")
-    w_val = float(w.numpy().ravel()[0])
-    b_val = float(b.numpy().ravel()[0])
-    print("w:", w_val, "b:", b_val)
+    w, b = params[0], params[1]
+    print("w:", float(w.numpy().ravel()[0]), "b:", float(b.numpy().ravel()[0]))
 
 
 if __name__ == "__main__":  # pragma: no cover - example script

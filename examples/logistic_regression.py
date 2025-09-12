@@ -6,9 +6,9 @@
 
 """Binary classification with logistic regression using Minitensor.
 
-A simple demonstration of training a logistic regression model on a
-synthetic dataset. All heavy computations are executed in Rust via the
-Minitensor Python bindings.
+This example trains a logistic regression model using the high level
+``nn`` and ``optim`` APIs. It demonstrates a full training cycle including
+model definition, loss computation, backpropagation and parameter updates.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 import minitensor as mt
+from minitensor import nn, optim
 
 
 def main() -> None:  # pragma: no cover - example script
@@ -32,37 +33,33 @@ def main() -> None:  # pragma: no cover - example script
     x = mt.Tensor(x_np)
     y = mt.Tensor(y_np.reshape(-1, 1))
 
-    w = mt.randn(2, 1, requires_grad=True)
-    b = mt.zeros(1, requires_grad=True)
+    model = nn.Sequential([nn.DenseLayer(2, 1), nn.Sigmoid()])
+    criterion = nn.BCELoss()
+    optimizer = optim.SGD(0.1, 0.0, 0.0, False)
+    params = model.parameters()
 
-    lr = 0.1
     epochs = 100
 
     for epoch in range(epochs):
-        logits = x.matmul(w) + b
-        probs = logits.sigmoid()
-        eps = 1e-7
-        term1 = y * (probs + eps).log()
-        term2 = (1 - y) * (1 - probs + eps).log()
-        loss = (term1 + term2).mean() * -1
-
-        # Gradient of BCE with sigmoid
-        grad_logits = probs - y
-        grad_w = x.transpose().matmul(grad_logits) / num_samples
-        grad_b = grad_logits.mean()
-
-        w = (w - lr * grad_w).detach().requires_grad_()
-        b = (b - lr * grad_b).detach().requires_grad_()
+        preds = model(x)
+        loss = criterion(preds, y)
+        optimizer.zero_grad(params)
+        loss.backward()
+        optimizer.step(params)
 
         if (epoch + 1) % 20 == 0:
-            preds = probs.detach().numpy() > 0.5
-            acc = (preds.flatten() == y.numpy().flatten()).mean()
+            preds_np = preds.detach().numpy() > 0.5
+            acc = (preds_np.flatten() == y.numpy().flatten()).mean()
             loss_val = float(loss.numpy().ravel()[0])
             print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f} | Acc: {acc:.2f}")
 
-    preds = (x.matmul(w) + b).sigmoid().detach().numpy() > 0.5
-    acc = (preds.flatten() == y.numpy().flatten()).mean()
+    final_preds = model(x).detach().numpy() > 0.5
+    acc = (final_preds.flatten() == y.numpy().flatten()).mean()
     print(f"Final accuracy: {acc:.2f}")
+
+    # Retrieve trained parameters
+    params = model.parameters()
+    w, b = params[0], params[1]
     print("Learned weights:", w.numpy().ravel(), "bias:", b.numpy().ravel())
 
 

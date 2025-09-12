@@ -76,7 +76,7 @@ model = nn.Sequential([
 
 # Set up training
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001)
+optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
 
 print(f"Model: {model}")
 print(f"Input shape: {x.shape}")
@@ -136,9 +136,9 @@ bce = nn.BCELoss()                  # Binary cross entropy
 from minitensor import optim
 
 # Optimizers
-sgd = optim.SGD(0.01, momentum=0.9)         # SGD with momentum
-adam = optim.Adam(0.001, betas=(0.9, 0.999)) # Adam optimizer
-rmsprop = optim.RMSprop(0.01, alpha=0.99)   # RMSprop optimizer
+sgd = optim.SGD(0.01, 0.9, 0.0, False)                  # SGD with momentum
+adam = optim.Adam(0.001, 0.9, 0.999, 1e-8)              # Adam optimizer
+rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)     # RMSprop optimizer
 ```
 
 ## Architecture
@@ -178,29 +178,34 @@ model = nn.Sequential([
 
 # Initialize model
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001, betas=(0.9, 0.999))
+optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
 ```
 
-### Training Loop (Conceptual)
+### Training Loop
 
 ```python
-# Training data
-train_loader = get_data_loader()  # Your data loading logic
+import minitensor as mt
+from minitensor import nn, optim
 
-# Training loop
-for epoch in range(num_epochs):
-    for batch_idx, (data, target) in enumerate(train_loader):
-        # Forward pass
-        output = model(data)
-        loss = criterion(output, target)
+# Synthetic data: y = 3x + 0.5
+x = mt.randn(64, 1)
+y = 3 * x + 0.5
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+# Model, loss, optimizer
+model = nn.DenseLayer(1, 1)
+criterion = nn.MSELoss()
+optimizer = optim.SGD(0.1, 0.0, 0.0, False)
+params = model.parameters()
 
-        if batch_idx % 100 == 0:
-            print(f'Epoch: {epoch}, Loss: {loss.item():.6f}')
+for epoch in range(100):
+    pred = model(x)
+    loss = criterion(pred, y)
+    optimizer.zero_grad(params)
+    loss.backward()
+    optimizer.step(params)
+    if (epoch + 1) % 20 == 0:
+        loss_val = float(loss.numpy().ravel()[0])
+        print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f}")
 ```
 
 ### Code Style

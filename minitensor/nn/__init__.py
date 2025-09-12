@@ -21,7 +21,9 @@ other numerical libraries and allows parts of the library (such as the tensor
 API) to be used independently of the neural network layers.
 """
 
-from typing import List
+from typing import Dict, List, Type
+
+from ..tensor import Tensor
 
 # Try to import the Rust core.  During development the extension might not be
 # built yet, so we swallow errors and simply expose an empty module.
@@ -38,131 +40,207 @@ __all__: List[str] = []
 if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
     _nn = _minitensor_core.nn
 
-    def _export(name: str) -> None:
-        """Export ``name`` from the Rust ``nn`` module if available."""
-        obj = getattr(_nn, name, None)
-        if obj is not None:
-            globals()[name] = obj
-            __all__.append(name)
+    def _wrap_module_class(cls: Type) -> Type:
+        class WrappedModule:
+            """Thin Python wrapper around a Rust ``nn`` module.
 
-    for _name in [
-        # Base module / layers
-        "Module",
-        "DenseLayer",
-        "Conv2d",
-        "BatchNorm1d",
-        "BatchNorm2d",
-        "Dropout",
-        "Dropout2d",
-        "Sequential",
-        # Activations
-        "ReLU",
-        "Sigmoid",
-        "Tanh",
-        "Softmax",
-        "LeakyReLU",
-        "ELU",
-        "GELU",
-        # Loss functions
-        "MSELoss",
-        "MAELoss",
-        "HuberLoss",
-        "CrossEntropyLoss",
-        "BCELoss",
-        "FocalLoss",
-    ]:
-        _export(_name)
+            It unwraps :class:`~minitensor.tensor.Tensor` arguments to their
+            underlying Rust representations and wraps tensor outputs back into
+            the Python ``Tensor`` class.
+            """
 
-    if "DenseLayer" in globals():
-        _DenseLayer = globals()["DenseLayer"]
-
-        class DenseLayer:  # pragma: no cover - thin wrapper
-            """Wrap the Rust :class:`DenseLayer` to provide default arguments."""
-
-            def __init__(
-                self,
-                in_features: int,
-                out_features: int,
-                bias: bool = True,
-                device=None,
-                dtype=None,
-            ) -> None:
-                self._layer = _DenseLayer(
-                    in_features, out_features, bias, device, dtype
-                )
+            def __init__(self, *args, **kwargs):
+                self._module = cls(*args, **kwargs)
+                self._parameters: list[Tensor] = []
+                for attr in dir(self._module):
+                    obj = getattr(self._module, attr)
+                    if isinstance(obj, _minitensor_core.Tensor) and getattr(
+                        obj, "requires_grad", False
+                    ):
+                        tensor = Tensor.__new__(Tensor)
+                        tensor._tensor = obj
+                        self._parameters.append(tensor)
 
             def __getattr__(self, name):
-                return getattr(self._layer, name)
+                return getattr(self._module, name)
 
-            def summary(self, name: str | None = None):
-                """Return a layer summary with a default name.
+            def _wrap(self, obj):
+                if isinstance(obj, _minitensor_core.Tensor):
+                    tensor = Tensor.__new__(Tensor)
+                    tensor._tensor = obj
+                    return tensor
+                return obj
 
-                The underlying Rust ``Module`` requires a name argument.  Provide
-                a sensible default matching the Python class name when none is
-                supplied to mirror the PyTorch API.
-                """
+            def forward(self, *args, **kwargs):
+                saw_python_tensor = False
+                new_args = []
+                for a in args:
+                    if isinstance(a, Tensor):
+                        saw_python_tensor = True
+                        new_args.append(a._tensor)
+                    else:
+                        new_args.append(a)
+                new_kwargs = {}
+                for k, v in kwargs.items():
+                    if isinstance(v, Tensor):
+                        saw_python_tensor = True
+                        new_kwargs[k] = v._tensor
+                    else:
+                        new_kwargs[k] = v
+                result = self._module.forward(*new_args, **new_kwargs)
+                if saw_python_tensor:
+                    return self._wrap(result)
+                return result
+
+            __call__ = forward
+
+            def parameters(self):
+                """Return trainable parameters as live Python ``Tensor`` objects."""
+
+                params = list(self._parameters)
+
+                # Recurse into known child modules stored on the Python wrapper
+                # itself (e.g. ``Sequential.layers``).
+                for attr in dir(self):
+                    child = getattr(self, attr)
+                    if isinstance(child, list):
+                        for item in child:
+                            if hasattr(item, "_module"):
+                                params.extend(item.parameters())
+                    elif hasattr(child, "_module") and child is not self:
+                        params.extend(child.parameters())
+
+                return params
+
+            def summary(
+                self, name: str | None = None
+            ):  # pragma: no cover - thin wrapper
+                if not hasattr(self._module, "summary"):
+                    raise AttributeError("Underlying module lacks summary")
                 if name is None:
                     name = self.__class__.__name__
-                return self._layer.summary(name)
+                return self._module.summary(name)
 
-        globals()["DenseLayer"] = DenseLayer
+        WrappedModule.__name__ = cls.__name__
+        return WrappedModule
 
-    if "BatchNorm1d" in globals():
-        _BatchNorm1d = globals()["BatchNorm1d"]
+    _special_wrappers: Dict[str, Type] = {}
 
-        class BatchNorm1d:  # pragma: no cover - thin wrapper
-            """Wrap the Rust :class:`BatchNorm1d` with default parameters."""
+    def _install(name: str, cls: Type) -> None:
+        wrapped = _wrap_module_class(cls)
 
-            def __init__(
-                self,
-                num_features: int,
-                eps: float = 1e-5,
-                momentum: float = 0.1,
-                affine: bool = True,
-                device=None,
-                dtype=None,
-            ) -> None:
-                self._layer = _BatchNorm1d(
-                    num_features, eps, momentum, affine, device, dtype
-                )
+        if name == "DenseLayer":
 
-            def __getattr__(self, name):
-                return getattr(self._layer, name)
+            class DenseLayer(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(
+                    self,
+                    in_features: int,
+                    out_features: int,
+                    bias: bool = True,
+                    device=None,
+                    dtype=None,
+                ) -> None:
+                    super().__init__(in_features, out_features, bias, device, dtype)
 
-            def summary(self, name: str | None = None):
-                if name is None:
-                    name = self.__class__.__name__
-                return self._layer.summary(name)
+            _special_wrappers[name] = DenseLayer
+        elif name == "BatchNorm1d":
 
-        globals()["BatchNorm1d"] = BatchNorm1d
+            class BatchNorm1d(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(
+                    self,
+                    num_features: int,
+                    eps: float = 1e-5,
+                    momentum: float = 0.1,
+                    affine: bool = True,
+                    device=None,
+                    dtype=None,
+                ) -> None:
+                    super().__init__(num_features, eps, momentum, affine, device, dtype)
 
-    if "BatchNorm2d" in globals():
-        _BatchNorm2d = globals()["BatchNorm2d"]
+            _special_wrappers[name] = BatchNorm1d
+        elif name == "BatchNorm2d":
 
-        class BatchNorm2d:  # pragma: no cover - thin wrapper
-            """Wrap the Rust :class:`BatchNorm2d` with default parameters."""
+            class BatchNorm2d(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(
+                    self,
+                    num_features: int,
+                    eps: float = 1e-5,
+                    momentum: float = 0.1,
+                    affine: bool = True,
+                    device=None,
+                    dtype=None,
+                ) -> None:
+                    super().__init__(num_features, eps, momentum, affine, device, dtype)
 
-            def __init__(
-                self,
-                num_features: int,
-                eps: float = 1e-5,
-                momentum: float = 0.1,
-                affine: bool = True,
-                device=None,
-                dtype=None,
-            ) -> None:
-                self._layer = _BatchNorm2d(
-                    num_features, eps, momentum, affine, device, dtype
-                )
+            _special_wrappers[name] = BatchNorm2d
+        elif name == "MSELoss":
 
-            def __getattr__(self, name):
-                return getattr(self._layer, name)
+            class MSELoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, reduction: str = "mean") -> None:
+                    super().__init__(reduction)
 
-            def summary(self, name: str | None = None):
-                if name is None:
-                    name = self.__class__.__name__
-                return self._layer.summary(name)
+            _special_wrappers[name] = MSELoss
+        elif name == "MAELoss":
 
-        globals()["BatchNorm2d"] = BatchNorm2d
+            class MAELoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, reduction: str = "mean") -> None:
+                    super().__init__(reduction)
+
+            _special_wrappers[name] = MAELoss
+        elif name == "HuberLoss":
+
+            class HuberLoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, delta: float = 1.0, reduction: str = "mean") -> None:
+                    super().__init__(delta, reduction)
+
+            _special_wrappers[name] = HuberLoss
+        elif name == "CrossEntropyLoss":
+
+            class CrossEntropyLoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, reduction: str = "mean") -> None:
+                    super().__init__(reduction)
+
+            _special_wrappers[name] = CrossEntropyLoss
+        elif name == "BCELoss":
+
+            class BCELoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, reduction: str = "mean") -> None:
+                    super().__init__(reduction)
+
+            _special_wrappers[name] = BCELoss
+        elif name == "FocalLoss":
+
+            class FocalLoss(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(
+                    self,
+                    alpha: float = 0.25,
+                    gamma: float = 2.0,
+                    reduction: str = "mean",
+                ) -> None:
+                    super().__init__(alpha, gamma, reduction)
+
+            _special_wrappers[name] = FocalLoss
+        elif name == "Sequential":
+
+            class Sequential(wrapped):  # pragma: no cover - thin wrapper
+                def __init__(self, layers):
+                    self.layers = layers
+                    core_layers = [getattr(l, "_module", l) for l in layers]
+                    super().__init__(core_layers)
+
+            _special_wrappers[name] = Sequential
+        else:
+            _special_wrappers[name] = wrapped
+
+    for _name in dir(_nn):
+        if _name.startswith("_"):
+            continue
+        attr = getattr(_nn, _name)
+        if isinstance(attr, type):
+            _install(_name, attr)
+
+    for _name, _cls in _special_wrappers.items():
+        globals()[_name] = _cls
+        __all__.append(_name)
 # When the core is missing we simply expose an empty namespace so that importing
 # :mod:`minitensor.nn` never raises an exception.
