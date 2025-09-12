@@ -21,6 +21,9 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 </div>
 
+> [!CAUTION]
+> This library is in active development stage. Gradients may not work properly. APIs may change or break. Use carefully.
+
 ## Features
 
 - **High Performance**: Rust backend for maximum speed and memory efficiency
@@ -51,7 +54,8 @@ maturin develop --release
 # Optional: editable install with pip (debug build by default)
 pip install -e .
 ```
-> *Note:* `pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
+
+> _Note:_ `pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
 
 ### Basic Usage
 
