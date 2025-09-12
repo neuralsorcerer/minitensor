@@ -6,19 +6,19 @@
 
 use super::Backend;
 use crate::{device::Device, error::Result};
-use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
+use opencl3::command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue};
 use opencl3::context::Context;
-use opencl3::device::{Device as OpenCLDevice, CL_DEVICE_TYPE_GPU};
+use opencl3::device::{CL_DEVICE_TYPE_GPU, Device as OpenCLDevice};
 use opencl3::kernel::{ExecuteKernel, Kernel};
 use opencl3::memory::{Buffer, CL_MEM_READ_WRITE};
 use opencl3::platform::get_platforms;
 use opencl3::program::Program;
-use opencl3::types::{cl_float, CL_BLOCKING};
+use opencl3::types::{CL_BLOCKING, cl_float};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// OpenCL buffer wrapper for memory management
 pub struct OpenCLBuffer {
@@ -559,7 +559,7 @@ __kernel void matmul_kernel(__global const float* a,
                            const unsigned int k) {
     int row = get_global_id(1);
     int col = get_global_id(0);
-    
+
     if (row < m && col < n) {
         float sum = 0.0f;
         for (int i = 0; i < k; i++) {
@@ -624,7 +624,7 @@ __kernel void matmul_kernel(__global const float* a,
                            const unsigned int k) {
     int row = get_global_id(1);
     int col = get_global_id(0);
-    
+
     if (row < m && col < n) {
         float sum = 0.0f;
         for (int i = 0; i < k; i++) {

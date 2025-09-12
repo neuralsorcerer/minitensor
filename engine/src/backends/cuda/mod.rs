@@ -311,7 +311,7 @@ extern "C" __global__ void mul_kernel(float* a, float* b, float* c, int n) {
 extern "C" __global__ void matmul_kernel(float* a, float* b, float* c, int m, int n, int k) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (row < m && col < n) {
         float sum = 0.0f;
         for (int i = 0; i < k; i++) {
@@ -686,9 +686,11 @@ mod tests {
         }
 
         let backend = CudaBackend::initialize().unwrap();
-        assert!(backend
-            .copy_from_host(std::ptr::null_mut(), &[1u8])
-            .is_err());
+        assert!(
+            backend
+                .copy_from_host(std::ptr::null_mut(), &[1u8])
+                .is_err()
+        );
         let mut buf = [0u8; 1];
         assert!(backend.copy_to_host(&mut buf, std::ptr::null()).is_err());
     }

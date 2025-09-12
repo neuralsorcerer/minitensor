@@ -6,11 +6,11 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use engine::TensorIndex;
 use engine::operations::arithmetic::{mul, sub};
 use engine::operations::reduction::sum as tensor_sum;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
-use engine::TensorIndex;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 

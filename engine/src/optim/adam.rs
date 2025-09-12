@@ -318,7 +318,7 @@ impl Adam {
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "Adam only supports float32/float64 tensors",
-                ))
+                ));
             }
         }
 

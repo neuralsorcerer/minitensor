@@ -282,7 +282,7 @@ impl TensorData {
                 let bytes: Vec<u8> = bools.into_iter().map(|b| b as u8).collect();
                 TensorBuffer::Owned(bytes)
             } else {
-                use std::mem::{size_of, ManuallyDrop};
+                use std::mem::{ManuallyDrop, size_of};
                 let mut data = ManuallyDrop::new(data);
                 let ptr = data.as_mut_ptr() as *mut u8;
                 let len = numel * size_of::<T>();

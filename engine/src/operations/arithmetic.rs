@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, AddBackward, DivBackward, MulBackward, NegBackward, SubBackward},
+    autograd::{AddBackward, DivBackward, MulBackward, NegBackward, SubBackward, add_to_graph},
     error::{MinitensorError, Result},
     operations::simd::{
         can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
@@ -14,7 +14,7 @@ use crate::{
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
 const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
@@ -53,7 +53,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Addition not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -244,7 +244,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Subtraction not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -310,7 +310,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Multiplication not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -377,7 +377,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Division not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -916,11 +916,7 @@ fn div_f32_direct(
             rhs.shape(),
             output_shape,
             |a, b| {
-                if b == 0.0 {
-                    f32::INFINITY
-                } else {
-                    a / b
-                }
+                if b == 0.0 { f32::INFINITY } else { a / b }
             },
         )
     }
@@ -955,11 +951,7 @@ fn div_f64_direct(
             rhs.shape(),
             output_shape,
             |a, b| {
-                if b == 0.0 {
-                    f64::INFINITY
-                } else {
-                    a / b
-                }
+                if b == 0.0 { f64::INFINITY } else { a / b }
             },
         )
     }

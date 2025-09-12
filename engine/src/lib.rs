@@ -24,8 +24,8 @@ pub mod tensor;
 // Re-export core types
 pub use autograd::{ComputationGraph, GradientFunction};
 pub use custom_ops::{
-    execute_custom_op, is_custom_op_registered, list_custom_ops, register_custom_op,
-    unregister_custom_op, CustomOp, CustomOpBuilder, CustomOpRegistry,
+    CustomOp, CustomOpBuilder, CustomOpRegistry, execute_custom_op, is_custom_op_registered,
+    list_custom_ops, register_custom_op, unregister_custom_op,
 };
 pub use debug::{
     GraphEdge, GraphNode, GraphVisualizer, MemoryTracker, OperationProfiler, TensorDebugger,
@@ -38,8 +38,8 @@ pub use hardware::{
     SystemHardware, WorkloadAnalysis,
 };
 pub use plugins::{
-    get_plugin_info, is_plugin_loaded, list_plugins, register_plugin, unload_plugin, Plugin,
-    PluginInfo, PluginManager, VersionInfo,
+    Plugin, PluginInfo, PluginManager, VersionInfo, get_plugin_info, is_plugin_loaded,
+    list_plugins, register_plugin, unload_plugin,
 };
 pub use serialization::{
     DeploymentModel, ModelMetadata, ModelSerializer, ModelVersion, SerializationFormat,

@@ -43,6 +43,7 @@ dev = [
     "black",
     "isort",
     "mypy",
+    "pre-commit",
 ]
 docs = [
     "sphinx",

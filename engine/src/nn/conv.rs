@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{
-    init::{init_bias, init_parameter, InitMethod},
     Layer,
+    init::{InitMethod, init_bias, init_parameter},
 };
 use crate::{
     device::Device,

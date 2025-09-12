@@ -11,8 +11,8 @@
 
 #[cfg(feature = "opencl")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use engine::backends::opencl::{OpenCLBackend, OpenCLOps};
     use engine::backends::Backend;
+    use engine::backends::opencl::{OpenCLBackend, OpenCLOps};
     use opencl3::memory::{CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
     use std::sync::Arc;
 

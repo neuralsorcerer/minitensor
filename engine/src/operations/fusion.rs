@@ -92,7 +92,7 @@ where
 pub enum FusedOp {
     /// Element-wise addition
     Add,
-    /// Element-wise subtraction  
+    /// Element-wise subtraction
     Sub,
     /// Element-wise multiplication
     Mul,
@@ -262,11 +262,7 @@ impl FusionSequence {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
                     binary_apply_f32(input_slice, second_slice, output_slice, |a, b| {
-                        if b == 0.0 {
-                            f32::INFINITY
-                        } else {
-                            a / b
-                        }
+                        if b == 0.0 { f32::INFINITY } else { a / b }
                     });
                 } else {
                     return Err(MinitensorError::invalid_operation(
@@ -353,11 +349,7 @@ impl FusionSequence {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
                     binary_apply_f64(input_slice, second_slice, output_slice, |a, b| {
-                        if b == 0.0 {
-                            f64::INFINITY
-                        } else {
-                            a / b
-                        }
+                        if b == 0.0 { f64::INFINITY } else { a / b }
                     });
                 } else {
                     return Err(MinitensorError::invalid_operation(

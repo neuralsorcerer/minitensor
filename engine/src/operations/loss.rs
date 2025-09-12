@@ -6,8 +6,8 @@
 
 use crate::{
     autograd::{
-        add_to_graph, BCELossBackward, CrossEntropyLossBackward, FocalLossBackward,
-        HuberLossBackward, KLDivLossBackward, MAELossBackward, MSELossBackward,
+        BCELossBackward, CrossEntropyLossBackward, FocalLossBackward, HuberLossBackward,
+        KLDivLossBackward, MAELossBackward, MSELossBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
     operations::{
@@ -63,7 +63,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -132,7 +132,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -202,7 +202,7 @@ pub fn cross_entropy_loss(
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -330,7 +330,7 @@ pub fn binary_cross_entropy_loss(
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -390,7 +390,7 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -484,7 +484,7 @@ pub fn focal_loss(
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -566,7 +566,7 @@ pub fn huber_loss(
             return Err(MinitensorError::invalid_operation(format!(
                 "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
                 reduction
-            )))
+            )));
         }
     };
 
@@ -627,7 +627,7 @@ fn validate_loss_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Loss functions require floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -669,7 +669,7 @@ fn validate_classification_inputs(
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Classification loss functions require floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -743,7 +743,7 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "Unsupported target dtype for classification loss",
-                ))
+                ));
             }
         }
         let mut dims = targets.shape().dims().to_vec();
@@ -804,7 +804,7 @@ fn abs(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Absolute value only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -878,7 +878,7 @@ fn sign(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sign operation only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -942,7 +942,7 @@ fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sum only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1003,7 +1003,7 @@ fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Division only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1041,7 +1041,7 @@ fn create_scalar_tensor(
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Scalar tensor creation only supported for floating point types",
-            ))
+            ));
         }
     }
 
@@ -1125,7 +1125,7 @@ fn compute_huber_elementwise(
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Huber loss only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1182,7 +1182,7 @@ fn exp(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Exponential only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1236,7 +1236,7 @@ fn log(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Logarithm only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1283,7 +1283,7 @@ fn subtract_from_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Subtraction only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1329,7 +1329,7 @@ fn negate(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Negation only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1383,7 +1383,7 @@ fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Power operation only supported for floating point tensors",
-            ))
+            ));
         }
     }
 

@@ -8,21 +8,21 @@ use crate::device::PyDevice;
 use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
+use engine::Device;
 use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss};
 use engine::nn::{
-    activation::{LeakyReLU, ELU, GELU},
+    DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
+    activation::{ELU, GELU, LeakyReLU},
     conv::Conv2d,
     dropout::{Dropout, Dropout2d},
     normalization::{BatchNorm1d, BatchNorm2d},
     utils::{LayerUtils, SequentialUtils},
-    DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
 };
 use engine::operations::batch_norm as batch_norm_op;
 use engine::operations::conv2d as conv2d_op;
 use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use engine::tensor::DataType;
-use engine::Device;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};

@@ -369,7 +369,7 @@ impl RMSprop {
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "RMSprop only supports float32/float64 tensors",
-                ))
+                ));
             }
         }
 

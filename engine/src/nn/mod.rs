@@ -16,9 +16,9 @@ pub mod sequential;
 pub mod utils;
 
 // Re-export the main trait and common types
-pub use activation::{LeakyReLU, ReLU, Sigmoid, Softmax, Tanh, ELU, GELU};
+pub use activation::{ELU, GELU, LeakyReLU, ReLU, Sigmoid, Softmax, Tanh};
 pub use dense_layer::DenseLayer;
-pub use init::{init_bias, init_parameter, InitMethod};
+pub use init::{InitMethod, init_bias, init_parameter};
 pub use layer::{Layer, Module};
 pub use loss::{BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, MAELoss, MSELoss};
 pub use sequential::{Sequential, SequentialBuilder};

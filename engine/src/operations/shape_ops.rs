@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, ReshapeBackward},
+    autograd::{ReshapeBackward, add_to_graph},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };

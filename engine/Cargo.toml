@@ -1,7 +1,7 @@
 [package]
 name = "engine"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors.workspace = true
 description = "High-performance tensor operations and automatic differentiation library"
 license.workspace = true
@@ -72,4 +72,3 @@ blas = ["dep:blas-src", "dep:cblas"]
 criterion = "0.7"
 proptest = "1.0"
 approx = "0.5"
-

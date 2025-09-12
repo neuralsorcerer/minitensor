@@ -15,5 +15,5 @@ pub mod manager;
 pub mod pool;
 
 pub use allocator::{Allocator, CpuAllocator};
-pub use manager::{global_allocate, global_deallocate, init_memory_manager, UnifiedMemoryManager};
+pub use manager::{UnifiedMemoryManager, global_allocate, global_deallocate, init_memory_manager};
 pub use pool::{MemoryPool, PoolStats, PooledAllocator};

@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, CumprodBackward, CumsumBackward, ProdBackward, SumBackward},
+    autograd::{CumprodBackward, CumsumBackward, ProdBackward, SumBackward, add_to_graph},
     error::{MinitensorError, Result},
     operations::simd::{
         simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
@@ -45,7 +45,7 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Te
                 DataType::Bool => {
                     return Err(MinitensorError::invalid_operation(
                         "Sum not supported for boolean tensors",
-                    ))
+                    ));
                 }
             }
 
@@ -181,7 +181,7 @@ pub fn cumsum(tensor: &Tensor, dim: usize) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Cumsum not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -224,7 +224,7 @@ pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Cumsum not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -254,7 +254,7 @@ pub fn cumprod(tensor: &Tensor, dim: usize) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Cumprod not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -304,7 +304,7 @@ pub fn cumprod_backward(
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Cumprod backward only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -366,7 +366,7 @@ pub fn mean(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<T
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Mean only supported for floating point tensors",
-            ))
+            ));
         }
     };
 
@@ -1141,7 +1141,7 @@ pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tenso
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Sum not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -1665,11 +1665,7 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data.par_iter().cloned().reduce(
         || f32::NEG_INFINITY,
         |a, b| {
-            if b.is_nan() {
-                a
-            } else {
-                a.max(b)
-            }
+            if b.is_nan() { a } else { a.max(b) }
         },
     );
 
@@ -1690,11 +1686,7 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data.par_iter().cloned().reduce(
         || f64::NEG_INFINITY,
         |a, b| {
-            if b.is_nan() {
-                a
-            } else {
-                a.max(b)
-            }
+            if b.is_nan() { a } else { a.max(b) }
         },
     );
 
@@ -1764,11 +1756,7 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data.par_iter().cloned().reduce(
         || f32::INFINITY,
         |a, b| {
-            if b.is_nan() {
-                a
-            } else {
-                a.min(b)
-            }
+            if b.is_nan() { a } else { a.min(b) }
         },
     );
 
@@ -1789,11 +1777,7 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data.par_iter().cloned().reduce(
         || f64::INFINITY,
         |a, b| {
-            if b.is_nan() {
-                a
-            } else {
-                a.min(b)
-            }
+            if b.is_nan() { a } else { a.min(b) }
         },
     );
 
@@ -1863,11 +1847,7 @@ fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f32::NEG_INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -1888,11 +1868,7 @@ fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f64::NEG_INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -1913,11 +1889,7 @@ fn argmax_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, i32::MIN),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -1938,11 +1910,7 @@ fn argmax_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, i64::MIN),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -1980,11 +1948,7 @@ fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f32::INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -2005,11 +1969,7 @@ fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f64::INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -2030,11 +1990,7 @@ fn argmin_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, i32::MAX),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 
@@ -2055,11 +2011,7 @@ fn argmin_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, i64::MAX),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 {
-                (i1, v1)
-            } else {
-                (i2, v2)
-            }
+            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
         },
     );
 

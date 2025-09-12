@@ -197,10 +197,12 @@ fn test_softmax_arbitrary_dimension() {
     let e41 = (4.0 - max1).exp();
     let sum1 = e21 + e41;
     let expected0 = [e10 / sum0, e21 / sum1, e30 / sum0, e41 / sum1];
-    assert!(data0
-        .iter()
-        .zip(expected0.iter())
-        .all(|(a, b)| (a - b).abs() < 1e-6));
+    assert!(
+        data0
+            .iter()
+            .zip(expected0.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-6)
+    );
 
     // Softmax along dim 1 (rows)
     let result_dim1 = activation::softmax(&input, Some(1)).unwrap();
@@ -214,10 +216,12 @@ fn test_softmax_arbitrary_dimension() {
     let e4 = (4.0 - max_row1).exp();
     let sum_row1 = e3 + e4;
     let expected1 = [e1 / sum_row0, e2 / sum_row0, e3 / sum_row1, e4 / sum_row1];
-    assert!(data1
-        .iter()
-        .zip(expected1.iter())
-        .all(|(a, b)| (a - b).abs() < 1e-6));
+    assert!(
+        data1
+            .iter()
+            .zip(expected1.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-6)
+    );
 
     let _ = autograd::clear_graph();
 }
@@ -249,10 +253,12 @@ fn test_softmax_backward_dim1() {
         }
     }
 
-    assert!(grad_data
-        .iter()
-        .zip(expected.iter())
-        .all(|(a, b)| (a - b).abs() < 1e-6));
+    assert!(
+        grad_data
+            .iter()
+            .zip(expected.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-6)
+    );
 
     let _ = autograd::clear_graph();
 }
@@ -284,10 +290,12 @@ fn test_softmax_backward_dim0() {
         }
     }
 
-    assert!(grad_data
-        .iter()
-        .zip(expected.iter())
-        .all(|(a, b)| (a - b).abs() < 1e-6));
+    assert!(
+        grad_data
+            .iter()
+            .zip(expected.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-6)
+    );
 
     let _ = autograd::clear_graph();
 }

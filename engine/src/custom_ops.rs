@@ -7,7 +7,7 @@
 pub mod examples;
 
 use crate::{
-    autograd::{add_to_graph, GradientFunction, TensorId},
+    autograd::{GradientFunction, TensorId, add_to_graph},
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},

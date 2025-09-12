@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{
-    init::{init_parameter, InitMethod},
     Layer,
+    init::{InitMethod, init_parameter},
 };
 use crate::{
     device::Device,
@@ -23,7 +23,7 @@ fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> 
         _ => {
             return Err(MinitensorError::invalid_argument(
                 "BatchNorm only supports floating types".to_string(),
-            ))
+            ));
         }
     }
     Ok(Tensor::new(
@@ -187,7 +187,7 @@ impl Layer for BatchNorm1d {
         // Validate input dimensions - expect 2D [N, C] or 3D [N, C, L]
         if input.ndim() < 2 || input.ndim() > 3 {
             return Err(MinitensorError::invalid_operation(
-                "BatchNorm1d expects 2D input [batch_size, features] or 3D input [batch_size, features, length]"
+                "BatchNorm1d expects 2D input [batch_size, features] or 3D input [batch_size, features, length]",
             ));
         }
 

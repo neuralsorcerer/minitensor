@@ -186,7 +186,7 @@ impl SGD {
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "SGD only supports float32/float64 tensors",
-                ))
+                ));
             }
         }
 
@@ -256,7 +256,7 @@ impl SGD {
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "SGD only supports float32/float64 tensors",
-                ))
+                ));
             }
         }
 

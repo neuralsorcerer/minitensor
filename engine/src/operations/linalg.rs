@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{add_to_graph, MatMulBackward, TransposeBackward},
+    autograd::{MatMulBackward, TransposeBackward, add_to_graph},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
@@ -62,17 +62,21 @@ unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c
 #[cfg(not(feature = "blas"))]
 #[inline]
 unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
-    matrixmultiply::sgemm(
-        m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
-    );
+    unsafe {
+        matrixmultiply::sgemm(
+            m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+        )
+    };
 }
 
 #[cfg(not(feature = "blas"))]
 #[inline]
 unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
-    matrixmultiply::dgemm(
-        m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
-    );
+    unsafe {
+        matrixmultiply::dgemm(
+            m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+        )
+    };
 }
 
 /// Matrix multiplication with gradient support
@@ -143,7 +147,7 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Matrix multiplication not supported for boolean tensors",
-            ))
+            ));
         }
     }
 

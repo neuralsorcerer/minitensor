@@ -9,7 +9,7 @@ use crate::{
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
 fn broadcast_compare_op<T, F>(

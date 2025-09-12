@@ -195,7 +195,7 @@ impl PySerializationFormat {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown serialization format: {}",
                     format_str
-                )))
+                )));
             }
         };
         Ok(Self { inner: format })

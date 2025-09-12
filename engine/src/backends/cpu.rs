@@ -8,7 +8,7 @@ use super::Backend;
 use crate::{device::Device, error::Result};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::ptr::NonNull;
 
 /// CPU backend for tensor operations
@@ -194,9 +194,11 @@ mod tests {
         let backend = CpuBackend::initialize().unwrap();
 
         // Non-empty copy with null destination should error
-        assert!(backend
-            .copy_from_host(std::ptr::null_mut(), &[1u8])
-            .is_err());
+        assert!(
+            backend
+                .copy_from_host(std::ptr::null_mut(), &[1u8])
+                .is_err()
+        );
 
         // Non-empty copy with null source should error
         let mut buf = [0u8; 1];

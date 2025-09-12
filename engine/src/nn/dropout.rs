@@ -255,7 +255,7 @@ impl Layer for Dropout2d {
         // Validate input dimensions - expect 4D tensor [N, C, H, W]
         if input.ndim() != 4 {
             return Err(MinitensorError::invalid_operation(
-                "Dropout2d expects 4D input tensor with shape [batch_size, channels, height, width]"
+                "Dropout2d expects 4D input tensor with shape [batch_size, channels, height, width]",
             ));
         }
 

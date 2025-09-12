@@ -1714,13 +1714,12 @@ impl Tensor {
                 .copied(),
             DataType::Int32 => self.data.as_i32_slice()?.iter().max().map(|&x| x as f64),
             DataType::Int64 => self.data.as_i64_slice()?.iter().max().map(|&x| x as f64),
-            DataType::Bool => {
-                self.data
-                    .as_bool_slice()?
-                    .iter()
-                    .max()
-                    .map(|&x| if x { 1.0 } else { 0.0 })
-            }
+            DataType::Bool => self
+                .data
+                .as_bool_slice()?
+                .iter()
+                .max()
+                .map(|&x| if x { 1.0 } else { 0.0 }),
         }
     }
 
@@ -1742,13 +1741,12 @@ impl Tensor {
                 .copied(),
             DataType::Int32 => self.data.as_i32_slice()?.iter().min().map(|&x| x as f64),
             DataType::Int64 => self.data.as_i64_slice()?.iter().min().map(|&x| x as f64),
-            DataType::Bool => {
-                self.data
-                    .as_bool_slice()?
-                    .iter()
-                    .min()
-                    .map(|&x| if x { 1.0 } else { 0.0 })
-            }
+            DataType::Bool => self
+                .data
+                .as_bool_slice()?
+                .iter()
+                .min()
+                .map(|&x| if x { 1.0 } else { 0.0 }),
         }
     }
 

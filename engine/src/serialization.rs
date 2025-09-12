@@ -677,9 +677,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(state_dict.parameter_names().len(), 1);
-        assert!(state_dict
-            .parameter_names()
-            .contains(&&"weight".to_string()));
+        assert!(
+            state_dict
+                .parameter_names()
+                .contains(&&"weight".to_string())
+        );
 
         // Load parameter
         let loaded = state_dict.load_parameter("weight", None).unwrap();

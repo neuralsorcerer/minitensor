@@ -5,10 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
+    VERSION,
     custom_ops::{CustomOp, CustomOpRegistry},
     error::{MinitensorError, Result},
     nn::Layer,
-    VERSION,
 };
 use std::collections::HashMap;
 #[cfg(feature = "dynamic-loading")]
@@ -410,10 +410,12 @@ mod tests {
         }
 
         fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
-            vec![CustomOpBuilder::new("test_plugin_op", 1)
-                .forward(|inputs| Ok(inputs[0].clone()))
-                .build()
-                .unwrap()]
+            vec![
+                CustomOpBuilder::new("test_plugin_op", 1)
+                    .forward(|inputs| Ok(inputs[0].clone()))
+                    .build()
+                    .unwrap(),
+            ]
         }
     }
 

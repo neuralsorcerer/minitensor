@@ -370,10 +370,12 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
     // Process SIMD_WIDTH elements at a time
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm256_add_ps(a, b);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm256_add_ps(a, b);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     // Handle remaining elements
@@ -393,10 +395,12 @@ unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm256_sub_ps(a, b);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm256_sub_ps(a, b);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -415,10 +419,12 @@ unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm256_mul_ps(a, b);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm256_mul_ps(a, b);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -437,10 +443,12 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm256_div_ps(a, b);
-        _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm256_div_ps(a, b);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -464,10 +472,12 @@ unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm_add_ps(a, b);
-        _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm_add_ps(a, b);
+            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -486,10 +496,12 @@ unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm_sub_ps(a, b);
-        _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm_sub_ps(a, b);
+            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -508,10 +520,12 @@ unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm_mul_ps(a, b);
-        _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm_mul_ps(a, b);
+            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -530,10 +544,12 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-        let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-        let result = _mm_div_ps(a, b);
-        _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
+            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
+            let result = _mm_div_ps(a, b);
+            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -557,10 +573,12 @@ unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f32(lhs.as_ptr().add(i));
-        let b = vld1q_f32(rhs.as_ptr().add(i));
-        let result = vaddq_f32(a, b);
-        vst1q_f32(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f32(lhs.as_ptr().add(i));
+            let b = vld1q_f32(rhs.as_ptr().add(i));
+            let result = vaddq_f32(a, b);
+            vst1q_f32(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -579,10 +597,12 @@ unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f32(lhs.as_ptr().add(i));
-        let b = vld1q_f32(rhs.as_ptr().add(i));
-        let result = vsubq_f32(a, b);
-        vst1q_f32(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f32(lhs.as_ptr().add(i));
+            let b = vld1q_f32(rhs.as_ptr().add(i));
+            let result = vsubq_f32(a, b);
+            vst1q_f32(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -601,10 +621,12 @@ unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f32(lhs.as_ptr().add(i));
-        let b = vld1q_f32(rhs.as_ptr().add(i));
-        let result = vmulq_f32(a, b);
-        vst1q_f32(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f32(lhs.as_ptr().add(i));
+            let b = vld1q_f32(rhs.as_ptr().add(i));
+            let result = vmulq_f32(a, b);
+            vst1q_f32(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -623,10 +645,12 @@ unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f32(lhs.as_ptr().add(i));
-        let b = vld1q_f32(rhs.as_ptr().add(i));
-        let result = vdivq_f32(a, b);
-        vst1q_f32(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f32(lhs.as_ptr().add(i));
+            let b = vld1q_f32(rhs.as_ptr().add(i));
+            let result = vdivq_f32(a, b);
+            vst1q_f32(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -871,10 +895,12 @@ unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm256_add_pd(a, b);
-        _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm256_add_pd(a, b);
+            _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -893,10 +919,12 @@ unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm256_sub_pd(a, b);
-        _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm256_sub_pd(a, b);
+            _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -915,10 +943,12 @@ unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm256_mul_pd(a, b);
-        _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm256_mul_pd(a, b);
+            _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -937,10 +967,12 @@ unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm256_div_pd(a, b);
-        _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm256_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm256_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm256_div_pd(a, b);
+            _mm256_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -964,10 +996,12 @@ unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm_add_pd(a, b);
-        _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm_add_pd(a, b);
+            _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -986,10 +1020,12 @@ unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm_sub_pd(a, b);
-        _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm_sub_pd(a, b);
+            _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1008,10 +1044,12 @@ unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm_mul_pd(a, b);
-        _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm_mul_pd(a, b);
+            _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1030,10 +1068,12 @@ unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = _mm_loadu_pd(lhs.as_ptr().add(i));
-        let b = _mm_loadu_pd(rhs.as_ptr().add(i));
-        let result = _mm_div_pd(a, b);
-        _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = _mm_loadu_pd(lhs.as_ptr().add(i));
+            let b = _mm_loadu_pd(rhs.as_ptr().add(i));
+            let result = _mm_div_pd(a, b);
+            _mm_storeu_pd(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1057,10 +1097,12 @@ unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f64(lhs.as_ptr().add(i));
-        let b = vld1q_f64(rhs.as_ptr().add(i));
-        let result = vaddq_f64(a, b);
-        vst1q_f64(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f64(lhs.as_ptr().add(i));
+            let b = vld1q_f64(rhs.as_ptr().add(i));
+            let result = vaddq_f64(a, b);
+            vst1q_f64(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1079,10 +1121,12 @@ unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f64(lhs.as_ptr().add(i));
-        let b = vld1q_f64(rhs.as_ptr().add(i));
-        let result = vsubq_f64(a, b);
-        vst1q_f64(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f64(lhs.as_ptr().add(i));
+            let b = vld1q_f64(rhs.as_ptr().add(i));
+            let result = vsubq_f64(a, b);
+            vst1q_f64(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1101,10 +1145,12 @@ unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f64(lhs.as_ptr().add(i));
-        let b = vld1q_f64(rhs.as_ptr().add(i));
-        let result = vmulq_f64(a, b);
-        vst1q_f64(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f64(lhs.as_ptr().add(i));
+            let b = vld1q_f64(rhs.as_ptr().add(i));
+            let result = vmulq_f64(a, b);
+            vst1q_f64(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {
@@ -1123,10 +1169,12 @@ unsafe fn simd_div_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     let simd_len = len - (len % SIMD_WIDTH);
 
     for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        let a = vld1q_f64(lhs.as_ptr().add(i));
-        let b = vld1q_f64(rhs.as_ptr().add(i));
-        let result = vdivq_f64(a, b);
-        vst1q_f64(output.as_mut_ptr().add(i), result);
+        unsafe {
+            let a = vld1q_f64(lhs.as_ptr().add(i));
+            let b = vld1q_f64(rhs.as_ptr().add(i));
+            let result = vdivq_f64(a, b);
+            vst1q_f64(output.as_mut_ptr().add(i), result);
+        }
     }
 
     for i in simd_len..len {

@@ -11,8 +11,8 @@
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use engine::backends::metal::{MetalBackend, MetalOps};
     use engine::backends::Backend;
+    use engine::backends::metal::{MetalBackend, MetalOps};
 
     use std::sync::Arc;
 

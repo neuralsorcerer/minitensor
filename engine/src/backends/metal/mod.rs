@@ -9,8 +9,8 @@ use crate::{device::Device, error::Result};
 use metal::*;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Metal buffer wrapper for memory management
 pub struct MetalBufferWrapper {
@@ -483,9 +483,9 @@ kernel void matmul_kernel(device const float* a [[buffer(0)]],
                          uint2 index [[thread_position_in_grid]]) {
     uint row = index.y;
     uint col = index.x;
-    
+
     if (row >= m || col >= n) return;
-    
+
     float sum = 0.0;
     for (uint i = 0; i < k; i++) {
         sum += a[row * k + i] * b[i * n + col];
@@ -554,9 +554,9 @@ kernel void matmul_kernel(device const float* a [[buffer(0)]],
                          uint2 index [[thread_position_in_grid]]) {
     uint row = index.y;
     uint col = index.x;
-    
+
     if (row >= m || col >= n) return;
-    
+
     float sum = 0.0;
     for (uint i = 0; i < k; i++) {
         sum += a[row * k + i] * b[i * n + col];

@@ -758,14 +758,18 @@ mod tests {
         let hardware_profile = create_test_hardware_profile();
         let optimizer = ResourceOptimizer::new(hardware_profile);
 
-        assert!(!optimizer
-            .device_placement_optimizer
-            .available_devices
-            .is_empty());
-        assert!(!optimizer
-            .device_placement_optimizer
-            ._device_capabilities
-            .is_empty());
+        assert!(
+            !optimizer
+                .device_placement_optimizer
+                .available_devices
+                .is_empty()
+        );
+        assert!(
+            !optimizer
+                .device_placement_optimizer
+                ._device_capabilities
+                .is_empty()
+        );
     }
 
     #[test]

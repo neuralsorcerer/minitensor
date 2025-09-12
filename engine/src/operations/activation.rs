@@ -6,8 +6,8 @@
 
 use crate::{
     autograd::{
-        add_to_graph, CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward,
-        ReluBackward, SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward,
+        CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward, ReluBackward,
+        SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
@@ -78,7 +78,7 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Exponential function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -123,7 +123,7 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Logarithm function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -168,7 +168,7 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sine function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -213,7 +213,7 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Cosine function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -258,7 +258,7 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Tangent function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -303,7 +303,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Tanh function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -348,7 +348,7 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sigmoid function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -530,7 +530,7 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "ReLU function not supported for boolean tensors",
-            ))
+            ));
         }
     };
 
@@ -575,7 +575,7 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "LeakyReLU function only supported for floating point tensors",
-            ))
+            ));
         }
     };
 
@@ -627,7 +627,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Softmax function only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1198,7 +1198,7 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Absolute value not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -1232,7 +1232,7 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Clip not supported for boolean tensors",
-            ))
+            ));
         }
     }
 
@@ -1258,7 +1258,7 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Round only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1284,7 +1284,7 @@ pub fn floor(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Floor only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -1310,7 +1310,7 @@ pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Ceiling only supported for floating point tensors",
-            ))
+            ));
         }
     }
 

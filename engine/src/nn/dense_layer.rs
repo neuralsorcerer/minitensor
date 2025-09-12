@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{
-    init::{init_bias, init_parameter, InitMethod},
     Layer,
+    init::{InitMethod, init_bias, init_parameter},
 };
 use crate::{
     device::Device,
@@ -33,7 +33,7 @@ impl DenseLayer {
     ///
     /// # Arguments
     /// * `in_features` - Size of each input sample
-    /// * `out_features` - Size of each output sample  
+    /// * `out_features` - Size of each output sample
     /// * `bias` - If set to false, the layer will not learn an additive bias
     /// * `device` - Device to place the layer parameters on
     /// * `dtype` - Data type for the layer parameters

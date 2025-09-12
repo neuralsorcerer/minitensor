@@ -14,8 +14,8 @@ pub mod graph;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
@@ -920,7 +920,7 @@ impl GradientFunction for PowBackward {
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "Power backward only supported for floating point tensors",
-                ))
+                ));
             }
         }
 
@@ -1005,7 +1005,7 @@ impl GradientFunction for ReluBackward {
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "ReLU backward only supported for floating point tensors",
-                ))
+                ));
             }
         }
 
@@ -1110,7 +1110,7 @@ impl GradientFunction for LeakyReluBackward {
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "LeakyReLU backward only supported for floating point tensors",
-                ))
+                ));
             }
         }
 
@@ -1370,7 +1370,7 @@ impl GradientFunction for MSELossBackward {
                 return Err(MinitensorError::gradient_error(format!(
                     "Unknown reduction mode: {}",
                     self.reduction
-                )))
+                )));
             }
         }
 
@@ -1415,7 +1415,7 @@ impl GradientFunction for MAELossBackward {
                 return Err(MinitensorError::gradient_error(format!(
                     "Unknown reduction mode: {}",
                     self.reduction
-                )))
+                )));
             }
         }
 
@@ -1521,7 +1521,7 @@ impl GradientFunction for HuberLossBackward {
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "Huber loss only supports floating point tensors",
-                ))
+                ));
             }
         }
 
@@ -1597,7 +1597,7 @@ impl GradientFunction for CrossEntropyLossBackward {
                     _ => {
                         return Err(MinitensorError::invalid_operation(
                             "CrossEntropy backward only supports floating point tensors",
-                        ))
+                        ));
                     }
                 }
                 let scalar_tensor = Tensor::new(
@@ -1614,7 +1614,7 @@ impl GradientFunction for CrossEntropyLossBackward {
                 return Err(MinitensorError::gradient_error(format!(
                     "Unknown reduction mode: {}",
                     self.reduction
-                )))
+                )));
             }
         }
 
@@ -1796,7 +1796,7 @@ fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<T
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Scalar tensors only supported for floating point types",
-            ))
+            ));
         }
     }
 
@@ -1865,7 +1865,7 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Power operation only supported for floating point tensors",
-            ))
+            ));
         }
     }
 
@@ -2191,17 +2191,21 @@ mod tests {
         let rhs_t =
             crate::operations::linalg::transpose(&rhs, rhs.ndim() - 2, rhs.ndim() - 1).unwrap();
         let expected_lhs = crate::operations::linalg::matmul(&grad_output, &rhs_t).unwrap();
-        assert!(grads
-            .get(&input_ids[0])
-            .unwrap()
-            .allclose(&expected_lhs, 1e-6, 1e-6));
+        assert!(
+            grads
+                .get(&input_ids[0])
+                .unwrap()
+                .allclose(&expected_lhs, 1e-6, 1e-6)
+        );
         let lhs_t =
             crate::operations::linalg::transpose(&lhs, lhs.ndim() - 2, lhs.ndim() - 1).unwrap();
         let expected_rhs = crate::operations::linalg::matmul(&lhs_t, &grad_output).unwrap();
-        assert!(grads
-            .get(&input_ids[1])
-            .unwrap()
-            .allclose(&expected_rhs, 1e-6, 1e-6));
+        assert!(
+            grads
+                .get(&input_ids[1])
+                .unwrap()
+                .allclose(&expected_rhs, 1e-6, 1e-6)
+        );
     }
 
     #[test]
