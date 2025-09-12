@@ -5,7 +5,11 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
-use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use crate::{
+    autograd::{self, TensorId},
+    error::Result,
+    tensor::Tensor,
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -278,9 +282,9 @@ impl Optimizer for SGD {
                 continue;
             }
 
-            let grad = match param.grad() {
-                Some(g) => std::sync::Arc::clone(g),
-                None => continue, // Skip parameters without gradients
+            let grad = match autograd::get_gradient(param) {
+                Some(g) => g,
+                None => continue,
             };
 
             // Get learning rate for this parameter
@@ -288,10 +292,10 @@ impl Optimizer for SGD {
             let weight_decay = self.get_param_weight_decay(param.id());
 
             if self.momentum > 0.0 {
-                self.apply_momentum_update(param, grad.as_ref(), lr, weight_decay)?;
+                self.apply_momentum_update(param, &grad, lr, weight_decay)?;
             } else {
                 // Simple SGD update: param = param - lr * grad
-                self.apply_simple_update(param, grad.as_ref(), lr, weight_decay)?;
+                self.apply_simple_update(param, &grad, lr, weight_decay)?;
             }
         }
 

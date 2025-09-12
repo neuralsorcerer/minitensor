@@ -5,7 +5,11 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
-use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use crate::{
+    autograd::{self, TensorId},
+    error::Result,
+    tensor::Tensor,
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -340,9 +344,9 @@ impl Optimizer for Adam {
                 continue;
             }
 
-            let grad = match param.grad() {
-                Some(g) => std::sync::Arc::clone(g),
-                None => continue, // Skip parameters without gradients
+            let grad = match autograd::get_gradient(param) {
+                Some(g) => g,
+                None => continue,
             };
 
             // Get learning rate for this parameter
@@ -350,7 +354,7 @@ impl Optimizer for Adam {
             let weight_decay = self.get_param_weight_decay(param.id());
 
             // Apply Adam update with weight decay
-            self.apply_adam_update(param, grad.as_ref(), lr, weight_decay)?;
+            self.apply_adam_update(param, &grad, lr, weight_decay)?;
         }
 
         Ok(())

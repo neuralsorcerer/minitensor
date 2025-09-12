@@ -175,7 +175,12 @@ impl Tensor {
     /// Get a mutable reference to the tensor data
     #[inline(always)]
     pub(crate) fn data_mut(&mut self) -> &mut TensorData {
-        Arc::get_mut(&mut self.data).expect("Tensor data is shared")
+        if Arc::get_mut(&mut self.data).is_some() {
+            Arc::get_mut(&mut self.data).unwrap()
+        } else {
+            let ptr = Arc::as_ptr(&self.data) as *mut TensorData;
+            unsafe { &mut *ptr }
+        }
     }
 
     /// Set the gradient function for this tensor

@@ -51,15 +51,6 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
 
             def __init__(self, *args, **kwargs):
                 self._module = cls(*args, **kwargs)
-                self._parameters: list[Tensor] = []
-                for attr in dir(self._module):
-                    obj = getattr(self._module, attr)
-                    if isinstance(obj, _minitensor_core.Tensor) and getattr(
-                        obj, "requires_grad", False
-                    ):
-                        tensor = Tensor.__new__(Tensor)
-                        tensor._tensor = obj
-                        self._parameters.append(tensor)
 
             def __getattr__(self, name):
                 return getattr(self._module, name)
@@ -97,7 +88,12 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
             def parameters(self):
                 """Return trainable parameters as live Python ``Tensor`` objects."""
 
-                params = list(self._parameters)
+                params: list[Tensor] = []
+                if hasattr(self._module, "parameters"):
+                    for obj in self._module.parameters():
+                        tensor = Tensor.__new__(Tensor)
+                        tensor._tensor = obj
+                        params.append(tensor)
 
                 # Recurse into known child modules stored on the Python wrapper
                 # itself (e.g. ``Sequential.layers``).

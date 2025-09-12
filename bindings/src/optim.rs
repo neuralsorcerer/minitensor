@@ -7,6 +7,7 @@
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::optim::{Adam, Optimizer, RMSprop, SGD};
+use engine::{autograd, tensor::Tensor};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule as Pyo3Module};
 
@@ -35,7 +36,7 @@ impl PyOptimizer {
         }
 
         // Extract mutable references to the inner Tensor objects.
-        let mut tensor_refs: Vec<&mut engine::tensor::Tensor> =
+        let mut tensor_refs: Vec<&mut Tensor> =
             borrowed.iter_mut().map(|t| t.tensor_mut()).collect();
 
         // Dispatch to the correct optimizer implementation.
@@ -44,6 +45,10 @@ impl PyOptimizer {
             OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
             OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
         };
+
+        if let Err(e) = autograd::clear_graph() {
+            return Err(_convert_error(e));
+        }
 
         result.map_err(_convert_error)
     }
