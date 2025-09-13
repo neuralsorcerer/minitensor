@@ -29,9 +29,12 @@ class _OptimizerWrapper:
         self._opt = opt
         self._params = _unwrap(list(params))
 
-    def zero_grad(self, set_to_none: bool = False):
+    def zero_grad(self, set_to_none: bool = False) -> None:
         """Reset gradients of the tracked parameters."""
-        self._opt.zero_grad(self._params, set_to_none)
+        try:
+            self._opt.zero_grad(self._params, set_to_none)
+        except TypeError:
+            self._opt.zero_grad(self._params)
 
     def step(self) -> None:
         """Update the tracked parameters."""
@@ -47,13 +50,31 @@ class SGD(_OptimizerWrapper):  # pragma: no cover - thin wrapper
         weight_decay: float = 0.0,
         nesterov: bool = False,
     ) -> None:
+        params = list(params)
+        if not params:
+            raise ValueError("No parameters to optimize.")
+        if lr <= 0:
+            raise ValueError("Learning rate must be positive.")
+        if not (0 <= momentum <= 1):
+            raise ValueError("Momentum must be between 0 and 1.")
+        if weight_decay < 0:
+            raise ValueError("Weight decay must be non-negative.")
         opt = _optim.SGD(
             lr,
             momentum=momentum,
             weight_decay=weight_decay,
             nesterov=nesterov,
         )
+        self._py_params = params
         super().__init__(opt, params)
+
+    def zero_grad(self, set_to_none: bool = False):
+        """Reset gradients of the tracked parameters."""
+        if set_to_none:
+            for i, p in enumerate(self._py_params):
+                new = _Tensor(p.numpy(), requires_grad=p.requires_grad)
+                p._tensor = new._tensor
+                self._params[i] = p._tensor
 
 
 class Adam(_OptimizerWrapper):  # pragma: no cover - thin wrapper
