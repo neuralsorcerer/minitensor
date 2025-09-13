@@ -138,6 +138,17 @@ if _minitensor_core is not None and hasattr(_minitensor_core, "nn"):
                 ) -> None:
                     super().__init__(in_features, out_features, bias, device, dtype)
 
+                def parameters(self):  # pragma: no cover - thin wrapper
+                    params: list[Tensor] = []
+                    w = Tensor.__new__(Tensor)
+                    w._tensor = self._module.weight
+                    params.append(w)
+                    if getattr(self._module, "bias", None) is not None:
+                        b = Tensor.__new__(Tensor)
+                        b._tensor = self._module.bias
+                        params.append(b)
+                    return params
+
             _special_wrappers[name] = DenseLayer
         elif name == "BatchNorm1d":
 

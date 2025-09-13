@@ -420,9 +420,7 @@ class Tensor:
 
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
-            # Scalar addition
-            scalar_tensor = Tensor(other, dtype=self.dtype)
-            return self.__add__(scalar_tensor)
+            other = Tensor(other, dtype=self.dtype)
 
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
@@ -431,8 +429,11 @@ class Tensor:
                 result_shape = np.broadcast_shapes(self.shape, other.shape)
             except ValueError as e:
                 raise ValueError("Shapes are not broadcastable") from e
-            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
-            return Tensor(result_array, dtype=self.dtype)
+            result = Tensor.__new__(Tensor)
+            result._tensor = _minitensor_core.Tensor.zeros(
+                list(result_shape), self.dtype, None, False
+            )
+            return result
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__add__(other._tensor)
@@ -443,8 +444,7 @@ class Tensor:
 
     def __sub__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
-            scalar_tensor = Tensor(other, dtype=self.dtype)
-            return self.__sub__(scalar_tensor)
+            other = Tensor(other, dtype=self.dtype)
 
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
@@ -453,8 +453,11 @@ class Tensor:
                 result_shape = np.broadcast_shapes(self.shape, other.shape)
             except ValueError as e:
                 raise ValueError("Shapes are not broadcastable") from e
-            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
-            return Tensor(result_array, dtype=self.dtype)
+            result = Tensor.__new__(Tensor)
+            result._tensor = _minitensor_core.Tensor.zeros(
+                list(result_shape), self.dtype, None, False
+            )
+            return result
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__sub__(other._tensor)
@@ -466,8 +469,7 @@ class Tensor:
 
     def __mul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
-            scalar_tensor = Tensor(other, dtype=self.dtype)
-            return self.__mul__(scalar_tensor)
+            other = Tensor(other, dtype=self.dtype)
 
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
@@ -476,8 +478,11 @@ class Tensor:
                 result_shape = np.broadcast_shapes(self.shape, other.shape)
             except ValueError as e:
                 raise ValueError("Shapes are not broadcastable") from e
-            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
-            return Tensor(result_array, dtype=self.dtype)
+            result = Tensor.__new__(Tensor)
+            result._tensor = _minitensor_core.Tensor.zeros(
+                list(result_shape), self.dtype, None, False
+            )
+            return result
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__mul__(other._tensor)
@@ -488,8 +493,7 @@ class Tensor:
 
     def __truediv__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
-            scalar_tensor = Tensor(other, dtype=self.dtype)
-            return self.__truediv__(scalar_tensor)
+            other = Tensor(other, dtype=self.dtype)
 
         if self.numel() == 0 or other.numel() == 0:
             if self.dtype != other.dtype:
@@ -498,8 +502,11 @@ class Tensor:
                 result_shape = np.broadcast_shapes(self.shape, other.shape)
             except ValueError as e:
                 raise ValueError("Shapes are not broadcastable") from e
-            result_array = np.empty(result_shape, dtype=_TENSOR_TO_NP_DTYPE[self.dtype])
-            return Tensor(result_array, dtype=self.dtype)
+            result = Tensor.__new__(Tensor)
+            result._tensor = _minitensor_core.Tensor.zeros(
+                list(result_shape), self.dtype, None, False
+            )
+            return result
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__truediv__(other._tensor)
@@ -511,12 +518,20 @@ class Tensor:
 
     def __pow__(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Element-wise power operation."""
+        exp_tensor = exponent._tensor if isinstance(exponent, Tensor) else exponent
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.pow(exp_tensor)
         if isinstance(exponent, Tensor):
-            exponent_tensor = exponent
-        else:
-            exponent_tensor = Tensor(exponent)
-        # Use exp(exponent * log(self)) for broad dtype support
-        return (exponent_tensor * self.log()).exp()
+            exp_floor = exponent.astype("int64").astype(exponent.dtype)
+            frac_mask = exponent.ne(exp_floor).astype("int32")
+            neg_mask = self.lt(0).astype("int32")
+            mask = (neg_mask * frac_mask).astype("bool")
+            if bool(mask.any().numpy()):
+                res_np = result.numpy()
+                mask_np = mask.numpy().astype(bool)
+                res_np[mask_np] = 0.0
+                result = Tensor(res_np, dtype=self.dtype)
+        return result
 
     def pow(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Alias for the ``**`` operator."""
@@ -541,11 +556,6 @@ class Tensor:
             raise ValueError("matmul batch dimensions must match")
         if self.shape[-1] != other.shape[-2]:
             raise ValueError("matmul dimension mismatch")
-
-        if self.numel() == 0 or other.numel() == 0:
-            result_shape = self.shape[:-1] + (other.shape[-1],)
-            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-            return Tensor(np.zeros(result_shape, dtype=np_dtype), dtype=self.dtype)
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.matmul(other._tensor)
@@ -599,30 +609,9 @@ class Tensor:
             for d in dim:
                 if d < 0 or d >= ndim:
                     raise IndexError("Dimension out of range")
-        if dim is None and self.numel() == 0:
-            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-            if np.issubdtype(np_dtype, np.floating) or np.issubdtype(
-                np_dtype, np.integer
-            ):
-                return Tensor(np.array(1, dtype=np_dtype), dtype=self.dtype)
-            else:
-                raise ValueError("Prod not supported for boolean tensors")
-        if dim is None or len(dim) <= 1:
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.prod(dim, keepdim)
-            return result
-
-        dims = sorted(dim)
-        current = self._tensor
-        if keepdim:
-            for d in dims:
-                current = current.prod([d], True)
-        else:
-            for d in reversed(dims):
-                current = current.prod([d], False)
 
         result = Tensor.__new__(Tensor)
-        result._tensor = current
+        result._tensor = self._tensor.prod(dim, keepdim)
         return result
 
     def sum(
@@ -639,30 +628,9 @@ class Tensor:
             for d in dim:
                 if d < 0 or d >= ndim:
                     raise IndexError("Dimension out of range")
-        if dim is None and self.numel() == 0:
-            np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-            if np.issubdtype(np_dtype, np.floating) or np.issubdtype(
-                np_dtype, np.integer
-            ):
-                return Tensor(np.array(0, dtype=np_dtype), dtype=self.dtype)
-            else:  # bool
-                return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
-        if dim is None or len(dim) <= 1:
-            result = Tensor.__new__(Tensor)
-            result._tensor = self._tensor.sum(dim, keepdim)
-            return result
-
-        dims = sorted(dim)
-        current = self._tensor
-        if keepdim:
-            for d in dims:
-                current = current.sum([d], True)
-        else:
-            for d in reversed(dims):
-                current = current.sum([d], False)
 
         result = Tensor.__new__(Tensor)
-        result._tensor = current
+        result._tensor = self._tensor.sum(dim, keepdim)
         return result
 
     def mean(
@@ -683,10 +651,6 @@ class Tensor:
         if np.issubdtype(np_dtype, np.integer):
             raise ValueError("mean not defined for integer tensors")
 
-        if dim is None and self.numel() == 0:
-            if np.issubdtype(np_dtype, np.floating):
-                return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
-
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.mean(dim, keepdim)
         return result
@@ -695,63 +659,19 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Maximum values along dimension."""
-        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-
         if dim is None:
-            if self.numel() == 0:
-                if np.issubdtype(np_dtype, np.floating):
-                    return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
-                elif np.issubdtype(np_dtype, np.integer):
-                    return Tensor(
-                        np.array(np.iinfo(np_dtype).min, dtype=np_dtype),
-                        dtype=self.dtype,
-                    )
-                else:  # bool
-                    return Tensor(np.array(False, dtype=np_dtype), dtype=self.dtype)
-
-            if np.issubdtype(np_dtype, np.floating) and bool(
-                self.isnan().all().numpy()
-            ):
-                return Tensor(np.array(-np.inf, dtype=np_dtype), dtype=self.dtype)
-
             result = Tensor.__new__(Tensor)
             result._tensor = self._tensor.max(dim, keepdim)
             return result
 
         dim = dim if dim >= 0 else dim + self.ndim
-        dim_size = self.shape[dim]
-        out_shape = list(self.shape)
-        if keepdim:
-            out_shape[dim] = 1
-        else:
-            out_shape.pop(dim)
-
-        if dim_size == 0:
-            if np.issubdtype(np_dtype, np.floating):
-                fill_val = -np.inf
-            elif np.issubdtype(np_dtype, np.integer):
-                fill_val = np.iinfo(np_dtype).min
-            else:
-                fill_val = False
-            values = np.full(out_shape, fill_val, dtype=np_dtype)
-            indices = np.zeros(out_shape, dtype=np.int64)
-            return Tensor(values, dtype=self.dtype), Tensor(indices, dtype="int64")
+        if dim < 0 or dim >= self.ndim:
+            raise IndexError("Dimension out of range")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.max(dim, keepdim)
         indices = Tensor.__new__(Tensor)
         indices._tensor = self._tensor.argmax(dim, keepdim)
-
-        if np.issubdtype(np_dtype, np.floating):
-            all_nan = self.isnan().all(dim, keepdim)
-            if bool(all_nan.any().numpy()):
-                mask = all_nan.numpy().astype(bool)
-                res_np = result.numpy()
-                idx_np = indices.numpy()
-                res_np[mask] = -np.inf
-                idx_np[mask] = 0
-                result = Tensor(res_np, dtype=self.dtype)
-                indices = Tensor(idx_np, dtype="int64")
 
         return result, indices
 
@@ -759,63 +679,19 @@ class Tensor:
         self, dim: Optional[int] = None, keepdim: bool = False
     ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
         """Minimum values along dimension."""
-        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-
         if dim is None:
-            if self.numel() == 0:
-                if np.issubdtype(np_dtype, np.floating):
-                    return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
-                elif np.issubdtype(np_dtype, np.integer):
-                    return Tensor(
-                        np.array(np.iinfo(np_dtype).max, dtype=np_dtype),
-                        dtype=self.dtype,
-                    )
-                else:  # bool
-                    return Tensor(np.array(True, dtype=np_dtype), dtype=self.dtype)
-
-            if np.issubdtype(np_dtype, np.floating) and bool(
-                self.isnan().all().numpy()
-            ):
-                return Tensor(np.array(np.inf, dtype=np_dtype), dtype=self.dtype)
-
             result = Tensor.__new__(Tensor)
             result._tensor = self._tensor.min(dim, keepdim)
             return result
 
         dim = dim if dim >= 0 else dim + self.ndim
-        dim_size = self.shape[dim]
-        out_shape = list(self.shape)
-        if keepdim:
-            out_shape[dim] = 1
-        else:
-            out_shape.pop(dim)
-
-        if dim_size == 0:
-            if np.issubdtype(np_dtype, np.floating):
-                fill_val = np.inf
-            elif np.issubdtype(np_dtype, np.integer):
-                fill_val = np.iinfo(np_dtype).max
-            else:
-                fill_val = True
-            values = np.full(out_shape, fill_val, dtype=np_dtype)
-            indices = np.zeros(out_shape, dtype=np.int64)
-            return Tensor(values, dtype=self.dtype), Tensor(indices, dtype="int64")
+        if dim < 0 or dim >= self.ndim:
+            raise IndexError("Dimension out of range")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.min(dim, keepdim)
         indices = Tensor.__new__(Tensor)
         indices._tensor = self._tensor.argmin(dim, keepdim)
-
-        if np.issubdtype(np_dtype, np.floating):
-            all_nan = self.isnan().all(dim, keepdim)
-            if bool(all_nan.any().numpy()):
-                mask = all_nan.numpy().astype(bool)
-                res_np = result.numpy()
-                idx_np = indices.numpy()
-                res_np[mask] = np.inf
-                idx_np[mask] = 0
-                result = Tensor(res_np, dtype=self.dtype)
-                indices = Tensor(idx_np, dtype="int64")
 
         return result, indices
 
@@ -1174,13 +1050,6 @@ class Tensor:
                     _check_slice(item)
 
         _check_slice(key)
-        np_view = self.numpy()[key]
-        if np_view.size == 0:
-            return Tensor(
-                np_view,
-                dtype=self.dtype,
-                requires_grad=self.requires_grad,
-            )
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__getitem__(key)
         return result

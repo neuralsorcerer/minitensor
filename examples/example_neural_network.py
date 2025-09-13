@@ -92,7 +92,7 @@ def create_loss_and_optimizer():
         print(f"Created loss function: {criterion}")
 
         # Create optimizer (would normally pass model parameters)
-        optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
+        optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
         print(f"Created optimizer: {optimizer}")
 
         return True

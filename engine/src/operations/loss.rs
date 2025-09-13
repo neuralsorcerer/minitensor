@@ -322,7 +322,13 @@ pub fn binary_cross_entropy_loss(
     let term1 = mul(targets, &log_predictions)?;
     let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
     let combined = add(&term1, &term2)?;
-    let negative_bce = negate(&combined)?;
+    let zeros = Tensor::zeros(
+        combined.shape().clone(),
+        combined.dtype(),
+        combined.device(),
+        combined.requires_grad(),
+    );
+    let negative_bce = sub(&zeros, &combined)?;
 
     // Apply reduction
     let loss = match reduction {

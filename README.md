@@ -76,7 +76,7 @@ model = nn.Sequential([
 
 # Set up training
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
+optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
 
 print(f"Model: {model}")
 print(f"Input shape: {x.shape}")
@@ -136,9 +136,9 @@ bce = nn.BCELoss()                  # Binary cross entropy
 from minitensor import optim
 
 # Optimizers
-sgd = optim.SGD(0.01, 0.9, 0.0, False)                  # SGD with momentum
-adam = optim.Adam(0.001, 0.9, 0.999, 1e-8)              # Adam optimizer
-rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)     # RMSprop optimizer
+sgd = optim.SGD(0.01, 0.9, 0.0, False)                      # SGD with momentum
+adam = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)  # Adam optimizer
+rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)         # RMSprop optimizer
 ```
 
 ## Architecture
@@ -178,7 +178,7 @@ model = nn.Sequential([
 
 # Initialize model
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001, 0.9, 0.999, 1e-8)
+optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
 ```
 
 ### Training Loop

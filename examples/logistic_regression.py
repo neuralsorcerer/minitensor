@@ -13,25 +13,19 @@ model definition, loss computation, backpropagation and parameter updates.
 
 from __future__ import annotations
 
-import numpy as np
-
 import minitensor as mt
 from minitensor import nn, optim
 
 
 def main() -> None:  # pragma: no cover - example script
-    rng = np.random.default_rng(0)
     num_samples = 200
 
     # Synthetic dataset linearly separable by true_w and true_b
-    x_np = rng.normal(size=(num_samples, 2)).astype(np.float32)
-    true_w = np.array([[1.5], [-2.0]], dtype=np.float32)
-    true_b = -0.5
-    logits_np = x_np @ true_w + true_b
-    y_np = (logits_np > 0).astype(np.float32)
-
-    x = mt.Tensor(x_np)
-    y = mt.Tensor(y_np.reshape(-1, 1))
+    x = mt.randn(num_samples, 2)
+    true_w = mt.Tensor([[1.5], [-2.0]])
+    true_b = mt.Tensor([-0.5])
+    logits = x @ true_w + true_b
+    y = (logits > 0).astype("float32")
 
     model = nn.Sequential([nn.DenseLayer(2, 1), nn.Sigmoid()])
     criterion = nn.BCELoss()
@@ -48,13 +42,21 @@ def main() -> None:  # pragma: no cover - example script
         optimizer.step(params)
 
         if (epoch + 1) % 20 == 0:
-            preds_np = preds.detach().numpy() > 0.5
-            acc = (preds_np.flatten() == y.numpy().flatten()).mean()
+            preds_bin = preds.detach() > 0.5
+            acc = (
+                preds_bin.eq(y.astype("bool"))
+                .astype("float32")
+                .mean()
+                .numpy()
+                .ravel()[0]
+            )
             loss_val = float(loss.numpy().ravel()[0])
             print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f} | Acc: {acc:.2f}")
 
-    final_preds = model(x).detach().numpy() > 0.5
-    acc = (final_preds.flatten() == y.numpy().flatten()).mean()
+    final_preds = model(x).detach() > 0.5
+    acc = float(
+        final_preds.eq(y.astype("bool")).astype("float32").mean().numpy().ravel()[0]
+    )
     print(f"Final accuracy: {acc:.2f}")
 
     # Retrieve trained parameters
