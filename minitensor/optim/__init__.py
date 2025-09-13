@@ -55,8 +55,8 @@ class SGD(_OptimizerWrapper):  # pragma: no cover - thin wrapper
             raise ValueError("No parameters to optimize.")
         if lr <= 0:
             raise ValueError("Learning rate must be positive.")
-        if not (0 <= momentum <= 1):
-            raise ValueError("Momentum must be between 0 and 1.")
+        if momentum < 0:
+            raise ValueError("Momentum must be non-negative.")
         if weight_decay < 0:
             raise ValueError("Weight decay must be non-negative.")
         opt = _optim.SGD(

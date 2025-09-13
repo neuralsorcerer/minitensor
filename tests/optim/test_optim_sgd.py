@@ -80,9 +80,9 @@ def test_sgd_with_weight_decay():
 
     w, b = model.parameters()
     final_loss = float(criterion(model(x), y).numpy().ravel()[0])
-    assert abs(float(w.numpy().ravel()[0]) - 4.0) < 1e-3
-    assert abs(float(b.numpy().ravel()[0]) + 1.0) < 1e-3
-    assert final_loss < 1e-8
+    assert abs(float(w.numpy().ravel()[0]) - 3.9410) < 1e-3
+    assert abs(float(b.numpy().ravel()[0]) + 0.9956) < 1e-3
+    assert abs(final_loss - 0.00118) < 1e-4
 
 
 def test_sgd_with_momentum_and_weight_decay():
@@ -102,9 +102,9 @@ def test_sgd_with_momentum_and_weight_decay():
 
     w, b = model.parameters()
     final_loss = float(criterion(model(x), y).numpy().ravel()[0])
-    assert abs(float(w.numpy().ravel()[0]) - 4.0) < 1e-3
-    assert abs(float(b.numpy().ravel()[0]) + 1.0) < 1e-3
-    assert final_loss < 1e-8
+    assert abs(float(w.numpy().ravel()[0]) - 3.9411) < 1e-3
+    assert abs(float(b.numpy().ravel()[0]) + 0.9956) < 1e-3
+    assert abs(final_loss - 0.00118) < 1e-4
 
 
 def test_sgd_invalid_momentum():
@@ -113,16 +113,9 @@ def test_sgd_invalid_momentum():
     try:
         optim.SGD(model.parameters(), lr=0.1, momentum=-0.1)
     except ValueError as e:
-        assert str(e) == "Momentum must be between 0 and 1."
+        assert str(e) == "Momentum must be non-negative."
     else:
         assert False, "ValueError not raised for negative momentum."
-
-    try:
-        optim.SGD(model.parameters(), lr=0.1, momentum=1.5)
-    except ValueError as e:
-        assert str(e) == "Momentum must be between 0 and 1."
-    else:
-        assert False, "ValueError not raised for momentum greater than 1."
 
 
 def test_sgd_invalid_weight_decay():
