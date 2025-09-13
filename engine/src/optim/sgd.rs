@@ -282,10 +282,10 @@ impl Optimizer for SGD {
                 continue;
             }
 
-            let grad = if let Some(g) = param.grad() {
-                (**g).clone()
-            } else if let Some(g) = autograd::get_gradient(param) {
+            let grad = if let Some(g) = autograd::get_gradient(param) {
                 g
+            } else if let Some(g) = param.grad() {
+                (**g).clone()
             } else {
                 continue;
             };
@@ -305,9 +305,9 @@ impl Optimizer for SGD {
         Ok(())
     }
 
-    fn zero_grad(&self, parameters: &mut [&mut Tensor]) -> Result<()> {
+    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()> {
         for param in parameters.iter_mut() {
-            param.zero_grad();
+            param.zero_grad(set_to_none);
         }
         Ok(())
     }

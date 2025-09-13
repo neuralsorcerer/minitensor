@@ -13,7 +13,7 @@ pub use dtype::DataType;
 pub use shape::{Shape, Strides};
 
 use crate::{
-    autograd::{GradientFunction, TensorId},
+    autograd::{self, GradientFunction, TensorId},
     device::Device,
     error::{MinitensorError, Result},
     operations::arithmetic::add,
@@ -237,8 +237,49 @@ impl Tensor {
 
     /// Clear the gradient for this tensor
     #[inline(always)]
-    pub fn zero_grad(&mut self) {
-        self.grad = None;
+    pub fn zero_grad(&mut self, set_to_none: bool) {
+        autograd::zero_gradients();
+        if set_to_none {
+            self.grad = None;
+            return;
+        }
+
+        // If gradient exists, zero it in place
+        if let Some(g) = self.grad_mut() {
+            match g.dtype() {
+                DataType::Float32 => {
+                    if let Some(slice) = g.data_mut().as_f32_slice_mut() {
+                        slice.fill(0.0);
+                    }
+                }
+                DataType::Float64 => {
+                    if let Some(slice) = g.data_mut().as_f64_slice_mut() {
+                        slice.fill(0.0);
+                    }
+                }
+                DataType::Int32 => {
+                    if let Some(slice) = g.data_mut().as_i32_slice_mut() {
+                        slice.fill(0);
+                    }
+                }
+                DataType::Int64 => {
+                    if let Some(slice) = g.data_mut().as_i64_slice_mut() {
+                        slice.fill(0);
+                    }
+                }
+                DataType::Bool => {
+                    if let Some(slice) = g.data_mut().as_bool_slice_mut() {
+                        slice.fill(false);
+                    }
+                }
+            }
+        } else if self.requires_grad {
+            // If gradient doesn't exist but is required, create a zero tensor
+            let zero = Tensor::zeros(self.shape.clone(), self.dtype, self.device, false);
+            self.grad = Some(Arc::new(zero));
+        } else {
+            self.grad = None;
+        }
     }
 
     /// Check if this tensor has a gradient
@@ -1855,10 +1896,11 @@ mod tests {
         assert!(tensor.has_grad());
         assert!(tensor.grad().is_some());
 
-        // Clear gradient
-        tensor.zero_grad();
-        assert!(!tensor.has_grad());
-        assert!(tensor.grad().is_none());
+        // Clear gradient (should zero it in place)
+        tensor.zero_grad(false);
+        assert!(tensor.has_grad());
+        let expected = Tensor::zeros(shape.clone(), DataType::Float32, Device::cpu(), false);
+        assert!(tensor.grad().unwrap().allclose(&expected, 1e-6, 1e-6));
     }
 
     #[test]

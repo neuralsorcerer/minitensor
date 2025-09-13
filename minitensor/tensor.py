@@ -407,9 +407,9 @@ class Tensor:
         self._tensor.requires_grad_(requires_grad)
         return self
 
-    def zero_grad(self):
+    def zero_grad(self, set_to_none: bool = False):
         """Zero the gradient."""
-        self._tensor.zero_grad()
+        self._tensor.zero_grad(set_to_none)
 
     # Arithmetic operations with broadcasting support
     def __neg__(self) -> "Tensor":

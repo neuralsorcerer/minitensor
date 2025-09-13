@@ -110,6 +110,11 @@ pub fn get_gradient(tensor: &Tensor) -> Option<Tensor> {
     GLOBAL_GRAPH.with(|graph| graph.borrow().get_gradient(tensor.id()).cloned())
 }
 
+/// Clear all stored gradients in the global computation graph
+pub fn zero_gradients() {
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().zero_grad());
+}
+
 /// Clear the global computation graph
 pub fn clear_graph() -> Result<()> {
     GLOBAL_GRAPH.with(|graph| {

@@ -54,7 +54,7 @@ impl PyOptimizer {
     }
 
     /// Zero out gradients for the provided parameters.
-    fn zero_grad(&self, parameters: &Bound<PyList>) -> PyResult<()> {
+    fn zero_grad(&self, parameters: &Bound<PyList>, set_to_none: Option<bool>) -> PyResult<()> {
         let mut borrowed: Vec<PyRefMut<PyTensor>> = Vec::with_capacity(parameters.len());
         for obj in parameters.iter() {
             borrowed.push(obj.extract::<PyRefMut<PyTensor>>()?);
@@ -63,10 +63,11 @@ impl PyOptimizer {
         let mut tensor_refs: Vec<&mut engine::tensor::Tensor> =
             borrowed.iter_mut().map(|t| t.tensor_mut()).collect();
 
+        let set = set_to_none.unwrap_or(false);
         let result = match &self.inner {
-            OptimizerType::SGD(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
-            OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
-            OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice()),
+            OptimizerType::SGD(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
+            OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
+            OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
         };
 
         result.map_err(_convert_error)

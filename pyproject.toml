@@ -54,6 +54,7 @@ examples = [
     "matplotlib>=3.0",
     "jupyter",
     "notebook",
+    "scikit-learn",
 ]
 
 [project.urls]

@@ -161,7 +161,7 @@ pub trait Optimizer: Send + Sync {
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()>;
 
     /// Zero out gradients of parameters
-    fn zero_grad(&self, parameters: &mut [&mut Tensor]) -> Result<()>;
+    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()>;
 
     /// Get the learning rate (for single parameter group optimizers)
     fn learning_rate(&self) -> f64;

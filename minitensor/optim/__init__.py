@@ -29,9 +29,9 @@ class _OptimizerWrapper:
         self._opt = opt
         self._params = _unwrap(list(params))
 
-    def zero_grad(self) -> None:
+    def zero_grad(self, set_to_none: bool = False):
         """Reset gradients of the tracked parameters."""
-        self._opt.zero_grad(self._params)
+        self._opt.zero_grad(self._params, set_to_none)
 
     def step(self) -> None:
         """Update the tracked parameters."""

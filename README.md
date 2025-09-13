@@ -22,7 +22,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 </div>
 
 > [!CAUTION]
-> This library is in active development stage. Gradients may not work properly. APIs may change or break. Use carefully.
+> This library is in active development stage. Use carefully.
 
 ## Features
 
@@ -194,15 +194,14 @@ y = 3 * x + 0.5
 # Model, loss, optimizer
 model = nn.DenseLayer(1, 1)
 criterion = nn.MSELoss()
-optimizer = optim.SGD(0.1, 0.0, 0.0, False)
-params = model.parameters()
+optimizer = optim.SGD(model.parameters(), lr=0.1)
 
 for epoch in range(100):
     pred = model(x)
     loss = criterion(pred, y)
-    optimizer.zero_grad(params)
+    optimizer.zero_grad()
     loss.backward()
-    optimizer.step(params)
+    optimizer.step()
     if (epoch + 1) % 20 == 0:
         loss_val = float(loss.numpy().ravel()[0])
         print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f}")

@@ -232,8 +232,8 @@ impl PyTensor {
         Ok(())
     }
 
-    fn zero_grad(&mut self) {
-        self.inner.zero_grad();
+    fn zero_grad(&mut self, set_to_none: Option<bool>) {
+        self.inner.zero_grad(set_to_none.unwrap_or(false));
     }
 
     // Arithmetic operations

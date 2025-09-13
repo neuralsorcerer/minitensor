@@ -106,10 +106,38 @@ mod tests {
         assert!(tensor2.has_grad());
 
         let mut params = vec![&mut tensor1, &mut tensor2];
-        sgd.zero_grad(&mut params).unwrap();
+        sgd.zero_grad(&mut params, false).unwrap();
 
-        assert!(!tensor1.has_grad());
-        assert!(!tensor2.has_grad());
+        assert!(tensor1.has_grad());
+        assert!(tensor2.has_grad());
+        let expected1 = Tensor::zeros(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let expected2 = Tensor::zeros(
+            Shape::new(vec![3, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        assert!(tensor1.grad().unwrap().allclose(&expected1, 1e-6, 1e-6));
+        assert!(tensor2.grad().unwrap().allclose(&expected2, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_optimizer_zero_grad_set_to_none() {
+        let sgd = SGD::new(0.01, None, None);
+        let mut t1 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut t2 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let g = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        t1.set_grad(Some(g.clone()));
+        t2.set_grad(Some(g));
+        let mut params = vec![&mut t1, &mut t2];
+        sgd.zero_grad(&mut params, true).unwrap();
+        assert!(t1.grad().is_none());
+        assert!(t2.grad().is_none());
     }
 
     #[test]
