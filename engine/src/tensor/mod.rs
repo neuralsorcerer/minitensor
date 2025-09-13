@@ -353,6 +353,13 @@ impl Tensor {
         transpose(self, dim0, dim1)
     }
 
+    /// Permute tensor dimensions
+    #[inline(always)]
+    pub fn permute(&self, dims: Vec<isize>) -> Result<Self> {
+        use crate::operations::shape_ops::permute;
+        permute(self, dims)
+    }
+
     /// Unary negation
     #[inline(always)]
     pub fn neg(&self) -> Result<Self> {
@@ -376,7 +383,7 @@ impl Tensor {
 
     /// Sum reduction
     #[inline(always)]
-    pub fn sum(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
+    pub fn sum(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::sum;
         sum(self, dim, keepdim)
     }
@@ -1066,12 +1073,17 @@ impl Tensor {
         self.view(new_shape)
     }
 
-    /// Squeeze specific dimension if it has size 1
+    /// Squeeze specific dimension if it has size 1. Negative indices are supported.
     #[inline(always)]
-    pub fn squeeze_dim(&self, dim: usize) -> Result<Self> {
-        if dim >= self.ndim() {
-            return Err(MinitensorError::index_error(dim as isize, 0, self.ndim()));
+    pub fn squeeze_dim(&self, dim: isize) -> Result<Self> {
+        let ndim = self.ndim() as isize;
+        let dim = if dim < 0 { dim + ndim } else { dim };
+
+        if dim < 0 || dim >= ndim {
+            return Err(MinitensorError::index_error(dim, 0, ndim as usize));
         }
+
+        let dim = dim as usize;
 
         if self.shape.dims()[dim] != 1 {
             return Ok(self.clone());
@@ -1083,21 +1095,101 @@ impl Tensor {
         self.view(new_shape)
     }
 
-    /// Add dimension of size 1
+    /// Add dimension of size 1. Negative indices are supported.
     #[inline(always)]
-    pub fn unsqueeze(&self, dim: usize) -> Result<Self> {
-        if dim > self.ndim() {
-            return Err(MinitensorError::index_error(
-                dim as isize,
-                0,
-                self.ndim() + 1,
-            ));
+    pub fn unsqueeze(&self, dim: isize) -> Result<Self> {
+        let ndim = self.ndim() as isize;
+        let dim = if dim < 0 { dim + ndim + 1 } else { dim };
+
+        if dim < 0 || dim > ndim {
+            return Err(MinitensorError::index_error(dim, 0, (ndim + 1) as usize));
         }
+
+        let dim = dim as usize;
 
         let mut new_dims = self.shape.dims().to_vec();
         new_dims.insert(dim, 1);
         let new_shape = Shape::new(new_dims);
         self.view(new_shape)
+    }
+
+    /// Expand tensor dimensions without allocating new memory
+    #[inline(always)]
+    pub fn expand(&self, dims: Vec<isize>) -> Result<Self> {
+        let orig_dims = self.shape.dims();
+        let orig_strides = self.strides.as_slice();
+        let n_orig = orig_dims.len();
+        let n_new = dims.len();
+
+        if n_new < n_orig {
+            return Err(MinitensorError::invalid_operation(
+                "cannot expand to fewer dimensions".to_string(),
+            ));
+        }
+
+        let mut new_dims = vec![0usize; n_new];
+        let mut new_strides = vec![0usize; n_new];
+
+        for i in 0..n_new {
+            let size_spec = dims[n_new - 1 - i];
+            if size_spec < -1 {
+                return Err(MinitensorError::invalid_operation(
+                    "invalid negative dimension".to_string(),
+                ));
+            }
+
+            let orig_idx_opt = if i < n_orig {
+                Some(n_orig - 1 - i)
+            } else {
+                None
+            };
+            let orig_dim = orig_idx_opt.map(|idx| orig_dims[idx]).unwrap_or(1);
+            let orig_stride = orig_idx_opt.map(|idx| orig_strides[idx]).unwrap_or(0);
+
+            let target = if size_spec == -1 {
+                orig_dim
+            } else {
+                size_spec as usize
+            };
+
+            if let Some(idx) = orig_idx_opt {
+                if target == orig_dim {
+                    new_dims[n_new - 1 - i] = target;
+                    new_strides[n_new - 1 - i] = orig_stride;
+                } else if orig_dim == 1 && target > 0 {
+                    new_dims[n_new - 1 - i] = target;
+                    new_strides[n_new - 1 - i] = 0;
+                } else {
+                    return Err(MinitensorError::invalid_operation(format!(
+                        "cannot expand dimension {} from {} to {}",
+                        idx, orig_dim, target
+                    )));
+                }
+            } else {
+                if target != 1 {
+                    return Err(MinitensorError::invalid_operation(
+                        "cannot introduce new leading dimension".to_string(),
+                    ));
+                }
+                new_dims[n_new - 1 - i] = 1;
+                new_strides[n_new - 1 - i] = 0;
+            }
+        }
+
+        let mut tensor = self.clone();
+        tensor.shape = Shape::new(new_dims.clone());
+        tensor.strides = Strides::new(new_strides);
+
+        if tensor.requires_grad {
+            let grad_fn = Arc::new(crate::autograd::ExpandBackward {
+                input_shape: orig_dims.to_vec(),
+                input_id: self.id(),
+            });
+            tensor.set_grad_fn(Some(grad_fn.clone()));
+            autograd::add_to_graph(&tensor, Some(grad_fn))?;
+        }
+
+        Ok(tensor)
     }
 
     /// Flatten tensor from start_dim to end_dim

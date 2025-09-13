@@ -251,21 +251,21 @@ fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
         &mul(&a2, &b1).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out)
+    .unsqueeze(axis_out as isize)
     .map_err(_convert_error)?;
     let c1 = sub(
         &mul(&a2, &b0).map_err(_convert_error)?,
         &mul(&a0, &b2).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out)
+    .unsqueeze(axis_out as isize)
     .map_err(_convert_error)?;
     let c2 = sub(
         &mul(&a0, &b1).map_err(_convert_error)?,
         &mul(&a1, &b0).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out)
+    .unsqueeze(axis_out as isize)
     .map_err(_convert_error)?;
 
     let result = tensor_concatenate(&[&c0, &c1, &c2], axis_out).map_err(_convert_error)?;
@@ -315,7 +315,7 @@ fn prod(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyRes
 /// Compute sum along axis
 #[pyfunction]
 fn sum(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.sum(axis.map(|a| vec![a]), keepdims)
+    tensor.sum(axis.map(|a| vec![a as isize]), keepdims)
 }
 
 /// Compute maximum along axis

@@ -101,69 +101,60 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
 }
 
 /// Squeeze operation - remove dimensions of size 1
-pub fn squeeze(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
-    let current_shape = tensor.shape().dims();
-
+pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
     match dim {
-        Some(d) => {
-            // Squeeze specific dimension
-            if d >= current_shape.len() {
-                return Err(MinitensorError::index_error(
-                    d as isize,
-                    0,
-                    current_shape.len(),
-                ));
-            }
-
-            if current_shape[d] != 1 {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Cannot squeeze dimension {} with size {}",
-                    d, current_shape[d]
-                )));
-            }
-
-            let mut new_shape = current_shape.to_vec();
-            new_shape.remove(d);
-
-            reshape(tensor, Shape::new(new_shape))
-        }
-        None => {
-            // Squeeze all dimensions of size 1
-            let new_shape: Vec<usize> = current_shape
-                .iter()
-                .copied()
-                .filter(|&size| size != 1)
-                .collect();
-
-            // Handle the case where all dimensions are 1 (scalar)
-            let new_shape = if new_shape.is_empty() {
-                vec![1] // Keep at least one dimension
-            } else {
-                new_shape
-            };
-
-            reshape(tensor, Shape::new(new_shape))
-        }
+        Some(d) => tensor.squeeze_dim(d),
+        None => tensor.squeeze(),
     }
 }
 
 /// Unsqueeze operation - add a dimension of size 1
-pub fn unsqueeze(tensor: &Tensor, dim: usize) -> Result<Tensor> {
-    let current_shape = tensor.shape().dims();
+pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {
+    tensor.unsqueeze(dim)
+}
 
-    // Allow inserting at the end (dim == current_shape.len())
-    if dim > current_shape.len() {
-        return Err(MinitensorError::index_error(
-            dim as isize,
-            0,
-            current_shape.len() + 1,
+/// Permute tensor dimensions according to `dims`
+pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
+    let ndim = tensor.ndim();
+
+    // Validate number of dimensions
+    if dims.len() != ndim {
+        return Err(MinitensorError::invalid_operation(
+            "dims must match number of dimensions".to_string(),
         ));
     }
 
-    let mut new_shape = current_shape.to_vec();
-    new_shape.insert(dim, 1);
+    // Normalise negative dimensions and validate range
+    let mut normalized = Vec::with_capacity(ndim);
+    for &d in &dims {
+        let d = if d < 0 { d + ndim as isize } else { d };
+        if d < 0 || d >= ndim as isize {
+            return Err(MinitensorError::index_error(d, 0, ndim));
+        }
+        normalized.push(d as usize);
+    }
+    // Check that dims form a proper permutation
+    let mut sorted = normalized.clone();
+    sorted.sort_unstable();
+    if sorted != (0..ndim).collect::<Vec<_>>() {
+        return Err(MinitensorError::invalid_operation(
+            "dims must be a permutation of dimensions".to_string(),
+        ));
+    }
 
-    reshape(tensor, Shape::new(new_shape))
+    // Apply sequence of transposes to achieve the permutation
+    let mut result = tensor.clone();
+    let mut current: Vec<usize> = (0..ndim).collect();
+    for i in 0..ndim {
+        let target = normalized[i];
+        let j = current.iter().position(|&x| x == target).unwrap();
+        if i != j {
+            result = result.transpose(i, j)?;
+            current.swap(i, j);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Concatenate tensors along a specified dimension
@@ -525,11 +516,14 @@ mod tests {
     fn test_squeeze_specific_dim() {
         let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4, 1], false);
 
-        let squeezed = squeeze(&tensor, Some(0)).unwrap();
-        assert_eq!(squeezed.shape().dims(), &[4, 1]);
+        let s0 = squeeze(&tensor, Some(0)).unwrap();
+        assert_eq!(s0.shape().dims(), &[4, 1]);
 
-        let squeezed2 = squeeze(&squeezed, Some(1)).unwrap();
-        assert_eq!(squeezed2.shape().dims(), &[4]);
+        let s1 = squeeze(&s0, Some(1)).unwrap();
+        assert_eq!(s1.shape().dims(), &[4]);
+
+        let s_neg = squeeze(&tensor, Some(-1)).unwrap();
+        assert_eq!(s_neg.shape().dims(), &[1, 4]);
     }
 
     #[test]
@@ -538,25 +532,32 @@ mod tests {
 
         let squeezed = squeeze(&tensor, None).unwrap();
         assert_eq!(squeezed.shape().dims(), &[4]);
+
+        let scalar = create_test_tensor_f32(vec![1.0], vec![1, 1], false);
+        let s = squeeze(&scalar, None).unwrap();
+        assert!(s.shape().dims().is_empty());
     }
 
     #[test]
-    fn test_squeeze_invalid_dim() {
+    fn test_squeeze_out_of_range() {
         let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
-        let result = squeeze(&tensor, Some(0));
-        assert!(result.is_err()); // Cannot squeeze dimension of size 2
+        assert!(squeeze(&tensor, Some(2)).is_err());
+        assert!(squeeze(&tensor, Some(-3)).is_err());
     }
 
     #[test]
     fn test_unsqueeze() {
         let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
 
-        let unsqueezed = unsqueeze(&tensor, 0).unwrap();
-        assert_eq!(unsqueezed.shape().dims(), &[1, 4]);
+        let u0 = unsqueeze(&tensor, 0).unwrap();
+        assert_eq!(u0.shape().dims(), &[1, 4]);
 
-        let unsqueezed2 = unsqueeze(&tensor, 1).unwrap();
-        assert_eq!(unsqueezed2.shape().dims(), &[4, 1]);
+        let u1 = unsqueeze(&tensor, 1).unwrap();
+        assert_eq!(u1.shape().dims(), &[4, 1]);
+
+        let u_neg = unsqueeze(&tensor, -1).unwrap();
+        assert_eq!(u_neg.shape().dims(), &[4, 1]);
     }
 
     #[test]

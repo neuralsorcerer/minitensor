@@ -45,5 +45,5 @@ def test_permute_dim_length_mismatch():
 
 def test_permute_out_of_range():
     x = mt.arange(6).reshape(1, 2, 3)
-    with pytest.raises(ValueError):
+    with pytest.raises(IndexError):
         x.permute(0, 1, 3)

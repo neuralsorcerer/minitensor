@@ -29,7 +29,7 @@ if readme_path.exists():
 
 # Minimal dependencies - keep this lean for production
 INSTALL_REQUIRES = [
-    "numpy>=1.19.0",
+    "numpy",
 ]
 
 # Development dependencies
@@ -40,7 +40,7 @@ EXTRAS_REQUIRE = {
         "black",
         "isort",
         "mypy",
-        "maturin>=1.0,<2.0",
+        "maturin",
     ],
     "docs": [
         "sphinx",
@@ -48,14 +48,15 @@ EXTRAS_REQUIRE = {
         "myst-parser",
     ],
     "examples": [
-        "matplotlib>=3.0",
+        "matplotlib",
         "jupyter",
         "notebook",
+        "scikit-learn",
     ],
     "test": [
         "pytest>=6.0",
         "pytest-benchmark",
-        "numpy>=1.19.0",
+        "numpy",
     ],
 }
 

@@ -32,7 +32,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.19.0",
+    "numpy",
 ]
 dynamic = ["version"]
 
@@ -51,7 +51,7 @@ docs = [
     "myst-parser",
 ]
 examples = [
-    "matplotlib>=3.0",
+    "matplotlib",
     "jupyter",
     "notebook",
     "scikit-learn",

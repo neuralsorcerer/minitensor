@@ -148,7 +148,12 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn squeeze(&self, dim: Option<usize>) -> PyResult<Self> {
+    fn permute(&self, dims: Vec<isize>) -> PyResult<Self> {
+        let result = self.inner.permute(dims).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
         let result = if let Some(d) = dim {
             self.inner.squeeze_dim(d)
         } else {
@@ -158,8 +163,13 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn unsqueeze(&self, dim: usize) -> PyResult<Self> {
+    fn unsqueeze(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.unsqueeze(dim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn expand(&self, dims: Vec<isize>) -> PyResult<Self> {
+        let result = self.inner.expand(dims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -328,7 +338,7 @@ impl PyTensor {
     }
 
     // Reduction operations
-    pub fn sum(&self, dim: Option<Vec<usize>>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn sum(&self, dim: Option<Vec<isize>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.sum(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
@@ -793,7 +803,7 @@ impl PyTensor {
             .iter()
             .map(|obj| {
                 let t = obj.extract::<PyTensor>()?;
-                t.inner.unsqueeze(axis).map_err(_convert_error)
+                t.inner.unsqueeze(axis as isize).map_err(_convert_error)
             })
             .collect::<PyResult<_>>()?;
 
@@ -1087,75 +1097,52 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
     }
 }
 
-fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, force_copy: bool) -> PyResult<Py<PyAny>> {
+fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, _force_copy: bool) -> PyResult<Py<PyAny>> {
     if tensor.device() != Device::cpu() {
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Cannot convert GPU tensor to NumPy array. Use .cpu() first.",
         ));
     }
 
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let data = tensor.data().as_f32_slice().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f32 data")
+    let shape = tensor.shape().dims();
+    let strides = tensor.strides().as_slice();
+    let numel: usize = shape.iter().product();
+
+    macro_rules! to_numpy {
+        ($slice:expr, $ty:ty) => {{
+            let data = $slice.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get tensor data")
             })?;
-            let shape = tensor.shape().dims();
-            let array = if force_copy {
-                PyArray::from_vec(py, data.to_vec()).reshape(shape)?
-            } else {
-                PyArray::from_slice(py, data).reshape(shape)?
-            };
+            let mut out = Vec::<$ty>::with_capacity(numel);
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..numel {
+                let mut offset = 0usize;
+                for (idx, stride) in indices.iter().zip(strides) {
+                    offset += idx * stride;
+                }
+                out.push(data[offset]);
+                for axis in (0..indices.len()).rev() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+            let array = PyArray::from_vec(py, out).reshape(shape)?;
             Ok(array.into_any().unbind())
-        }
-        DataType::Float64 => {
-            let data = tensor.data().as_f64_slice().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f64 data")
-            })?;
-            let shape = tensor.shape().dims();
-            let array = if force_copy {
-                PyArray::from_vec(py, data.to_vec()).reshape(shape)?
-            } else {
-                PyArray::from_slice(py, data).reshape(shape)?
-            };
-            Ok(array.into_any().unbind())
-        }
-        DataType::Int32 => {
-            let data = tensor.data().as_i32_slice().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i32 data")
-            })?;
-            let shape = tensor.shape().dims();
-            let array = if force_copy {
-                PyArray::from_vec(py, data.to_vec()).reshape(shape)?
-            } else {
-                PyArray::from_slice(py, data).reshape(shape)?
-            };
-            Ok(array.into_any().unbind())
-        }
-        DataType::Int64 => {
-            let data = tensor.data().as_i64_slice().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i64 data")
-            })?;
-            let shape = tensor.shape().dims();
-            let array = if force_copy {
-                PyArray::from_vec(py, data.to_vec()).reshape(shape)?
-            } else {
-                PyArray::from_slice(py, data).reshape(shape)?
-            };
-            Ok(array.into_any().unbind())
-        }
-        DataType::Bool => {
-            let data = tensor.data().as_bool_slice().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get bool data")
-            })?;
-            let shape = tensor.shape().dims();
-            let array = if force_copy {
-                PyArray::from_vec(py, data.to_vec()).reshape(shape)?
-            } else {
-                PyArray::from_slice(py, data).reshape(shape)?
-            };
-            Ok(array.into_any().unbind())
-        }
+        }};
     }
+
+    let array: PyResult<Py<PyAny>> = match tensor.dtype() {
+        DataType::Float32 => to_numpy!(tensor.data().as_f32_slice(), f32),
+        DataType::Float64 => to_numpy!(tensor.data().as_f64_slice(), f64),
+        DataType::Int32 => to_numpy!(tensor.data().as_i32_slice(), i32),
+        DataType::Int64 => to_numpy!(tensor.data().as_i64_slice(), i64),
+        DataType::Bool => to_numpy!(tensor.data().as_bool_slice(), bool),
+    };
+
+    Ok(array?)
 }
 
 fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {

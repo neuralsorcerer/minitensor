@@ -353,6 +353,10 @@ fn test_reduction_operations_edges() {
     assert_eq!(sum_dim1.shape().dims(), &[2, 1]);
     assert_eq!(sum_dim1.data().as_f32_slice().unwrap(), &[3.0, 7.0]);
 
+    let sum_neg = reduction::sum(&t, Some(vec![-1]), false).unwrap();
+    assert_eq!(sum_neg.shape().dims(), &[2]);
+    assert_eq!(sum_neg.data().as_f32_slice().unwrap(), &[3.0, 7.0]);
+
     let mean_all = reduction::mean(&t, None, false).unwrap();
     assert!(mean_all.shape().dims().is_empty());
     assert!((mean_all.data().as_f32_slice().unwrap()[0] - 2.5).abs() < 1e-6);
@@ -361,6 +365,7 @@ fn test_reduction_operations_edges() {
     assert!(sum_all.shape().is_scalar());
     assert_eq!(sum_all.data().as_f32_slice().unwrap()[0], 10.0);
     assert!(reduction::sum(&t, Some(vec![2]), false).is_err());
+    assert!(reduction::sum(&t, Some(vec![-3]), false).is_err());
 
     let bool_src = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 2.0], vec![2, 2], false);
     let any_res = reduction::any(&bool_src, Some(1), true).unwrap();

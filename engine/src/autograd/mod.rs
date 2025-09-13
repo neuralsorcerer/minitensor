@@ -1343,7 +1343,27 @@ impl GradientFunction for ReshapeBackward {
     }
 }
 
-// Loss function gradient implementations
+/// Gradient function for expand operation which reduces broadcasted gradients
+pub struct ExpandBackward {
+    pub input_shape: Vec<usize>,
+    pub input_id: TensorId,
+}
+
+impl GradientFunction for ExpandBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let shape = Shape::new(self.input_shape.clone());
+        let grad_input = reduce_gradient_for_broadcasting(grad_output, &shape)?;
+        gradients.insert(self.input_id, grad_input);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
 
 /// Gradient function for MSE loss
 pub struct MSELossBackward {
@@ -1910,7 +1930,12 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
         return Ok(grad_output.clone());
     }
 
-    let mut grad = reduction::sum(grad_output, Some(axes_to_sum.into_vec()), true)?;
+    let axes: Vec<isize> = axes_to_sum
+        .into_vec()
+        .into_iter()
+        .map(|d| d as isize)
+        .collect();
+    let mut grad = reduction::sum(grad_output, Some(axes), true)?;
 
     if grad.shape() != target_shape {
         grad = grad.view(target_shape.clone())?;

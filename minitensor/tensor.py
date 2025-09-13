@@ -58,9 +58,8 @@ def _resolve_dtype(dtype: Optional[str]) -> str:
 class Tensor:
     """
     A multi-dimensional array with automatic differentiation support and NumPy compatibility.
-
-    This tensor class provides a PyTorch-like interface with comprehensive NumPy compatibility,
-    making it easy to migrate from NumPy-based code while gaining automatic differentiation.
+    This class wraps a Rust backend for efficient tensor computations and provides a unified interface
+    for both NumPy and Python.
     """
 
     # Ensure NumPy treats Tensor as having higher priority in operations
@@ -154,32 +153,32 @@ class Tensor:
     # NumPy compatibility properties
     @property
     def size(self) -> int:
-        """Total number of elements (NumPy compatibility)."""
+        """Total number of elements."""
         return self._tensor.size
 
     @property
     def itemsize(self) -> int:
-        """Size of each element in bytes (NumPy compatibility)."""
+        """Size of each element in bytes."""
         return self._tensor.itemsize
 
     @property
     def nbytes(self) -> int:
-        """Total bytes consumed by the tensor (NumPy compatibility)."""
+        """Total bytes consumed by the tensor."""
         return self._tensor.nbytes
 
     @property
     def strides(self) -> Tuple[int, ...]:
-        """Strides of the tensor (NumPy compatibility)."""
+        """Strides of the tensor."""
         return tuple(self._tensor.strides)
 
     @property
     def ndim(self) -> int:
-        """Number of dimensions (NumPy compatibility)."""
+        """Number of dimensions."""
         return self._tensor.ndim()
 
     @property
     def T(self) -> "Tensor":
-        """Transpose (NumPy compatibility)."""
+        """Transpose."""
         return self.transpose()
 
     # Basic tensor info methods
@@ -188,7 +187,7 @@ class Tensor:
         return self._tensor.numel()
 
     def dim(self) -> int:
-        """Get number of dimensions (PyTorch compatibility)."""
+        """Get number of dimensions."""
         return self.ndim
 
     def is_contiguous(self) -> bool:
@@ -276,12 +275,13 @@ class Tensor:
             shape = list(shape[0])
         else:
             shape = list(shape)
+
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.reshape(shape)
         return result
 
     def view(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
-        """Alias for reshape (PyTorch compatibility)."""
+        """Alias for reshape."""
         return self.reshape(*shape)
 
     def transpose(self, dim0: int = 0, dim1: int = 1) -> "Tensor":
@@ -291,29 +291,14 @@ class Tensor:
         return result
 
     def permute(self, *dims: int) -> "Tensor":
-        """Permute tensor dimensions (PyTorch compatibility)."""
-        # Accept dimensions as positional arguments or a single iterable
+        """Permute tensor dimensions."""
         if len(dims) == 1 and isinstance(dims[0], (list, tuple)):
-            dims = tuple(dims[0])
+            dims = list(dims[0])
+        else:
+            dims = list(dims)
 
-        # Support arbitrary dimension permutations using successive transposes
-        if len(dims) != self.ndim:
-            raise ValueError("dims must match number of dimensions")
-
-        # Normalise negative dimensions and validate permutation
-        ndim = self.ndim
-        dims = [d + ndim if d < 0 else d for d in dims]
-        if sorted(dims) != list(range(ndim)):
-            raise ValueError("dims must be a permutation of dimensions")
-
-        # Apply a sequence of transposes to achieve the desired order
-        result = self
-        current = list(range(ndim))
-        for i, d in enumerate(dims):
-            j = current.index(d)
-            if i != j:
-                result = result.transpose(i, j)
-                current[i], current[j] = current[j], current[i]
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.permute(dims)
         return result
 
     def squeeze(self, dim: Optional[int] = None) -> "Tensor":
@@ -326,6 +311,16 @@ class Tensor:
         """Add a dimension of size 1."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.unsqueeze(dim)
+        return result
+
+    def expand(self, *shape: int) -> "Tensor":
+        """Expand tensor dimensions without allocating new memory."""
+        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
+            dims = list(shape[0])
+        else:
+            dims = list(shape)
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.expand(dims)
         return result
 
     def flatten(self, start_dim: int = 0, end_dim: int = -1) -> "Tensor":
@@ -564,11 +559,11 @@ class Tensor:
         return result
 
     def mm(self, other: "Tensor") -> "Tensor":
-        """Matrix multiplication (PyTorch compatibility)."""
+        """Matrix multiplication."""
         return self.matmul(other)
 
     def dot(self, other: "Tensor") -> "Tensor":
-        """Dot product (NumPy compatibility)."""
+        """Dot product."""
         if self.ndim == 1 and other.ndim == 1:
             return (self * other).sum()
         else:
@@ -624,12 +619,6 @@ class Tensor:
             dim = [dim]
         elif isinstance(dim, tuple):
             dim = list(dim)
-        if dim is not None:
-            ndim = self.ndim
-            dim = [d + ndim if d < 0 else d for d in dim]
-            for d in dim:
-                if d < 0 or d >= ndim:
-                    raise IndexError("Dimension out of range")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.sum(dim, keepdim)

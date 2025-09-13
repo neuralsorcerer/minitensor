@@ -92,8 +92,8 @@ pub fn batch_norm(
         let mut rm_view = (*rm).clone().unsqueeze(0)?; // [1, C]
         let mut rv_view = (*rv).clone().unsqueeze(0)?;
         for _ in 2..input.ndim() {
-            rm_view = rm_view.unsqueeze(rm_view.ndim())?;
-            rv_view = rv_view.unsqueeze(rv_view.ndim())?;
+            rm_view = rm_view.unsqueeze(rm_view.ndim() as isize)?;
+            rv_view = rv_view.unsqueeze(rv_view.ndim() as isize)?;
         }
         (rm_view, rv_view)
     } else {
@@ -132,14 +132,14 @@ pub fn batch_norm(
     if let Some(w) = weight {
         let mut w_view = w.clone().unsqueeze(0)?;
         for _ in 2..input.ndim() {
-            w_view = w_view.unsqueeze(w_view.ndim())?;
+            w_view = w_view.unsqueeze(w_view.ndim() as isize)?;
         }
         output = crate::operations::arithmetic::mul(&output, &w_view)?;
     }
     if let Some(b) = bias {
         let mut b_view = b.clone().unsqueeze(0)?;
         for _ in 2..input.ndim() {
-            b_view = b_view.unsqueeze(b_view.ndim())?;
+            b_view = b_view.unsqueeze(b_view.ndim() as isize)?;
         }
         output = crate::operations::arithmetic::add(&output, &b_view)?;
     }

@@ -100,6 +100,14 @@ def test_sum_multiple_dims():
     np.testing.assert_allclose(r_keep.numpy(), np.array([[10.0]], dtype=np.float32))
 
 
+def test_sum_invalid_dim():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(IndexError):
+        t.sum(dim=[2])
+    with pytest.raises(IndexError):
+        t.sum(dim=[-3])
+
+
 def test_prod_all():
     t = mt.Tensor([1.0, 2.0, 3.0])
     p = t.prod()

@@ -1164,7 +1164,7 @@ fn softmax(tensor: &Tensor) -> Result<Tensor> {
     let max_vals = max(tensor, Some(dim), true)?;
     let shifted = sub(tensor, &max_vals)?;
     let exp_tensor = exp(&shifted)?;
-    let sum_exp = sum(&exp_tensor, Some(vec![dim]), true)?;
+    let sum_exp = sum(&exp_tensor, Some(vec![dim as isize]), true)?;
     divide_tensors(&exp_tensor, &sum_exp)
 }
 

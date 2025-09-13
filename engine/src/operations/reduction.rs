@@ -17,13 +17,25 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Sum reduction along specified dimensions
-pub fn sum(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
-    // Normalize and deduplicate dimensions
-    let mut dim = dim;
-    if let Some(ref mut dims) = dim {
-        dims.sort_unstable();
-        dims.dedup();
-    }
+pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // Normalise negative dimensions and deduplicate
+    let ndim = tensor.ndim() as isize;
+    let dim = match dim {
+        Some(dims) => {
+            let mut normalized = Vec::with_capacity(dims.len());
+            for d in dims {
+                let d = if d < 0 { d + ndim } else { d };
+                if d < 0 || d >= ndim {
+                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+                }
+                normalized.push(d as usize);
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    };
     let dims_clone = dim.clone();
 
     let result = match dim {
@@ -319,7 +331,8 @@ pub fn cumprod_backward(
 
 /// Mean reduction along specified dimensions
 pub fn mean(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
-    let sum_result = sum(tensor, dim.clone(), keepdim)?;
+    let dim_isize = dim.clone().map(|d| d.iter().map(|&x| x as isize).collect());
+    let sum_result = sum(tensor, dim_isize, keepdim)?;
 
     // Compute the number of elements being averaged
     let num_elements = match dim {
