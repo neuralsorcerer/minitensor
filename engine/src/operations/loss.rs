@@ -252,9 +252,9 @@ pub fn cross_entropy(
     let mut tgt = target.clone();
     if dim != ndim - 1 {
         for i in dim..(ndim - 1) {
-            pred = pred.transpose(i, i + 1)?;
+            pred = pred.transpose(i as isize, (i + 1) as isize)?;
             if target.ndim() == ndim {
-                tgt = tgt.transpose(i, i + 1)?;
+                tgt = tgt.transpose(i as isize, (i + 1) as isize)?;
             }
         }
     }
@@ -1160,11 +1160,11 @@ fn compute_huber_elementwise(
 /// Apply softmax activation for numerical stability
 fn softmax(tensor: &Tensor) -> Result<Tensor> {
     // Subtract the maximum value for numerical stability
-    let dim = tensor.ndim() - 1;
+    let dim = tensor.ndim() as isize - 1;
     let max_vals = max(tensor, Some(dim), true)?;
     let shifted = sub(tensor, &max_vals)?;
     let exp_tensor = exp(&shifted)?;
-    let sum_exp = sum(&exp_tensor, Some(vec![dim as isize]), true)?;
+    let sum_exp = sum(&exp_tensor, Some(vec![dim]), true)?;
     divide_tensors(&exp_tensor, &sum_exp)
 }
 

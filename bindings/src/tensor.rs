@@ -141,7 +141,7 @@ impl PyTensor {
         Ok(Self { inner: reshaped })
     }
 
-    fn transpose(&self, dim0: Option<usize>, dim1: Option<usize>) -> PyResult<Self> {
+    fn transpose(&self, dim0: Option<isize>, dim1: Option<isize>) -> PyResult<Self> {
         let dim0 = dim0.unwrap_or(0);
         let dim1 = dim1.unwrap_or(1);
         let result = self.inner.transpose(dim0, dim1).map_err(_convert_error)?;
@@ -173,22 +173,12 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn flatten(&self, start_dim: Option<usize>, end_dim: Option<i32>) -> PyResult<Self> {
+    fn flatten(&self, start_dim: Option<isize>, end_dim: Option<isize>) -> PyResult<Self> {
+        let ndim = self.ndim() as isize;
         let start = start_dim.unwrap_or(0);
-        let end = if let Some(e) = end_dim {
-            if e < 0 {
-                (self.ndim() as i32 + e) as usize
-            } else {
-                e as usize
-            }
-        } else {
-            self.ndim() - 1
-        };
+        let end = end_dim.unwrap_or(ndim - 1);
 
-        let result = self
-            .inner
-            .flatten_range(start, end)
-            .map_err(_convert_error)?;
+        let result = self.inner.flatten(start, end).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -344,71 +334,71 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    pub fn prod(&self, dim: Option<Vec<usize>>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn prod(&self, dim: Option<Vec<isize>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.prod(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn mean(&self, dim: Option<Vec<usize>>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn mean(&self, dim: Option<Vec<isize>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.mean(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn all(&self, dim: Option<usize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn all(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.all(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn any(&self, dim: Option<usize>, keepdim: Option<bool>) -> PyResult<Self> {
+    pub fn any(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.any(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn cumsum(&self, dim: usize) -> PyResult<Self> {
+    pub fn cumsum(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumsum(dim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn cumprod(&self, dim: usize) -> PyResult<Self> {
+    pub fn cumprod(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumprod(dim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn max(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn max(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.max(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn min(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn min(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.min(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn argmax(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn argmax(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmax(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn argmin(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn argmin(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmin(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn std(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn std(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.std(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn var(&self, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn var(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.var(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
@@ -768,7 +758,7 @@ impl PyTensor {
 
     /// Concatenate tensors along an axis
     #[staticmethod]
-    pub fn concatenate(tensors: &Bound<PyList>, _axis: Option<usize>) -> PyResult<PyTensor> {
+    pub fn concatenate(tensors: &Bound<PyList>, _axis: Option<isize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot concatenate empty list of tensors",
@@ -790,7 +780,7 @@ impl PyTensor {
 
     /// Stack tensors along a new axis
     #[staticmethod]
-    pub fn stack(tensors: &Bound<PyList>, _axis: Option<usize>) -> PyResult<PyTensor> {
+    pub fn stack(tensors: &Bound<PyList>, _axis: Option<isize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot stack empty list of tensors",
@@ -814,7 +804,7 @@ impl PyTensor {
     }
 
     /// Split tensor into multiple sub-tensors
-    pub fn split(&self, sections: usize, axis: Option<usize>) -> PyResult<Vec<PyTensor>> {
+    pub fn split(&self, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
         if sections == 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Sections must be greater than zero",
@@ -822,6 +812,15 @@ impl PyTensor {
         }
 
         let axis = axis.unwrap_or(0);
+        let ndim = self.inner.ndim() as isize;
+        let axis = if axis < 0 { axis + ndim } else { axis };
+        if axis < 0 || axis >= ndim {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Dimension {} out of range",
+                axis
+            )));
+        }
+        let axis = axis as usize;
         let dim_size = self.inner.shape().dims()[axis];
         if dim_size % sections != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -834,8 +833,9 @@ impl PyTensor {
         for i in 0..sections {
             let start = i * chunk;
             let end = start + chunk;
-            let slice = engine::operations::shape_ops::slice(&self.inner, axis, start, end, 1)
-                .map_err(_convert_error)?;
+            let slice =
+                engine::operations::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
+                    .map_err(_convert_error)?;
             outputs.push(PyTensor::from_tensor(slice));
         }
         Ok(outputs)

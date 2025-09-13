@@ -211,10 +211,10 @@ impl Layer for BatchNorm1d {
             input.clone()
         };
 
-        let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
+        let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
         let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-        let var =
-            crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(vec![0]), true)?; // [1,C]
+        let var = crate::operations::arithmetic::mul(&centered, &centered)?
+            .mean(Some(vec![0isize]), true)?; // [1,C]
 
         let mean = if input.ndim() == 3 {
             mean.view(Shape::new(vec![1, self.num_features, 1]))?
@@ -409,10 +409,10 @@ impl Layer for BatchNorm2d {
             let w = input.size(3)?;
             let reshaped = input.view(Shape::new(vec![n * h * w, self.num_features]))?;
 
-            let mean = reshaped.mean(Some(vec![0]), true)?; // [1,C]
+            let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
             let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
             let var = crate::operations::arithmetic::mul(&centered, &centered)?
-                .mean(Some(vec![0]), true)?; // [1,C]
+                .mean(Some(vec![0isize]), true)?; // [1,C]
 
             let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
             let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();

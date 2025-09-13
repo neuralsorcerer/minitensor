@@ -183,13 +183,16 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 }
 
 /// Transpose operation with gradient support
-pub fn transpose(tensor: &Tensor, dim0: usize, dim1: usize) -> Result<Tensor> {
-    // Validate dimensions
-    if dim0 >= tensor.ndim() || dim1 >= tensor.ndim() {
+pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
+    let ndim = tensor.ndim() as isize;
+    let dim0 = if dim0 < 0 { dim0 + ndim } else { dim0 };
+    let dim1 = if dim1 < 0 { dim1 + ndim } else { dim1 };
+
+    if dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim {
         return Err(MinitensorError::index_error(
-            dim0.max(dim1) as isize,
+            dim0.max(dim1),
             0,
-            tensor.ndim(),
+            ndim as usize,
         ));
     }
 
@@ -198,15 +201,18 @@ pub fn transpose(tensor: &Tensor, dim0: usize, dim1: usize) -> Result<Tensor> {
         return Ok(tensor.clone());
     }
 
+    let dim0_usize = dim0 as usize;
+    let dim1_usize = dim1 as usize;
+
     // Create new shape with swapped dimensions
     let mut new_shape = tensor.shape().dims().to_vec();
-    new_shape.swap(dim0, dim1);
+    new_shape.swap(dim0_usize, dim1_usize);
     let new_shape_obj = Shape::new(new_shape);
 
     // Create new strides with swapped dimensions
     let old_strides = tensor.strides().as_slice();
     let mut new_strides = old_strides.to_vec();
-    new_strides.swap(dim0, dim1);
+    new_strides.swap(dim0_usize, dim1_usize);
 
     // Create output tensor data by copying and rearranging
     let mut output_data =
@@ -214,11 +220,41 @@ pub fn transpose(tensor: &Tensor, dim0: usize, dim1: usize) -> Result<Tensor> {
 
     // Perform transpose based on data type
     match tensor.dtype() {
-        DataType::Float32 => transpose_f32(tensor, &mut output_data, &new_shape_obj, dim0, dim1)?,
-        DataType::Float64 => transpose_f64(tensor, &mut output_data, &new_shape_obj, dim0, dim1)?,
-        DataType::Int32 => transpose_i32(tensor, &mut output_data, &new_shape_obj, dim0, dim1)?,
-        DataType::Int64 => transpose_i64(tensor, &mut output_data, &new_shape_obj, dim0, dim1)?,
-        DataType::Bool => transpose_bool(tensor, &mut output_data, &new_shape_obj, dim0, dim1)?,
+        DataType::Float32 => transpose_f32(
+            tensor,
+            &mut output_data,
+            &new_shape_obj,
+            dim0_usize,
+            dim1_usize,
+        )?,
+        DataType::Float64 => transpose_f64(
+            tensor,
+            &mut output_data,
+            &new_shape_obj,
+            dim0_usize,
+            dim1_usize,
+        )?,
+        DataType::Int32 => transpose_i32(
+            tensor,
+            &mut output_data,
+            &new_shape_obj,
+            dim0_usize,
+            dim1_usize,
+        )?,
+        DataType::Int64 => transpose_i64(
+            tensor,
+            &mut output_data,
+            &new_shape_obj,
+            dim0_usize,
+            dim1_usize,
+        )?,
+        DataType::Bool => transpose_bool(
+            tensor,
+            &mut output_data,
+            &new_shape_obj,
+            dim0_usize,
+            dim1_usize,
+        )?,
     }
 
     // Create output tensor
@@ -233,7 +269,7 @@ pub fn transpose(tensor: &Tensor, dim0: usize, dim1: usize) -> Result<Tensor> {
     // Set up gradient function if needed
     if output.requires_grad() {
         let grad_fn = Arc::new(TransposeBackward {
-            dims: vec![dim0, dim1],
+            dims: vec![dim0_usize, dim1_usize],
             input_id: tensor.id(),
         });
 

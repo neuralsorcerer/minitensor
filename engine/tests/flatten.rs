@@ -16,7 +16,7 @@ fn test_flatten_basic() {
         Device::cpu(),
         false,
     );
-    let flat = t.flatten().unwrap();
+    let flat = t.flatten_all().unwrap();
     assert_eq!(flat.shape().dims(), &[24]);
     assert!(Arc::ptr_eq(t.data(), flat.data()));
 }
@@ -24,7 +24,7 @@ fn test_flatten_basic() {
 #[test]
 fn test_flatten_scalar() {
     let t = Tensor::ones(Shape::scalar(), DataType::Float32, Device::cpu(), false);
-    let flat = t.flatten().unwrap();
+    let flat = t.flatten_all().unwrap();
     assert_eq!(flat.shape().dims(), &[1]);
     assert!(Arc::ptr_eq(t.data(), flat.data()));
 }

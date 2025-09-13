@@ -335,20 +335,20 @@ impl Tensor {
     /// Flatten the tensor into a one-dimensional view.
     /// This operation avoids data copies when possible.
     #[inline(always)]
-    pub fn flatten(&self) -> Result<Self> {
+    pub fn flatten_all(&self) -> Result<Self> {
         let len = self.numel();
         self.reshape(Shape::new(vec![len]))
     }
 
-    /// Alias for [`flatten`](Self::flatten) following NumPy naming.
+    /// Alias for [`flatten_all`](Self::flatten_all) for backward compatibility.
     #[inline(always)]
     pub fn ravel(&self) -> Result<Self> {
-        self.flatten()
+        self.flatten_all()
     }
 
     /// Transpose two dimensions of the tensor
     #[inline(always)]
-    pub fn transpose(&self, dim0: usize, dim1: usize) -> Result<Self> {
+    pub fn transpose(&self, dim0: isize, dim1: isize) -> Result<Self> {
         use crate::operations::linalg::transpose;
         transpose(self, dim0, dim1)
     }
@@ -390,70 +390,70 @@ impl Tensor {
 
     /// Product reduction
     #[inline(always)]
-    pub fn prod(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
+    pub fn prod(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::prod;
         prod(self, dim, keepdim)
     }
 
     /// Mean reduction
     #[inline(always)]
-    pub fn mean(&self, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Self> {
+    pub fn mean(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::mean;
         mean(self, dim, keepdim)
     }
 
     /// Logical all reduction
     #[inline(always)]
-    pub fn all(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn all(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::all;
         all(self, dim, keepdim)
     }
 
     /// Logical any reduction
     #[inline(always)]
-    pub fn any(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn any(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::any;
         any(self, dim, keepdim)
     }
 
     /// Cumulative sum along a dimension
     #[inline(always)]
-    pub fn cumsum(&self, dim: usize) -> Result<Self> {
+    pub fn cumsum(&self, dim: isize) -> Result<Self> {
         use crate::operations::reduction::cumsum;
         cumsum(self, dim)
     }
 
     /// Cumulative product along a dimension
     #[inline(always)]
-    pub fn cumprod(&self, dim: usize) -> Result<Self> {
+    pub fn cumprod(&self, dim: isize) -> Result<Self> {
         use crate::operations::reduction::cumprod;
         cumprod(self, dim)
     }
 
     /// Maximum value
     #[inline(always)]
-    pub fn max(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn max(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::max;
         max(self, dim, keepdim)
     }
 
     /// Minimum value
     #[inline(always)]
-    pub fn min(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn min(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::min;
         min(self, dim, keepdim)
     }
 
     /// Argument of maximum value
     #[inline(always)]
-    pub fn argmax(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn argmax(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::argmax;
         argmax(self, dim, keepdim)
     }
 
     /// Argument of minimum value
     #[inline(always)]
-    pub fn argmin(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn argmin(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::argmin;
         argmin(self, dim, keepdim)
     }
@@ -501,14 +501,14 @@ impl Tensor {
 
     /// Standard deviation
     #[inline(always)]
-    pub fn std(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn std(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::std;
         std(self, dim, keepdim)
     }
 
     /// Variance
     #[inline(always)]
-    pub fn var(&self, dim: Option<usize>, keepdim: bool) -> Result<Self> {
+    pub fn var(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::var;
         var(self, dim, keepdim)
     }
@@ -1190,6 +1190,32 @@ impl Tensor {
         }
 
         Ok(tensor)
+    }
+
+    /// Flatten tensor from `start_dim` to `end_dim` with PyTorch-style dimension handling
+    pub fn flatten(&self, start_dim: isize, end_dim: isize) -> Result<Self> {
+        let ndim = self.ndim() as isize;
+
+        let start = if start_dim < 0 {
+            start_dim + ndim
+        } else {
+            start_dim
+        };
+        let end = if end_dim < 0 { end_dim + ndim } else { end_dim };
+
+        if start < 0 || start >= ndim {
+            return Err(MinitensorError::index_error(start, 0, ndim as usize));
+        }
+        if end < 0 || end >= ndim {
+            return Err(MinitensorError::index_error(end, 0, ndim as usize));
+        }
+        if start > end {
+            return Err(MinitensorError::invalid_argument(
+                "start_dim must be less than or equal to end_dim",
+            ));
+        }
+
+        self.flatten_range(start as usize, end as usize)
     }
 
     /// Flatten tensor from start_dim to end_dim

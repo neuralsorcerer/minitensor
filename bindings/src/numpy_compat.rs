@@ -92,13 +92,13 @@ fn full_like(tensor: &PyTensor, fill_value: f64, dtype: Option<&str>) -> PyResul
 
 /// Concatenate tensors along an axis
 #[pyfunction]
-fn concatenate(tensors: &Bound<PyList>, axis: Option<usize>) -> PyResult<PyTensor> {
+fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, axis)
 }
 
 /// Stack tensors along a new axis
 #[pyfunction]
-fn stack(tensors: &Bound<PyList>, axis: Option<usize>) -> PyResult<PyTensor> {
+fn stack(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, axis)
 }
 
@@ -116,7 +116,7 @@ fn hstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
 
 /// Split tensor into multiple sub-tensors
 #[pyfunction]
-fn split(tensor: &PyTensor, sections: usize, axis: Option<usize>) -> PyResult<Vec<PyTensor>> {
+fn split(tensor: &PyTensor, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
     tensor.split(sections, axis)
 }
 
@@ -209,7 +209,7 @@ fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
             "Invalid axis for cross product",
         ));
     }
-    let axis_out = axis_i32 as usize;
+    let axis_out = axis_i32 as isize;
 
     if a.tensor().dtype() != b.tensor().dtype() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -251,21 +251,21 @@ fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
         &mul(&a2, &b1).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out as isize)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
     let c1 = sub(
         &mul(&a2, &b0).map_err(_convert_error)?,
         &mul(&a0, &b2).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out as isize)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
     let c2 = sub(
         &mul(&a0, &b1).map_err(_convert_error)?,
         &mul(&a1, &b0).map_err(_convert_error)?,
     )
     .map_err(_convert_error)?
-    .unsqueeze(axis_out as isize)
+    .unsqueeze(axis_out)
     .map_err(_convert_error)?;
 
     let result = tensor_concatenate(&[&c0, &c1, &c2], axis_out).map_err(_convert_error)?;
@@ -286,7 +286,7 @@ fn array_equal(a: &PyTensor, b: &PyTensor) -> PyResult<bool> {
 
 /// Compute mean along axis
 #[pyfunction]
-fn mean(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn mean(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.mean(axis.map(|a| vec![a]), keepdims)
 }
 
@@ -294,7 +294,7 @@ fn mean(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyRes
 #[pyfunction]
 fn tensor_std(
     tensor: &PyTensor,
-    axis: Option<usize>,
+    axis: Option<isize>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
     tensor.std(axis, keepdims)
@@ -302,30 +302,30 @@ fn tensor_std(
 
 /// Compute variance along axis
 #[pyfunction]
-fn var(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn var(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.var(axis, keepdims)
 }
 
 /// Compute product along axis
 #[pyfunction]
-fn prod(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn prod(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.prod(axis.map(|a| vec![a]), keepdims)
 }
 
 /// Compute sum along axis
 #[pyfunction]
-fn sum(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.sum(axis.map(|a| vec![a as isize]), keepdims)
+fn sum(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+    tensor.sum(axis.map(|a| vec![a]), keepdims)
 }
 
 /// Compute maximum along axis
 #[pyfunction]
-fn max(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn max(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.max(axis, keepdims)
 }
 
 /// Compute minimum along axis
 #[pyfunction]
-fn min(tensor: &PyTensor, axis: Option<usize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+fn min(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
     tensor.min(axis, keepdims)
 }

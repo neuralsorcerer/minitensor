@@ -299,8 +299,8 @@ impl GradientFunction for MatMulBackward {
         if self.lhs_requires_grad {
             let rhs_t = crate::operations::linalg::transpose(
                 &self.rhs,
-                self.rhs.ndim() - 2,
-                self.rhs.ndim() - 1,
+                (self.rhs.ndim() - 2) as isize,
+                (self.rhs.ndim() - 1) as isize,
             )?;
             let lhs_grad = crate::operations::linalg::matmul(grad_output, &rhs_t)?;
             gradients.insert(self.input_ids[0], lhs_grad);
@@ -309,8 +309,8 @@ impl GradientFunction for MatMulBackward {
         if self.rhs_requires_grad {
             let lhs_t = crate::operations::linalg::transpose(
                 &self.lhs,
-                self.lhs.ndim() - 2,
-                self.lhs.ndim() - 1,
+                (self.lhs.ndim() - 2) as isize,
+                (self.lhs.ndim() - 1) as isize,
             )?;
             let rhs_grad = crate::operations::linalg::matmul(&lhs_t, grad_output)?;
             gradients.insert(self.input_ids[1], rhs_grad);
@@ -338,7 +338,11 @@ impl GradientFunction for TransposeBackward {
         // Transpose gradient: transpose back. Support both simple swaps and
         // arbitrary dimension permutations by applying the inverse permutation.
         let grad_input = if self.dims.len() == 2 {
-            crate::operations::linalg::transpose(grad_output, self.dims[0], self.dims[1])?
+            crate::operations::linalg::transpose(
+                grad_output,
+                self.dims[0] as isize,
+                self.dims[1] as isize,
+            )?
         } else {
             let mut inverse = vec![0; self.dims.len()];
             for (i, &d) in self.dims.iter().enumerate() {
@@ -352,7 +356,7 @@ impl GradientFunction for TransposeBackward {
                     .position(|&x| x == inverse[i])
                     .expect("invalid permutation");
                 if i != j {
-                    grad = crate::operations::linalg::transpose(&grad, i, j)?;
+                    grad = crate::operations::linalg::transpose(&grad, i as isize, j as isize)?;
                     current.swap(i, j);
                 }
             }
@@ -2218,8 +2222,12 @@ mod tests {
             false,
         );
         let grads = grad_fn.backward(&grad_output).unwrap();
-        let rhs_t =
-            crate::operations::linalg::transpose(&rhs, rhs.ndim() - 2, rhs.ndim() - 1).unwrap();
+        let rhs_t = crate::operations::linalg::transpose(
+            &rhs,
+            (rhs.ndim() - 2) as isize,
+            (rhs.ndim() - 1) as isize,
+        )
+        .unwrap();
         let expected_lhs = crate::operations::linalg::matmul(&grad_output, &rhs_t).unwrap();
         assert!(
             grads
@@ -2227,8 +2235,12 @@ mod tests {
                 .unwrap()
                 .allclose(&expected_lhs, 1e-6, 1e-6)
         );
-        let lhs_t =
-            crate::operations::linalg::transpose(&lhs, lhs.ndim() - 2, lhs.ndim() - 1).unwrap();
+        let lhs_t = crate::operations::linalg::transpose(
+            &lhs,
+            (lhs.ndim() - 2) as isize,
+            (lhs.ndim() - 1) as isize,
+        )
+        .unwrap();
         let expected_rhs = crate::operations::linalg::matmul(&lhs_t, &grad_output).unwrap();
         assert!(
             grads
@@ -2313,7 +2325,8 @@ mod tests {
         for i in 0..inverse.len() {
             let j = current.iter().position(|&x| x == inverse[i]).unwrap();
             if i != j {
-                expected = crate::operations::linalg::transpose(&expected, i, j).unwrap();
+                expected = crate::operations::linalg::transpose(&expected, i as isize, j as isize)
+                    .unwrap();
                 current.swap(i, j);
             }
         }

@@ -25,3 +25,9 @@ def test_flatten_range_and_error():
     assert f.shape == (2, 12)
     with pytest.raises(ValueError):
         t.flatten(2, 0)
+
+
+def test_flatten_negative_start_dim():
+    t = Tensor.arange(0, 24).reshape([2, 3, 4])
+    f = t.flatten(-3, -2)
+    assert f.shape == (6, 4)

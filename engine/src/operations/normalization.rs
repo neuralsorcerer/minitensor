@@ -79,10 +79,11 @@ pub fn batch_norm(
     let axes: Vec<usize> = (0..input.ndim()).filter(|&d| d != 1).collect();
 
     // Compute batch statistics if needed
-    let batch_mean = input.mean(Some(axes.clone()), true)?; // [1, C, ...]
+    let axes_isize: Vec<isize> = axes.iter().map(|&d| d as isize).collect();
+    let batch_mean = input.mean(Some(axes_isize.clone()), true)?; // [1, C, ...]
     let centered = crate::operations::arithmetic::sub(input, &batch_mean)?;
-    let batch_var =
-        crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(axes.clone()), true)?;
+    let batch_var = crate::operations::arithmetic::mul(&centered, &centered)?
+        .mean(Some(axes_isize.clone()), true)?;
 
     // Decide which statistics to use
     let (mean_used, var_used) = if training || running_mean.is_none() || running_var.is_none() {

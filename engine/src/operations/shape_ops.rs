@@ -12,6 +12,15 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+    let dim = if dim < 0 { dim + ndim as isize } else { dim };
+    if dim < 0 || dim >= ndim as isize {
+        Err(MinitensorError::index_error(dim, 0, ndim))
+    } else {
+        Ok(dim as usize)
+    }
+}
+
 /// Reshape operation with gradient support
 pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
     // Check if the total number of elements matches
@@ -149,7 +158,7 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
         let target = normalized[i];
         let j = current.iter().position(|&x| x == target).unwrap();
         if i != j {
-            result = result.transpose(i, j)?;
+            result = result.transpose(i as isize, j as isize)?;
             current.swap(i, j);
         }
     }
@@ -158,7 +167,7 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
 }
 
 /// Concatenate tensors along a specified dimension
-pub fn concatenate(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
+pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     if tensors.is_empty() {
         return Err(MinitensorError::invalid_operation(
             "Cannot concatenate empty list of tensors",
@@ -194,13 +203,7 @@ pub fn concatenate(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
     }
 
     // Validate concatenation dimension
-    if dim >= first_tensor.ndim() {
-        return Err(MinitensorError::index_error(
-            dim as isize,
-            0,
-            first_tensor.ndim(),
-        ));
-    }
+    let dim = normalize_dim(dim, first_tensor.ndim())?;
 
     // Validate that all dimensions except the concatenation dimension match
     for tensor in tensors.iter().skip(1) {
@@ -287,10 +290,8 @@ pub fn concatenate(tensors: &[&Tensor], dim: usize) -> Result<Tensor> {
 }
 
 /// Indexing operation - select elements along specified dimensions
-pub fn index_select(tensor: &Tensor, dim: usize, indices: &[usize]) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-    }
+pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
 
     let dim_size = tensor.shape().dims()[dim];
 
@@ -359,10 +360,8 @@ pub fn index_select(tensor: &Tensor, dim: usize, indices: &[usize]) -> Result<Te
 }
 
 /// Slicing operation - select a contiguous range of elements
-pub fn slice(tensor: &Tensor, dim: usize, start: usize, end: usize, step: usize) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-    }
+pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
 
     let dim_size = tensor.shape().dims()[dim];
 

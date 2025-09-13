@@ -16,6 +16,15 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+    let dim = if dim < 0 { dim + ndim as isize } else { dim };
+    if dim < 0 || dim >= ndim as isize {
+        Err(MinitensorError::index_error(dim, 0, ndim))
+    } else {
+        Ok(dim as usize)
+    }
+}
+
 /// Sum reduction along specified dimensions
 pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
@@ -106,12 +115,25 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
 }
 
 /// Product reduction along specified dimensions
-pub fn prod(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
-    let mut dim = dim;
-    if let Some(ref mut dims) = dim {
-        dims.sort_unstable();
-        dims.dedup();
-    }
+pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // Normalise negative dimensions and deduplicate
+    let ndim = tensor.ndim() as isize;
+    let dim = match dim {
+        Some(dims) => {
+            let mut normalized = Vec::with_capacity(dims.len());
+            for d in dims {
+                let d = if d < 0 { d + ndim } else { d };
+                if d < 0 || d >= ndim {
+                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+                }
+                normalized.push(d as usize);
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    };
     let dims_clone = dim.clone();
 
     let result = match dim {
@@ -177,10 +199,8 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<T
 }
 
 /// Cumulative sum along a specified dimension
-pub fn cumsum(tensor: &Tensor, dim: usize) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-    }
+pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
 
     let mut result_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
@@ -250,10 +270,8 @@ pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
 }
 
 /// Cumulative product along a specified dimension
-pub fn cumprod(tensor: &Tensor, dim: usize) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-    }
+pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
 
     let mut result_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
@@ -330,12 +348,36 @@ pub fn cumprod_backward(
 }
 
 /// Mean reduction along specified dimensions
-pub fn mean(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<Tensor> {
-    let dim_isize = dim.clone().map(|d| d.iter().map(|&x| x as isize).collect());
-    let sum_result = sum(tensor, dim_isize, keepdim)?;
+pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // Normalise negative dimensions and deduplicate
+    let ndim = tensor.ndim() as isize;
+    let normalized = match dim {
+        Some(dims) => {
+            let mut normalized = Vec::with_capacity(dims.len());
+            for d in dims {
+                let d = if d < 0 { d + ndim } else { d };
+                if d < 0 || d >= ndim {
+                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+                }
+                normalized.push(d as usize);
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    };
+
+    let sum_result = sum(
+        tensor,
+        normalized
+            .clone()
+            .map(|d| d.iter().map(|&x| x as isize).collect()),
+        keepdim,
+    )?;
 
     // Compute the number of elements being averaged
-    let num_elements = match dim {
+    let num_elements = match &normalized {
         None => tensor.numel() as f64,
         Some(dims) => {
             if dims.is_empty() {
@@ -343,62 +385,100 @@ pub fn mean(tensor: &Tensor, dim: Option<Vec<usize>>, keepdim: bool) -> Result<T
             }
 
             let mut count = 1.0;
-            for &d in &dims {
-                if d < tensor.ndim() {
-                    count *= tensor.shape().dims()[d] as f64;
-                }
+            for &d in dims {
+                count *= tensor.shape().dims()[d] as f64;
             }
             count
         }
     };
 
-    // Divide by number of elements
-    let divisor = match tensor.dtype() {
-        DataType::Float32 => Tensor::new(
-            Arc::new(TensorData::from_vec(
-                vec![num_elements as f32],
+    // Prepare sum tensor and divisor for division
+    let (sum_tensor, divisor) = match tensor.dtype() {
+        DataType::Float32 => (
+            sum_result,
+            Tensor::new(
+                Arc::new(TensorData::from_vec(
+                    vec![num_elements as f32],
+                    DataType::Float32,
+                    tensor.device(),
+                )),
+                Shape::scalar(),
                 DataType::Float32,
                 tensor.device(),
-            )),
-            Shape::scalar(),
-            DataType::Float32,
-            tensor.device(),
-            false,
+                false,
+            ),
         ),
-        DataType::Float64 => Tensor::new(
-            Arc::new(TensorData::from_vec(
-                vec![num_elements],
+        DataType::Float64 => (
+            sum_result,
+            Tensor::new(
+                Arc::new(TensorData::from_vec(
+                    vec![num_elements],
+                    DataType::Float64,
+                    tensor.device(),
+                )),
+                Shape::scalar(),
                 DataType::Float64,
                 tensor.device(),
-            )),
-            Shape::scalar(),
-            DataType::Float64,
-            tensor.device(),
-            false,
+                false,
+            ),
         ),
-        _ => {
+        DataType::Int32 => (
+            sum_result.astype(DataType::Float32)?,
+            Tensor::new(
+                Arc::new(TensorData::from_vec(
+                    vec![num_elements as f32],
+                    DataType::Float32,
+                    tensor.device(),
+                )),
+                Shape::scalar(),
+                DataType::Float32,
+                tensor.device(),
+                false,
+            ),
+        ),
+        DataType::Int64 => (
+            sum_result.astype(DataType::Float64)?,
+            Tensor::new(
+                Arc::new(TensorData::from_vec(
+                    vec![num_elements],
+                    DataType::Float64,
+                    tensor.device(),
+                )),
+                Shape::scalar(),
+                DataType::Float64,
+                tensor.device(),
+                false,
+            ),
+        ),
+        DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
-                "Mean only supported for floating point tensors",
+                "Mean not supported for boolean tensors",
             ));
         }
     };
 
-    crate::operations::arithmetic::div(&sum_result, &divisor)
+    crate::operations::arithmetic::div(&sum_tensor, &divisor)
 }
 
 /// Logical all reduction along specified dimension
-pub fn all(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn all(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => all_all(tensor, keepdim),
-        Some(d) => all_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            all_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
 /// Logical any reduction along specified dimension
-pub fn any(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn any(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => any_all(tensor, keepdim),
-        Some(d) => any_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            any_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
@@ -793,7 +873,7 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
 }
 
 /// Maximum value along specified dimension
-pub fn max(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => {
             // Find global maximum
@@ -821,12 +901,15 @@ pub fn max(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor>
                 tensor.requires_grad(),
             ))
         }
-        Some(d) => max_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            max_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
 /// Minimum value along specified dimension
-pub fn min(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => {
             // Find global minimum
@@ -854,12 +937,15 @@ pub fn min(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor>
                 tensor.requires_grad(),
             ))
         }
-        Some(d) => min_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            min_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
 /// Argument of maximum value along specified dimension
-pub fn argmax(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn argmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => {
             // Find global argmax
@@ -887,12 +973,15 @@ pub fn argmax(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tens
                 false, // argmax doesn't require gradients
             ))
         }
-        Some(d) => argmax_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            argmax_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
 /// Argument of minimum value along specified dimension
-pub fn argmin(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {
         None => {
             // Find global argmin
@@ -920,18 +1009,21 @@ pub fn argmin(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tens
                 false, // argmin doesn't require gradients
             ))
         }
-        Some(d) => argmin_along_dim(tensor, d, keepdim),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            argmin_along_dim(tensor, d, keepdim)
+        }
     }
 }
 
 /// Standard deviation along specified dimension
-pub fn std(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn std(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     let variance = var(tensor, dim, keepdim)?;
     crate::operations::activation::sqrt(&variance)
 }
 
 /// Variance along specified dimension
-pub fn var(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor> {
+pub fn var(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",
@@ -939,7 +1031,7 @@ pub fn var(tensor: &Tensor, dim: Option<usize>, keepdim: bool) -> Result<Tensor>
     }
 
     // Compute mean
-    let mean_tensor = mean(tensor, dim.map(|d| vec![d]), keepdim)?;
+    let mean_tensor = mean(tensor, dim.clone().map(|d| vec![d]), keepdim)?;
 
     // Compute (x - mean)^2
     let diff = crate::operations::arithmetic::sub(tensor, &mean_tensor)?;
@@ -3274,8 +3366,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mean_int_error() {
+    fn test_mean_int_support() {
         let t = create_tensor_i32(vec![1, 2, 3, 4], vec![2, 2]);
-        assert!(mean(&t, Some(vec![0]), false).is_err());
+        let res = mean(&t, Some(vec![0isize]), false).unwrap();
+        assert_eq!(res.dtype(), DataType::Float32);
+        assert_eq!(res.data().as_f32_slice().unwrap(), &[2.0, 3.0]);
     }
 }

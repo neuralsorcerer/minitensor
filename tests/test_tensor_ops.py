@@ -58,6 +58,18 @@ def test_transpose_invalid_dim():
         t.transpose(0, 2)
 
 
+def test_transpose_negative_dim():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    tr = t.transpose(0, -1)
+    np.testing.assert_allclose(tr.numpy(), np.array([[1.0, 3.0], [2.0, 4.0]]))
+
+
+def test_transpose_negative_dim_out_of_range():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(IndexError):
+        t.transpose(0, -3)
+
+
 def test_sum_keepdim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     s = t.sum(dim=[1], keepdim=True)
@@ -72,12 +84,6 @@ def test_prod_keepdim():
     np.testing.assert_allclose(p.numpy(), np.array([[2.0], [12.0]]))
     p_no = t.prod(dim=[1], keepdim=False)
     np.testing.assert_allclose(p_no.numpy(), np.array([2.0, 12.0]))
-
-
-def test_mean_int_error():
-    t = mt.Tensor([[1, 2], [3, 4]], dtype="int32")
-    with pytest.raises(ValueError):
-        t.mean(dim=[0])
 
 
 def test_backward_non_scalar_error():
@@ -122,10 +128,23 @@ def test_bool_prod():
     np.testing.assert_array_equal(p_dim.numpy(), np.array([True, False]))
 
 
+def test_prod_negative_dim():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    r = t.prod(dim=[-1])
+    np.testing.assert_allclose(r.numpy(), np.array([2.0, 12.0]))
+
+
 def test_mean_negative_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     r = t.mean(dim=[-1])
     np.testing.assert_allclose(r.numpy(), np.array([1.5, 3.5]))
+
+
+def test_mean_int_tensor():
+    t = mt.Tensor([1, 2, 3], dtype="int32")
+    r = t.mean()
+    assert r.dtype == "float32"
+    np.testing.assert_allclose(r.numpy(), np.array(2.0, dtype=np.float32))
 
 
 def test_any_all_keepdim():
@@ -142,6 +161,13 @@ def test_any_all_negative_dim():
     all_res = t.all(dim=-2)
     np.testing.assert_array_equal(any_res.numpy(), np.array([True, True]))
     np.testing.assert_array_equal(all_res.numpy(), np.array([False, False]))
+
+
+def test_max_negative_dim():
+    t = mt.arange(6).reshape(2, 3)
+    vals, idx = t.max(dim=-1)
+    np.testing.assert_allclose(vals.numpy(), np.max(t.numpy(), axis=-1))
+    np.testing.assert_array_equal(idx.numpy(), np.argmax(t.numpy(), axis=-1))
 
 
 def test_empty_tensor_reductions():
@@ -246,3 +272,36 @@ def test_array_equal_parallel():
 def test_empty_ones_tensor():
     t = mt.Tensor.ones([0])
     assert t.numpy().size == 0
+
+
+def test_concatenate_negative_axis():
+    a = mt.arange(6).reshape(2, 3)
+    b = mt.arange(6, 12).reshape(2, 3)
+    core_res = mt.numpy_compat.concatenate([a._tensor, b._tensor], axis=-1)
+    res = mt.Tensor.__new__(mt.Tensor)
+    res._tensor = core_res
+    np.testing.assert_allclose(
+        res.numpy(), np.concatenate([a.numpy(), b.numpy()], axis=-1)
+    )
+
+
+def test_stack_negative_axis():
+    a = mt.arange(6).reshape(2, 3)
+    b = mt.arange(6, 12).reshape(2, 3)
+    core_res = mt.numpy_compat.stack([a._tensor, b._tensor], axis=-1)
+    res = mt.Tensor.__new__(mt.Tensor)
+    res._tensor = core_res
+    np.testing.assert_allclose(res.numpy(), np.stack([a.numpy(), b.numpy()], axis=-1))
+
+
+def test_split_negative_axis():
+    t = mt.arange(12).reshape(3, 4)
+    core_parts = mt.numpy_compat.split(t._tensor, 2, axis=-1)
+    parts = []
+    for cp in core_parts:
+        wrapper = mt.Tensor.__new__(mt.Tensor)
+        wrapper._tensor = cp
+        parts.append(wrapper)
+    np_parts = np.split(t.numpy(), 2, axis=-1)
+    for p, n in zip(parts, np_parts):
+        np.testing.assert_allclose(p.numpy(), n)

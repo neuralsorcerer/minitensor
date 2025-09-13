@@ -296,7 +296,6 @@ class Tensor:
             dims = list(dims[0])
         else:
             dims = list(dims)
-
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.permute(dims)
         return result
@@ -600,12 +599,6 @@ class Tensor:
             dim = [dim]
         elif isinstance(dim, tuple):
             dim = list(dim)
-        if dim is not None:
-            ndim = self.ndim
-            dim = [d + ndim if d < 0 else d for d in dim]
-            for d in dim:
-                if d < 0 or d >= ndim:
-                    raise IndexError("Dimension out of range")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.prod(dim, keepdim)
@@ -632,15 +625,6 @@ class Tensor:
             dim = [dim]
         elif isinstance(dim, tuple):
             dim = list(dim)
-        if dim is not None:
-            ndim = self.ndim
-            dim = [d + ndim if d < 0 else d for d in dim]
-            for d in dim:
-                if d < 0 or d >= ndim:
-                    raise IndexError("Dimension out of range")
-        np_dtype = _TENSOR_TO_NP_DTYPE[self.dtype]
-        if np.issubdtype(np_dtype, np.integer):
-            raise ValueError("mean not defined for integer tensors")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.mean(dim, keepdim)
@@ -654,10 +638,6 @@ class Tensor:
             result = Tensor.__new__(Tensor)
             result._tensor = self._tensor.max(dim, keepdim)
             return result
-
-        dim = dim if dim >= 0 else dim + self.ndim
-        if dim < 0 or dim >= self.ndim:
-            raise IndexError("Dimension out of range")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.max(dim, keepdim)
@@ -675,10 +655,6 @@ class Tensor:
             result._tensor = self._tensor.min(dim, keepdim)
             return result
 
-        dim = dim if dim >= 0 else dim + self.ndim
-        if dim < 0 or dim >= self.ndim:
-            raise IndexError("Dimension out of range")
-
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.min(dim, keepdim)
         indices = Tensor.__new__(Tensor)
@@ -688,10 +664,6 @@ class Tensor:
 
     def argmax(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Indices of maximum values."""
-        if dim is not None:
-            dim = dim + self.ndim if dim < 0 else dim
-            if dim < 0 or dim >= self.ndim:
-                raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.argmax(dim, keepdim)
         return result
@@ -937,38 +909,24 @@ class Tensor:
     # Utility methods
     def all(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if all elements evaluate to True."""
-        if dim is not None:
-            dim = dim + self.ndim if dim < 0 else dim
-            if dim < 0 or dim >= self.ndim:
-                raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.all(dim, keepdim)
         return result
 
     def any(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Test if any element evaluates to True."""
-        if dim is not None:
-            dim = dim + self.ndim if dim < 0 else dim
-            if dim < 0 or dim >= self.ndim:
-                raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.any(dim, keepdim)
         return result
 
     def cumsum(self, dim: int) -> "Tensor":
         """Cumulative sum along a dimension."""
-        dim = dim + self.ndim if dim < 0 else dim
-        if dim < 0 or dim >= self.ndim:
-            raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.cumsum(dim)
         return result
 
     def cumprod(self, dim: int) -> "Tensor":
         """Cumulative product along a dimension."""
-        dim = dim + self.ndim if dim < 0 else dim
-        if dim < 0 or dim >= self.ndim:
-            raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.cumprod(dim)
         return result
