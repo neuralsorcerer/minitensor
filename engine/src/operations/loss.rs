@@ -11,7 +11,7 @@ use crate::{
     },
     error::{MinitensorError, Result},
     operations::{
-        arithmetic::{mul, sub},
+        arithmetic::{add, mul, sub},
         reduction::{max, sum},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -308,14 +308,21 @@ pub fn binary_cross_entropy_loss(
 
     // Compute BCE: -[targets * log(predictions) + (1 - targets) * log(1 - predictions)]
     let log_predictions = log(predictions)?;
-    let one_minus_targets = subtract_from_scalar(targets, 1.0)?;
-    let one_minus_predictions = subtract_from_scalar(predictions, 1.0)?;
+
+    let ones = Tensor::ones(
+        predictions.shape().clone(),
+        predictions.dtype(),
+        predictions.device(),
+        false,
+    );
+    let one_minus_targets = sub(&ones, targets)?;
+    let one_minus_predictions = sub(&ones, predictions)?;
     let log_one_minus_predictions = log(&one_minus_predictions)?;
 
     let term1 = mul(targets, &log_predictions)?;
     let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
-    let bce_values = sub(&term1, &term2)?;
-    let negative_bce = negate(&bce_values)?;
+    let combined = add(&term1, &term2)?;
+    let negative_bce = negate(&combined)?;
 
     // Apply reduction
     let loss = match reduction {
@@ -462,7 +469,13 @@ pub fn focal_loss(
 
     // Compute focal loss components
     let log_predictions = log(&softmax_predictions)?;
-    let one_minus_p = subtract_from_scalar(&softmax_predictions, 1.0)?;
+    let ones = Tensor::ones(
+        softmax_predictions.shape().clone(),
+        softmax_predictions.dtype(),
+        softmax_predictions.device(),
+        false,
+    );
+    let one_minus_p = sub(&ones, &softmax_predictions)?;
     let focal_weight = power(&one_minus_p, gamma)?;
 
     // Compute negative log likelihood with focal weighting
@@ -1249,53 +1262,6 @@ fn log(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Subtract scalar from tensor elements
-fn subtract_from_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            let scalar_f32 = scalar as f32;
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = scalar_f32 - val;
-            }
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = scalar - val;
-            }
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Subtraction only supported for floating point tensors",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
 /// Negate tensor elements
 fn negate(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
@@ -1502,6 +1468,24 @@ mod tests {
         // Expected: [1.0 * (2.0 - 0.5 * 1.0), 1.0 * (2.0 - 0.5 * 1.0)] = [1.5, 1.5]
         assert!((loss_data[0] - 1.5).abs() < 1e-6);
         assert!((loss_data[1] - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bce_loss_mean_and_backward() {
+        let predictions = create_test_tensor_f32(vec![0.8, 0.2], vec![2], true);
+        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2], false);
+
+        let loss = binary_cross_entropy_loss(&predictions, &targets, "mean").unwrap();
+        let loss_val = loss.data().as_f32_slice().unwrap()[0];
+        let expected = -((0.8f32).ln() + (0.8f32).ln()) / 2.0;
+        assert!((loss_val - expected).abs() < 1e-6);
+
+        let grads = crate::autograd::backward(&loss, None).unwrap();
+        let grad = grads.get(&predictions.id()).unwrap();
+        let grad_slice = grad.data().as_f32_slice().unwrap();
+        let expected_grad = [-(1.0 / 0.8) / 2.0, (1.0 / 0.8) / 2.0];
+        assert!((grad_slice[0] - expected_grad[0]).abs() < 1e-6);
+        assert!((grad_slice[1] - expected_grad[1]).abs() < 1e-6);
     }
 
     #[test]

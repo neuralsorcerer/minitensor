@@ -282,9 +282,12 @@ impl Optimizer for SGD {
                 continue;
             }
 
-            let grad = match autograd::get_gradient(param) {
-                Some(g) => g,
-                None => continue,
+            let grad = if let Some(g) = param.grad() {
+                (**g).clone()
+            } else if let Some(g) = autograd::get_gradient(param) {
+                g
+            } else {
+                continue;
             };
 
             // Get learning rate for this parameter
