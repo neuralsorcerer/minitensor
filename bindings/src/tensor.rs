@@ -135,9 +135,9 @@ impl PyTensor {
     }
 
     // Tensor manipulation methods
-    fn reshape(&self, shape: Vec<usize>) -> PyResult<Self> {
-        let new_shape = Shape::new(shape);
-        let reshaped = self.inner.reshape(new_shape).map_err(_convert_error)?;
+    fn reshape(&self, shape: Vec<isize>) -> PyResult<Self> {
+        let reshaped = engine::operations::reshape_with_inference(&self.inner, shape)
+            .map_err(_convert_error)?;
         Ok(Self { inner: reshaped })
     }
 

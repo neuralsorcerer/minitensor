@@ -44,6 +44,62 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
     }
 }
 
+/// This wrapper performs validation and inference for a single ``-1``
+/// dimension before delegating to [`reshape`].
+pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
+    let neg_count = dims.iter().filter(|&&d| d == -1).count();
+    if neg_count > 1 {
+        return Err(MinitensorError::invalid_operation(
+            "can only specify one -1 dimension in reshape".to_string(),
+        ));
+    }
+
+    let mut out_dims = Vec::with_capacity(dims.len());
+    if neg_count == 1 {
+        let mut known: usize = 1;
+        for &dim in &dims {
+            if dim == -1 {
+                continue;
+            }
+            if dim < -1 {
+                return Err(MinitensorError::invalid_operation(
+                    "invalid negative dimension".to_string(),
+                ));
+            }
+            known *= dim as usize;
+        }
+        if known == 0 {
+            return Err(MinitensorError::invalid_operation(
+                "cannot reshape tensor with -1 and 0 dimensions".to_string(),
+            ));
+        }
+        if tensor.numel() % known != 0 {
+            return Err(MinitensorError::invalid_operation(
+                "cannot infer reshape dimension".to_string(),
+            ));
+        }
+        let inferred = tensor.numel() / known;
+        for &dim in &dims {
+            if dim == -1 {
+                out_dims.push(inferred);
+            } else {
+                out_dims.push(dim as usize);
+            }
+        }
+    } else {
+        for &dim in &dims {
+            if dim < 0 {
+                return Err(MinitensorError::invalid_operation(
+                    "negative dimensions are not allowed".to_string(),
+                ));
+            }
+            out_dims.push(dim as usize);
+        }
+    }
+
+    reshape(tensor, Shape::new(out_dims))
+}
+
 /// Squeeze operation - remove dimensions of size 1
 pub fn squeeze(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     let current_shape = tensor.shape().dims();
@@ -434,6 +490,34 @@ mod tests {
         let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = reshape(&tensor, Shape::new(vec![2, 3]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reshape_infer_dim() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![6], false);
+        let reshaped = reshape_with_inference(&tensor, vec![2, -1]).unwrap();
+        assert_eq!(reshaped.shape().dims(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_reshape_multiple_negative_one_error() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
+        let result = reshape_with_inference(&tensor, vec![-1, -1]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reshape_infer_mismatch_error() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5], false);
+        let result = reshape_with_inference(&tensor, vec![4, -1]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reshape_zero_dim_with_inference_error() {
+        let tensor = create_test_tensor_f32(vec![], vec![0], false);
+        let result = reshape_with_inference(&tensor, vec![-1, 0]);
         assert!(result.is_err());
     }
 

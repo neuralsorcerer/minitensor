@@ -273,9 +273,11 @@ class Tensor:
     def reshape(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
         """Reshape tensor to new shape."""
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = shape[0]
+            shape = list(shape[0])
+        else:
+            shape = list(shape)
         result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.reshape(list(shape))
+        result._tensor = self._tensor.reshape(shape)
         return result
 
     def view(self, *shape: Union[int, Sequence[int]]) -> "Tensor":

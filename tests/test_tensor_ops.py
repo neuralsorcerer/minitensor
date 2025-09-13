@@ -28,6 +28,30 @@ def test_reshape_invalid_size():
         t.reshape([3, 2])
 
 
+def test_reshape_infer_dim():
+    t = mt.arange(6)
+    r = t.reshape(2, -1)
+    np.testing.assert_allclose(r.numpy(), np.arange(6, dtype=np.float32).reshape(2, 3))
+
+
+def test_reshape_multiple_negative_one_error():
+    t = mt.arange(6)
+    with pytest.raises(ValueError):
+        t.reshape(-1, -1)
+
+
+def test_reshape_infer_mismatch_error():
+    t = mt.arange(5)
+    with pytest.raises(ValueError):
+        t.reshape(4, -1)
+
+
+def test_reshape_zero_dim_with_inference_error():
+    t = mt.arange(0)
+    with pytest.raises(ValueError):
+        t.reshape(-1, 0)
+
+
 def test_transpose_invalid_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     with pytest.raises(IndexError):
