@@ -27,17 +27,16 @@ def main() -> None:  # pragma: no cover - example script
 
     model = nn.DenseLayer(1, 1)
     criterion = nn.MSELoss()
-    optimizer = optim.SGD(0.1, 0.0, 0.0, False)
-    params = model.parameters()
+    optimizer = optim.SGD(model.parameters(), lr=0.1)
 
     epochs = 100
 
     for epoch in range(epochs):
         preds = model(x)
         loss = criterion(preds, y)
-        optimizer.zero_grad(params)
+        optimizer.zero_grad()
         loss.backward()
-        optimizer.step(params)
+        optimizer.step()
 
         if (epoch + 1) % 20 == 0:
             loss_val = float(loss.numpy().ravel()[0])

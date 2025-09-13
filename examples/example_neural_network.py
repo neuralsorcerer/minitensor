@@ -62,15 +62,14 @@ def train_network():
         )
 
         criterion = nn.MSELoss()
-        optimizer = optim.SGD(0.01, 0.0, 0.0, False)
-        params = model.parameters()
+        optimizer = optim.SGD(model.parameters(), lr=0.01)
 
         for epoch in range(5):
             preds = model(x)
             loss = criterion(preds, y)
-            optimizer.zero_grad(params)
+            optimizer.zero_grad()
             loss.backward()
-            optimizer.step(params)
+            optimizer.step()
             loss_val = float(loss.numpy().ravel()[0])
             print(f"Epoch {epoch+1}: loss {loss_val:.4f}")
 
@@ -92,7 +91,7 @@ def create_loss_and_optimizer():
         print(f"Created loss function: {criterion}")
 
         # Create optimizer (would normally pass model parameters)
-        optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
+        optimizer = optim.Adam([], 0.001, betas=(0.9, 0.999), epsilon=1e-8)
         print(f"Created optimizer: {optimizer}")
 
         return True

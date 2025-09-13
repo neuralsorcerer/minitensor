@@ -4,105 +4,112 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Optimisation algorithms for Minitensor.
+"""Optimisation algorithms backed by the Rust core."""
 
-The optimisers are implemented in Rust and exported through PyO3 bindings.  In
-minimal builds some of them might be absent which previously resulted in import
-errors when :mod:`minitensor` was imported.  This module mirrors the approach
-used in :mod:`minitensor.nn` and only exposes the symbols that are actually
-available in the core.
-"""
+from __future__ import annotations
 
-from typing import Dict, List
+from typing import List as _List
 
-from ..tensor import Tensor
+from .. import _core as _minitensor_core  # type: ignore
+from ..tensor import Tensor as _Tensor
 
-try:  # pragma: no cover - tested via public API
-    from .. import _core as _minitensor_core  # type: ignore
-except Exception:  # pylint: disable=broad-except
-    try:
-        import minitensor._core as _minitensor_core  # type: ignore
-    except Exception:  # pragma: no cover
-        _minitensor_core = None  # type: ignore
+_optim = _minitensor_core.optim
 
-__all__: List[str] = []
+__all__: _List[str] = ["SGD", "Adam", "RMSprop"]
 
-if _minitensor_core is not None and hasattr(_minitensor_core, "optim"):
-    _optim = _minitensor_core.optim
 
-    def _wrap_optimizer(cls):
-        class WrappedOpt:
-            def __init__(self, *args, **kwargs):
-                self._opt = cls(*args, **kwargs)
+def _unwrap(params):
+    return [p._tensor if isinstance(p, _Tensor) else p for p in params]
 
-            def _unwrap(self, params):
-                return [p._tensor if isinstance(p, Tensor) else p for p in params]
 
-            def zero_grad(self, params):
-                self._opt.zero_grad(self._unwrap(params))
+class _OptimizerWrapper:
+    """Thin wrapper mirroring PyTorch's optimiser interface."""
 
-            def step(self, params):
-                self._opt.step(self._unwrap(params))
+    def __init__(self, opt, params) -> None:
+        self._opt = opt
+        self._params = _unwrap(list(params))
 
-        WrappedOpt.__name__ = cls.__name__
-        return WrappedOpt
+    def zero_grad(self) -> None:
+        """Reset gradients of the tracked parameters."""
+        self._opt.zero_grad(self._params)
 
-    for _name in dir(_optim):
-        if _name.startswith("_"):
-            continue
-        obj = getattr(_optim, _name)
-        if isinstance(obj, type):
-            globals()[_name] = _wrap_optimizer(obj)
-        else:
-            globals()[_name] = obj
-        __all__.append(_name)
-# If the core is missing nothing is exported which keeps imports harmless.
+    def step(self) -> None:
+        """Update the tracked parameters."""
+        self._opt.step(self._params)
 
-if "SGD" not in globals():
 
-    class SGD:
-        """Basic stochastic gradient descent optimizer.
+class SGD(_OptimizerWrapper):  # pragma: no cover - thin wrapper
+    def __init__(
+        self,
+        params,
+        lr: float,
+        momentum: float = 0.0,
+        weight_decay: float = 0.0,
+        nesterov: bool = False,
+    ) -> None:
+        opt = _optim.SGD(
+            lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            nesterov=nesterov,
+        )
+        super().__init__(opt, params)
 
-        Parameters are updated in-place using tensor operations that dispatch to
-        the Rust backend, ensuring all heavy computation remains in native code.
-        Momentum is supported but optional and defaults to the simple form used in
-        the examples.
-        """
 
-        def __init__(
-            self,
-            lr: float,
-            momentum: float = 0.0,
-            weight_decay: float = 0.0,
-            nesterov: bool = False,
-        ) -> None:
-            self.lr = lr
-            self.momentum = momentum
-            self.weight_decay = weight_decay
-            self.nesterov = nesterov
-            self._velocity: Dict[int, Tensor] = {}
+class Adam(_OptimizerWrapper):  # pragma: no cover - thin wrapper
+    def __init__(
+        self,
+        params,
+        lr: float,
+        betas: tuple[float, float] | None = None,
+        beta1: float | None = None,
+        beta2: float | None = None,
+        epsilon: float = 1e-8,
+        weight_decay: float = 0.0,
+    ) -> None:
+        if betas is not None and (beta1 is not None or beta2 is not None):
+            raise TypeError("specify either betas tuple or beta1/beta2, not both")
+        if betas is None:
+            if beta1 is None and beta2 is None:
+                betas = (0.9, 0.999)
+            elif beta1 is not None and beta2 is not None:
+                betas = (beta1, beta2)
+            else:
+                raise TypeError("both beta1 and beta2 must be provided")
+        if not isinstance(betas, tuple) or len(betas) != 2:
+            raise TypeError("betas must be a tuple of two floats")
+        opt = _optim.Adam(
+            lr,
+            betas=betas,
+            epsilon=epsilon,
+            weight_decay=weight_decay,
+        )
+        super().__init__(opt, params)
 
-        def zero_grad(self, params) -> None:
-            for p in params:
-                p.zero_grad()
 
-        def step(self, params) -> None:
-            for p in params:
-                grad = p.grad
-                if grad is None:
-                    continue
-                grad = grad.detach()
-                if self.weight_decay != 0.0:
-                    grad = (grad + self.weight_decay * p).detach()
-                if self.momentum != 0.0:
-                    v = self._velocity.setdefault(
-                        id(p), Tensor.zeros(p.shape, dtype=p.dtype, device=p.device)
-                    )
-                    v = (self.momentum * v + grad).detach()
-                    self._velocity[id(p)] = v
-                    grad = v + self.momentum * v if self.nesterov else v
-                update = (p - self.lr * grad).detach()
-                p[...] = update
+class RMSprop(_OptimizerWrapper):  # pragma: no cover - thin wrapper
+    def __init__(
+        self,
+        params,
+        lr: float,
+        alpha: float = 0.99,
+        epsilon: float = 1e-8,
+        weight_decay: float = 0.0,
+        momentum: float = 0.0,
+        centered: bool = False,
+    ) -> None:
+        opt = _optim.RMSprop(
+            lr,
+            alpha=alpha,
+            epsilon=epsilon,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            centered=centered,
+        )
+        super().__init__(opt, params)
 
-    __all__.append("SGD")
+
+try:
+    del annotations  # type: ignore  # noqa: F401
+except Exception:
+    pass
