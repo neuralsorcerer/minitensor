@@ -57,6 +57,30 @@ pip install -e .
 
 > _Note:_ `pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
 
+**Using the install script (Linux/macOS/Windows via Git Bash/WSL):**
+
+```bash
+# Linux/macOS terminal or Git Bash on Windows
+bash install.sh
+```
+
+On Windows PowerShell, run the script through bash:
+
+```powershell
+bash install.sh
+```
+
+Common options:
+
+```bash
+bash install.sh --no-venv          # Use current Python env (no virtualenv)
+bash install.sh --venv .myvenv     # Create/use a specific venv directory
+bash install.sh --debug            # Debug build (default is --release)
+bash install.sh --python /usr/bin/python3.12   # Use a specific Python
+```
+
+The script ensures Python 3.10+, sets up a virtual environment by default, installs Rust (via rustup if needed), installs maturin (with patchelf on Linux), builds MiniTensor, and verifies the installation.
+
 ### Basic Usage
 
 ```python
@@ -145,7 +169,7 @@ rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)         # RMSprop optimizer
 
 Minitensor is built with a modular architecture:
 
-```
+```text
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Python API    │    │   PyO3 Bindings  │    │   Rust Engine   │
 │                 │<-->│                  │<-->│                 │
