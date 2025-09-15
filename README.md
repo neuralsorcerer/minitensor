@@ -57,16 +57,9 @@ pip install -e .
 
 > _Note:_ `pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
 
-**Using the install script (Linux/macOS/Windows via Git Bash/WSL):**
+**Using the install script (Linux/macOS/Windows):**
 
 ```bash
-# Linux/macOS terminal or Git Bash on Windows
-bash install.sh
-```
-
-On Windows PowerShell, run the script through bash:
-
-```powershell
 bash install.sh
 ```
 

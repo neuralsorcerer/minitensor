@@ -1,8 +1,8 @@
 [build-system]
 requires = [
-    "maturin>=1.0,<2.0",
-    "setuptools>=45",
-    "setuptools_scm[toml]>=6.2",
+    "maturin",
+    "setuptools",
+    "setuptools_scm[toml]",
 ]
 build-backend = "maturin"
 
@@ -16,7 +16,7 @@ authors = [
 ]
 keywords = ["deep-learning", "neural-networks", "tensor", "rust", "python", "machine-learning", "gpu", "cuda"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -38,7 +39,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=6.0",
+    "pytest",
     "pytest-benchmark",
     "black",
     "isort",
