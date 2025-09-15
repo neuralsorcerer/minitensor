@@ -12,11 +12,11 @@ use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySlice, PyTuple};
+use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use std::sync::Arc;
 
 /// Python wrapper for Tensor with comprehensive functionality
-#[pyclass(name = "Tensor")]
+#[pyclass(name = "Tensor", module = "minitensor._core")]
 #[derive(Clone)]
 pub struct PyTensor {
     inner: Tensor,
@@ -153,6 +153,20 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    fn movedim(&self, source: &Bound<PyAny>, destination: &Bound<PyAny>) -> PyResult<Self> {
+        let src_vec: Vec<isize> = match source.extract::<isize>() {
+            Ok(v) => vec![v],
+            Err(_) => source.extract()?,
+        };
+        let dst_vec: Vec<isize> = match destination.extract::<isize>() {
+            Ok(v) => vec![v],
+            Err(_) => destination.extract()?,
+        };
+        let result = engine::operations::shape_ops::movedim(&self.inner, &src_vec, &dst_vec)
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
         let result = if let Some(d) = dim {
             self.inner.squeeze_dim(d)
@@ -175,6 +189,25 @@ impl PyTensor {
 
     fn repeat(&self, repeats: Vec<usize>) -> PyResult<Self> {
         let result = self.inner.repeat(repeats).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn flip(&self, dims: Vec<isize>) -> PyResult<Self> {
+        let result =
+            engine::operations::shape_ops::flip(&self.inner, &dims).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn roll(&self, shifts: Vec<isize>, dims: Option<Vec<isize>>) -> PyResult<Self> {
+        let dims_ref = dims.as_ref().map(|d| d.as_slice());
+        let result = engine::operations::shape_ops::roll(&self.inner, &shifts, dims_ref)
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn narrow(&self, dim: isize, start: usize, length: usize) -> PyResult<Self> {
+        let result = engine::operations::shape_ops::narrow(&self.inner, dim, start, length)
+            .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -812,6 +845,13 @@ impl PyTensor {
     pub fn index_select(&self, dim: isize, indices: &Bound<PyList>) -> PyResult<PyTensor> {
         let idx_vec: Vec<usize> = indices.extract()?;
         let result = engine::operations::shape_ops::index_select(&self.inner, dim, &idx_vec)
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    /// Gather elements along a dimension using an index tensor
+    pub fn gather(&self, dim: isize, index: &PyTensor) -> PyResult<PyTensor> {
+        let result = engine::operations::shape_ops::gather(&self.inner, dim, &index.inner)
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }

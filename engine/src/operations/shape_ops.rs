@@ -166,6 +166,63 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
     Ok(result)
 }
 
+/// Move tensor dimensions to new positions, keeping relative order of other dims
+pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Result<Tensor> {
+    let ndim = tensor.ndim();
+
+    if source.len() != destination.len() {
+        return Err(MinitensorError::invalid_operation(
+            "movedim: source and destination must have the same length".to_string(),
+        ));
+    }
+
+    let mut src: Vec<usize> = Vec::with_capacity(source.len());
+    let mut dst: Vec<usize> = Vec::with_capacity(destination.len());
+
+    for &s in source {
+        let s = if s < 0 { s + ndim as isize } else { s };
+        if s < 0 || s >= ndim as isize {
+            return Err(MinitensorError::index_error(s, 0, ndim));
+        }
+        src.push(s as usize);
+    }
+    for &d in destination {
+        let d = if d < 0 { d + ndim as isize } else { d };
+        if d < 0 || d >= ndim as isize {
+            return Err(MinitensorError::index_error(d, 0, ndim));
+        }
+        dst.push(d as usize);
+    }
+
+    // Check for duplicate dimensions
+    let mut src_sorted = src.clone();
+    src_sorted.sort_unstable();
+    src_sorted.dedup();
+    if src_sorted.len() != src.len() {
+        return Err(MinitensorError::invalid_operation(
+            "movedim: duplicate dimensions in source".to_string(),
+        ));
+    }
+    let mut dst_sorted = dst.clone();
+    dst_sorted.sort_unstable();
+    dst_sorted.dedup();
+    if dst_sorted.len() != dst.len() {
+        return Err(MinitensorError::invalid_operation(
+            "movedim: duplicate dimensions in destination".to_string(),
+        ));
+    }
+
+    // Build permutation order
+    let mut order: Vec<usize> = (0..ndim).filter(|i| !src.contains(i)).collect();
+    let mut pairs: Vec<(usize, usize)> = dst.iter().copied().zip(src.iter().copied()).collect();
+    pairs.sort_by_key(|&(d, _)| d);
+    for (d, s) in pairs {
+        order.insert(d, s);
+    }
+    let order_isize: Vec<isize> = order.into_iter().map(|v| v as isize).collect();
+    permute(tensor, order_isize)
+}
+
 /// Concatenate tensors along a specified dimension
 pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     if tensors.is_empty() {
@@ -392,6 +449,101 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
     ))
 }
 
+/// Gather operation - collect elements along a dimension using an index tensor
+pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
+
+    if index.ndim() != tensor.ndim() {
+        return Err(MinitensorError::invalid_operation(
+            "gather index tensor must have the same number of dimensions as input",
+        ));
+    }
+
+    if index.dtype() != DataType::Int64 {
+        return Err(MinitensorError::invalid_operation(
+            "gather indices must be int64",
+        ));
+    }
+
+    let input_dims = tensor.shape().dims();
+    let index_dims = index.shape().dims();
+
+    // Validate shapes except at gather dimension
+    for (i, (&idx_d, &in_d)) in index_dims.iter().zip(input_dims.iter()).enumerate() {
+        if i != dim && idx_d != in_d {
+            return Err(MinitensorError::shape_mismatch(
+                input_dims.to_vec(),
+                index_dims.to_vec(),
+            ));
+        }
+    }
+
+    let dim_size = input_dims[dim];
+
+    // Validate indices
+    let idx_slice = index
+        .data()
+        .as_i64_slice()
+        .ok_or_else(|| MinitensorError::invalid_operation("gather indices must be int64"))?;
+    for &v in idx_slice {
+        if v < 0 || v as usize >= dim_size {
+            return Err(MinitensorError::index_error(v as isize, 0, dim_size));
+        }
+    }
+
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "gather currently supports only CPU tensors",
+        ));
+    }
+
+    let outer: usize = input_dims[..dim].iter().product();
+    let inner: usize = input_dims[dim + 1..].iter().product();
+    let idx_dim = index_dims[dim];
+
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+    let requires_grad = tensor.requires_grad();
+    let output_shape_obj = Shape::new(index_dims.to_vec());
+
+    macro_rules! gather_impl {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation("Tensor data access failed for gather")
+            })?;
+            let idx = idx_slice;
+            let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
+            for o in 0..outer {
+                for i in 0..idx_dim {
+                    for j in 0..inner {
+                        let idx_pos = o * idx_dim * inner + i * inner + j;
+                        let gather_idx = idx[idx_pos] as usize;
+                        let src_pos = o * dim_size * inner + gather_idx * inner + j;
+                        out[idx_pos] = src[src_pos];
+                    }
+                }
+            }
+            TensorData::$from_vec(out, device)
+        }};
+    }
+
+    let data = match dtype {
+        DataType::Float32 => gather_impl!(f32, as_f32_slice, from_vec_f32),
+        DataType::Float64 => gather_impl!(f64, as_f64_slice, from_vec_f64),
+        DataType::Int32 => gather_impl!(i32, as_i32_slice, from_vec_i32),
+        DataType::Int64 => gather_impl!(i64, as_i64_slice, from_vec_i64),
+        DataType::Bool => gather_impl!(bool, as_bool_slice, from_vec_bool),
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
 /// Slicing operation - select a contiguous range of elements
 pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize) -> Result<Tensor> {
     let dim = normalize_dim(dim, tensor.ndim())?;
@@ -468,6 +620,109 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
         device,
         requires_grad,
     ))
+}
+
+/// Narrow tensor along a dimension starting at `start` for `length` elements
+pub fn narrow(tensor: &Tensor, dim: isize, start: usize, length: usize) -> Result<Tensor> {
+    let dim = normalize_dim(dim, tensor.ndim())?;
+    let dim_size = tensor.shape().dims()[dim];
+
+    if start > dim_size {
+        return Err(MinitensorError::index_error(start as isize, 0, dim_size));
+    }
+    if start + length > dim_size {
+        return Err(MinitensorError::index_error(
+            (start + length) as isize,
+            0,
+            dim_size,
+        ));
+    }
+
+    if length == 0 {
+        let mut out_shape = tensor.shape().dims().to_vec();
+        out_shape[dim] = 0;
+        return Ok(Tensor::zeros(
+            Shape::new(out_shape),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        ));
+    }
+
+    slice(tensor, dim as isize, start, start + length, 1)
+}
+
+/// Flip tensor elements along specified dimensions.
+pub fn flip(tensor: &Tensor, dims: &[isize]) -> Result<Tensor> {
+    let ndim = tensor.ndim();
+    let mut normalized = Vec::with_capacity(dims.len());
+    for &d in dims {
+        let dim = normalize_dim(d, ndim)?;
+        if normalized.contains(&dim) {
+            return Err(MinitensorError::invalid_operation(
+                "dims must be unique".to_string(),
+            ));
+        }
+        normalized.push(dim);
+    }
+
+    let mut result = tensor.clone();
+    for &dim in &normalized {
+        let size = result.shape().dims()[dim];
+        let indices: Vec<usize> = (0..size).rev().collect();
+        result = index_select(&result, dim as isize, &indices)?;
+    }
+
+    Ok(result)
+}
+
+/// Roll tensor elements along specified dimensions with wrap-around
+pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result<Tensor> {
+    if let Some(dims) = dims {
+        if shifts.len() != dims.len() {
+            return Err(MinitensorError::invalid_operation(
+                "shifts and dims must have the same length".to_string(),
+            ));
+        }
+        let mut result = tensor.clone();
+        for (&shift, &dim) in shifts.iter().zip(dims.iter()) {
+            let dim = normalize_dim(dim, result.ndim())?;
+            let size = result.shape().dims()[dim] as isize;
+            if size == 0 {
+                continue;
+            }
+            let k = ((shift % size) + size) % size;
+            if k == 0 {
+                continue;
+            }
+            let split_point = (size - k) as usize;
+            let first = slice(&result, dim as isize, 0, split_point, 1)?;
+            let second = slice(&result, dim as isize, split_point, size as usize, 1)?;
+            result = concatenate(&[&second, &first], dim as isize)?;
+        }
+        Ok(result)
+    } else {
+        if shifts.len() != 1 {
+            return Err(MinitensorError::invalid_operation(
+                "shifts must contain a single value when dims is None".to_string(),
+            ));
+        }
+        let shift = shifts[0];
+        let flat = tensor.flatten_all()?;
+        let size = flat.shape().dims()[0] as isize;
+        if size == 0 {
+            return flat.reshape(tensor.shape().clone());
+        }
+        let k = ((shift % size) + size) % size;
+        if k == 0 {
+            return flat.reshape(tensor.shape().clone());
+        }
+        let split_point = (size - k) as usize;
+        let first = slice(&flat, 0, 0, split_point, 1)?;
+        let second = slice(&flat, 0, split_point, size as usize, 1)?;
+        let rolled = concatenate(&[&second, &first], 0)?;
+        rolled.reshape(tensor.shape().clone())
+    }
 }
 
 #[cfg(test)]

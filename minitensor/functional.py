@@ -263,6 +263,28 @@ def repeat(input: Tensor, *repeats: int) -> Tensor:
     return input.repeat(*repeats)
 
 
+def flip(input: Tensor, dims: Union[int, Sequence[int]]) -> Tensor:
+    """Flip ``input`` along specified dimensions."""
+
+    return input.flip(dims)
+
+
+def roll(
+    input: Tensor,
+    shifts: Union[int, Sequence[int]],
+    dims: Optional[Union[int, Sequence[int]]] = None,
+) -> Tensor:
+    """Roll tensor elements along specified dimensions."""
+
+    return input.roll(shifts, dims)
+
+
+def narrow(input: Tensor, dim: int, start: int, length: int) -> Tensor:
+    """Narrow ``input`` along ``dim`` starting at ``start`` for ``length`` elements."""
+
+    return input.narrow(dim, start, length)
+
+
 def cat(tensors: Sequence[Tensor], dim: int = 0) -> Tensor:
     """Concatenate ``tensors`` along an existing dimension.
 
@@ -348,6 +370,21 @@ def index_select(input: Tensor, dim: int, indices: Sequence[int]) -> Tensor:
     """
 
     return input.index_select(dim, indices)
+
+
+def gather(input: Tensor, dim: int, index: Tensor) -> Tensor:
+    """Gather elements from ``input`` along ``dim`` using ``index`` tensor.
+
+    Args:
+        input: Source tensor.
+        dim: Dimension along which to gather.
+        index: Tensor containing indices to gather.
+
+    Returns:
+        Tensor: Result tensor with same shape as ``index``.
+    """
+
+    return input.gather(dim, index)
 
 
 def softmax(input: Tensor, dim: Optional[int] = None) -> Tensor:
@@ -582,11 +619,15 @@ __all__ = [
     "unsqueeze",
     "expand",
     "repeat",
+    "flip",
+    "roll",
+    "narrow",
     "cat",
     "stack",
     "split",
     "chunk",
     "index_select",
+    "gather",
     "softmax",
     "dense_layer",
     "conv2d",

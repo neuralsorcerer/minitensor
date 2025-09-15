@@ -14,7 +14,7 @@ except ImportError as e:
     ) from e
 
 import sys
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from . import functional, nn, optim
 
@@ -160,6 +160,16 @@ def index_select(input, dim: int, indices):
     return functional.index_select(input, dim, indices)
 
 
+def gather(input, dim: int, index):
+    """Gather elements from ``input`` along ``dim`` using ``index`` tensor."""
+    return functional.gather(input, dim, index)
+
+
+def narrow(input, dim: int, start: int, length: int):
+    """Narrow ``input`` along ``dim`` starting at ``start`` for ``length`` elements."""
+    return functional.narrow(input, dim, start, length)
+
+
 def cross(a, b, axis=-1):
     """Compute the 3D cross product (NumPy compatibility)."""
     return numpy_compat.cross(a, b, axis=axis)
@@ -232,6 +242,16 @@ def repeat(input, *repeats: int):
     return functional.repeat(input, *repeats)
 
 
+def flip(input, dims: Union[int, Sequence[int]]):
+    """Flip ``input`` along specified dimensions."""
+    return functional.flip(input, dims)
+
+
+def roll(input, shifts, dims: Optional[Union[int, Sequence[int]]] = None):
+    """Roll ``input`` along specified dimensions."""
+    return functional.roll(input, shifts, dims)
+
+
 # Device management
 def device(device_str):
     """Create a device object."""
@@ -267,6 +287,8 @@ __all__ = [
     "stack",
     "chunk",
     "index_select",
+    "gather",
+    "narrow",
     "reshape",
     "view",
     "flatten",
@@ -281,6 +303,8 @@ __all__ = [
     "unsqueeze",
     "expand",
     "repeat",
+    "flip",
+    "roll",
     "split",
     "cross",
     "device",

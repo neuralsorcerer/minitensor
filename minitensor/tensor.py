@@ -305,38 +305,9 @@ class Tensor:
     ) -> "Tensor":
         """Move tensor dimensions to new positions."""
 
-        ndim = self.ndim
-
-        if isinstance(source, int):
-            source = [source]
-        else:
-            source = list(source)
-
-        if isinstance(destination, int):
-            destination = [destination]
-        else:
-            destination = list(destination)
-
-        if len(source) != len(destination):
-            raise ValueError(
-                "movedim: source and destination must have the same length"
-            )
-
-        source = [s + ndim if s < 0 else s for s in source]
-        destination = [d + ndim if d < 0 else d for d in destination]
-
-        if any(s < 0 or s >= ndim for s in source):
-            raise ValueError("movedim: source dimension out of range")
-        if any(d < 0 or d >= ndim for d in destination):
-            raise ValueError("movedim: destination dimension out of range")
-        if len(set(source)) != len(source) or len(set(destination)) != len(destination):
-            raise ValueError("movedim: duplicate dimensions in source or destination")
-
-        order = [i for i in range(ndim) if i not in source]
-        for dest, src in sorted(zip(destination, source)):
-            order.insert(dest, src)
-
-        return self.permute(order)
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.movedim(source, destination)
+        return result
 
     moveaxis = movedim
 
@@ -387,12 +358,60 @@ class Tensor:
         result._tensor = self._tensor.repeat(list(repeats))
         return result
 
+    def flip(self, dims: Union[int, Sequence[int]]) -> "Tensor":
+        """Flip the tensor along given dimensions."""
+
+        if isinstance(dims, int):
+            dims_list = [dims]
+        else:
+            dims_list = list(dims)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.flip(dims_list)
+        return result
+
+    def roll(
+        self,
+        shifts: Union[int, Sequence[int]],
+        dims: Optional[Union[int, Sequence[int]]] = None,
+    ) -> "Tensor":
+        """Roll the tensor along given dimensions with wrap-around."""
+
+        if isinstance(shifts, int):
+            shift_list = [int(shifts)]
+        else:
+            shift_list = [int(s) for s in shifts]
+
+        if dims is None:
+            dims_list = None
+        else:
+            if isinstance(dims, int):
+                dims_list = [int(dims)]
+            else:
+                dims_list = [int(d) for d in dims]
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.roll(shift_list, dims_list)
+        return result
+
+    def narrow(self, dim: int, start: int, length: int) -> "Tensor":
+        """Narrow the tensor along ``dim`` starting at ``start`` for ``length`` elements."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.narrow(dim, start, length)
+        return result
+
     def index_select(self, dim: int, indices: Sequence[int]) -> "Tensor":
         """Select elements along ``dim`` using integer ``indices``."""
 
         idx_list = [int(i) for i in indices]
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.index_select(dim, idx_list)
+        return result
+
+    def gather(self, dim: int, index: "Tensor") -> "Tensor":
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.gather(dim, index._tensor)
         return result
 
     def flatten(self, start_dim: int = 0, end_dim: int = -1) -> "Tensor":
@@ -422,6 +441,8 @@ class Tensor:
             List[Tensor]: Tensors resulting from the split.
         """
 
+        if not isinstance(split_size_or_sections, int):
+            split_size_or_sections = list(split_size_or_sections)
         parts = self._tensor.split(split_size_or_sections, dim)
         result: List[Tensor] = []
         for p in parts:
@@ -442,7 +463,7 @@ class Tensor:
             List[Tensor]: List of ``chunks`` tensors split from this tensor.
         """
 
-        parts = self._tensor.chunk(chunks, dim)
+        parts = self._tensor.chunk(int(chunks), dim)
         result = []
         for p in parts:
             t = Tensor.__new__(Tensor)
