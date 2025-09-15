@@ -5,18 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Enhanced Tensor class with comprehensive NumPy compatibility and automatic differentiation support.
+Tensor class with NumPy compatibility and automatic differentiation support.
 """
 
 try:
     from . import _core as _minitensor_core
-except ImportError:
-    # Fallback for development - try direct import
-    try:
-        import minitensor._core as _minitensor_core
-    except ImportError:
-        # Final fallback for development
-        import minitensor as _minitensor_core
+except ImportError as e:
+    raise ImportError(
+        "The minitensor core extension is not built. "
+        "Run `pip install -e .` or `maturin develop` to compile the Rust backend."
+    ) from e
 
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
