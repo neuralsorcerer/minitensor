@@ -173,6 +173,11 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    fn repeat(&self, repeats: Vec<usize>) -> PyResult<Self> {
+        let result = self.inner.repeat(repeats).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     fn flatten(&self, start_dim: Option<isize>, end_dim: Option<isize>) -> PyResult<Self> {
         let ndim = self.ndim() as isize;
         let start = start_dim.unwrap_or(0);
@@ -803,9 +808,17 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(result))
     }
 
-    /// Split tensor into multiple sub-tensors
-    pub fn split(&self, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
-        if sections == 0 {
+    /// Select elements along a dimension using integer indices
+    pub fn index_select(&self, dim: isize, indices: &Bound<PyList>) -> PyResult<PyTensor> {
+        let idx_vec: Vec<usize> = indices.extract()?;
+        let result = engine::operations::shape_ops::index_select(&self.inner, dim, &idx_vec)
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    /// Split tensor into multiple sub-tensors of equal size (``chunk``)
+    pub fn chunk(&self, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
+        if sections <= 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Sections must be greater than zero",
             ));
@@ -820,23 +833,102 @@ impl PyTensor {
                 axis
             )));
         }
-        let axis = axis as usize;
-        let dim_size = self.inner.shape().dims()[axis];
+
+        let dim_size = self.inner.shape().dims()[axis as usize];
         if dim_size % sections != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Tensor cannot be evenly split along the given axis",
             ));
         }
 
-        let chunk = dim_size / sections;
-        let mut outputs = Vec::with_capacity(sections);
-        for i in 0..sections {
-            let start = i * chunk;
-            let end = start + chunk;
+        let chunk_size = dim_size / sections;
+        let section_vec = vec![chunk_size as usize; sections as usize];
+        self.split_with_sections(section_vec, axis as usize)
+    }
+
+    /// Split tensor by chunk size or explicit sections along an axis
+    pub fn split(
+        &self,
+        split_size_or_sections: &Bound<PyAny>,
+        axis: Option<isize>,
+    ) -> PyResult<Vec<PyTensor>> {
+        let axis = axis.unwrap_or(0);
+        let ndim = self.inner.ndim() as isize;
+        let axis = if axis < 0 { axis + ndim } else { axis };
+        if axis < 0 || axis >= ndim {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Dimension {} out of range",
+                axis
+            )));
+        }
+        let axis = axis as usize;
+        let dim_size = self.inner.shape().dims()[axis];
+
+        let mut sections: Vec<usize> = Vec::new();
+
+        if let Ok(split_size) = split_size_or_sections.extract::<usize>() {
+            if split_size == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "split_size must be greater than zero",
+                ));
+            }
+            let mut remaining = dim_size;
+            while remaining > 0 {
+                let chunk = split_size.min(remaining);
+                sections.push(chunk);
+                remaining -= chunk;
+            }
+        } else if let Ok(list) = split_size_or_sections.downcast::<PyList>() {
+            for obj in list.iter() {
+                let size: usize = obj.extract()?;
+                if size == 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "section size must be greater than zero",
+                    ));
+                }
+                sections.push(size);
+            }
+            let total: usize = sections.iter().sum();
+            if total != dim_size {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "split sizes do not sum to dimension size",
+                ));
+            }
+        } else if let Ok(tuple) = split_size_or_sections.downcast::<PyTuple>() {
+            for obj in tuple.iter() {
+                let size: usize = obj.extract()?;
+                if size == 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "section size must be greater than zero",
+                    ));
+                }
+                sections.push(size);
+            }
+            let total: usize = sections.iter().sum();
+            if total != dim_size {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "split sizes do not sum to dimension size",
+                ));
+            }
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "split_size_or_sections must be int or sequence",
+            ));
+        }
+
+        self.split_with_sections(sections, axis)
+    }
+
+    fn split_with_sections(&self, sections: Vec<usize>, axis: usize) -> PyResult<Vec<PyTensor>> {
+        let mut outputs = Vec::with_capacity(sections.len());
+        let mut start = 0;
+        for size in sections {
+            let end = start + size;
             let slice =
                 engine::operations::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
                     .map_err(_convert_error)?;
             outputs.push(PyTensor::from_tensor(slice));
+            start = end;
         }
         Ok(outputs)
     }

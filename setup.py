@@ -35,7 +35,7 @@ INSTALL_REQUIRES = [
 # Development dependencies
 EXTRAS_REQUIRE = {
     "dev": [
-        "pytest>=6.0",
+        "pytest",
         "pytest-benchmark",
         "black",
         "isort",
@@ -54,7 +54,7 @@ EXTRAS_REQUIRE = {
         "scikit-learn",
     ],
     "test": [
-        "pytest>=6.0",
+        "pytest",
         "pytest-benchmark",
         "numpy",
     ],
@@ -77,18 +77,19 @@ setup(
     author="Soumyadip Sarkar",
     url="https://github.com/neuralsorcerer/minitensor",
     project_urls={
-        "Homepage": "https://github.com/neuralsorcerer/minitensor",
+        "Homepage": "https://github.com/neuralsorcerer/minitensor#readme",
         "Repository": "https://github.com/neuralsorcerer/minitensor",
         "Bug Tracker": "https://github.com/neuralsorcerer/minitensor/issues",
     },
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Programming Language :: Rust",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Software Development :: Libraries :: Python Modules",

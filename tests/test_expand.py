@@ -7,7 +7,8 @@
 import numpy as np
 import pytest
 
-from minitensor import Tensor
+from minitensor import Tensor, expand
+from minitensor import functional as F
 
 
 def test_expand_basic():
@@ -30,3 +31,19 @@ def test_expand_invalid():
     t = Tensor([1, 2, 3])
     with pytest.raises(Exception):
         t.expand(2, 3)
+
+
+def test_functional_expand():
+    t = Tensor([[1], [2]])
+    e = F.expand(t, -1, 3)
+    np.testing.assert_array_equal(
+        e.numpy(), np.array([[1, 1, 1], [2, 2, 2]], dtype=np.float32)
+    )
+
+
+def test_top_level_expand():
+    t = Tensor([[1], [2]])
+    e = expand(t, -1, 3)
+    np.testing.assert_array_equal(
+        e.numpy(), np.array([[1, 1, 1], [2, 2, 2]], dtype=np.float32)
+    )

@@ -19,8 +19,7 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
-import math
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 from .tensor import Tensor
 
@@ -74,6 +73,281 @@ def cos(input: Tensor) -> Tensor:
 def tan(input: Tensor) -> Tensor:
     """Tangent function computed as sin(x)/cos(x)."""
     return input.tan()
+
+
+def reshape(input: Tensor, shape) -> Tensor:
+    """Reshape ``input`` to ``shape``.
+
+    Args:
+        input: Tensor to reshape.
+        shape: New shape as a sequence of integers or a single integer.
+
+    Returns:
+        Tensor: A view of ``input`` with the specified shape.
+    """
+
+    return input.reshape(shape)
+
+
+def view(input: Tensor, *shape: Union[int, Sequence[int]]) -> Tensor:
+    """Return a view of ``input`` with a new shape.
+
+    Args:
+        input: Tensor to reshape.
+        *shape: Desired view shape. ``-1`` indicates that the size of the
+            corresponding dimension should be inferred.
+
+    Returns:
+        Tensor: A view of ``input`` with the specified shape.
+    """
+
+    return input.view(*shape)
+
+
+def flatten(input: Tensor, start_dim: int = 0, end_dim: int = -1) -> Tensor:
+    """Flatten input tensor across specified dimensions.
+
+    Args:
+        input: Tensor to be flattened.
+        start_dim: First dimension to flatten.
+        end_dim: Last dimension to flatten.
+
+    Returns:
+        Tensor: A flattened view of the input tensor.
+    """
+    return input.flatten(start_dim, end_dim)
+
+
+def ravel(input: Tensor) -> Tensor:
+    """Flatten all dimensions of the input tensor.
+
+    Args:
+        input: Tensor to be flattened.
+
+    Returns:
+        Tensor: A view of ``input`` flattened to one dimension.
+    """
+
+    return input.ravel()
+
+
+def transpose(input: Tensor, dim0: int, dim1: int) -> Tensor:
+    """Swap two dimensions of the input tensor.
+
+    Args:
+        input: Tensor to transpose.
+        dim0: First dimension to swap.
+        dim1: Second dimension to swap.
+
+    Returns:
+        Tensor: A view of ``input`` with ``dim0`` and ``dim1`` swapped.
+    """
+
+    return input.transpose(dim0, dim1)
+
+
+def permute(input: Tensor, dims: Sequence[int]) -> Tensor:
+    """Permute the dimensions of the input tensor.
+
+    Args:
+        input: Tensor whose dimensions to permute.
+        dims: Sequence specifying the new order of dimensions.
+
+    Returns:
+        Tensor: A view of ``input`` with dimensions reordered as ``dims``.
+    """
+
+    return input.permute(dims)
+
+
+def movedim(
+    input: Tensor,
+    source: Union[int, Sequence[int]],
+    destination: Union[int, Sequence[int]],
+) -> Tensor:
+    """Move tensor dimensions to new positions.
+
+    Args:
+        input: Tensor whose dimensions to move.
+        source: Source dimensions to move. Can be a single integer or a
+            sequence of integers.
+        destination: Destination dimensions to move to. Can be a single
+            integer or a sequence of integers.
+
+    Returns:
+        Tensor: A view of ``input`` with dimensions moved to new positions.
+    """
+
+    return input.movedim(source, destination)
+
+
+# Alias matching PyTorch's ``moveaxis`` name
+moveaxis = movedim
+
+
+def swapaxes(input: Tensor, axis0: int, axis1: int) -> Tensor:
+    """Swap two axes of ``input``.
+
+    Args:
+        input: Tensor whose axes to swap.
+        axis0: First axis to swap.
+        axis1: Second axis to swap.
+
+    Returns:
+        Tensor: A view of ``input`` with axes ``axis0`` and ``axis1`` swapped.
+    """
+
+    return input.swapaxes(axis0, axis1)
+
+
+swapdims = swapaxes
+
+
+def squeeze(input: Tensor, dim: Optional[int] = None) -> Tensor:
+    """Remove dimensions of size 1 from ``input``.
+
+    Args:
+        input: Tensor to squeeze.
+        dim: Specific dimension to squeeze. If ``None``, all dimensions of
+            size 1 are removed.
+
+    Returns:
+        Tensor: A view of ``input`` with singleton dimensions removed.
+    """
+
+    return input.squeeze(dim)
+
+
+def unsqueeze(input: Tensor, dim: int) -> Tensor:
+    """Insert a dimension of size 1 into ``input`` at ``dim``.
+
+    Args:
+        input: Tensor to unsqueeze.
+        dim: Position at which to insert the singleton dimension.
+
+    Returns:
+        Tensor: A view of ``input`` with an extra dimension of size 1.
+    """
+
+    return input.unsqueeze(dim)
+
+
+def expand(input: Tensor, *shape: int) -> Tensor:
+    """Expand ``input`` to a larger size without allocating new memory.
+
+    Args:
+        input: Tensor to expand.
+        *shape: Desired expanded shape or a single sequence specifying the
+            size. ``-1`` indicates that the size of the corresponding
+            dimension should not be changed.
+
+    Returns:
+        Tensor: A view of ``input`` expanded to ``shape``.
+    """
+
+    return input.expand(*shape)
+
+
+def repeat(input: Tensor, *repeats: int) -> Tensor:
+    """Repeat ``input`` along each dimension.
+
+    Args:
+        input: Tensor to repeat.
+        *repeats: The number of repeats for each dimension. May also be a
+            single sequence specifying the repeats.
+
+    Returns:
+        Tensor: The repeated tensor.
+    """
+
+    return input.repeat(*repeats)
+
+
+def cat(tensors: Sequence[Tensor], dim: int = 0) -> Tensor:
+    """Concatenate ``tensors`` along an existing dimension.
+
+    Args:
+        tensors: Sequence of tensors to concatenate.
+        dim: Dimension along which to concatenate. May be negative to
+            index from the end.
+
+    Returns:
+        Tensor: A single tensor formed by joining ``tensors`` along ``dim``.
+    """
+
+    core_tensors = [t._tensor for t in tensors]
+    result = Tensor.__new__(Tensor)
+    result._tensor = _minitensor_core.Tensor.concatenate(core_tensors, dim)
+    return result
+
+
+def stack(tensors: Sequence[Tensor], dim: int = 0) -> Tensor:
+    """Stack ``tensors`` along a new dimension ``dim``.
+
+    Args:
+        tensors: Sequence of tensors to stack.
+        dim: The index at which to insert the new dimension. May be
+            negative to index from the end.
+
+    Returns:
+        Tensor: A tensor containing all inputs stacked along the new
+        dimension.
+    """
+
+    core_tensors = [t._tensor for t in tensors]
+    result = Tensor.__new__(Tensor)
+    result._tensor = _minitensor_core.Tensor.stack(core_tensors, dim)
+    return result
+
+
+def split(
+    input: Tensor, split_size_or_sections: Union[int, Sequence[int]], dim: int = 0
+) -> list[Tensor]:
+    """Split ``input`` into chunks along ``dim``.
+
+    Args:
+        input: Tensor to split.
+        split_size_or_sections: Size of each chunk or list of sizes for each
+            chunk.
+        dim: Dimension along which to split the tensor.
+
+    Returns:
+        list[Tensor]: List of tensors resulting from the split.
+    """
+
+    return input.split(split_size_or_sections, dim)
+
+
+def chunk(input: Tensor, chunks: int, dim: int = 0) -> list[Tensor]:
+    """Split ``input`` into ``chunks`` along ``dim``.
+
+    Args:
+        input: Tensor to split.
+        chunks: Number of chunks to return. The size of ``input`` along ``dim``
+            must be divisible by ``chunks``.
+        dim: Dimension along which to split the tensor.
+
+    Returns:
+        list[Tensor]: List of tensors resulting from the split.
+    """
+
+    return input.chunk(chunks, dim)
+
+
+def index_select(input: Tensor, dim: int, indices: Sequence[int]) -> Tensor:
+    """Select elements along ``dim`` using integer ``indices``.
+
+    Args:
+        input: Tensor to index.
+        dim: Dimension along which to select.
+        indices: Sequence of integer indices specifying which elements to
+            gather.
+
+    Returns:
+        Tensor: Tensor containing the selected elements.
+    """
+
+    return input.index_select(dim, indices)
 
 
 def softmax(input: Tensor, dim: Optional[int] = None) -> Tensor:
@@ -294,6 +568,25 @@ __all__ = [
     "sin",
     "cos",
     "tan",
+    "reshape",
+    "view",
+    "flatten",
+    "ravel",
+    "transpose",
+    "permute",
+    "movedim",
+    "moveaxis",
+    "swapaxes",
+    "swapdims",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "repeat",
+    "cat",
+    "stack",
+    "split",
+    "chunk",
+    "index_select",
     "softmax",
     "dense_layer",
     "conv2d",

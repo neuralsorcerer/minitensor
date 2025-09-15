@@ -14,6 +14,7 @@ except ImportError as e:
     ) from e
 
 import sys
+from typing import Optional, Sequence
 
 from . import functional, nn, optim
 
@@ -134,19 +135,101 @@ def asarray(data, dtype=None, requires_grad=False):
     return numpy_compat.asarray(data, dtype, requires_grad)
 
 
-def concatenate(tensors, axis=0):
-    """Concatenate tensors along an axis (NumPy compatibility)."""
-    return numpy_compat.concatenate(tensors, axis)
+def cat(tensors, dim: int = 0):
+    """Concatenate tensors along an existing dimension."""
+    return functional.cat(tensors, dim)
 
 
-def stack(tensors, axis=0):
-    """Stack tensors along a new axis (NumPy compatibility)."""
-    return numpy_compat.stack(tensors, axis)
+def stack(tensors, dim: int = 0):
+    """Stack tensors along a new dimension."""
+    return functional.stack(tensors, dim)
+
+
+def split(input, split_size_or_sections, dim: int = 0):
+    """Split ``input`` into chunks along ``dim``."""
+    return functional.split(input, split_size_or_sections, dim)
+
+
+def chunk(input, chunks: int, dim: int = 0):
+    """Split ``input`` into ``chunks`` along ``dim``."""
+    return functional.chunk(input, chunks, dim)
+
+
+def index_select(input, dim: int, indices):
+    """Select elements along ``dim`` using integer ``indices``."""
+    return functional.index_select(input, dim, indices)
 
 
 def cross(a, b, axis=-1):
     """Compute the 3D cross product (NumPy compatibility)."""
     return numpy_compat.cross(a, b, axis=axis)
+
+
+# Functional operation wrappers
+def reshape(input, shape):
+    """Return ``input`` with a new shape."""
+    return functional.reshape(input, shape)
+
+
+def view(input, *shape):
+    """Return a view of ``input`` with a new shape."""
+    return functional.view(input, *shape)
+
+
+def flatten(input, start_dim: int = 0, end_dim: int = -1):
+    """Return a view of ``input`` with dimensions flattened."""
+    return functional.flatten(input, start_dim, end_dim)
+
+
+def ravel(input):
+    """Flatten all dimensions of ``input``."""
+    return functional.ravel(input)
+
+
+def transpose(input, dim0: int, dim1: int):
+    """Swap two dimensions of ``input``."""
+    return functional.transpose(input, dim0, dim1)
+
+
+def permute(input, dims: Sequence[int]):
+    """Reorder dimensions of ``input`` according to ``dims``."""
+    return functional.permute(input, dims)
+
+
+def movedim(input, source, destination):
+    """Move tensor dimensions to new positions."""
+    return functional.movedim(input, source, destination)
+
+
+moveaxis = movedim
+
+
+def swapaxes(input, axis0: int, axis1: int):
+    """Swap two axes of ``input``."""
+    return functional.swapaxes(input, axis0, axis1)
+
+
+swapdims = swapaxes
+
+
+def squeeze(input, dim: Optional[int] = None):
+    """Remove dimensions of size 1 from ``input``."""
+    return functional.squeeze(input, dim)
+
+
+def unsqueeze(input, dim: int):
+    """Insert a dimension of size 1 at position ``dim`` in ``input``."""
+    return functional.unsqueeze(input, dim)
+
+
+def expand(input, *shape: int):
+    """Return ``input`` expanded to a larger ``shape``."""
+    return functional.expand(input, *shape)
+
+
+def repeat(input, *repeats: int):
+    """Repeat ``input`` along each dimension."""
+    return functional.repeat(input, *repeats)
 
 
 # Device management
@@ -180,8 +263,25 @@ __all__ = [
     "from_numpy",
     "from_numpy_shared",
     "asarray",
-    "concatenate",
+    "cat",
     "stack",
+    "chunk",
+    "index_select",
+    "reshape",
+    "view",
+    "flatten",
+    "ravel",
+    "transpose",
+    "permute",
+    "movedim",
+    "moveaxis",
+    "swapaxes",
+    "swapdims",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "repeat",
+    "split",
     "cross",
     "device",
     "cpu",

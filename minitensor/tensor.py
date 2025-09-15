@@ -300,6 +300,53 @@ class Tensor:
         result._tensor = self._tensor.permute(dims)
         return result
 
+    def movedim(
+        self, source: Union[int, Sequence[int]], destination: Union[int, Sequence[int]]
+    ) -> "Tensor":
+        """Move tensor dimensions to new positions."""
+
+        ndim = self.ndim
+
+        if isinstance(source, int):
+            source = [source]
+        else:
+            source = list(source)
+
+        if isinstance(destination, int):
+            destination = [destination]
+        else:
+            destination = list(destination)
+
+        if len(source) != len(destination):
+            raise ValueError(
+                "movedim: source and destination must have the same length"
+            )
+
+        source = [s + ndim if s < 0 else s for s in source]
+        destination = [d + ndim if d < 0 else d for d in destination]
+
+        if any(s < 0 or s >= ndim for s in source):
+            raise ValueError("movedim: source dimension out of range")
+        if any(d < 0 or d >= ndim for d in destination):
+            raise ValueError("movedim: destination dimension out of range")
+        if len(set(source)) != len(source) or len(set(destination)) != len(destination):
+            raise ValueError("movedim: duplicate dimensions in source or destination")
+
+        order = [i for i in range(ndim) if i not in source]
+        for dest, src in sorted(zip(destination, source)):
+            order.insert(dest, src)
+
+        return self.permute(order)
+
+    moveaxis = movedim
+
+    def swapaxes(self, axis0: int, axis1: int) -> "Tensor":
+        """Swap two dimensions of the tensor."""
+
+        return self.transpose(axis0, axis1)
+
+    swapdims = swapaxes
+
     def squeeze(self, dim: Optional[int] = None) -> "Tensor":
         """Remove dimensions of size 1."""
         result = Tensor.__new__(Tensor)
@@ -322,6 +369,32 @@ class Tensor:
         result._tensor = self._tensor.expand(dims)
         return result
 
+    def repeat(self, *repeats: int) -> "Tensor":
+        """Repeat the tensor along each dimension."""
+
+        if len(repeats) == 1 and isinstance(repeats[0], (list, tuple)):
+            repeats = tuple(repeats[0])
+        if len(repeats) < self.ndim:
+            raise ValueError(
+                "number of dimensions of repeat dims can not be smaller than number of dimensions of tensor"
+            )
+
+        repeats = tuple(int(r) for r in repeats)
+        if any(r <= 0 for r in repeats):
+            raise ValueError("repeats must be positive")
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.repeat(list(repeats))
+        return result
+
+    def index_select(self, dim: int, indices: Sequence[int]) -> "Tensor":
+        """Select elements along ``dim`` using integer ``indices``."""
+
+        idx_list = [int(i) for i in indices]
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.index_select(dim, idx_list)
+        return result
+
     def flatten(self, start_dim: int = 0, end_dim: int = -1) -> "Tensor":
         """Flatten tensor dimensions."""
         result = Tensor.__new__(Tensor)
@@ -331,6 +404,51 @@ class Tensor:
     def ravel(self) -> "Tensor":
         """Return flattened tensor (NumPy compatibility)."""
         return self.flatten()
+
+    def split(
+        self,
+        split_size_or_sections: Union[int, Sequence[int]],
+        dim: int = 0,
+    ) -> List["Tensor"]:
+        """Split the tensor into chunks along ``dim``.
+
+        Args:
+            split_size_or_sections: Size of each chunk or list/tuple of sizes
+                for each chunk.
+            dim: Dimension along which to split. May be negative to index
+                from the end.
+
+        Returns:
+            List[Tensor]: Tensors resulting from the split.
+        """
+
+        parts = self._tensor.split(split_size_or_sections, dim)
+        result: List[Tensor] = []
+        for p in parts:
+            t = Tensor.__new__(Tensor)
+            t._tensor = p
+            result.append(t)
+        return result
+
+    def chunk(self, chunks: int, dim: int = 0) -> List["Tensor"]:
+        """Split the tensor into equal sized chunks along ``dim``.
+
+        Args:
+            chunks: Number of chunks to return. The tensor size along ``dim``
+                must be divisible by ``chunks``.
+            dim: Dimension along which to split the tensor.
+
+        Returns:
+            List[Tensor]: List of ``chunks`` tensors split from this tensor.
+        """
+
+        parts = self._tensor.chunk(chunks, dim)
+        result = []
+        for p in parts:
+            t = Tensor.__new__(Tensor)
+            t._tensor = p
+            result.append(t)
+        return result
 
     # Tensor operations
     def clone(self) -> "Tensor":

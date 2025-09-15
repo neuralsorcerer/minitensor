@@ -7,6 +7,9 @@
 import numpy as np
 import pytest
 
+from minitensor import flatten
+from minitensor import functional as F
+from minitensor import ravel, view
 from minitensor.tensor import Tensor
 
 
@@ -31,3 +34,51 @@ def test_flatten_negative_start_dim():
     t = Tensor.arange(0, 24).reshape([2, 3, 4])
     f = t.flatten(-3, -2)
     assert f.shape == (6, 4)
+
+
+def test_functional_flatten():
+    t = Tensor.arange(0, 24).reshape([2, 3, 4])
+    f = F.flatten(t, 1, -1)
+    assert f.shape == (2, 12)
+    assert np.array_equal(f.numpy(), t.flatten(1, -1).numpy())
+
+
+def test_top_level_flatten():
+    t = Tensor.arange(0, 24).reshape([2, 3, 4])
+    f = flatten(t, 1, -1)
+    assert f.shape == (2, 12)
+    assert np.array_equal(f.numpy(), t.flatten(1, -1).numpy())
+
+
+def test_functional_ravel():
+    t = Tensor.arange(0, 24).reshape([2, 3, 4])
+    r = F.ravel(t)
+    assert r.shape == (24,)
+    assert np.array_equal(r.numpy(), t.ravel().numpy())
+
+
+def test_top_level_ravel():
+    t = Tensor.arange(0, 24).reshape([2, 3, 4])
+    r = ravel(t)
+    assert r.shape == (24,)
+    assert np.array_equal(r.numpy(), t.ravel().numpy())
+
+
+def test_functional_view():
+    t = Tensor.arange(0, 24)
+    v = F.view(t, 2, 12)
+    assert v.shape == (2, 12)
+    assert np.array_equal(v.numpy(), t.view(2, 12).numpy())
+
+
+def test_top_level_view():
+    t = Tensor.arange(0, 24)
+    v = view(t, 2, 12)
+    assert v.shape == (2, 12)
+    assert np.array_equal(v.numpy(), t.view(2, 12).numpy())
+
+
+def test_view_invalid_shape():
+    t = Tensor.arange(0, 10)
+    with pytest.raises(ValueError):
+        F.view(t, 3, 4)

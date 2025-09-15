@@ -289,6 +289,39 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     ))
 }
 
+/// Repeat `tensor` according to `repeats` along each dimension.
+pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
+    if repeats.len() < tensor.ndim() {
+        return Err(MinitensorError::invalid_operation(
+            "number of dimensions of repeat dims can not be smaller than number of dimensions of tensor",
+        ));
+    }
+    if repeats.iter().any(|&r| r == 0) {
+        return Err(MinitensorError::invalid_argument(
+            "repeats must be positive",
+        ));
+    }
+
+    let mut result = tensor.clone();
+
+    if repeats.len() > result.ndim() {
+        let mut new_shape = vec![1; repeats.len() - result.ndim()];
+        new_shape.extend_from_slice(result.shape().dims());
+        result = result.reshape(Shape::new(new_shape))?;
+    }
+
+    for (dim, &rep) in repeats.iter().enumerate() {
+        if rep == 1 {
+            continue;
+        }
+        let clones: Vec<Tensor> = (0..rep).map(|_| result.clone()).collect();
+        let refs: Vec<&Tensor> = clones.iter().collect();
+        result = concatenate(&refs, dim as isize)?;
+    }
+
+    Ok(result)
+}
+
 /// Indexing operation - select elements along specified dimensions
 pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Tensor> {
     let dim = normalize_dim(dim, tensor.ndim())?;
@@ -598,5 +631,20 @@ mod tests {
         assert_eq!(result.shape().dims(), &[2, 2]);
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 2.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_repeat_basic() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let repeated = repeat(&tensor, &[3]).unwrap();
+        assert_eq!(repeated.shape().dims(), &[6]);
+        let data = repeated.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_repeat_dim_mismatch_error() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        assert!(repeat(&tensor, &[]).is_err());
     }
 }

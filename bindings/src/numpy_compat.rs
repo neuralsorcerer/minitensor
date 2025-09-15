@@ -117,19 +117,19 @@ fn hstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
 /// Split tensor into multiple sub-tensors
 #[pyfunction]
 fn split(tensor: &PyTensor, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
-    tensor.split(sections, axis)
+    tensor.chunk(sections, axis)
 }
 
 /// Split tensor horizontally
 #[pyfunction]
 fn hsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
-    tensor.split(sections, Some(1))
+    tensor.chunk(sections, Some(1))
 }
 
 /// Split tensor vertically
 #[pyfunction]
 fn vsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
-    tensor.split(sections, Some(0))
+    tensor.chunk(sections, Some(0))
 }
 
 /// Dot product of two tensors

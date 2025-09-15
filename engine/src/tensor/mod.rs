@@ -1192,6 +1192,12 @@ impl Tensor {
         Ok(tensor)
     }
 
+    /// Repeat tensor according to `repeats` along each dimension
+    #[inline(always)]
+    pub fn repeat(&self, repeats: Vec<usize>) -> Result<Self> {
+        crate::operations::shape_ops::repeat(self, &repeats)
+    }
+
     /// Flatten tensor from `start_dim` to `end_dim` with PyTorch-style dimension handling
     pub fn flatten(&self, start_dim: isize, end_dim: isize) -> Result<Self> {
         let ndim = self.ndim() as isize;
