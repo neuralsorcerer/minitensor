@@ -10,7 +10,8 @@ build-backend = "maturin"
 name = "minitensor"
 description = "A lightweight, high-performance tensor operations library."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
 authors = [
     { name = "Soumyadip Sarkar", email = "soumyadip@soumyadipsarkar.com" }
 ]
@@ -19,7 +20,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
