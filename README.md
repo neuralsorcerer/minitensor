@@ -37,6 +37,12 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 ### Installation
 
+**From PyPi:**
+
+```bash
+pip install minitensor
+```
+
 **From Source:**
 
 ```bash
