@@ -6,7 +6,5 @@ authors:
     orcid: https://orcid.org/0000-0002-2377-9147
 title: "MiniTensor: A Lightweight, High-Performance Tensor Operations Library"
 date-released: 2025-09-03
-identifiers:
-  - type: doi
-    value: 10.5281/zenodo.17162776
+doi: 10.5281/zenodo.17162776
 url: "https://github.com/neuralsorcerer/minitensor"
