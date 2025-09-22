@@ -181,7 +181,7 @@ def movedim(
     return input.movedim(source, destination)
 
 
-# Alias matching PyTorch's ``moveaxis`` name
+# Alias matching ``moveaxis`` name
 moveaxis = movedim
 
 
@@ -261,6 +261,17 @@ def repeat(input: Tensor, *repeats: int) -> Tensor:
     """
 
     return input.repeat(*repeats)
+
+
+def repeat_interleave(
+    input: Tensor,
+    repeats: Union[int, Sequence[int], Tensor],
+    dim: Optional[int] = None,
+    output_size: Optional[int] = None,
+) -> Tensor:
+    """Repeat elements of ``input`` along a dimension."""
+
+    return input.repeat_interleave(repeats, dim, output_size)
 
 
 def flip(input: Tensor, dims: Union[int, Sequence[int]]) -> Tensor:
@@ -619,6 +630,7 @@ __all__ = [
     "unsqueeze",
     "expand",
     "repeat",
+    "repeat_interleave",
     "flip",
     "roll",
     "narrow",

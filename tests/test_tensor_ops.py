@@ -52,6 +52,16 @@ def test_reshape_zero_dim_with_inference_error():
         t.reshape(-1, 0)
 
 
+def test_reshape_backward_preserves_gradients():
+    base = mt.arange(0.0, 6.0, dtype="float32", requires_grad=True)
+    reshaped = base.reshape((2, 3))
+    reshaped.sum().backward()
+
+    grad = base.grad
+    assert grad is not None
+    np.testing.assert_allclose(grad.numpy(), np.ones(6, dtype=np.float32))
+
+
 def test_transpose_invalid_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     with pytest.raises(IndexError):

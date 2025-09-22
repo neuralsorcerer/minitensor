@@ -349,11 +349,30 @@ class Tensor:
             )
 
         repeats = tuple(int(r) for r in repeats)
-        if any(r <= 0 for r in repeats):
-            raise ValueError("repeats must be positive")
+        if any(r < 0 for r in repeats):
+            raise ValueError("repeats must be non-negative")
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.repeat(list(repeats))
+        return result
+
+    def repeat_interleave(
+        self,
+        repeats: Union[int, Sequence[int], "Tensor"],
+        dim: Optional[int] = None,
+        output_size: Optional[int] = None,
+    ) -> "Tensor":
+        """Repeat elements of the tensor along a given dimension."""
+
+        if isinstance(repeats, Tensor):
+            backend_repeats = repeats._tensor
+        else:
+            backend_repeats = repeats
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.repeat_interleave(
+            backend_repeats, dim, output_size
+        )
         return result
 
     def flip(self, dims: Union[int, Sequence[int]]) -> "Tensor":
@@ -654,21 +673,33 @@ class Tensor:
         exp_tensor = exponent._tensor if isinstance(exponent, Tensor) else exponent
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.pow(exp_tensor)
-        if isinstance(exponent, Tensor):
-            exp_floor = exponent.astype("int64").astype(exponent.dtype)
-            frac_mask = exponent.ne(exp_floor).astype("int32")
-            neg_mask = self.lt(0).astype("int32")
-            mask = (neg_mask * frac_mask).astype("bool")
-            if bool(mask.any().numpy()):
-                res_np = result.numpy()
-                mask_np = mask.numpy().astype(bool)
-                res_np[mask_np] = 0.0
-                result = Tensor(res_np, dtype=self.dtype)
         return result
 
     def pow(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Alias for the ``**`` operator."""
         return self.__pow__(exponent)
+
+    def __rpow__(self, base: Union["Tensor", float, int]) -> "Tensor":
+        """Support right-hand exponentiation so scalars delegate to the Rust backend."""
+
+        if isinstance(base, Tensor):
+            return base.__pow__(self)
+
+        kwargs = {"dtype": self.dtype}
+        try:
+            kwargs["device"] = _minitensor_core.Device(self.device)
+        except Exception:
+            # Fallback to the default device if construction fails (e.g., CPU-only builds).
+            pass
+
+        try:
+            base_tensor = Tensor(base, **kwargs)
+        except Exception as exc:  # pragma: no cover
+            raise TypeError(
+                f"unsupported base type for power: {type(base).__name__}"
+            ) from exc
+
+        return base_tensor.__pow__(self)
 
     def __matmul__(self, other: "Tensor") -> "Tensor":
         """Matrix multiplication operator (@)."""

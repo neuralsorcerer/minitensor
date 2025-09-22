@@ -242,6 +242,17 @@ def repeat(input, *repeats: int):
     return functional.repeat(input, *repeats)
 
 
+def repeat_interleave(
+    input,
+    repeats,
+    dim: Optional[Union[int, Sequence[int]]] = None,
+    output_size: Optional[int] = None,
+):
+    """Repeat elements of ``input`` along a dimension."""
+
+    return functional.repeat_interleave(input, repeats, dim, output_size)
+
+
 def flip(input, dims: Union[int, Sequence[int]]):
     """Flip ``input`` along specified dimensions."""
     return functional.flip(input, dims)
@@ -303,6 +314,7 @@ __all__ = [
     "unsqueeze",
     "expand",
     "repeat",
+    "repeat_interleave",
     "flip",
     "roll",
     "split",

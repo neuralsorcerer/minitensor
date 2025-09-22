@@ -6,6 +6,7 @@
 
 use crate::device::PyDevice;
 use crate::error::_convert_error;
+use engine::operations::shape_ops::RepeatInterleaveSpec;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
@@ -13,6 +14,7 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use std::convert::TryFrom;
 use std::sync::Arc;
 
 /// Python wrapper for Tensor with comprehensive functionality
@@ -203,6 +205,62 @@ impl PyTensor {
         let result = engine::operations::shape_ops::roll(&self.inner, &shifts, dims_ref)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
+    }
+
+    fn repeat_interleave(
+        &self,
+        repeats: &Bound<PyAny>,
+        dim: Option<isize>,
+        output_size: Option<usize>,
+    ) -> PyResult<Self> {
+        if let Ok(value) = repeats.extract::<usize>() {
+            let result = engine::operations::shape_ops::repeat_interleave(
+                &self.inner,
+                RepeatInterleaveSpec::Scalar(value),
+                dim,
+                output_size,
+            )
+            .map_err(_convert_error)?;
+            return Ok(Self { inner: result });
+        }
+
+        if let Ok(seq) = repeats.extract::<Vec<i64>>() {
+            let mut converted = Vec::with_capacity(seq.len());
+            for value in seq {
+                if value < 0 {
+                    return Err(PyValueError::new_err(
+                        "repeat_interleave: repeats must be non-negative integers",
+                    ));
+                }
+                let value = usize::try_from(value).map_err(|_| {
+                    PyValueError::new_err("repeat_interleave: repeat value exceeds platform limits")
+                })?;
+                converted.push(value);
+            }
+            let result = engine::operations::shape_ops::repeat_interleave(
+                &self.inner,
+                RepeatInterleaveSpec::Slice(&converted),
+                dim,
+                output_size,
+            )
+            .map_err(_convert_error)?;
+            return Ok(Self { inner: result });
+        }
+
+        if let Ok(py_tensor) = repeats.extract::<PyRef<PyTensor>>() {
+            let result = engine::operations::shape_ops::repeat_interleave(
+                &self.inner,
+                RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
+                dim,
+                output_size,
+            )
+            .map_err(_convert_error)?;
+            return Ok(Self { inner: result });
+        }
+
+        Err(PyTypeError::new_err(
+            "repeat_interleave: repeats must be an int, sequence of ints, or Tensor",
+        ))
     }
 
     fn narrow(&self, dim: isize, start: usize, length: usize) -> PyResult<Self> {

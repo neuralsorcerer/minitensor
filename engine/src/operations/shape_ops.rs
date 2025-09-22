@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{ReshapeBackward, add_to_graph},
+    autograd::{RepeatInterleaveBackward, ReshapeBackward, add_to_graph},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -31,8 +31,9 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
         ));
     }
 
-    // Use the tensor's built-in view method for reshaping
-    let reshaped = tensor.view(new_shape.clone())?;
+    // Use the tensor's built-in view method for reshaping and refresh metadata
+    let mut reshaped = tensor.view(new_shape.clone())?;
+    reshaped.refresh_autograd_metadata();
 
     // Set up gradient function if needed
     if reshaped.requires_grad() {
@@ -41,13 +42,12 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
             input_id: tensor.id(),
         });
 
-        let mut reshaped_with_grad = reshaped;
-        reshaped_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        reshaped.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
-        add_to_graph(&reshaped_with_grad, Some(grad_fn))?;
+        add_to_graph(&reshaped, Some(grad_fn))?;
 
-        Ok(reshaped_with_grad)
+        Ok(reshaped)
     } else {
         Ok(reshaped)
     }
@@ -353,11 +353,6 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
             "number of dimensions of repeat dims can not be smaller than number of dimensions of tensor",
         ));
     }
-    if repeats.iter().any(|&r| r == 0) {
-        return Err(MinitensorError::invalid_argument(
-            "repeats must be positive",
-        ));
-    }
 
     let mut result = tensor.clone();
 
@@ -365,6 +360,30 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         let mut new_shape = vec![1; repeats.len() - result.ndim()];
         new_shape.extend_from_slice(result.shape().dims());
         result = result.reshape(Shape::new(new_shape))?;
+    }
+
+    if repeats.iter().any(|&r| r == 0) {
+        let mut out_shape = result.shape().dims().to_vec();
+        for (dim, &rep) in repeats.iter().enumerate() {
+            out_shape[dim] *= rep;
+        }
+        let shape = Shape::new(out_shape);
+        let dtype = result.dtype();
+        let device = result.device();
+        let data = match dtype {
+            DataType::Float32 => TensorData::from_vec_f32(vec![], device),
+            DataType::Float64 => TensorData::from_vec_f64(vec![], device),
+            DataType::Int32 => TensorData::from_vec_i32(vec![], device),
+            DataType::Int64 => TensorData::from_vec_i64(vec![], device),
+            DataType::Bool => TensorData::from_vec_bool(vec![], device),
+        };
+        return Ok(Tensor::new(
+            Arc::new(data),
+            shape,
+            dtype,
+            device,
+            result.requires_grad(),
+        ));
     }
 
     for (dim, &rep) in repeats.iter().enumerate() {
@@ -723,6 +742,240 @@ pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result
         let rolled = concatenate(&[&second, &first], 0)?;
         rolled.reshape(tensor.shape().clone())
     }
+}
+
+/// Specification of repeat counts accepted by [`repeat_interleave`].
+#[derive(Clone, Copy)]
+pub enum RepeatInterleaveSpec<'a> {
+    /// A single repeat value applied to every element along ``dim``.
+    Scalar(usize),
+    /// Explicit repeat counts provided as a slice.
+    Slice(&'a [usize]),
+    /// Repeat counts provided as a tensor (must contain integer data).
+    Tensor(&'a Tensor),
+}
+
+fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<usize>> {
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "repeat_interleave: repeats tensor must reside on CPU".to_string(),
+        ));
+    }
+
+    if tensor.numel() != dim_size {
+        return Err(MinitensorError::invalid_operation(
+            "repeat_interleave: repeats tensor must have the same number of elements as the selected dimension"
+                .to_string(),
+        ));
+    }
+
+    match tensor.dtype() {
+        DataType::Int32 => {
+            let slice = tensor.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave: repeats tensor must be contiguous".to_string(),
+                )
+            })?;
+            let mut out = Vec::with_capacity(slice.len());
+            for &value in slice {
+                if value < 0 {
+                    return Err(MinitensorError::invalid_operation(
+                        "repeat_interleave: repeats must be non-negative".to_string(),
+                    ));
+                }
+                out.push(value as usize);
+            }
+            Ok(out)
+        }
+        DataType::Int64 => {
+            let slice = tensor.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave: repeats tensor must be contiguous".to_string(),
+                )
+            })?;
+            let mut out = Vec::with_capacity(slice.len());
+            for &value in slice {
+                if value < 0 {
+                    return Err(MinitensorError::invalid_operation(
+                        "repeat_interleave: repeats must be non-negative".to_string(),
+                    ));
+                }
+                out.push(value as usize);
+            }
+            Ok(out)
+        }
+        other => Err(MinitensorError::type_mismatch(
+            "integral tensor",
+            format!("{:?}", other),
+        )),
+    }
+}
+
+fn expand_repeats(spec: RepeatInterleaveSpec<'_>, dim_size: usize) -> Result<Vec<usize>> {
+    match spec {
+        RepeatInterleaveSpec::Scalar(value) => Ok(vec![value; dim_size]),
+        RepeatInterleaveSpec::Slice(values) => {
+            if values.len() == dim_size {
+                Ok(values.to_vec())
+            } else if values.len() == 1 {
+                if dim_size == 0 {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![values[0]; dim_size])
+                }
+            } else if values.is_empty() && dim_size == 0 {
+                Ok(Vec::new())
+            } else {
+                Err(MinitensorError::invalid_operation(
+                    "repeat_interleave: repeats must be a single value or match tensor size along dim"
+                        .to_string(),
+                ))
+            }
+        }
+        RepeatInterleaveSpec::Tensor(tensor) => collect_repeats_from_tensor(tensor, dim_size),
+    }
+}
+
+fn build_empty_repeat_result(tensor: &Tensor, dim: usize, target: usize) -> Result<Tensor> {
+    let mut out_shape = tensor.shape().dims().to_vec();
+    out_shape[dim] = target;
+    let shape = Shape::new(out_shape);
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+    let data = TensorData::zeros_on_device(shape.numel(), dtype, device);
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        dtype,
+        device,
+        tensor.requires_grad(),
+    ))
+}
+
+/// Repeat elements of ``tensor`` according to ``repeats`` along ``dim``.
+pub fn repeat_interleave(
+    tensor: &Tensor,
+    repeats: RepeatInterleaveSpec<'_>,
+    dim: Option<isize>,
+    output_size: Option<usize>,
+) -> Result<Tensor> {
+    if dim.is_none() {
+        let flat = tensor.flatten_all()?;
+        return repeat_interleave(&flat, repeats, Some(0), output_size);
+    }
+
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "repeat_interleave currently supports only CPU tensors".to_string(),
+        ));
+    }
+
+    let dim = normalize_dim(dim.unwrap(), tensor.ndim())?;
+    let dims = tensor.shape().dims();
+    let dim_size = dims[dim];
+    let reps = expand_repeats(repeats, dim_size)?;
+    let repeats_for_backward = reps.clone();
+    let total_repeats: usize = reps.iter().sum();
+    let input_shape_vec = dims.to_vec();
+
+    if let Some(expected) = output_size {
+        if expected != total_repeats {
+            return Err(MinitensorError::invalid_argument(format!(
+                "repeat_interleave: output_size ({expected}) must equal sum of repeats ({total_repeats})"
+            )));
+        }
+    }
+
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+    let requires_grad = tensor.requires_grad();
+
+    let target_dim = output_size.unwrap_or(total_repeats);
+    let mut output_shape = input_shape_vec.clone();
+    output_shape[dim] = target_dim;
+    let output_shape_obj = Shape::new(output_shape.clone());
+    let output_numel = output_shape_obj.numel();
+
+    let inner: usize = dims[dim + 1..].iter().product();
+    let outer: usize = if dim == 0 {
+        1
+    } else {
+        dims[..dim].iter().product()
+    };
+
+    if target_dim == 0 || output_numel == 0 || inner == 0 || outer == 0 {
+        let mut result = build_empty_repeat_result(tensor, dim, target_dim)?;
+        if requires_grad {
+            let grad_fn = Arc::new(RepeatInterleaveBackward {
+                input_shape: input_shape_vec.clone(),
+                repeats: repeats_for_backward.clone(),
+                input_id: tensor.id(),
+                dim,
+            });
+            result.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&result, Some(grad_fn))?;
+        }
+        return Ok(result);
+    }
+
+    macro_rules! repeat_impl {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave: tensor data access failed".to_string(),
+                )
+            })?;
+            let mut out = vec![<$ty>::default(); output_numel];
+            out.par_chunks_mut(target_dim * inner).enumerate().for_each(
+                |(outer_idx, out_chunk)| {
+                    let mut dst_offset = 0;
+                    let base = outer_idx * dim_size * inner;
+                    for (i, &rep) in reps.iter().enumerate() {
+                        if rep == 0 {
+                            continue;
+                        }
+                        let src_start = base + i * inner;
+                        let src_slice = &src[src_start..src_start + inner];
+                        for _ in 0..rep {
+                            let end = dst_offset + inner;
+                            out_chunk[dst_offset..end].copy_from_slice(src_slice);
+                            dst_offset = end;
+                        }
+                    }
+                },
+            );
+            TensorData::$from_vec(out, device)
+        }};
+    }
+
+    let data = match dtype {
+        DataType::Float32 => repeat_impl!(f32, as_f32_slice, from_vec_f32),
+        DataType::Float64 => repeat_impl!(f64, as_f64_slice, from_vec_f64),
+        DataType::Int32 => repeat_impl!(i32, as_i32_slice, from_vec_i32),
+        DataType::Int64 => repeat_impl!(i64, as_i64_slice, from_vec_i64),
+        DataType::Bool => repeat_impl!(bool, as_bool_slice, from_vec_bool),
+    };
+
+    let mut result = Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    );
+
+    if requires_grad {
+        let grad_fn = Arc::new(RepeatInterleaveBackward {
+            input_shape: input_shape_vec,
+            repeats: repeats_for_backward,
+            input_id: tensor.id(),
+            dim,
+        });
+        result.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result, Some(grad_fn))?;
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]

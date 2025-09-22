@@ -41,3 +41,10 @@ def test_repeat_errors():
         t.repeat(2)
     with pytest.raises(ValueError):
         t.repeat(2, -1)
+
+
+def test_repeat_zero():
+    t = Tensor([[1, 2], [3, 4]])
+    r = t.repeat(0, 2)
+    assert r.shape == (0, 4)
+    assert r.numel() == 0

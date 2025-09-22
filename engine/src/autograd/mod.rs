@@ -719,6 +719,12 @@ impl GradientFunction for SigmoidBackward {
 }
 
 /// Gradient function for power operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowBroadcast {
+    None,
+    BaseScalar,
+    ExponentScalar,
+}
 pub struct PowBackward {
     pub base: Tensor,
     pub exponent: Tensor,
@@ -726,6 +732,7 @@ pub struct PowBackward {
     pub input_ids: [TensorId; 2],
     pub base_requires_grad: bool,
     pub exp_requires_grad: bool,
+    pub broadcast: PowBroadcast,
 }
 
 impl GradientFunction for PowBackward {
@@ -759,27 +766,65 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f32 slice from grad_data",
                         )
                     })?;
-                    let len = base_slice.len();
-                    if len < PAR_THRESHOLD {
-                        for i in 0..len {
-                            grad_slice[i] =
-                                exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
+
+                    match self.broadcast {
+                        PowBroadcast::None => {
+                            let len = base_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] = exp_slice[i]
+                                        * base_slice[i].powf(exp_slice[i] - 1.0)
+                                        * grad_out[i];
+                                }
+                            } else {
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let exp_ptr = exp_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let base_ptr = base_ptr as *const f32;
+                                    let exp_ptr = exp_ptr as *const f32;
+                                    let go_ptr = go_ptr as *const f32;
+                                    let grad_ptr = grad_ptr as *mut f32;
+                                    *grad_ptr.add(i) = *exp_ptr.add(i)
+                                        * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
+                                        * *go_ptr.add(i);
+                                });
+                            }
                         }
-                    } else {
-                        let base_ptr = base_slice.as_ptr() as usize;
-                        let exp_ptr = exp_slice.as_ptr() as usize;
-                        let go_ptr = grad_out.as_ptr() as usize;
-                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                        (0..len).into_par_iter().for_each(|i| unsafe {
-                            let base_ptr = base_ptr as *const f32;
-                            let exp_ptr = exp_ptr as *const f32;
-                            let go_ptr = go_ptr as *const f32;
-                            let grad_ptr = grad_ptr as *mut f32;
-                            *grad_ptr.add(i) = *exp_ptr.add(i)
-                                * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
-                                * *go_ptr.add(i);
-                        });
+                        PowBroadcast::BaseScalar => {
+                            let base_val = base_slice[0];
+                            let mut accum = 0.0_f32;
+                            for i in 0..grad_out.len() {
+                                accum +=
+                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
+                            }
+                            grad_slice[0] = accum;
+                        }
+                        PowBroadcast::ExponentScalar => {
+                            let exp_val = exp_slice[0];
+                            let len = base_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] =
+                                        exp_val * base_slice[i].powf(exp_val - 1.0) * grad_out[i];
+                                }
+                            } else {
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let base_ptr = base_ptr as *const f32;
+                                    let go_ptr = go_ptr as *const f32;
+                                    let grad_ptr = grad_ptr as *mut f32;
+                                    *grad_ptr.add(i) = exp_val
+                                        * (*base_ptr.add(i)).powf(exp_val - 1.0)
+                                        * *go_ptr.add(i);
+                                });
+                            }
+                        }
                     }
+
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
                         self.base.shape().clone(),
@@ -801,25 +846,44 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f32 slice from grad_data",
                         )
                     })?;
-                    let len = exp_slice.len();
-                    if len < PAR_THRESHOLD {
-                        for i in 0..len {
-                            grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+
+                    match self.broadcast {
+                        PowBroadcast::None => {
+                            let len = exp_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                                }
+                            } else {
+                                let out_ptr = out_slice.as_ptr() as usize;
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let out_ptr = out_ptr as *const f32;
+                                    let base_ptr = base_ptr as *const f32;
+                                    let go_ptr = go_ptr as *const f32;
+                                    let grad_ptr = grad_ptr as *mut f32;
+                                    *grad_ptr.add(i) =
+                                        *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
+                                });
+                            }
                         }
-                    } else {
-                        let out_ptr = out_slice.as_ptr() as usize;
-                        let base_ptr = base_slice.as_ptr() as usize;
-                        let go_ptr = grad_out.as_ptr() as usize;
-                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                        (0..len).into_par_iter().for_each(|i| unsafe {
-                            let out_ptr = out_ptr as *const f32;
-                            let base_ptr = base_ptr as *const f32;
-                            let go_ptr = go_ptr as *const f32;
-                            let grad_ptr = grad_ptr as *mut f32;
-                            *grad_ptr.add(i) =
-                                *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
-                        });
+                        PowBroadcast::BaseScalar => {
+                            let base_val = base_slice[0];
+                            for i in 0..grad_out.len() {
+                                grad_slice[i] = out_slice[i] * base_val.ln() * grad_out[i];
+                            }
+                        }
+                        PowBroadcast::ExponentScalar => {
+                            let mut accum = 0.0_f32;
+                            for i in 0..grad_out.len() {
+                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
+                            }
+                            grad_slice[0] = accum;
+                        }
                     }
+
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
                         self.exponent.shape().clone(),
@@ -855,27 +919,65 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f64 slice from grad_data",
                         )
                     })?;
-                    let len = base_slice.len();
-                    if len < PAR_THRESHOLD {
-                        for i in 0..len {
-                            grad_slice[i] =
-                                exp_slice[i] * base_slice[i].powf(exp_slice[i] - 1.0) * grad_out[i];
+
+                    match self.broadcast {
+                        PowBroadcast::None => {
+                            let len = base_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] = exp_slice[i]
+                                        * base_slice[i].powf(exp_slice[i] - 1.0)
+                                        * grad_out[i];
+                                }
+                            } else {
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let exp_ptr = exp_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let base_ptr = base_ptr as *const f64;
+                                    let exp_ptr = exp_ptr as *const f64;
+                                    let go_ptr = go_ptr as *const f64;
+                                    let grad_ptr = grad_ptr as *mut f64;
+                                    *grad_ptr.add(i) = *exp_ptr.add(i)
+                                        * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
+                                        * *go_ptr.add(i);
+                                });
+                            }
                         }
-                    } else {
-                        let base_ptr = base_slice.as_ptr() as usize;
-                        let exp_ptr = exp_slice.as_ptr() as usize;
-                        let go_ptr = grad_out.as_ptr() as usize;
-                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                        (0..len).into_par_iter().for_each(|i| unsafe {
-                            let base_ptr = base_ptr as *const f64;
-                            let exp_ptr = exp_ptr as *const f64;
-                            let go_ptr = go_ptr as *const f64;
-                            let grad_ptr = grad_ptr as *mut f64;
-                            *grad_ptr.add(i) = *exp_ptr.add(i)
-                                * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
-                                * *go_ptr.add(i);
-                        });
+                        PowBroadcast::BaseScalar => {
+                            let base_val = base_slice[0];
+                            let mut accum = 0.0_f64;
+                            for i in 0..grad_out.len() {
+                                accum +=
+                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
+                            }
+                            grad_slice[0] = accum;
+                        }
+                        PowBroadcast::ExponentScalar => {
+                            let exp_val = exp_slice[0];
+                            let len = base_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] =
+                                        exp_val * base_slice[i].powf(exp_val - 1.0) * grad_out[i];
+                                }
+                            } else {
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let base_ptr = base_ptr as *const f64;
+                                    let go_ptr = go_ptr as *const f64;
+                                    let grad_ptr = grad_ptr as *mut f64;
+                                    *grad_ptr.add(i) = exp_val
+                                        * (*base_ptr.add(i)).powf(exp_val - 1.0)
+                                        * *go_ptr.add(i);
+                                });
+                            }
+                        }
                     }
+
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
                         self.base.shape().clone(),
@@ -897,25 +999,44 @@ impl GradientFunction for PowBackward {
                             "Failed to get mutable f64 slice from grad_data",
                         )
                     })?;
-                    let len = exp_slice.len();
-                    if len < PAR_THRESHOLD {
-                        for i in 0..len {
-                            grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+
+                    match self.broadcast {
+                        PowBroadcast::None => {
+                            let len = exp_slice.len();
+                            if len < PAR_THRESHOLD {
+                                for i in 0..len {
+                                    grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
+                                }
+                            } else {
+                                let out_ptr = out_slice.as_ptr() as usize;
+                                let base_ptr = base_slice.as_ptr() as usize;
+                                let go_ptr = grad_out.as_ptr() as usize;
+                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
+                                (0..len).into_par_iter().for_each(|i| unsafe {
+                                    let out_ptr = out_ptr as *const f64;
+                                    let base_ptr = base_ptr as *const f64;
+                                    let go_ptr = go_ptr as *const f64;
+                                    let grad_ptr = grad_ptr as *mut f64;
+                                    *grad_ptr.add(i) =
+                                        *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
+                                });
+                            }
                         }
-                    } else {
-                        let out_ptr = out_slice.as_ptr() as usize;
-                        let base_ptr = base_slice.as_ptr() as usize;
-                        let go_ptr = grad_out.as_ptr() as usize;
-                        let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                        (0..len).into_par_iter().for_each(|i| unsafe {
-                            let out_ptr = out_ptr as *const f64;
-                            let base_ptr = base_ptr as *const f64;
-                            let go_ptr = go_ptr as *const f64;
-                            let grad_ptr = grad_ptr as *mut f64;
-                            *grad_ptr.add(i) =
-                                *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
-                        });
+                        PowBroadcast::BaseScalar => {
+                            let base_val = base_slice[0];
+                            for i in 0..grad_out.len() {
+                                grad_slice[i] = out_slice[i] * base_val.ln() * grad_out[i];
+                            }
+                        }
+                        PowBroadcast::ExponentScalar => {
+                            let mut accum = 0.0_f64;
+                            for i in 0..grad_out.len() {
+                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
+                            }
+                            grad_slice[0] = accum;
+                        }
                     }
+
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
                         self.exponent.shape().clone(),
@@ -1345,6 +1466,146 @@ impl GradientFunction for ReshapeBackward {
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
     }
+}
+
+/// Gradient function for repeat_interleave operation
+pub struct RepeatInterleaveBackward {
+    pub input_shape: Vec<usize>,
+    pub repeats: Vec<usize>,
+    pub input_id: TensorId,
+    pub dim: usize,
+}
+
+impl GradientFunction for RepeatInterleaveBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let grad_input = repeat_interleave_backward_impl(
+            grad_output,
+            &self.input_shape,
+            &self.repeats,
+            self.dim,
+        )?;
+
+        let mut gradients = FxHashMap::default();
+        gradients.insert(self.input_id, grad_input);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+fn repeat_interleave_backward_impl(
+    grad_output: &Tensor,
+    input_shape: &[usize],
+    repeats: &[usize],
+    dim: usize,
+) -> Result<Tensor> {
+    if dim >= input_shape.len() {
+        return Err(MinitensorError::index_error(
+            dim as isize,
+            0,
+            input_shape.len(),
+        ));
+    }
+
+    let dim_size = input_shape[dim];
+    if repeats.len() != dim_size {
+        return Err(MinitensorError::invalid_operation(
+            "repeat_interleave backward: repeats must match input dimension size".to_string(),
+        ));
+    }
+
+    let grad_shape_vec = input_shape.to_vec();
+    let grad_shape = Shape::new(grad_shape_vec.clone());
+    let numel = grad_shape.numel();
+    let dtype = grad_output.dtype();
+    let device = grad_output.device();
+    let total_repeats: usize = repeats.iter().sum();
+
+    let inner: usize = if dim + 1 >= input_shape.len() {
+        1
+    } else {
+        input_shape[dim + 1..].iter().product()
+    };
+    let outer: usize = if dim == 0 {
+        1
+    } else {
+        input_shape[..dim].iter().product()
+    };
+
+    if numel == 0 || total_repeats == 0 || inner == 0 || outer == 0 {
+        return Ok(Tensor::zeros(
+            Shape::new(grad_shape_vec),
+            dtype,
+            device,
+            false,
+        ));
+    }
+
+    let output_dims = grad_output.shape().dims();
+    if output_dims.len() != input_shape.len() || output_dims[dim] != total_repeats {
+        return Err(MinitensorError::shape_mismatch(
+            input_shape.to_vec(),
+            output_dims.to_vec(),
+        ));
+    }
+
+    macro_rules! repeat_interleave_backward_impl_inner {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = grad_output.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave backward: gradient tensor must be contiguous".to_string(),
+                )
+            })?;
+            let mut dst = vec![<$ty>::default(); numel];
+            let chunk = total_repeats * inner;
+            dst.par_chunks_mut(dim_size * inner)
+                .enumerate()
+                .for_each(|(outer_idx, dst_chunk)| {
+                    let mut src_offset = outer_idx * chunk;
+                    for (i, &rep) in repeats.iter().enumerate() {
+                        if rep == 0 {
+                            continue;
+                        }
+                        let dst_start = i * inner;
+                        let dst_slice = &mut dst_chunk[dst_start..dst_start + inner];
+                        for _ in 0..rep {
+                            let src_slice = &src[src_offset..src_offset + inner];
+                            dst_slice.iter_mut().zip(src_slice.iter()).for_each(
+                                |(dst_val, &src_val)| {
+                                    *dst_val += src_val;
+                                },
+                            );
+                            src_offset += inner;
+                        }
+                    }
+                });
+            TensorData::$from_vec(dst, device)
+        }};
+    }
+
+    let data = match dtype {
+        DataType::Float32 => {
+            repeat_interleave_backward_impl_inner!(f32, as_f32_slice, from_vec_f32)
+        }
+        DataType::Float64 => {
+            repeat_interleave_backward_impl_inner!(f64, as_f64_slice, from_vec_f64)
+        }
+        DataType::Int32 => repeat_interleave_backward_impl_inner!(i32, as_i32_slice, from_vec_i32),
+        DataType::Int64 => repeat_interleave_backward_impl_inner!(i64, as_i64_slice, from_vec_i64),
+        DataType::Bool => {
+            return Ok(Tensor::zeros(grad_shape, dtype, device, false));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        grad_shape,
+        dtype,
+        device,
+        false,
+    ))
 }
 
 /// Gradient function for expand operation which reduces broadcasted gradients

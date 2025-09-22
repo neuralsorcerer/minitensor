@@ -23,7 +23,7 @@ def _unwrap(params):
 
 
 class _OptimizerWrapper:
-    """Thin wrapper mirroring PyTorch's optimiser interface."""
+    """Thin wrapper for optimiser interface."""
 
     def __init__(self, opt, params) -> None:
         self._opt = opt

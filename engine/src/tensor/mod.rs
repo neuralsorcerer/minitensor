@@ -202,6 +202,14 @@ impl Tensor {
         self
     }
 
+    /// Assign a fresh tensor identifier and clear autograd metadata.
+    #[inline(always)]
+    pub(crate) fn refresh_autograd_metadata(&mut self) {
+        self.tensor_id = TensorId::new();
+        self.grad_fn = None;
+        self.grad = None;
+    }
+
     /// Get the gradient for this tensor
     #[inline(always)]
     pub fn grad(&self) -> Option<&Arc<Tensor>> {
@@ -1177,6 +1185,7 @@ impl Tensor {
         }
 
         let mut tensor = self.clone();
+        tensor.refresh_autograd_metadata();
         tensor.shape = Shape::new(new_dims.clone());
         tensor.strides = Strides::new(new_strides);
 
@@ -1198,7 +1207,7 @@ impl Tensor {
         crate::operations::shape_ops::repeat(self, &repeats)
     }
 
-    /// Flatten tensor from `start_dim` to `end_dim` with PyTorch-style dimension handling
+    /// Flatten tensor from `start_dim` to `end_dim`
     pub fn flatten(&self, start_dim: isize, end_dim: isize) -> Result<Self> {
         let ndim = self.ndim() as isize;
 

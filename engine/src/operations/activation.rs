@@ -6,8 +6,9 @@
 
 use crate::{
     autograd::{
-        CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward, ReluBackward,
-        SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward, add_to_graph,
+        CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward, PowBroadcast,
+        ReluBackward, SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward,
+        add_to_graph,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
@@ -397,17 +398,31 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // For simplicity, require identical shapes
-    if base.shape() != exponent.shape() {
-        return Err(MinitensorError::shape_mismatch(
-            base.shape().dims().to_vec(),
-            exponent.shape().dims().to_vec(),
-        ));
-    }
+    let base_shape = base.shape().clone();
+    let exponent_shape = exponent.shape().clone();
+    let base_numel = base_shape.numel();
+    let exp_numel = exponent_shape.numel();
 
-    // Create output tensor data
+    let broadcast = if base_shape == exponent_shape {
+        PowBroadcast::None
+    } else if base_numel == 1 {
+        PowBroadcast::BaseScalar
+    } else if exp_numel == 1 {
+        PowBroadcast::ExponentScalar
+    } else {
+        return Err(MinitensorError::shape_mismatch(
+            base_shape.dims().to_vec(),
+            exponent_shape.dims().to_vec(),
+        ));
+    };
+
+    let output_shape = match broadcast {
+        PowBroadcast::None | PowBroadcast::ExponentScalar => base_shape.clone(),
+        PowBroadcast::BaseScalar => exponent_shape.clone(),
+    };
+
     let mut output_data =
-        TensorData::uninitialized_on_device(base.numel(), base.dtype(), base.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), base.dtype(), base.device());
 
     match base.dtype() {
         DataType::Float32 => {
@@ -420,8 +435,24 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
             let out = output_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
             })?;
-            for i in 0..b.len() {
-                out[i] = b[i].powf(e[i]);
+            match broadcast {
+                PowBroadcast::None => {
+                    for i in 0..b.len() {
+                        out[i] = b[i].powf(e[i]);
+                    }
+                }
+                PowBroadcast::BaseScalar => {
+                    let base_val = b[0];
+                    for i in 0..e.len() {
+                        out[i] = base_val.powf(e[i]);
+                    }
+                }
+                PowBroadcast::ExponentScalar => {
+                    let exp_val = e[0];
+                    for i in 0..b.len() {
+                        out[i] = b[i].powf(exp_val);
+                    }
+                }
             }
         }
         DataType::Float64 => {
@@ -434,8 +465,24 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
             let out = output_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
             })?;
-            for i in 0..b.len() {
-                out[i] = b[i].powf(e[i]);
+            match broadcast {
+                PowBroadcast::None => {
+                    for i in 0..b.len() {
+                        out[i] = b[i].powf(e[i]);
+                    }
+                }
+                PowBroadcast::BaseScalar => {
+                    let base_val = b[0];
+                    for i in 0..e.len() {
+                        out[i] = base_val.powf(e[i]);
+                    }
+                }
+                PowBroadcast::ExponentScalar => {
+                    let exp_val = e[0];
+                    for i in 0..b.len() {
+                        out[i] = b[i].powf(exp_val);
+                    }
+                }
             }
         }
         _ => {
@@ -447,7 +494,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
 
     let output = Tensor::new(
         Arc::new(output_data),
-        base.shape().clone(),
+        output_shape,
         base.dtype(),
         base.device(),
         base.requires_grad() || exponent.requires_grad(),
@@ -461,6 +508,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
             input_ids: [base.id(), exponent.id()],
             base_requires_grad: base.requires_grad(),
             exp_requires_grad: exponent.requires_grad(),
+            broadcast,
         });
 
         let mut output_with_grad = output;
@@ -1763,7 +1811,7 @@ mod tests {
     #[test]
     fn test_pow_shape_mismatch_error() {
         let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let exp = create_test_tensor_f32(vec![3.0], vec![1], false);
+        let exp = create_test_tensor_f32(vec![3.0, 4.0, 5.0], vec![3], false);
         assert!(pow(&base, &exp).is_err());
     }
 
@@ -1812,6 +1860,74 @@ mod tests {
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - 3.0 * 2.0_f32.powf(2.0)).abs() < 1e-6);
         assert!((g[1] - 3.0 * 3.0_f32.powf(2.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pow_base_scalar_tensor_exponent() {
+        let base = create_test_tensor_f32(vec![2.0], vec![], false);
+        let exp = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        let result = pow(&base, &exp).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 4.0).abs() < 1e-6);
+        assert!((data[2] - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pow_exponent_scalar_tensor_base() {
+        let base = create_test_tensor_f32(vec![2.0, 3.0, 4.0], vec![3], false);
+        let exp = create_test_tensor_f32(vec![2.0], vec![1], false);
+        let result = pow(&base, &exp).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!((data[0] - 4.0).abs() < 1e-6);
+        assert!((data[1] - 9.0).abs() < 1e-6);
+        assert!((data[2] - 16.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pow_base_scalar_gradient() {
+        let base = create_test_tensor_f32(vec![2.0], vec![], true);
+        let exp = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let result = pow(&base, &exp).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad = grads.get(&base.id()).unwrap();
+        let g = grad.data().as_f32_slice().unwrap();
+        let base_val = base.data().as_f32_slice().unwrap()[0];
+        let exp_vals = exp.data().as_f32_slice().unwrap();
+        let expected = exp_vals
+            .iter()
+            .map(|&e| e * base_val.powf(e - 1.0))
+            .sum::<f32>();
+        assert!((g[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pow_exponent_scalar_gradient() {
+        let base = create_test_tensor_f32(vec![2.0, 3.0], vec![2], false);
+        let exp = create_test_tensor_f32(vec![1.5], vec![1], true);
+        let result = pow(&base, &exp).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad = grads.get(&exp.id()).unwrap();
+        let g = grad.data().as_f32_slice().unwrap();
+        let exp_val = exp.data().as_f32_slice().unwrap()[0];
+        let base_vals = base.data().as_f32_slice().unwrap();
+        let expected = base_vals
+            .iter()
+            .map(|&b| b.powf(exp_val) * b.ln())
+            .sum::<f32>();
+        assert!((g[0] - expected).abs() < 1e-6);
     }
 
     #[test]
