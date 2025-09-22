@@ -21,7 +21,7 @@ except ImportError as e:
 
 from typing import Optional, Sequence, Union
 
-from .tensor import Tensor
+from .tensor import Tensor, _normalize_device
 
 
 def relu(input: Tensor) -> Tensor:
@@ -73,6 +73,43 @@ def cos(input: Tensor) -> Tensor:
 def tan(input: Tensor) -> Tensor:
     """Tangent function computed as sin(x)/cos(x)."""
     return input.tan()
+
+
+def where(condition: Tensor, input: Tensor, other: Tensor) -> Tensor:
+    """Select elements from ``input`` or ``other`` based on ``condition``.
+
+    Args:
+        condition: Boolean tensor controlling the selection. Must be
+            broadcastable to the operands.
+        input: Tensor providing values where ``condition`` is ``True``.
+        other: Tensor providing values where ``condition`` is ``False``.
+
+    Returns:
+        Tensor: The broadcasted result of the selection.
+    """
+
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+
+    target_device = _normalize_device(input.device)
+
+    if not isinstance(condition, Tensor):
+        condition = Tensor(condition, dtype="bool", device=target_device)
+    else:
+        if condition.dtype != "bool":
+            raise TypeError("where condition must be a bool tensor")
+        if condition.device != input.device:
+            condition = condition.to(target_device)
+
+    if not isinstance(other, Tensor):
+        other = Tensor(other, dtype=input.dtype, device=target_device)
+    else:
+        if other.dtype != input.dtype:
+            raise TypeError("where requires tensors to have the same dtype")
+        if other.device != input.device:
+            other = other.to(target_device)
+
+    return input.where(condition, other)
 
 
 def reshape(input: Tensor, shape) -> Tensor:

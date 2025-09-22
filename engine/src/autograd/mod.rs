@@ -7,7 +7,7 @@
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    operations::{activation, arithmetic, reduction, shape_ops},
+    operations::{activation, arithmetic, reduction, selection, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 pub mod graph;
@@ -248,6 +248,61 @@ impl GradientFunction for DivBackward {
 
         gradients.insert(self.input_ids[0], lhs_grad);
         gradients.insert(self.input_ids[1], rhs_grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for where/select operation
+pub struct WhereBackward {
+    pub condition: Tensor,
+    pub input_shape: Vec<usize>,
+    pub other_shape: Vec<usize>,
+    pub input_requires_grad: bool,
+    pub other_requires_grad: bool,
+    pub input_ids: [TensorId; 2],
+}
+
+impl GradientFunction for WhereBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(self.input_requires_grad as usize + self.other_requires_grad as usize);
+
+        let mut zero_tensor: Option<Tensor> = None;
+
+        if self.input_requires_grad {
+            let zeros = zero_tensor.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = selection::where_op(&self.condition, grad_output, zeros)?;
+            let reduced =
+                reduce_gradient_for_broadcasting(&selected, &Shape::new(self.input_shape.clone()))?;
+            gradients.insert(self.input_ids[0], reduced);
+        }
+
+        if self.other_requires_grad {
+            let zeros = zero_tensor.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = selection::where_op(&self.condition, zeros, grad_output)?;
+            let reduced =
+                reduce_gradient_for_broadcasting(&selected, &Shape::new(self.other_shape.clone()))?;
+            gradients.insert(self.input_ids[1], reduced);
+        }
 
         Ok(gradients)
     }

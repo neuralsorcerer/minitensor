@@ -13,6 +13,7 @@ pub mod linalg;
 pub mod loss;
 pub mod normalization;
 pub mod reduction;
+pub mod selection;
 pub mod shape_ops;
 pub mod simd;
 
@@ -26,5 +27,6 @@ pub use linalg::*;
 pub use loss::*;
 pub use normalization::*;
 pub use reduction::*;
+pub use selection::*;
 pub use shape_ops::*;
 pub use simd::*;

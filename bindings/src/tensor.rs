@@ -392,6 +392,15 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(name = "where")]
+    pub fn where_method(&self, condition: &PyTensor, other: &PyTensor) -> PyResult<Self> {
+        let result = self
+            .inner
+            .where_select(&condition.inner, &other.inner)
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     // Comparison operations
     pub fn eq(&self, other: &PyTensor) -> PyResult<Self> {
         let result = self.inner.eq(&other.inner).map_err(_convert_error)?;

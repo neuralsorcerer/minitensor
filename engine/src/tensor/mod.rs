@@ -382,6 +382,13 @@ impl Tensor {
         add(self, other)
     }
 
+    /// Select elements from self or other based on a boolean condition tensor
+    #[inline(always)]
+    pub fn where_select(&self, condition: &Tensor, other: &Tensor) -> Result<Self> {
+        use crate::operations::selection::where_op;
+        where_op(condition, self, other)
+    }
+
     /// Matrix multiplication
     #[inline(always)]
     pub fn matmul(&self, other: &Tensor) -> Result<Self> {

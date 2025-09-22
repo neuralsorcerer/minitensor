@@ -9,6 +9,7 @@ use crate::tensor::PyTensor;
 use engine::TensorIndex;
 use engine::operations::arithmetic::{mul, sub};
 use engine::operations::reduction::sum as tensor_sum;
+use engine::operations::selection::where_op as tensor_where;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
 use pyo3::prelude::*;
@@ -36,6 +37,7 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dot, m)?)?;
     m.add_function(wrap_pyfunction!(matmul, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
+    m.add_function(wrap_pyfunction!(where_py, m)?)?;
 
     // Comparison functions
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -150,6 +152,14 @@ fn dot(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
 #[pyfunction]
 fn matmul(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
     a.matmul(b)
+}
+
+/// Element-wise selection based on a boolean condition
+#[pyfunction(name = "where")]
+fn where_py(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyResult<PyTensor> {
+    let result =
+        tensor_where(condition.tensor(), x.tensor(), y.tensor()).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
 }
 
 /// Cross product of two tensors along a given axis

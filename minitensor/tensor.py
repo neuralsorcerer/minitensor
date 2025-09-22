@@ -31,6 +31,32 @@ _TENSOR_TO_NP_DTYPE = {
 
 _NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
 
+
+def _normalize_device(device: Optional[str]) -> Optional[str]:
+    """Normalize device strings returned from the Rust backend."""
+
+    if device is None:
+        return None
+
+    if isinstance(device, str) and device.startswith("device"):
+        try:
+            inside = device.split("{", 1)[1].split("}", 1)[0]
+            fields = {}
+            for part in inside.split(","):
+                if ":" in part:
+                    key, value = part.split(":", 1)
+                    fields[key.strip()] = value.strip()
+            device_type = fields.get("device_type")
+            device_id = fields.get("device_id")
+            if device_type:
+                if not device_id or device_id in {"none", "default"}:
+                    return device_type
+                return f"{device_type}:{device_id}"
+        except Exception:
+            return device
+    return device
+
+
 # Global default dtype management
 _DEFAULT_DTYPE = "float32"
 _VALID_DTYPES = set(_TENSOR_TO_NP_DTYPE.keys())
@@ -115,7 +141,18 @@ class Tensor:
         else:
             # Create new tensor from data
             dtype = _resolve_dtype(dtype)
-            self._tensor = _minitensor_core.Tensor(data, dtype, device, requires_grad)
+            if isinstance(device, _minitensor_core.Device):
+                device_obj = device
+            else:
+                normalized_device = _normalize_device(device)
+                device_obj = (
+                    _minitensor_core.Device(normalized_device)
+                    if normalized_device is not None
+                    else None
+                )
+            self._tensor = _minitensor_core.Tensor(
+                data, dtype, device_obj, requires_grad
+            )
 
     # Core properties
     @property
@@ -735,6 +772,41 @@ class Tensor:
             return (self * other).sum()
         else:
             return self.matmul(other)
+
+    def where(self, condition: "Tensor", other: "Tensor") -> "Tensor":
+        """Select elements from ``self`` or ``other`` based on ``condition``.
+
+        Args:
+            condition: Boolean tensor deciding which elements to select from
+                ``self`` and ``other``. Must be broadcastable to the shapes of
+                the inputs.
+            other: Tensor providing values where ``condition`` is ``False``.
+
+        Returns:
+            Tensor: Resulting tensor with broadcasted shape.
+        """
+
+        target_device = _normalize_device(self.device)
+
+        if not isinstance(condition, Tensor):
+            condition = Tensor(condition, dtype="bool", device=target_device)
+        if condition.dtype != "bool":
+            raise TypeError("where condition must be a bool tensor")
+
+        if not isinstance(other, Tensor):
+            other = Tensor(other, dtype=self.dtype, device=target_device)
+
+        if self.dtype != other.dtype:
+            raise TypeError("where requires tensors to have the same dtype")
+
+        if condition.device != self.device or other.device != self.device:
+            raise ValueError(
+                "where requires condition, self, and other tensors on the same device"
+            )
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.where(condition._tensor, other._tensor)
+        return result
 
     def cross(self, other: "Tensor", axis: int = -1) -> "Tensor":
         """Compute the 3D cross product with another tensor.

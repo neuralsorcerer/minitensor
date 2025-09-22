@@ -263,6 +263,11 @@ def roll(input, shifts, dims: Optional[Union[int, Sequence[int]]] = None):
     return functional.roll(input, shifts, dims)
 
 
+def where(condition, input, other):
+    """Select elements from ``input`` or ``other`` based on ``condition``."""
+    return functional.where(condition, input, other)
+
+
 # Device management
 def device(device_str):
     """Create a device object."""
@@ -317,6 +322,7 @@ __all__ = [
     "repeat_interleave",
     "flip",
     "roll",
+    "where",
     "split",
     "cross",
     "device",

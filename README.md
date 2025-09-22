@@ -22,9 +22,6 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 </div>
 
-> [!CAUTION]
-> This library is in active development stage. Use carefully.
-
 ## Features
 
 - **High Performance**: Rust backend for maximum speed and memory efficiency
