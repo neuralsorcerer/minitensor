@@ -6,11 +6,13 @@
 
 pub mod activation;
 pub mod arithmetic;
+pub mod binary;
 pub mod comparison;
 pub mod conv;
 pub mod fusion;
 pub mod linalg;
 pub mod loss;
+pub mod minmax;
 pub mod normalization;
 pub mod reduction;
 pub mod selection;
@@ -25,6 +27,7 @@ pub use conv::*;
 pub use fusion::*;
 pub use linalg::*;
 pub use loss::*;
+pub use minmax::*;
 pub use normalization::*;
 pub use reduction::*;
 pub use selection::*;

@@ -7,6 +7,7 @@
 import numpy as np
 import pytest
 
+import minitensor as mt
 from minitensor.tensor import Tensor
 
 
@@ -15,6 +16,22 @@ def test_to_float64():
     y = x.to("float64")
     assert y.dtype == "float64"
     assert np.allclose(y.numpy(), np.array([1.5, -2.3], dtype=np.float64))
+
+
+def test_to_accepts_device_string():
+    x = Tensor([1.0, 2.0, 3.0], dtype="float32")
+    y = x.to("cpu")
+    assert y.device == "cpu"
+    np.testing.assert_allclose(y.numpy(), np.array([1.0, 2.0, 3.0], dtype=np.float32))
+
+
+def test_to_accepts_device_object_and_dtype_keyword():
+    x = Tensor([1.5, -2.3], dtype="float32")
+    cpu = mt.device("cpu")
+    y = x.to(cpu, dtype="float64")
+    assert y.device == "cpu"
+    assert y.dtype == "float64"
+    np.testing.assert_allclose(y.numpy(), np.array([1.5, -2.3], dtype=np.float64))
 
 
 def test_astype_int():

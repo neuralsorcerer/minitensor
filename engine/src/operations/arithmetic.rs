@@ -7,9 +7,12 @@
 use crate::{
     autograd::{AddBackward, DivBackward, MulBackward, NegBackward, SubBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::simd::{
-        can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
-        simd_mul_f32, simd_mul_f64, simd_sub_f32, simd_sub_f64,
+    operations::{
+        binary::{BinaryOpKind, coerce_binary_operands},
+        simd::{
+            can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
+            simd_mul_f32, simd_mul_f64, simd_sub_f32, simd_sub_f64,
+        },
     },
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
@@ -29,60 +32,70 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Check data type compatibility
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+
+    if output_shape.numel() == 0 {
+        let mut output = Tensor::empty(
+            output_shape.clone(),
+            result_dtype,
+            lhs.device(),
+            requires_grad,
+        );
+
+        if requires_grad {
+            let grad_fn = Arc::new(AddBackward {
+                input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
+                input_ids: [lhs.id(), rhs.id()],
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output, Some(grad_fn))?;
+        }
+
+        return Ok(output);
+    }
 
     // Create output tensor data
     let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
 
     // Perform element-wise addition based on data type
-    match lhs.dtype() {
-        DataType::Float32 => add_f32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Float64 => add_f64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int32 => add_i32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int64 => add_i64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Addition not supported for boolean tensors",
-            ));
-        }
+    match result_dtype {
+        DataType::Float32 => add_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Float64 => add_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int32 => add_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int64 => add_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Bool => add_bool_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
     }
 
     // Create output tensor
-    let output = Tensor::new(
+    let mut output = Tensor::new(
         Arc::new(output_data),
         output_shape.clone(),
-        lhs.dtype(),
+        result_dtype,
         lhs.device(),
-        lhs.requires_grad() || rhs.requires_grad(),
+        requires_grad,
     );
 
     // Set up gradient function if needed
-    if output.requires_grad() {
+    if requires_grad {
         let grad_fn = Arc::new(AddBackward {
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_ids: [lhs.id(), rhs.id()],
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        output.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
-    } else {
-        Ok(output)
+        add_to_graph(&output, Some(grad_fn))?;
     }
+
+    Ok(output)
 }
 
 /// In-place element-wise addition used for gradient accumulation
@@ -202,9 +215,26 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             }
         }
         DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "In-place addition not supported for boolean tensors",
-            ));
+            let lhs_slice = lhs.data_mut().as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable bool slice from lhs tensor")
+            })?;
+            let rhs_slice = rhs.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
+            })?;
+            let len = lhs_slice.len();
+            if len < PAR_THRESHOLD {
+                for i in 0..len {
+                    lhs_slice[i] = lhs_slice[i] || rhs_slice[i];
+                }
+            } else {
+                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
+                let rhs_ptr = rhs_slice.as_ptr() as usize;
+                (0..len).into_par_iter().for_each(|i| unsafe {
+                    let lhs_ptr = lhs_ptr as *mut bool;
+                    let rhs_ptr = rhs_ptr as *const bool;
+                    *lhs_ptr.add(i) = *lhs_ptr.add(i) || *rhs_ptr.add(i);
+                });
+            }
         }
     }
     Ok(())
@@ -220,60 +250,68 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Check data type compatibility
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Sub)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+
+    if output_shape.numel() == 0 {
+        let mut output = Tensor::empty(
+            output_shape.clone(),
+            result_dtype,
+            lhs.device(),
+            requires_grad,
+        );
+
+        if requires_grad {
+            let grad_fn = Arc::new(SubBackward {
+                input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
+                input_ids: [lhs.id(), rhs.id()],
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output, Some(grad_fn))?;
+        }
+
+        return Ok(output);
+    }
 
     // Create output tensor data
     let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
 
     // Perform element-wise subtraction based on data type
-    match lhs.dtype() {
-        DataType::Float32 => sub_f32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Float64 => sub_f64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int32 => sub_i32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int64 => sub_i64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Subtraction not supported for boolean tensors",
-            ));
-        }
+    match result_dtype {
+        DataType::Float32 => sub_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Float64 => sub_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int32 => sub_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int64 => sub_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Bool => unreachable!("boolean subtraction should be rejected during coercion"),
     }
 
     // Create output tensor
-    let output = Tensor::new(
+    let mut output = Tensor::new(
         Arc::new(output_data),
         output_shape.clone(),
-        lhs.dtype(),
+        result_dtype,
         lhs.device(),
-        lhs.requires_grad() || rhs.requires_grad(),
+        requires_grad,
     );
 
     // Set up gradient function if needed
-    if output.requires_grad() {
+    if requires_grad {
         let grad_fn = Arc::new(SubBackward {
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_ids: [lhs.id(), rhs.id()],
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
-    } else {
-        Ok(output)
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
     }
+
+    Ok(output)
 }
 
 /// Element-wise multiplication with broadcasting support
@@ -286,61 +324,70 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Check data type compatibility
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+
+    if output_shape.numel() == 0 {
+        let mut output = Tensor::empty(
+            output_shape.clone(),
+            result_dtype,
+            lhs.device(),
+            requires_grad,
+        );
+
+        if requires_grad {
+            let grad_fn = Arc::new(MulBackward {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                input_ids: [lhs.id(), rhs.id()],
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output, Some(grad_fn))?;
+        }
+
+        return Ok(output);
+    }
 
     // Create output tensor data
     let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
 
     // Perform element-wise multiplication based on data type
-    match lhs.dtype() {
-        DataType::Float32 => mul_f32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Float64 => mul_f64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int32 => mul_i32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int64 => mul_i64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Multiplication not supported for boolean tensors",
-            ));
-        }
+    match result_dtype {
+        DataType::Float32 => mul_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Float64 => mul_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int32 => mul_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int64 => mul_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Bool => mul_bool_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
     }
 
     // Create output tensor
-    let output = Tensor::new(
+    let mut output = Tensor::new(
         Arc::new(output_data),
         output_shape.clone(),
-        lhs.dtype(),
+        result_dtype,
         lhs.device(),
-        lhs.requires_grad() || rhs.requires_grad(),
+        requires_grad,
     );
 
     // Set up gradient function if needed
-    if output.requires_grad() {
+    if requires_grad {
         let grad_fn = Arc::new(MulBackward {
             lhs: lhs.clone(),
             rhs: rhs.clone(),
             input_ids: [lhs.id(), rhs.id()],
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
-    } else {
-        Ok(output)
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
     }
+
+    Ok(output)
 }
 
 /// Element-wise division with broadcasting support
@@ -353,61 +400,70 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // Check data type compatibility
-    if lhs.dtype() != rhs.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", lhs.dtype()),
-            format!("{:?}", rhs.dtype()),
-        ));
-    }
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Div)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+
+    if output_shape.numel() == 0 {
+        let mut output = Tensor::empty(
+            output_shape.clone(),
+            result_dtype,
+            lhs.device(),
+            requires_grad,
+        );
+
+        if requires_grad {
+            let grad_fn = Arc::new(DivBackward {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                input_ids: [lhs.id(), rhs.id()],
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output, Some(grad_fn))?;
+        }
+
+        return Ok(output);
+    }
 
     // Create output tensor data
     let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
 
     // Perform element-wise division based on data type
-    match lhs.dtype() {
-        DataType::Float32 => div_f32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Float64 => div_f64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int32 => div_i32_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Int64 => div_i64_direct(lhs, rhs, &mut output_data, &output_shape)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Division not supported for boolean tensors",
-            ));
+    match result_dtype {
+        DataType::Float32 => div_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Float64 => div_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int32 | DataType::Int64 | DataType::Bool => {
+            unreachable!("integer and boolean division should coerce to floating point")
         }
     }
 
     // Create output tensor
-    let output = Tensor::new(
+    let mut output = Tensor::new(
         Arc::new(output_data),
         output_shape.clone(),
-        lhs.dtype(),
+        result_dtype,
         lhs.device(),
-        lhs.requires_grad() || rhs.requires_grad(),
+        requires_grad,
     );
 
     // Set up gradient function if needed
-    if output.requires_grad() {
+    if requires_grad {
         let grad_fn = Arc::new(DivBackward {
             lhs: lhs.clone(),
             rhs: rhs.clone(),
             input_ids: [lhs.id(), rhs.id()],
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
-    } else {
-        Ok(output)
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
     }
+
+    Ok(output)
 }
 
 /// Element-wise negation
@@ -640,6 +696,34 @@ fn add_i64_direct(
         rhs.shape(),
         output_shape,
         |a, b| a + b,
+    )
+}
+
+fn add_bool_direct(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    output_data: &mut TensorData,
+    output_shape: &Shape,
+) -> Result<()> {
+    let lhs_data = lhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
+    })?;
+    let rhs_data = rhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
+    })?;
+
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable bool slice from output data")
+    })?;
+
+    broadcast_binary_op(
+        lhs_data,
+        rhs_data,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        |a, b| a || b,
     )
 }
 
@@ -887,6 +971,34 @@ fn mul_i64_direct(
     )
 }
 
+fn mul_bool_direct(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    output_data: &mut TensorData,
+    output_shape: &Shape,
+) -> Result<()> {
+    let lhs_data = lhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
+    })?;
+    let rhs_data = rhs.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
+    })?;
+
+    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable bool slice from output data")
+    })?;
+
+    broadcast_binary_op(
+        lhs_data,
+        rhs_data,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        |a, b| a && b,
+    )
+}
+
 fn div_f32_direct(
     lhs: &Tensor,
     rhs: &Tensor,
@@ -957,76 +1069,8 @@ fn div_f64_direct(
     }
 }
 
-fn div_i32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| {
-            if b == 0 {
-                i32::MAX // Represent overflow/infinity for integers
-            } else {
-                a / b
-            }
-        },
-    )
-}
-
-fn div_i64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| {
-            if b == 0 {
-                i64::MAX // Represent overflow/infinity for integers
-            } else {
-                a / b
-            }
-        },
-    )
-}
-
 /// Generic broadcasting binary operation
-fn broadcast_binary_op<T, F>(
+pub(crate) fn broadcast_binary_op<T, F>(
     lhs_data: &[T],
     rhs_data: &[T],
     output_data: &mut [T],
@@ -1043,6 +1087,10 @@ where
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
     let rank = output_dims.len();
+
+    if output_shape.numel() == 0 || output_dims.iter().any(|&dim| dim == 0) {
+        return Ok(());
+    }
 
     // Fast path when no broadcasting is required. This avoids the
     // relatively expensive index mapping logic below and simply applies the
@@ -1331,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_type_mismatch_error() {
+    fn test_mixed_dtype_promotion() {
         let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
 
         // Create an i32 tensor
@@ -1348,8 +1396,9 @@ mod tests {
             false,
         );
 
-        let result = add(&a, &b);
-        assert!(result.is_err());
+        let result = add(&a, &b).unwrap();
+        assert_eq!(result.dtype(), DataType::Float32);
+        assert_eq!(result.data().as_f32_slice().unwrap(), &[4.0, 6.0]);
     }
 
     #[test]
@@ -1381,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bool_arithmetic_error() {
+    fn test_bool_arithmetic_behaviour() {
         // Create boolean tensors
         let shape_obj = Shape::new(vec![2]);
         let mut data_a = TensorData::zeros(shape_obj.numel(), DataType::Bool);
@@ -1408,10 +1457,19 @@ mod tests {
             false,
         );
 
-        assert!(add(&a, &b).is_err());
+        let add_result = add(&a, &b).unwrap();
+        assert_eq!(add_result.dtype(), DataType::Bool);
+        assert_eq!(add_result.data().as_bool_slice().unwrap(), &[true, true]);
         assert!(sub(&a, &b).is_err());
-        assert!(mul(&a, &b).is_err());
-        assert!(div(&a, &b).is_err());
+        let mul_result = mul(&a, &b).unwrap();
+        assert_eq!(mul_result.dtype(), DataType::Bool);
+        assert_eq!(mul_result.data().as_bool_slice().unwrap(), &[false, false]);
+        let div_result = div(&a, &b).unwrap();
+        assert_eq!(div_result.dtype(), DataType::Float32);
+        assert_eq!(
+            div_result.data().as_f32_slice().unwrap(),
+            &[f32::INFINITY, 0.0]
+        );
         assert!(neg(&a).is_err());
     }
 
@@ -1432,5 +1490,43 @@ mod tests {
         let result_data = result.data().as_f32_slice().unwrap();
         assert!(result_data[0].is_infinite());
         assert_eq!(result_data[1], 2.0);
+    }
+
+    #[test]
+    fn test_add_handles_zero_sized_broadcast() {
+        let a = create_test_tensor_f32(vec![], vec![0, 3], false);
+        let b = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+
+        let result = add(&a, &b).unwrap();
+        assert_eq!(result.shape().dims(), &[0, 3]);
+        assert_eq!(result.data().as_f32_slice().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_add_handles_zero_sized_broadcast_from_vec() {
+        use crate::tensor::TensorData;
+
+        let a_data = TensorData::from_vec::<f32>(vec![], DataType::Float32, Device::cpu());
+        let a = Tensor::new(
+            Arc::new(a_data),
+            Shape::new(vec![0, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let b_data =
+            TensorData::from_vec::<f32>(vec![1.0_f32, 2.0, 3.0], DataType::Float32, Device::cpu());
+        let b = Tensor::new(
+            Arc::new(b_data),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let result = add(&a, &b).unwrap();
+        assert_eq!(result.shape().dims(), &[0, 3]);
+        assert_eq!(result.data().as_f32_slice().unwrap().len(), 0);
     }
 }

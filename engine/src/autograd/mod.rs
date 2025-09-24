@@ -7,7 +7,7 @@
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    operations::{activation, arithmetic, reduction, selection, shape_ops},
+    operations::{activation, arithmetic, minmax, reduction, selection, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 pub mod graph;
@@ -301,6 +301,132 @@ impl GradientFunction for WhereBackward {
             let selected = selection::where_op(&self.condition, zeros, grad_output)?;
             let reduced =
                 reduce_gradient_for_broadcasting(&selected, &Shape::new(self.other_shape.clone()))?;
+            gradients.insert(self.input_ids[1], reduced);
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for element-wise maximum operation
+pub struct MaximumBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub input_shapes: [Vec<usize>; 2],
+    pub input_requires_grad: [bool; 2],
+    pub input_ids: [TensorId; 2],
+}
+
+impl GradientFunction for MaximumBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(self.input_requires_grad.iter().filter(|&&b| b).count());
+
+        if !self.input_requires_grad[0] && !self.input_requires_grad[1] {
+            return Ok(gradients);
+        }
+
+        let mask = minmax::maximum_backward_mask(&self.lhs, &self.rhs)?;
+        let mut zeros: Option<Tensor> = None;
+
+        if self.input_requires_grad[0] {
+            let zero = zeros.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = minmax::select_with_mask(&mask, grad_output, zero)?;
+            let reduced = reduce_gradient_for_broadcasting(
+                &selected,
+                &Shape::new(self.input_shapes[0].clone()),
+            )?;
+            gradients.insert(self.input_ids[0], reduced);
+        }
+
+        if self.input_requires_grad[1] {
+            let zero = zeros.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = minmax::select_with_mask(&mask, zero, grad_output)?;
+            let reduced = reduce_gradient_for_broadcasting(
+                &selected,
+                &Shape::new(self.input_shapes[1].clone()),
+            )?;
+            gradients.insert(self.input_ids[1], reduced);
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for element-wise minimum operation
+pub struct MinimumBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub input_shapes: [Vec<usize>; 2],
+    pub input_requires_grad: [bool; 2],
+    pub input_ids: [TensorId; 2],
+}
+
+impl GradientFunction for MinimumBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(self.input_requires_grad.iter().filter(|&&b| b).count());
+
+        if !self.input_requires_grad[0] && !self.input_requires_grad[1] {
+            return Ok(gradients);
+        }
+
+        let mask = minmax::minimum_backward_mask(&self.lhs, &self.rhs)?;
+        let mut zeros: Option<Tensor> = None;
+
+        if self.input_requires_grad[0] {
+            let zero = zeros.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = minmax::select_with_mask(&mask, grad_output, zero)?;
+            let reduced = reduce_gradient_for_broadcasting(
+                &selected,
+                &Shape::new(self.input_shapes[0].clone()),
+            )?;
+            gradients.insert(self.input_ids[0], reduced);
+        }
+
+        if self.input_requires_grad[1] {
+            let zero = zeros.get_or_insert_with(|| {
+                Tensor::zeros(
+                    grad_output.shape().clone(),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                )
+            });
+            let selected = minmax::select_with_mask(&mask, zero, grad_output)?;
+            let reduced = reduce_gradient_for_broadcasting(
+                &selected,
+                &Shape::new(self.input_shapes[1].clone()),
+            )?;
             gradients.insert(self.input_ids[1], reduced);
         }
 

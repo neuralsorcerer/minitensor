@@ -6,6 +6,7 @@
 
 use crate::{
     error::{MinitensorError, Result},
+    operations::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -284,33 +285,33 @@ macro_rules! cmp_op {
                     format!("{:?}", rhs.device()),
                 ));
             }
-            if lhs.dtype() != rhs.dtype() {
-                return Err(MinitensorError::type_mismatch(
-                    format!("{:?}", lhs.dtype()),
-                    format!("{:?}", rhs.dtype()),
+            let (lhs_cast, rhs_cast, common_dtype) =
+                coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+
+            if matches!(common_dtype, DataType::Bool) && !$bool_ok {
+                return Err(MinitensorError::invalid_operation(
+                    "Comparison not supported for boolean tensors",
                 ));
             }
 
-            let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+            let lhs_ref = lhs_cast.as_ref();
+            let rhs_ref = rhs_cast.as_ref();
+
+            let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
             let mut output_data = TensorData::zeros_on_device(
                 output_shape.numel(),
                 DataType::Bool,
                 lhs.device(),
             );
 
-            match lhs.dtype() {
-                DataType::Float32 => cmp_f32(lhs, rhs, &mut output_data, &output_shape, |a, b| a $op b)?,
-                DataType::Float64 => cmp_f64(lhs, rhs, &mut output_data, &output_shape, |a, b| a $op b)?,
-                DataType::Int32 => cmp_i32(lhs, rhs, &mut output_data, &output_shape, |a, b| a $op b)?,
-                DataType::Int64 => cmp_i64(lhs, rhs, &mut output_data, &output_shape, |a, b| a $op b)?,
+            match common_dtype {
+                DataType::Float32 => cmp_f32(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| a $op b)?,
+                DataType::Float64 => cmp_f64(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| a $op b)?,
+                DataType::Int32 => cmp_i32(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| a $op b)?,
+                DataType::Int64 => cmp_i64(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| a $op b)?,
                 DataType::Bool => {
-                    if $bool_ok {
-                        cmp_bool(lhs, rhs, &mut output_data, &output_shape, |a, b| a $op b)?
-                    } else {
-                        return Err(MinitensorError::invalid_operation(
-                            "Comparison not supported for boolean tensors",
-                        ));
-                    }
+                    debug_assert!($bool_ok);
+                    cmp_bool(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| a $op b)?
                 }
             }
 
@@ -410,9 +411,20 @@ mod tests {
     }
 
     #[test]
-    fn test_eq_type_mismatch_error() {
-        let a = tensor_from_vec_f32(vec![1.0]);
-        let b = tensor_from_vec_i32(vec![1]);
-        assert!(eq(&a, &b).is_err());
+    fn test_eq_promotes_mixed_dtypes() {
+        let a = tensor_from_vec_f32(vec![1.0, 2.0]);
+        let b = tensor_from_vec_i32(vec![1, 3]);
+        let result = eq(&a, &b).unwrap();
+        let slice = result.data().as_bool_slice().unwrap();
+        assert_eq!(slice, &[true, false]);
+    }
+
+    #[test]
+    fn test_lt_promotes_bool_with_integers() {
+        let a = tensor_from_vec_bool(vec![true, false]);
+        let b = tensor_from_vec_i32(vec![2, -1]);
+        let result = lt(&a, &b).unwrap();
+        let slice = result.data().as_bool_slice().unwrap();
+        assert_eq!(slice, &[true, false]);
     }
 }

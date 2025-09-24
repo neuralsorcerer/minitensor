@@ -94,6 +94,25 @@ def test_np_add_dtype_promotion():
     np.testing.assert_allclose(result.numpy(), np.array([2, 4, 6], dtype=np.float64))
 
 
+def test_operator_add_with_numpy_array():
+    t = Tensor([1, 2, 3], dtype="int32")
+    arr = np.array([0.5, 1.5, 2.5], dtype=np.float64)
+    result = t + arr
+    assert isinstance(result, Tensor)
+    assert result.dtype == "float64"
+    np.testing.assert_allclose(
+        result.numpy(), np.array([1.5, 3.5, 5.5], dtype=np.float64)
+    )
+
+
+def test_operator_comparison_with_numpy_array():
+    t = Tensor([1.0, 2.0, 3.0], dtype="float32")
+    arr = np.array([1.0, 1.5, 3.5], dtype=np.float32)
+    result = t.gt(arr)
+    assert isinstance(result, Tensor)
+    np.testing.assert_array_equal(result.numpy(), np.array([False, True, False]))
+
+
 def test_from_numpy_int_and_bool():
     int_arr = np.array([1, 2, 3], dtype=np.int32)
     t_int = Tensor.from_numpy(int_arr)

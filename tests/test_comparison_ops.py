@@ -32,11 +32,30 @@ def test_gt_incompatible_shapes_error():
         a.gt(b)
 
 
-def test_eq_type_mismatch_error():
+def test_eq_promotes_mixed_dtypes():
     a = mt.Tensor([1.0, 2.0], dtype="float32")
-    b = mt.Tensor([1, 2], dtype="int32")
+    b = mt.Tensor([1, 3], dtype="int32")
+    result = a.eq(b)
+    expected = np.array([True, False])
+    np.testing.assert_array_equal(result.numpy(), expected)
+
+
+def test_bool_numeric_comparisons():
+    bools = mt.Tensor([True, False], dtype="bool")
+    ints = mt.Tensor([1, 0], dtype="int32")
+    floats = mt.Tensor([1.0, 0.5], dtype="float32")
+
+    eq_res = bools.eq(ints)
+    np.testing.assert_array_equal(eq_res.numpy(), np.array([True, True]))
+
+    lt_res = bools.lt(floats)
+    np.testing.assert_array_equal(lt_res.numpy(), np.array([False, True]))
+
+
+def test_comparison_invalid_operand_type():
+    a = mt.Tensor([1.0, 2.0])
     with pytest.raises(TypeError):
-        a.eq(b)
+        a.eq("foo")
 
 
 def test_nan_and_inf_comparisons():

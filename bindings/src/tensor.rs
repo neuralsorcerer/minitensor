@@ -6,6 +6,7 @@
 
 use crate::device::PyDevice;
 use crate::error::_convert_error;
+use engine::operations::binary::{BinaryOpKind, coerce_binary_operands};
 use engine::operations::shape_ops::RepeatInterleaveSpec;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, Tensor, TensorIndex};
@@ -14,6 +15,7 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
@@ -72,7 +74,7 @@ impl PyTensor {
 
     #[getter]
     fn device(&self) -> String {
-        format!("{:?}", self.inner.device()).to_lowercase()
+        self.inner.device().to_string()
     }
 
     #[getter]
@@ -399,6 +401,54 @@ impl PyTensor {
             .where_select(&condition.inner, &other.inner)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
+    }
+
+    pub fn maximum(&self, other: &PyTensor) -> PyResult<Self> {
+        let result = self.inner.maximum(&other.inner).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn minimum(&self, other: &PyTensor) -> PyResult<Self> {
+        let result = self.inner.minimum(&other.inner).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn _coerce_binary_operands(
+        &self,
+        other: &PyTensor,
+        op: &str,
+    ) -> PyResult<(PyTensor, PyTensor)> {
+        let op_kind = match op {
+            "__add__" | "add" => BinaryOpKind::Add,
+            "__sub__" | "sub" => BinaryOpKind::Sub,
+            "__mul__" | "mul" => BinaryOpKind::Mul,
+            "__truediv__" | "div" => BinaryOpKind::Div,
+            "maximum" => BinaryOpKind::Maximum,
+            "minimum" => BinaryOpKind::Minimum,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unsupported binary operation for dtype coercion: {op}"
+                )));
+            }
+        };
+
+        let (lhs_cast, rhs_cast, _) =
+            coerce_binary_operands(self.tensor(), other.tensor(), op_kind)
+                .map_err(_convert_error)?;
+
+        let lhs_tensor = match lhs_cast {
+            Cow::Borrowed(_) => self.inner.clone(),
+            Cow::Owned(tensor) => tensor,
+        };
+        let rhs_tensor = match rhs_cast {
+            Cow::Borrowed(_) => other.inner.clone(),
+            Cow::Owned(tensor) => tensor,
+        };
+
+        Ok((
+            PyTensor::from_tensor(lhs_tensor),
+            PyTensor::from_tensor(rhs_tensor),
+        ))
     }
 
     // Comparison operations

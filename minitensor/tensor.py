@@ -16,6 +16,7 @@ except ImportError as e:
         "Run `pip install -e .` or `maturin develop` to compile the Rust backend."
     ) from e
 
+from numbers import Integral, Real
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -30,6 +31,32 @@ _TENSOR_TO_NP_DTYPE = {
 }
 
 _NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
+
+_FLOAT_DTYPES = {"float32", "float64"}
+_INT_DTYPES = {"int32", "int64"}
+
+
+def _resolve_scalar_dtype(value: Any, context_dtype: str) -> Optional[str]:
+    if isinstance(value, np.generic):
+        mapped = _NP_TO_TENSOR_DTYPE.get(value.dtype)
+        if mapped is not None:
+            return mapped
+
+    if isinstance(value, bool):
+        return "bool"
+
+    if isinstance(value, Integral):
+        if context_dtype in _INT_DTYPES or context_dtype in _FLOAT_DTYPES:
+            return context_dtype
+        return "int64"
+
+    if isinstance(value, Real):
+        if context_dtype == "float64":
+            return "float64"
+        float_default = _DEFAULT_DTYPE if _DEFAULT_DTYPE in _FLOAT_DTYPES else "float32"
+        return float_default
+
+    return None
 
 
 def _normalize_device(device: Optional[str]) -> Optional[str]:
@@ -113,6 +140,28 @@ class Tensor:
         np.cos: lambda a: a.cos(),
         np.tan: lambda a: a.tan(),
     }
+
+    @staticmethod
+    def _from_array_like(value: Any, device: str) -> Optional["Tensor"]:
+        """Convert array-like Python inputs to a ``Tensor`` on ``device`` if possible."""
+
+        np_source = None
+        if isinstance(value, np.ndarray):
+            np_source = value
+        elif isinstance(value, (list, tuple)):
+            try:
+                np_source = np.array(value)
+            except Exception:  # pragma: no cover - rely on scalar coercion fallback
+                np_source = None
+
+        if np_source is None:
+            return None
+
+        mapped_dtype = _NP_TO_TENSOR_DTYPE.get(np_source.dtype, None)
+        try:
+            return Tensor(np_source, dtype=mapped_dtype, device=device)
+        except Exception:  # pragma: no cover - fall back to scalar promotion
+            return None
 
     def __init__(
         self,
@@ -548,18 +597,73 @@ class Tensor:
         result._tensor = self._tensor.contiguous()
         return result
 
-    def to(self, device_or_dtype: Union[str, "Tensor"]) -> "Tensor":
-        """Move tensor to device or convert dtype."""
-        if isinstance(device_or_dtype, str):
-            if device_or_dtype in ["cpu", "cuda", "metal"]:
-                # Device conversion
-                result = Tensor.__new__(Tensor)
-                result._tensor = self._tensor.to(device_or_dtype)
-                return result
+    def to(
+        self,
+        device_or_dtype: Optional[Union[str, _minitensor_core.Device]] = None,
+        *,
+        dtype: Optional[str] = None,
+        device: Optional[Union[str, _minitensor_core.Device]] = None,
+    ) -> "Tensor":
+        """Move the tensor to another device and/or dtype using the Rust backend."""
+
+        target_dtype = dtype
+
+        def _resolve_device(
+            spec: Optional[Union[str, _minitensor_core.Device]],
+        ) -> Optional[_minitensor_core.Device]:
+            if spec is None:
+                return None
+            if isinstance(spec, _minitensor_core.Device):
+                return spec
+            if isinstance(spec, str):
+                normalized = _normalize_device(spec)
+                return _minitensor_core.Device(normalized)
+            raise TypeError(
+                "to() expects device specifications as strings or Device objects"
+            )
+
+        target_device = _resolve_device(device)
+
+        if isinstance(device_or_dtype, _minitensor_core.Device):
+            if target_device is not None:
+                raise TypeError("to() received multiple device specifications")
+            target_device = device_or_dtype
+        elif isinstance(device_or_dtype, str):
+            normalized = _normalize_device(device_or_dtype)
+            if normalized in _VALID_DTYPES:
+                if target_dtype is not None and target_dtype != normalized:
+                    raise TypeError("dtype specified both positionally and via keyword")
+                target_dtype = normalized
             else:
-                return self.astype(device_or_dtype)
-        else:
-            raise TypeError("to() expects device string or dtype")
+                if target_device is not None:
+                    raise TypeError("to() received multiple device specifications")
+                target_device = _resolve_device(normalized)
+        elif device_or_dtype is not None:
+            raise TypeError("to() expects dtype or device specifications")
+
+        if target_dtype is not None and target_dtype not in _VALID_DTYPES:
+            raise ValueError(f"Unsupported dtype '{target_dtype}'")
+
+        tensor_obj = self._tensor
+        mutated = False
+
+        if target_dtype is not None and target_dtype != self.dtype:
+            tensor_obj = tensor_obj.astype(target_dtype)
+            mutated = True
+
+        if target_device is not None:
+            desired_device = _normalize_device(str(target_device))
+            current_device = _normalize_device(self.device)
+            if desired_device != current_device:
+                tensor_obj = tensor_obj.to(target_device)
+                mutated = True
+
+        if not mutated:
+            return self
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = tensor_obj
+        return result
 
     def cpu(self) -> "Tensor":
         """Move tensor to CPU."""
@@ -568,9 +672,9 @@ class Tensor:
         return result
 
     def cuda(self, device: Optional[int] = None) -> "Tensor":
-        """Move tensor to CUDA device."""
-        # Simplified - would need proper CUDA device handling
-        return self.to("cuda")
+        """Move tensor to a CUDA device using Rust execution."""
+        spec = "cuda" if device is None else f"cuda:{device}"
+        return self.to(spec)
 
     def astype(self, dtype: str) -> "Tensor":
         """Convert tensor to a different data type."""
@@ -608,102 +712,52 @@ class Tensor:
         return result
 
     def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-
-        if self.numel() == 0 or other.numel() == 0:
-            if self.dtype != other.dtype:
-                raise TypeError("Cannot add tensors with different dtypes")
-            try:
-                result_shape = np.broadcast_shapes(self.shape, other.shape)
-            except ValueError as e:
-                raise ValueError("Shapes are not broadcastable") from e
-            result = Tensor.__new__(Tensor)
-            result._tensor = _minitensor_core.Tensor.zeros(
-                list(result_shape), self.dtype, None, False
-            )
-            return result
-
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.__add__(other._tensor)
+        result = self._binary_op(other, "__add__")
+        if result is NotImplemented:
+            return NotImplemented
         return result
 
     def __radd__(self, other: Union[float, int]) -> "Tensor":
-        return self.__add__(other)
+        result = self._binary_op(other, "__add__", reverse=True)
+        if result is NotImplemented:
+            return NotImplemented
+        return result
 
     def __sub__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-
-        if self.numel() == 0 or other.numel() == 0:
-            if self.dtype != other.dtype:
-                raise TypeError("Cannot subtract tensors with different dtypes")
-            try:
-                result_shape = np.broadcast_shapes(self.shape, other.shape)
-            except ValueError as e:
-                raise ValueError("Shapes are not broadcastable") from e
-            result = Tensor.__new__(Tensor)
-            result._tensor = _minitensor_core.Tensor.zeros(
-                list(result_shape), self.dtype, None, False
-            )
-            return result
-
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.__sub__(other._tensor)
+        result = self._binary_op(other, "__sub__")
+        if result is NotImplemented:
+            return NotImplemented
         return result
 
     def __rsub__(self, other: Union[float, int]) -> "Tensor":
-        scalar_tensor = Tensor(other)
-        return scalar_tensor.__sub__(self)
+        result = self._binary_op(other, "__sub__", reverse=True)
+        if result is NotImplemented:
+            return NotImplemented
+        return result
 
     def __mul__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-
-        if self.numel() == 0 or other.numel() == 0:
-            if self.dtype != other.dtype:
-                raise TypeError("Cannot multiply tensors with different dtypes")
-            try:
-                result_shape = np.broadcast_shapes(self.shape, other.shape)
-            except ValueError as e:
-                raise ValueError("Shapes are not broadcastable") from e
-            result = Tensor.__new__(Tensor)
-            result._tensor = _minitensor_core.Tensor.zeros(
-                list(result_shape), self.dtype, None, False
-            )
-            return result
-
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.__mul__(other._tensor)
+        result = self._binary_op(other, "__mul__")
+        if result is NotImplemented:
+            return NotImplemented
         return result
 
     def __rmul__(self, other: Union[float, int]) -> "Tensor":
-        return self.__mul__(other)
+        result = self._binary_op(other, "__mul__", reverse=True)
+        if result is NotImplemented:
+            return NotImplemented
+        return result
 
     def __truediv__(self, other: Union["Tensor", float, int]) -> "Tensor":
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-
-        if self.numel() == 0 or other.numel() == 0:
-            if self.dtype != other.dtype:
-                raise TypeError("Cannot divide tensors with different dtypes")
-            try:
-                result_shape = np.broadcast_shapes(self.shape, other.shape)
-            except ValueError as e:
-                raise ValueError("Shapes are not broadcastable") from e
-            result = Tensor.__new__(Tensor)
-            result._tensor = _minitensor_core.Tensor.zeros(
-                list(result_shape), self.dtype, None, False
-            )
-            return result
-
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.__truediv__(other._tensor)
+        result = self._binary_op(other, "__truediv__")
+        if result is NotImplemented:
+            return NotImplemented
         return result
 
     def __rtruediv__(self, other: Union[float, int]) -> "Tensor":
-        scalar_tensor = Tensor(other)
-        return scalar_tensor.__truediv__(self)
+        result = self._binary_op(other, "__truediv__", reverse=True)
+        if result is NotImplemented:
+            return NotImplemented
+        return result
 
     def __pow__(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Element-wise power operation."""
@@ -711,6 +765,66 @@ class Tensor:
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.pow(exp_tensor)
         return result
+
+    def _binary_op(
+        self, other: Any, op_name: str, *, reverse: bool = False
+    ) -> Union["Tensor", Any]:
+        operands = self._coerce_binary_operands(other, op_name, reverse=reverse)
+        if operands is NotImplemented:
+            return NotImplemented
+
+        lhs, rhs = operands
+        result = Tensor.__new__(Tensor)
+        result._tensor = getattr(lhs._tensor, op_name)(rhs._tensor)
+        return result
+
+    def _comparison_op_or_notimplemented(
+        self, other: Any, method: str, *, reverse: bool = False
+    ) -> Union["Tensor", Any]:
+        candidate = other
+        if not isinstance(other, Tensor):
+            maybe_tensor = Tensor._from_array_like(other, self.device)
+            if maybe_tensor is not None:
+                candidate = maybe_tensor
+
+        operands = self._coerce_binary_operands(candidate, "__add__", reverse=reverse)
+        if operands is NotImplemented:
+            return NotImplemented
+
+        lhs, rhs = operands
+        result = Tensor.__new__(Tensor)
+        result._tensor = getattr(lhs._tensor, method)(rhs._tensor)
+        return result
+
+    def _coerce_binary_operands(
+        self, other: Any, op_name: str, *, reverse: bool = False
+    ) -> Union[Tuple["Tensor", "Tensor"], Any]:
+        if isinstance(other, Tensor):
+            lhs = other if reverse else self
+            rhs = self if reverse else other
+            try:
+                lhs_core, rhs_core = lhs._tensor._coerce_binary_operands(
+                    rhs._tensor, op_name
+                )
+            except AttributeError:
+                return NotImplemented
+
+            lhs_tensor = Tensor.__new__(Tensor)
+            lhs_tensor._tensor = lhs_core
+            rhs_tensor = Tensor.__new__(Tensor)
+            rhs_tensor._tensor = rhs_core
+            return (lhs_tensor, rhs_tensor)
+
+        array_tensor = Tensor._from_array_like(other, self.device)
+        if array_tensor is not None:
+            return self._coerce_binary_operands(array_tensor, op_name, reverse=reverse)
+
+        scalar_dtype = _resolve_scalar_dtype(other, self.dtype)
+        if scalar_dtype is None:
+            return NotImplemented
+
+        scalar_tensor = Tensor(other, dtype=scalar_dtype, device=self.device)
+        return (scalar_tensor, self) if reverse else (self, scalar_tensor)
 
     def pow(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Alias for the ``**`` operator."""
@@ -1011,140 +1125,108 @@ class Tensor:
     # Comparison operations
     def eq(self, other: Any) -> "Tensor":
         """Element-wise equality comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.eq(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "eq")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for eq: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def ne(self, other: Any) -> "Tensor":
         """Element-wise not-equal comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.ne(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "ne")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for ne: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def lt(self, other: Any) -> "Tensor":
         """Element-wise less-than comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.lt(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "lt")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for lt: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def le(self, other: Any) -> "Tensor":
         """Element-wise less-than-or-equal comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.le(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "le")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for le: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def gt(self, other: Any) -> "Tensor":
         """Element-wise greater-than comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.gt(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "gt")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for gt: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def ge(self, other: Any) -> "Tensor":
         """Element-wise greater-than-or-equal comparison."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            raise TypeError("Cannot compare tensors with different dtypes")
-        result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.ge(other._tensor)
+        result = self._comparison_op_or_notimplemented(other, "ge")
+        if result is NotImplemented:
+            raise TypeError(
+                "unsupported operand type(s) for ge: 'Tensor' and "
+                f"'{type(other).__name__}'"
+            )
         return result
 
     def maximum(self, other: "Tensor") -> "Tensor":
-        """Element-wise maximum computed via Rust-backed operations."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            other = other.astype(self.dtype)
+        operands = self._coerce_binary_operands(other, "maximum")
+        if operands is NotImplemented:
+            raise TypeError("unsupported operand for maximum")
 
-        if self.dtype == "bool" and other.dtype == "bool":
-            return self.astype("int32").maximum(other.astype("int32")).astype("bool")
-
-        mask = self.ge(other).astype(self.dtype)
-        one = Tensor(1, dtype=self.dtype)
-        return mask * self + (one - mask) * other
+        lhs, rhs = operands
+        result = Tensor.__new__(Tensor)
+        result._tensor = lhs._tensor.maximum(rhs._tensor)
+        return result
 
     def minimum(self, other: "Tensor") -> "Tensor":
-        """Element-wise minimum computed via Rust-backed operations."""
-        if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype)
-        elif other.dtype != self.dtype:
-            other = other.astype(self.dtype)
+        operands = self._coerce_binary_operands(other, "minimum")
+        if operands is NotImplemented:
+            raise TypeError("unsupported operand for minimum")
 
-        if self.dtype == "bool" and other.dtype == "bool":
-            return self.astype("int32").minimum(other.astype("int32")).astype("bool")
-
-        mask = self.le(other).astype(self.dtype)
-        one = Tensor(1, dtype=self.dtype)
-        return mask * self + (one - mask) * other
+        lhs, rhs = operands
+        result = Tensor.__new__(Tensor)
+        result._tensor = lhs._tensor.minimum(rhs._tensor)
+        return result
 
     # Python special methods for comparisons
     def __eq__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.eq(other)
+        result = self._comparison_op_or_notimplemented(other, "eq")
+        return result
 
     def __ne__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.ne(other)
+        result = self._comparison_op_or_notimplemented(other, "ne")
+        return result
 
     def __lt__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.lt(other)
+        result = self._comparison_op_or_notimplemented(other, "lt")
+        return result
 
     def __le__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.le(other)
+        result = self._comparison_op_or_notimplemented(other, "le")
+        return result
 
     def __gt__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.gt(other)
+        result = self._comparison_op_or_notimplemented(other, "gt")
+        return result
 
     def __ge__(self, other: object) -> "Tensor":
-        if not isinstance(other, Tensor):
-            try:
-                other = Tensor(other, dtype=self.dtype)
-            except Exception:
-                return NotImplemented
-        return self.ge(other)
+        result = self._comparison_op_or_notimplemented(other, "ge")
+        return result
 
     # Utility methods
     def all(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":

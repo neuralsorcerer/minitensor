@@ -382,6 +382,20 @@ impl Tensor {
         add(self, other)
     }
 
+    /// Element-wise maximum
+    #[inline(always)]
+    pub fn maximum(&self, other: &Tensor) -> Result<Self> {
+        use crate::operations::minmax::maximum;
+        maximum(self, other)
+    }
+
+    /// Element-wise minimum
+    #[inline(always)]
+    pub fn minimum(&self, other: &Tensor) -> Result<Self> {
+        use crate::operations::minmax::minimum;
+        minimum(self, other)
+    }
+
     /// Select elements from self or other based on a boolean condition tensor
     #[inline(always)]
     pub fn where_select(&self, condition: &Tensor, other: &Tensor) -> Result<Self> {

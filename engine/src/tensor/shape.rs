@@ -118,7 +118,22 @@ impl Shape {
                 1
             };
 
-            result_dims.push(self_dim.max(other_dim));
+            let result_dim = if self_dim == other_dim {
+                self_dim
+            } else if self_dim == 1 {
+                other_dim
+            } else if other_dim == 1 {
+                self_dim
+            } else {
+                // Due to the prior broadcastability check this branch should be
+                // unreachable, but we keep it to ensure graceful error handling
+                return Err(MinitensorError::shape_mismatch(
+                    self.dims.clone(),
+                    other.dims.clone(),
+                ));
+            };
+
+            result_dims.push(result_dim);
         }
 
         result_dims.reverse();
