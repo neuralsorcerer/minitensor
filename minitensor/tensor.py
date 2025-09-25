@@ -8,6 +8,8 @@
 Tensor class with NumPy compatibility and automatic differentiation support.
 """
 
+from __future__ import annotations
+
 try:
     from . import _core as _minitensor_core
 except ImportError as e:
@@ -19,25 +21,43 @@ except ImportError as e:
 from numbers import Integral, Real
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
+try:  # pragma: no cover
+    import numpy as np
+except (
+    ModuleNotFoundError
+):  # pragma: no cover - fallback for environments without NumPy
+    np = None  # type: ignore[assignment]
 
-# Mapping between NumPy dtypes and Tensor dtype strings
-_TENSOR_TO_NP_DTYPE = {
-    "float32": np.dtype(np.float32),
-    "float64": np.dtype(np.float64),
-    "int32": np.dtype(np.int32),
-    "int64": np.dtype(np.int64),
-    "bool": np.dtype(np.bool_),
-}
+_HAS_NUMPY = np is not None
 
-_NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
+# Supported dtype names irrespective of NumPy availability
+_SUPPORTED_DTYPES = {"float32", "float64", "int32", "int64", "bool"}
+
+if _HAS_NUMPY:
+    # Mapping between NumPy dtypes and Tensor dtype strings
+    _TENSOR_TO_NP_DTYPE = {
+        "float32": np.dtype(np.float32),
+        "float64": np.dtype(np.float64),
+        "int32": np.dtype(np.int32),
+        "int64": np.dtype(np.int64),
+        "bool": np.dtype(np.bool_),
+    }
+    _NP_TO_TENSOR_DTYPE = {v: k for k, v in _TENSOR_TO_NP_DTYPE.items()}
+
+    _NUMPY_GENERIC: Tuple[type, ...] = (np.generic,)
+    _NUMPY_ARRAY: Tuple[type, ...] = (np.ndarray,)
+else:
+    _TENSOR_TO_NP_DTYPE = {}
+    _NP_TO_TENSOR_DTYPE = {}
+    _NUMPY_GENERIC = ()
+    _NUMPY_ARRAY = ()
 
 _FLOAT_DTYPES = {"float32", "float64"}
 _INT_DTYPES = {"int32", "int64"}
 
 
 def _resolve_scalar_dtype(value: Any, context_dtype: str) -> Optional[str]:
-    if isinstance(value, np.generic):
+    if _HAS_NUMPY and isinstance(value, _NUMPY_GENERIC):
         mapped = _NP_TO_TENSOR_DTYPE.get(value.dtype)
         if mapped is not None:
             return mapped
@@ -86,7 +106,7 @@ def _normalize_device(device: Optional[str]) -> Optional[str]:
 
 # Global default dtype management
 _DEFAULT_DTYPE = "float32"
-_VALID_DTYPES = set(_TENSOR_TO_NP_DTYPE.keys())
+_VALID_DTYPES = set(_SUPPORTED_DTYPES)
 
 
 def set_default_dtype(dtype: str) -> None:
@@ -120,33 +140,53 @@ class Tensor:
     # Mapping of NumPy ufuncs to Tensor operations. These lambdas ensure that
     # all computations are executed by the Rust backend by leveraging the
     # Tensor's arithmetic and math methods.
-    _UFUNC_BINARY_MAP = {
-        np.add: lambda a, b: a + b,
-        np.subtract: lambda a, b: a - b,
-        np.multiply: lambda a, b: a * b,
-        np.true_divide: lambda a, b: a / b,
-        np.power: lambda a, b: a.pow(b),
-        np.maximum: lambda a, b: a.maximum(b),
-        np.minimum: lambda a, b: a.minimum(b),
-    }
+    if _HAS_NUMPY:
+        _UFUNC_BINARY_MAP = {
+            np.add: lambda a, b: a + b,
+            np.subtract: lambda a, b: a - b,
+            np.multiply: lambda a, b: a * b,
+            np.true_divide: lambda a, b: a / b,
+            np.power: lambda a, b: a.pow(b),
+            np.maximum: lambda a, b: a.maximum(b),
+            np.minimum: lambda a, b: a.minimum(b),
+        }
 
-    _UFUNC_UNARY_MAP = {
-        np.negative: lambda a: -a,
-        np.exp: lambda a: a.exp(),
-        np.log: lambda a: a.log(),
-        np.sqrt: lambda a: a.sqrt(),
-        np.abs: lambda a: a.abs(),
-        np.sin: lambda a: a.sin(),
-        np.cos: lambda a: a.cos(),
-        np.tan: lambda a: a.tan(),
-    }
+        _UFUNC_UNARY_MAP = {
+            np.negative: lambda a: -a,
+            np.exp: lambda a: a.exp(),
+            np.log: lambda a: a.log(),
+            np.sqrt: lambda a: a.sqrt(),
+            np.abs: lambda a: a.abs(),
+            np.sin: lambda a: a.sin(),
+            np.cos: lambda a: a.cos(),
+            np.tan: lambda a: a.tan(),
+        }
+    else:  # pragma: no cover - NumPy dispatch is unavailable without NumPy itself
+        _UFUNC_BINARY_MAP = {}
+        _UFUNC_UNARY_MAP = {}
 
     @staticmethod
-    def _from_array_like(value: Any, device: str) -> Optional["Tensor"]:
+    def _ensure_on_device(tensor: "Tensor", device: Optional[str]) -> "Tensor":
+        """Move ``tensor`` to ``device`` when necessary."""
+
+        if device is None:
+            return tensor
+
+        current = _normalize_device(tensor.device)
+        if current == device:
+            return tensor
+
+        return tensor.to(device)
+
+    @staticmethod
+    def _from_array_like(value: Any, device: Optional[str]) -> Optional["Tensor"]:
         """Convert array-like Python inputs to a ``Tensor`` on ``device`` if possible."""
 
+        if not _HAS_NUMPY:
+            return None
+
         np_source = None
-        if isinstance(value, np.ndarray):
+        if isinstance(value, _NUMPY_ARRAY):
             np_source = value
         elif isinstance(value, (list, tuple)):
             try:
@@ -283,19 +323,31 @@ class Tensor:
         return self.itemsize
 
     # Data conversion methods
-    def numpy(self) -> np.ndarray:
+    def numpy(self) -> "np.ndarray":
         """Convert to numpy array with zero-copy when possible."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to materialize Tensor data as a NumPy array."
+            )
         try:
             return self._tensor.numpy()
         except NotImplementedError:
             return self._tensor.numpy_copy()
 
-    def numpy_copy(self) -> np.ndarray:
+    def numpy_copy(self) -> "np.ndarray":
         """Convert to numpy array with explicit copy."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to materialize Tensor data as a NumPy array."
+            )
         return self._tensor.numpy_copy()
 
-    def __array__(self, dtype: Optional[np.dtype] = None) -> np.ndarray:
+    def __array__(self, dtype: Optional["np.dtype"] = None) -> "np.ndarray":
         """Support NumPy's array protocol for seamless interoperability."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to expose Tensor data through the array protocol."
+            )
         array = self.numpy()
         if dtype is not None:
             return array.astype(dtype, copy=False)
@@ -303,34 +355,40 @@ class Tensor:
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         """Dispatch NumPy ufuncs to Tensor operations executed in Rust."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to dispatch ufuncs for Tensor operands."
+            )
         if method != "__call__" or kwargs.get("out") is not None:
             return NotImplemented
 
-        np_dtypes = []
-        tensor_inputs = []
+        tensor_inputs: List[Tensor] = []
+        target_device = _normalize_device(self.device)
 
-        for x in inputs:
-            if isinstance(x, Tensor):
-                tensor_inputs.append(x)
-                np_dtypes.append(_TENSOR_TO_NP_DTYPE[x.dtype])
-            elif isinstance(x, np.ndarray):
-                if x.dtype in _NP_TO_TENSOR_DTYPE:
-                    arr_tensor = Tensor.from_numpy(x)
-                else:
-                    arr_tensor = Tensor(x.tolist())
-                tensor_inputs.append(arr_tensor)
-                np_dtypes.append(x.dtype)
-            else:
-                arr_tensor = Tensor(x)
-                tensor_inputs.append(arr_tensor)
-                np_dtypes.append(np.array(x).dtype)
+        for arg in inputs:
+            if isinstance(arg, Tensor):
+                tensor_inputs.append(arg)
+                continue
 
-        result_np_dtype = np.result_type(*np_dtypes)
-        target_dtype = _NP_TO_TENSOR_DTYPE.get(np.dtype(result_np_dtype), "float32")
-        tensor_inputs = [
-            t if t.dtype == target_dtype else t.astype(target_dtype)
-            for t in tensor_inputs
-        ]
+            if isinstance(arg, _NUMPY_ARRAY):
+                if arg.dtype in _NP_TO_TENSOR_DTYPE:
+                    converted = Tensor.from_numpy(arg)
+                    tensor_inputs.append(
+                        Tensor._ensure_on_device(converted, target_device)
+                    )
+                    continue
+                tensor_inputs.append(Tensor(arg.tolist(), device=target_device))
+                continue
+
+            maybe_tensor = Tensor._from_array_like(arg, target_device)
+            if maybe_tensor is not None:
+                tensor_inputs.append(maybe_tensor)
+                continue
+
+            try:
+                tensor_inputs.append(Tensor(arg, device=target_device))
+            except Exception:
+                return NotImplemented
 
         if ufunc in self._UFUNC_BINARY_MAP and len(tensor_inputs) == 2:
             return self._UFUNC_BINARY_MAP[ufunc](tensor_inputs[0], tensor_inputs[1])
@@ -342,15 +400,13 @@ class Tensor:
 
     def tolist(self) -> List:
         """Convert to Python list."""
-        if self.numel() == 0:
-            return []
         return self._tensor.tolist()
 
     def item(self) -> Union[float, int, bool]:
         """Get scalar value from single-element tensor."""
         if self.numel() != 1:
             raise ValueError("item() can only be called on tensors with one element")
-        return self.tolist()
+        return self._tensor.item()
 
     # Tensor manipulation methods
     def reshape(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
@@ -1037,7 +1093,7 @@ class Tensor:
     ) -> "Tensor":
         """Standard deviation along dimension."""
         result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.std(dim, keepdim)
+        result._tensor = self._tensor.std(dim, keepdim, unbiased)
         return result
 
     def var(
@@ -1045,7 +1101,7 @@ class Tensor:
     ) -> "Tensor":
         """Variance along dimension."""
         result = Tensor.__new__(Tensor)
-        result._tensor = self._tensor.var(dim, keepdim)
+        result._tensor = self._tensor.var(dim, keepdim, unbiased)
         return result
 
     # Mathematical functions
@@ -1483,15 +1539,23 @@ class Tensor:
         return Tensor(base) ** linear
 
     @staticmethod
-    def from_numpy(array: np.ndarray, requires_grad: bool = False) -> "Tensor":
+    def from_numpy(array: "np.ndarray", requires_grad: bool = False) -> "Tensor":
         """Create a tensor from a NumPy array."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to construct tensors from NumPy arrays."
+            )
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.from_numpy(array, requires_grad)
         return result
 
     @staticmethod
-    def from_numpy_shared(array: np.ndarray, requires_grad: bool = False) -> "Tensor":
+    def from_numpy_shared(array: "np.ndarray", requires_grad: bool = False) -> "Tensor":
         """Create a tensor from a NumPy array with zero-copy when possible."""
+        if not _HAS_NUMPY:
+            raise ModuleNotFoundError(
+                "NumPy is required to construct tensors from NumPy arrays."
+            )
         result = Tensor.__new__(Tensor)
         result._tensor = _minitensor_core.Tensor.from_numpy_shared(array, requires_grad)
         return result
@@ -1597,8 +1661,12 @@ def linspace(
     )
 
 
-def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
+def from_numpy(array: "np.ndarray", requires_grad: bool = False) -> Tensor:
     """Create a tensor from a NumPy array."""
+    if not _HAS_NUMPY:
+        raise ModuleNotFoundError(
+            "NumPy is required to construct tensors from NumPy arrays."
+        )
     return Tensor.from_numpy(array, requires_grad=requires_grad)
 
 

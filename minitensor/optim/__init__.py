@@ -65,16 +65,7 @@ class SGD(_OptimizerWrapper):  # pragma: no cover - thin wrapper
             weight_decay=weight_decay,
             nesterov=nesterov,
         )
-        self._py_params = params
         super().__init__(opt, params)
-
-    def zero_grad(self, set_to_none: bool = False):
-        """Reset gradients of the tracked parameters."""
-        if set_to_none:
-            for i, p in enumerate(self._py_params):
-                new = _Tensor(p.numpy(), requires_grad=p.requires_grad)
-                p._tensor = new._tensor
-                self._params[i] = p._tensor
 
 
 class Adam(_OptimizerWrapper):  # pragma: no cover - thin wrapper

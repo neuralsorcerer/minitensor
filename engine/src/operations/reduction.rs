@@ -1017,13 +1017,13 @@ pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
 }
 
 /// Standard deviation along specified dimension
-pub fn std(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    let variance = var(tensor, dim, keepdim)?;
+pub fn std(tensor: &Tensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
+    let variance = var(tensor, dim, keepdim, unbiased)?;
     crate::operations::activation::sqrt(&variance)
 }
 
 /// Variance along specified dimension
-pub fn var(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+pub fn var(tensor: &Tensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",
@@ -1038,7 +1038,51 @@ pub fn var(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
     let squared_diff = crate::operations::arithmetic::mul(&diff, &diff)?;
 
     // Compute mean of squared differences
-    mean(&squared_diff, dim.map(|d| vec![d]), keepdim)
+    let variance = mean(&squared_diff, dim.map(|d| vec![d]), keepdim)?;
+
+    if !unbiased {
+        return Ok(variance);
+    }
+
+    let sample_count = match dim {
+        None => tensor.numel() as f64,
+        Some(d) => {
+            let axis = normalize_dim(d, tensor.ndim())?;
+            tensor.shape().dims()[axis] as f64
+        }
+    };
+
+    if sample_count == 0.0 {
+        return Ok(variance);
+    }
+
+    let correction = sample_count / (sample_count - 1.0);
+
+    let correction_tensor = match variance.dtype() {
+        DataType::Float32 => Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![correction as f32],
+                variance.device(),
+            )),
+            Shape::scalar(),
+            DataType::Float32,
+            variance.device(),
+            false,
+        ),
+        DataType::Float64 => Tensor::new(
+            Arc::new(TensorData::from_vec_f64(
+                vec![correction],
+                variance.device(),
+            )),
+            Shape::scalar(),
+            DataType::Float64,
+            variance.device(),
+            false,
+        ),
+        _ => unreachable!("variance is only defined for floating point tensors"),
+    };
+
+    crate::operations::arithmetic::mul(&variance, &correction_tensor)
 }
 
 // Helper functions for type-specific operations

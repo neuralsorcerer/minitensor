@@ -115,13 +115,7 @@ impl PyTensor {
 
     #[getter]
     fn strides(&self) -> Vec<usize> {
-        // Calculate strides based on shape
-        let shape = self.inner.shape().dims();
-        let mut strides = vec![1; shape.len()];
-        for i in (0..shape.len().saturating_sub(1)).rev() {
-            strides[i] = strides[i + 1] * shape[i + 1];
-        }
-        strides
+        self.inner.strides().as_slice().to_vec()
     }
 
     // Basic tensor info methods
@@ -134,8 +128,7 @@ impl PyTensor {
     }
 
     fn is_contiguous(&self) -> bool {
-        // Simplified check - assume contiguous for now
-        true
+        self.inner.is_contiguous()
     }
 
     // Tensor manipulation methods
@@ -547,15 +540,33 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    pub fn std(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn std(
+        &self,
+        axis: Option<isize>,
+        keepdims: Option<bool>,
+        unbiased: Option<bool>,
+    ) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.std(axis, keepdims).map_err(_convert_error)?;
+        let unbiased = unbiased.unwrap_or(true);
+        let result = self
+            .inner
+            .std(axis, keepdims, unbiased)
+            .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn var(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
+    pub fn var(
+        &self,
+        axis: Option<isize>,
+        keepdims: Option<bool>,
+        unbiased: Option<bool>,
+    ) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.var(axis, keepdims).map_err(_convert_error)?;
+        let unbiased = unbiased.unwrap_or(true);
+        let result = self
+            .inner
+            .var(axis, keepdims, unbiased)
+            .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -655,7 +666,15 @@ impl PyTensor {
     }
 
     fn tolist(&self) -> PyResult<Py<PyAny>> {
-        Python::attach(|py| convert_tensor_to_python_list(&self.inner, py))
+        if self.inner.ndim() == 0 {
+            Python::attach(|py| convert_tensor_to_python_scalar(&self.inner, py))
+        } else {
+            Python::attach(|py| convert_tensor_to_python_list(&self.inner, py))
+        }
+    }
+
+    fn item(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| convert_tensor_to_python_scalar(&self.inner, py))
     }
 
     // Comparison operations
@@ -1395,44 +1414,123 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, _force_copy: bool) -> Py
 }
 
 fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
-    // Simplified implementation - would need recursive structure for multi-dimensional
+    let shape: Vec<usize> = tensor.shape().dims().to_vec();
     match tensor.dtype() {
         DataType::Float32 => {
             let data = tensor.data().as_f32_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f32 data")
             })?;
-            let list: Vec<f32> = data.to_vec();
-            Ok(list.into_py_any(py)?)
+            nested_list_from_slice(py, data, &shape)
         }
         DataType::Float64 => {
             let data = tensor.data().as_f64_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f64 data")
             })?;
-            let list: Vec<f64> = data.to_vec();
-            Ok(list.into_py_any(py)?)
+            nested_list_from_slice(py, data, &shape)
         }
         DataType::Int32 => {
             let data = tensor.data().as_i32_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i32 data")
             })?;
-            let list: Vec<i32> = data.to_vec();
-            Ok(list.into_py_any(py)?)
+            nested_list_from_slice(py, data, &shape)
         }
         DataType::Int64 => {
             let data = tensor.data().as_i64_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i64 data")
             })?;
-            let list: Vec<i64> = data.to_vec();
-            Ok(list.into_py_any(py)?)
+            nested_list_from_slice(py, data, &shape)
         }
         DataType::Bool => {
             let data = tensor.data().as_bool_slice().ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get bool data")
             })?;
-            let list: Vec<bool> = data.to_vec();
-            Ok(list.into_py_any(py)?)
+            nested_list_from_slice(py, data, &shape)
         }
     }
+}
+
+fn convert_tensor_to_python_scalar(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
+    if tensor.numel() != 1 {
+        return Err(PyErr::new::<PyValueError, _>(
+            "only one element tensors can be converted to Python scalars",
+        ));
+    }
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let data = tensor.data().as_f32_slice().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f32 data")
+            })?;
+            data[0].into_py_any(py)
+        }
+        DataType::Float64 => {
+            let data = tensor.data().as_f64_slice().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get f64 data")
+            })?;
+            data[0].into_py_any(py)
+        }
+        DataType::Int32 => {
+            let data = tensor.data().as_i32_slice().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i32 data")
+            })?;
+            data[0].into_py_any(py)
+        }
+        DataType::Int64 => {
+            let data = tensor.data().as_i64_slice().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get i64 data")
+            })?;
+            data[0].into_py_any(py)
+        }
+        DataType::Bool => {
+            let data = tensor.data().as_bool_slice().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get bool data")
+            })?;
+            data[0].into_py_any(py)
+        }
+    }
+}
+
+fn nested_list_from_slice<'py, T>(
+    py: Python<'py>,
+    data: &[T],
+    shape: &[usize],
+) -> PyResult<Py<PyAny>>
+where
+    T: Copy + IntoPyObjectExt<'py>,
+{
+    if shape.is_empty() {
+        if let Some(value) = data.first() {
+            return (*value).into_py_any(py);
+        }
+        return PyList::empty(py).into_py_any(py);
+    }
+
+    if shape.len() == 1 {
+        let mut elements: Vec<Py<PyAny>> = Vec::with_capacity(data.len());
+        for value in data.iter().copied() {
+            elements.push(value.into_py_any(py)?);
+        }
+        let list = PyList::new(py, elements)?;
+        return list.into_py_any(py);
+    }
+
+    let chunk = shape[1..]
+        .iter()
+        .fold(1usize, |acc, &dim| acc.saturating_mul(dim));
+    let mut parts: Vec<Py<PyAny>> = Vec::with_capacity(shape[0]);
+    for index in 0..shape[0] {
+        let start = index * chunk;
+        let end = start + chunk;
+        let slice = if start <= end && end <= data.len() {
+            &data[start..end]
+        } else {
+            &[]
+        };
+        parts.push(nested_list_from_slice(py, slice, &shape[1..])?);
+    }
+
+    let list = PyList::new(py, parts)?;
+    list.into_py_any(py)
 }
 
 fn create_random_tensor(

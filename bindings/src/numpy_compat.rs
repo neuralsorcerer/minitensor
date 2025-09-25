@@ -12,6 +12,7 @@ use engine::operations::reduction::sum as tensor_sum;
 use engine::operations::selection::where_op as tensor_where;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -306,14 +307,32 @@ fn tensor_std(
     tensor: &PyTensor,
     axis: Option<isize>,
     keepdims: Option<bool>,
+    ddof: Option<usize>,
 ) -> PyResult<PyTensor> {
-    tensor.std(axis, keepdims)
+    let ddof = ddof.unwrap_or(0);
+    if ddof > 1 {
+        return Err(PyValueError::new_err(
+            "minitensor only supports ddof values of 0 or 1",
+        ));
+    }
+    tensor.std(axis, keepdims, Some(ddof == 1))
 }
 
 /// Compute variance along axis
 #[pyfunction]
-fn var(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.var(axis, keepdims)
+fn var(
+    tensor: &PyTensor,
+    axis: Option<isize>,
+    keepdims: Option<bool>,
+    ddof: Option<usize>,
+) -> PyResult<PyTensor> {
+    let ddof = ddof.unwrap_or(0);
+    if ddof > 1 {
+        return Err(PyValueError::new_err(
+            "minitensor only supports ddof values of 0 or 1",
+        ));
+    }
+    tensor.var(axis, keepdims, Some(ddof == 1))
 }
 
 /// Compute product along axis

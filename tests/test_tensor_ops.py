@@ -22,6 +22,30 @@ def test_reshape_and_transpose_roundtrip():
     )
 
 
+def _numpy_strides_in_elements(array: np.ndarray) -> tuple[int, ...]:
+    return tuple(s // array.itemsize for s in array.strides)
+
+
+def test_strides_and_contiguity_follow_backend_layout():
+    base = mt.arange(6).reshape(2, 3)
+    base_np = base.numpy()
+    assert base.is_contiguous()
+    assert base.strides == (3, 1)
+    assert base.strides == _numpy_strides_in_elements(base_np)
+
+    transposed = base.transpose(0, 1)
+    transposed_np = transposed.numpy()
+    assert transposed.shape == (3, 2)
+    assert transposed.strides == _numpy_strides_in_elements(transposed_np)
+    assert isinstance(transposed.is_contiguous(), bool)
+
+    materialized = transposed.contiguous()
+    materialized_np = materialized.numpy()
+    assert materialized.is_contiguous()
+    assert materialized.strides == _numpy_strides_in_elements(materialized_np)
+    np.testing.assert_allclose(materialized_np, transposed_np)
+
+
 def test_reshape_invalid_size():
     t = mt.Tensor([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(ValueError):

@@ -530,16 +530,16 @@ impl Tensor {
 
     /// Standard deviation
     #[inline(always)]
-    pub fn std(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn std(&self, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Self> {
         use crate::operations::reduction::std;
-        std(self, dim, keepdim)
+        std(self, dim, keepdim, unbiased)
     }
 
     /// Variance
     #[inline(always)]
-    pub fn var(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+    pub fn var(&self, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Self> {
         use crate::operations::reduction::var;
-        var(self, dim, keepdim)
+        var(self, dim, keepdim, unbiased)
     }
 
     /// Exponential function
