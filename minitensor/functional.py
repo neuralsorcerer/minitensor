@@ -19,6 +19,7 @@ except ImportError as e:
         "Run `maturin develop` or install the package."
     ) from e
 
+from numbers import Real
 from typing import Optional, Sequence, Union
 
 from .tensor import Tensor, _normalize_device
@@ -36,6 +37,20 @@ def relu(input: Tensor) -> Tensor:
     return input.relu()
 
 
+def hardshrink(input: Tensor, lambd: float = 0.5) -> Tensor:
+    """Hardshrink activation function.
+
+    Args:
+        input: Input tensor to activate.
+        lambd: Threshold that defines the zero region ``[-lambd, lambd]``.
+
+    Returns:
+        Tensor: The hardshrink transformation of ``input``.
+    """
+
+    return input.hardshrink(lambd)
+
+
 def sigmoid(input: Tensor) -> Tensor:
     """Sigmoid activation function.
 
@@ -48,6 +63,51 @@ def sigmoid(input: Tensor) -> Tensor:
     return input.sigmoid()
 
 
+def softplus(input: Tensor, beta: float = 1.0, threshold: float = 20.0) -> Tensor:
+    """Softplus activation function.
+
+    Args:
+        input: Input tensor to activate.
+        beta: Slope parameter controlling the smoothness.
+        threshold: Value above which the function is approximated as linear.
+
+    Returns:
+        Tensor: The softplus transformation of ``input``.
+    """
+
+    return input.softplus(beta, threshold)
+
+
+def gelu(input: Tensor, approximate: str = "none") -> Tensor:
+    """Gaussian Error Linear Unit activation."""
+
+    return input.gelu(approximate)
+
+
+def elu(input: Tensor, alpha: float = 1.0) -> Tensor:
+    """Exponential Linear Unit activation."""
+
+    return input.elu(alpha)
+
+
+def selu(input: Tensor) -> Tensor:
+    """Scaled Exponential Linear Unit activation."""
+
+    return input.selu()
+
+
+def silu(input: Tensor) -> Tensor:
+    """Sigmoid Linear Unit (Swish) activation."""
+
+    return input.silu()
+
+
+def softsign(input: Tensor) -> Tensor:
+    """Softsign activation function."""
+
+    return input.softsign()
+
+
 def tanh(input: Tensor) -> Tensor:
     """Hyperbolic tangent activation function.
 
@@ -58,6 +118,18 @@ def tanh(input: Tensor) -> Tensor:
         Tensor: A new tensor with values in the range (-1, 1).
     """
     return input.tanh()
+
+
+def log1p(input: Tensor) -> Tensor:
+    """Compute ``log(1 + x)`` element-wise."""
+
+    return input.log1p()
+
+
+def expm1(input: Tensor) -> Tensor:
+    """Compute ``exp(x) - 1`` element-wise."""
+
+    return input.expm1()
 
 
 def sin(input: Tensor) -> Tensor:
@@ -73,6 +145,18 @@ def cos(input: Tensor) -> Tensor:
 def tan(input: Tensor) -> Tensor:
     """Tangent function computed as sin(x)/cos(x)."""
     return input.tan()
+
+
+def rsqrt(input: Tensor) -> Tensor:
+    """Reciprocal square root computed in Rust."""
+
+    return input.rsqrt()
+
+
+def logaddexp(input: Tensor, other: Tensor) -> Tensor:
+    """Compute the element-wise ``logaddexp`` between two tensors."""
+
+    return input.logaddexp(other)
 
 
 def where(condition: Tensor, input: Tensor, other: Tensor) -> Tensor:
@@ -98,18 +182,35 @@ def where(condition: Tensor, input: Tensor, other: Tensor) -> Tensor:
     else:
         if condition.dtype != "bool":
             raise TypeError("where condition must be a bool tensor")
-        if condition.device != input.device:
-            condition = condition.to(target_device)
+        condition = Tensor._ensure_on_device(condition, target_device)
 
     if not isinstance(other, Tensor):
-        other = Tensor(other, dtype=input.dtype, device=target_device)
+        other = Tensor(other, device=target_device)
     else:
-        if other.dtype != input.dtype:
-            raise TypeError("where requires tensors to have the same dtype")
-        if other.device != input.device:
-            other = other.to(target_device)
+        other = Tensor._ensure_on_device(other, target_device)
 
     return input.where(condition, other)
+
+
+def masked_fill(
+    input: Tensor, mask: Tensor, value: Union[Tensor, Real, bool]
+) -> Tensor:
+    """Fill elements of ``input`` where ``mask`` is ``True``.
+
+    Args:
+        input: Base tensor whose elements will be conditionally replaced.
+        mask: Boolean tensor selecting elements to overwrite. Must be
+            broadcastable to ``input``.
+        value: Replacement provided either as a tensor or scalar.
+
+    Returns:
+        Tensor: Tensor with selected elements replaced.
+    """
+
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+
+    return input.masked_fill(mask, value)
 
 
 def reshape(input: Tensor, shape) -> Tensor:
@@ -139,6 +240,24 @@ def view(input: Tensor, *shape: Union[int, Sequence[int]]) -> Tensor:
     """
 
     return input.view(*shape)
+
+
+def triu(input: Tensor, diagonal: int = 0) -> Tensor:
+    """Return the upper triangular part of ``input``."""
+
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+
+    return input.triu(diagonal)
+
+
+def tril(input: Tensor, diagonal: int = 0) -> Tensor:
+    """Return the lower triangular part of ``input``."""
+
+    if not isinstance(input, Tensor):
+        input = Tensor(input)
+
+    return input.tril(diagonal)
 
 
 def flatten(input: Tensor, start_dim: int = 0, end_dim: int = -1) -> Tensor:
@@ -478,22 +597,48 @@ def median(
 
 
 def softmax(input: Tensor, dim: Optional[int] = None) -> Tensor:
-    """Softmax activation function.
+    """Softmax activation function."""
 
-    Args:
-        input: Input tensor.
-        dim: Dimension along which to apply softmax. Defaults to the last
-            dimension.
+    target_dim = -1 if dim is None else dim
+    return input.softmax(target_dim)
 
-    Returns:
-        Tensor: Probability distribution computed along ``dim``.
-    """
-    axis = dim
-    if axis is None:
-        axis = len(input.shape) - 1
-    elif axis < 0:
-        axis = len(input.shape) + axis
-    return input.softmax(axis)
+
+def log_softmax(input: Tensor, dim: Optional[int] = None) -> Tensor:
+    """Log-softmax activation backed entirely by the Rust engine."""
+
+    target_dim = -1 if dim is None else dim
+    return input.log_softmax(target_dim)
+
+
+def logsumexp(
+    input: Tensor,
+    dim: Optional[Union[int, Sequence[int]]] = None,
+    keepdim: bool = False,
+) -> Tensor:
+    """Compute a numerically stable log-sum-exp reduction."""
+
+    if dim is None:
+        dims = None
+    elif isinstance(dim, int):
+        dims = [dim]
+    elif isinstance(dim, tuple):
+        dims = list(dim)
+    else:
+        dims = list(dim)
+
+    return input.logsumexp(dims, keepdim)
+
+
+def layer_norm(
+    input: Tensor,
+    normalized_shape: Union[int, Sequence[int]],
+    weight: Optional[Tensor] = None,
+    bias: Optional[Tensor] = None,
+    eps: float = 1e-5,
+) -> Tensor:
+    """Apply layer normalization using the Rust backend implementation."""
+
+    return input.layer_norm(normalized_shape, weight=weight, bias=bias, eps=eps)
 
 
 def dense_layer(input: Tensor, weight: Tensor, bias: Optional[Tensor] = None) -> Tensor:
@@ -695,8 +840,12 @@ __all__ = [
     "sin",
     "cos",
     "tan",
+    "softsign",
+    "rsqrt",
     "reshape",
     "view",
+    "triu",
+    "tril",
     "flatten",
     "ravel",
     "transpose",

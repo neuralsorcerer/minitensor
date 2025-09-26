@@ -46,6 +46,20 @@ def test_strides_and_contiguity_follow_backend_layout():
     np.testing.assert_allclose(materialized_np, transposed_np)
 
 
+def test_contiguous_materializes_expand():
+    base = mt.arange(0.0, 3.0, dtype="float32").reshape(3, 1)
+    expanded = base.expand(3, 4)
+    assert not expanded.is_contiguous()
+
+    materialized = expanded.contiguous()
+    assert materialized.is_contiguous()
+    expected = np.broadcast_to(
+        np.arange(0.0, 3.0, dtype=np.float32).reshape(3, 1),
+        (3, 4),
+    )
+    np.testing.assert_allclose(materialized.numpy(), expected)
+
+
 def test_reshape_invalid_size():
     t = mt.Tensor([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(ValueError):
@@ -224,6 +238,38 @@ def test_cumsum_and_backward():
     )
 
 
+def test_masked_fill_with_scalar():
+    base = mt.arange(0.0, 4.0, dtype="float32").reshape(2, 2)
+    mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
+
+    filled = base.masked_fill(mask, 10.0)
+    expected = np.array([[10.0, 1.0], [2.0, 10.0]], dtype=np.float32)
+    np.testing.assert_allclose(filled.numpy(), expected)
+
+
+def test_masked_fill_tensor_gradient():
+    base = mt.arange(0.0, 4.0, dtype="float32", requires_grad=True).reshape(2, 2)
+    mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
+    values = mt.full((1, 2), 5.0, dtype="float32", requires_grad=True)
+
+    output = base.masked_fill(mask, values)
+    loss = output.sum()
+    loss.backward()
+
+    base_grad = base.grad
+    assert base_grad is not None
+    np.testing.assert_allclose(
+        base_grad.numpy(),
+        np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
+    )
+
+    values_grad = values.grad
+    assert values_grad is not None
+    np.testing.assert_allclose(
+        values_grad.numpy(), np.array([[1.0, 1.0]], dtype=np.float32)
+    )
+
+
 def test_cumprod_and_backward():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
     p0 = t.cumprod(0)
@@ -301,6 +347,26 @@ def test_array_equal_parallel():
     assert a.array_equal(b)
     c = mt.Tensor.zeros([5000])
     assert not a.array_equal(c)
+
+
+def test_clone_preserves_autograd_history():
+    dev = mt.device("cpu")
+    base = mt.Tensor(
+        np.array([1.0, -2.0, 3.0], dtype=np.float32), requires_grad=True, device=dev
+    )
+    base.zero_grad(set_to_none=True)
+
+    cloned = base.clone()
+    assert cloned.requires_grad
+
+    scale = mt.Tensor(np.array([0.5, 0.25, -1.5], dtype=np.float32), device=dev)
+    out = (cloned * scale).sum()
+    out.backward()
+
+    np.testing.assert_allclose(
+        base.grad.numpy(),
+        np.array([0.5, 0.25, -1.5], dtype=np.float32),
+    )
 
 
 def test_empty_ones_tensor():

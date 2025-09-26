@@ -13,7 +13,7 @@ pub use dtype::DataType;
 pub use shape::{Shape, Strides};
 
 use crate::{
-    autograd::{self, GradientFunction, TensorId},
+    autograd::{self, CloneBackward, GradientFunction, TensorId},
     device::Device,
     error::{MinitensorError, Result},
     operations::arithmetic::add,
@@ -175,12 +175,148 @@ impl Tensor {
     /// Get a mutable reference to the tensor data
     #[inline(always)]
     pub(crate) fn data_mut(&mut self) -> &mut TensorData {
-        if Arc::get_mut(&mut self.data).is_some() {
-            Arc::get_mut(&mut self.data).unwrap()
+        let needs_detach = self.grad_fn.is_some() || !self.requires_grad;
+        if needs_detach {
+            if Arc::get_mut(&mut self.data).is_none() {
+                let cloned = self.data.as_ref().clone_data();
+                self.data = Arc::new(cloned);
+            }
+            Arc::get_mut(&mut self.data).expect("Tensor data should be uniquely owned")
         } else {
             let ptr = Arc::as_ptr(&self.data) as *mut TensorData;
             unsafe { &mut *ptr }
         }
+    }
+
+    /// Create a deep copy of the tensor data while preserving autograd history.
+    #[inline]
+    pub fn deep_clone(&self) -> Result<Self> {
+        let data = Arc::new(self.data.as_ref().clone_data());
+        let mut cloned = Tensor::new(
+            data,
+            self.shape.clone(),
+            self.dtype,
+            self.device,
+            self.requires_grad,
+        );
+
+        if self.requires_grad {
+            let grad_fn = Arc::new(CloneBackward {
+                input_id: self.tensor_id,
+            });
+            cloned.set_grad_fn(Some(grad_fn.clone()));
+            autograd::add_to_graph(&cloned, Some(grad_fn))?;
+        }
+
+        Ok(cloned)
+    }
+
+    /// Materialise the tensor into a contiguous layout.
+    pub fn contiguous(&self) -> Result<Self> {
+        if self.is_contiguous() && self.data.is_contiguous() {
+            return Ok(self.clone());
+        }
+
+        if !self.device.is_cpu() {
+            return Err(MinitensorError::invalid_operation(
+                "contiguous currently supports only CPU tensors".to_string(),
+            ));
+        }
+
+        let numel = self.numel();
+        let dtype = self.dtype;
+        let device = self.device;
+        let requires_grad = self.requires_grad;
+        let shape = self.shape.dims().to_vec();
+        let strides = self.strides.as_slice().to_vec();
+
+        let mut output_data = TensorData::uninitialized_on_device(numel, dtype, device);
+
+        match dtype {
+            DataType::Float32 => {
+                let src = self.data.as_f32_slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access float32 data for contiguous copy".to_string(),
+                    )
+                })?;
+                let dst = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access float32 storage for contiguous copy".to_string(),
+                    )
+                })?;
+                copy_strided_to_contiguous(src, dst, &shape, &strides);
+            }
+            DataType::Float64 => {
+                let src = self.data.as_f64_slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access float64 data for contiguous copy".to_string(),
+                    )
+                })?;
+                let dst = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access float64 storage for contiguous copy".to_string(),
+                    )
+                })?;
+                copy_strided_to_contiguous(src, dst, &shape, &strides);
+            }
+            DataType::Int32 => {
+                let src = self.data.as_i32_slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access int32 data for contiguous copy".to_string(),
+                    )
+                })?;
+                let dst = output_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access int32 storage for contiguous copy".to_string(),
+                    )
+                })?;
+                copy_strided_to_contiguous(src, dst, &shape, &strides);
+            }
+            DataType::Int64 => {
+                let src = self.data.as_i64_slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access int64 data for contiguous copy".to_string(),
+                    )
+                })?;
+                let dst = output_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access int64 storage for contiguous copy".to_string(),
+                    )
+                })?;
+                copy_strided_to_contiguous(src, dst, &shape, &strides);
+            }
+            DataType::Bool => {
+                let src = self.data.as_bool_slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access bool data for contiguous copy".to_string(),
+                    )
+                })?;
+                let dst = output_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::invalid_operation(
+                        "failed to access bool storage for contiguous copy".to_string(),
+                    )
+                })?;
+                copy_strided_to_contiguous(src, dst, &shape, &strides);
+            }
+        }
+
+        let mut output = Tensor::new(
+            Arc::new(output_data),
+            self.shape.clone(),
+            dtype,
+            device,
+            requires_grad,
+        );
+
+        if requires_grad {
+            let grad_fn = Arc::new(CloneBackward {
+                input_id: self.tensor_id,
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            autograd::add_to_graph(&output, Some(grad_fn))?;
+        }
+
+        Ok(output)
     }
 
     /// Set the gradient function for this tensor
@@ -403,6 +539,18 @@ impl Tensor {
         where_op(condition, self, other)
     }
 
+    /// Fill elements specified by `mask` with values from `value`.
+    #[inline(always)]
+    pub fn masked_fill(&self, mask: &Tensor, value: &Tensor) -> Result<Self> {
+        crate::operations::selection::masked_fill(self, mask, value)
+    }
+
+    /// Fill elements specified by `mask` with a scalar.
+    #[inline(always)]
+    pub fn masked_fill_scalar(&self, mask: &Tensor, value: f64) -> Result<Self> {
+        crate::operations::selection::masked_fill_scalar(self, mask, value)
+    }
+
     /// Matrix multiplication
     #[inline(always)]
     pub fn matmul(&self, other: &Tensor) -> Result<Self> {
@@ -410,11 +558,32 @@ impl Tensor {
         matmul(self, other)
     }
 
+    /// Upper triangular part of the tensor's last two dimensions
+    #[inline(always)]
+    pub fn triu(&self, diagonal: i64) -> Result<Self> {
+        use crate::operations::linalg::triu;
+        triu(self, diagonal)
+    }
+
+    /// Lower triangular part of the tensor's last two dimensions
+    #[inline(always)]
+    pub fn tril(&self, diagonal: i64) -> Result<Self> {
+        use crate::operations::linalg::tril;
+        tril(self, diagonal)
+    }
+
     /// Sum reduction
     #[inline(always)]
     pub fn sum(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::sum;
         sum(self, dim, keepdim)
+    }
+
+    /// Log-sum-exp reduction
+    #[inline(always)]
+    pub fn logsumexp(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::logsumexp;
+        logsumexp(self, dim, keepdim)
     }
 
     /// Product reduction
@@ -590,6 +759,20 @@ impl Tensor {
         log(self)
     }
 
+    /// log1p (log(1 + x))
+    #[inline(always)]
+    pub fn log1p(&self) -> Result<Self> {
+        use crate::operations::activation::log1p;
+        log1p(self)
+    }
+
+    /// expm1 (exp(x) - 1)
+    #[inline(always)]
+    pub fn expm1(&self) -> Result<Self> {
+        use crate::operations::activation::expm1;
+        expm1(self)
+    }
+
     /// Sine function
     #[inline(always)]
     pub fn sin(&self) -> Result<Self> {
@@ -625,6 +808,48 @@ impl Tensor {
         sigmoid(self)
     }
 
+    /// Softplus activation
+    #[inline(always)]
+    pub fn softplus(&self, beta: f64, threshold: f64) -> Result<Self> {
+        use crate::operations::activation::softplus;
+        softplus(self, beta, threshold)
+    }
+
+    /// GELU activation
+    #[inline(always)]
+    pub fn gelu(&self, approximate: bool) -> Result<Self> {
+        use crate::operations::activation::gelu;
+        gelu(self, approximate)
+    }
+
+    /// ELU activation
+    #[inline(always)]
+    pub fn elu(&self, alpha: f64) -> Result<Self> {
+        use crate::operations::activation::elu;
+        elu(self, alpha)
+    }
+
+    /// SELU activation
+    #[inline(always)]
+    pub fn selu(&self) -> Result<Self> {
+        use crate::operations::activation::selu;
+        selu(self)
+    }
+
+    /// SiLU activation
+    #[inline(always)]
+    pub fn silu(&self) -> Result<Self> {
+        use crate::operations::activation::silu;
+        silu(self)
+    }
+
+    /// Softsign activation
+    #[inline(always)]
+    pub fn softsign(&self) -> Result<Self> {
+        use crate::operations::activation::softsign;
+        softsign(self)
+    }
+
     /// ReLU activation
     #[inline(always)]
     pub fn relu(&self) -> Result<Self> {
@@ -632,11 +857,38 @@ impl Tensor {
         relu(self)
     }
 
+    /// Hardshrink activation
+    #[inline(always)]
+    pub fn hardshrink(&self, lambd: f64) -> Result<Self> {
+        use crate::operations::activation::hardshrink;
+        hardshrink(self, lambd)
+    }
+
     /// Softmax activation
     #[inline(always)]
     pub fn softmax(&self, dim: Option<usize>) -> Result<Self> {
         use crate::operations::activation::softmax;
         softmax(self, dim)
+    }
+
+    /// Log-Softmax activation
+    #[inline(always)]
+    pub fn log_softmax(&self, dim: Option<usize>) -> Result<Self> {
+        use crate::operations::activation::log_softmax;
+        log_softmax(self, dim)
+    }
+
+    /// Layer normalization
+    #[inline(always)]
+    pub fn layer_norm(
+        &self,
+        normalized_shape: &[usize],
+        weight: Option<&Tensor>,
+        bias: Option<&Tensor>,
+        eps: f64,
+    ) -> Result<Self> {
+        use crate::operations::normalization::layer_norm;
+        layer_norm(self, normalized_shape, weight, bias, eps)
     }
 
     /// Absolute value
@@ -653,11 +905,23 @@ impl Tensor {
         sqrt(self)
     }
 
+    pub fn rsqrt(&self) -> Result<Self> {
+        use crate::operations::activation::rsqrt;
+        rsqrt(self)
+    }
+
     /// Raise tensor elements to a scalar power
     #[inline(always)]
     pub fn powf(&self, exponent: f64) -> Result<Self> {
         use crate::operations::activation::powf;
         powf(self, exponent)
+    }
+
+    /// Numerically stable logaddexp
+    #[inline(always)]
+    pub fn logaddexp(&self, other: &Tensor) -> Result<Self> {
+        use crate::operations::activation::logaddexp;
+        logaddexp(self, other)
     }
 
     /// Element-wise power with another tensor
@@ -2023,6 +2287,41 @@ impl Tensor {
     }
 }
 
+fn copy_strided_to_contiguous<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    shape: &[usize],
+    strides: &[usize],
+) {
+    if dst.is_empty() {
+        return;
+    }
+
+    if shape.is_empty() {
+        dst[0] = src[0];
+        return;
+    }
+
+    let ndim = shape.len();
+    let mut index = vec![0usize; ndim];
+
+    for value in dst.iter_mut() {
+        let mut offset = 0usize;
+        for (&idx, &stride) in index.iter().zip(strides.iter()) {
+            offset += idx * stride;
+        }
+        *value = src[offset];
+
+        for dim in (0..ndim).rev() {
+            index[dim] += 1;
+            if index[dim] < shape[dim] {
+                break;
+            }
+            index[dim] = 0;
+        }
+    }
+}
+
 impl std::fmt::Debug for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tensor")
@@ -2422,5 +2721,81 @@ mod tests {
             false,
         );
         assert!(empty1.array_equal(&empty2));
+    }
+
+    #[test]
+    fn test_deep_clone_independent_storage() {
+        let shape = Shape::new(vec![2, 2]);
+        let data = Arc::new(TensorData::from_vec_f32(
+            vec![1.0, 2.0, 3.0, 4.0],
+            Device::cpu(),
+        ));
+        let tensor = Tensor::new(data, shape.clone(), DataType::Float32, Device::cpu(), false);
+
+        let mut cloned = tensor.deep_clone().unwrap();
+        {
+            let slice = cloned.data_mut().as_f32_slice_mut().unwrap();
+            slice[0] = 42.0;
+        }
+
+        let original_slice = tensor.data().as_f32_slice().unwrap();
+        assert_eq!(original_slice, &[1.0, 2.0, 3.0, 4.0]);
+        let cloned_slice = cloned.data().as_f32_slice().unwrap();
+        assert_eq!(cloned_slice, &[42.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_deep_clone_preserves_gradients() {
+        let shape = Shape::new(vec![3]);
+        let data = Arc::new(TensorData::from_vec_f32(
+            vec![1.0, -2.0, 3.0],
+            Device::cpu(),
+        ));
+        let mut tensor = Tensor::new(data, shape.clone(), DataType::Float32, Device::cpu(), true);
+        tensor.zero_grad(true);
+
+        let cloned = tensor.deep_clone().unwrap();
+        assert!(cloned.requires_grad());
+
+        let grad = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![0.5, -1.0, 2.0],
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        cloned.backward(Some(grad.clone())).unwrap();
+
+        let accumulated = autograd::get_gradient(&tensor).expect("gradient should be set");
+        assert!(accumulated.allclose(&grad, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_contiguous_materialises_expanded_views() {
+        let base = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0], Device::cpu())),
+            Shape::new(vec![2, 1]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let expanded = base
+            .expand(vec![2isize, 3isize])
+            .expect("expand should succeed");
+        assert!(!expanded.is_contiguous());
+
+        let contiguous = expanded.contiguous().expect("contiguous should copy data");
+        assert!(contiguous.is_contiguous());
+        assert_eq!(contiguous.shape().dims(), &[2, 3]);
+        let values = contiguous
+            .data()
+            .as_f32_slice()
+            .expect("materialised data should be accessible")
+            .to_vec();
+        assert_eq!(values, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
     }
 }

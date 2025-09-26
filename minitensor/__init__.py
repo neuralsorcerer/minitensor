@@ -199,6 +199,36 @@ def median(input, dim=None, keepdim=False):
     return functional.median(input, dim=dim, keepdim=keepdim)
 
 
+def logsumexp(input, dim=None, keepdim: bool = False):
+    """Compute a numerically stable log-sum-exp reduction."""
+
+    return functional.logsumexp(input, dim=dim, keepdim=keepdim)
+
+
+def softmax(input, dim=None):
+    """Compute softmax along ``dim``."""
+
+    return functional.softmax(input, dim=dim)
+
+
+def log_softmax(input, dim=None):
+    """Compute log-softmax along ``dim``."""
+
+    return functional.log_softmax(input, dim=dim)
+
+
+def softsign(input):
+    """Softsign activation computed in Rust."""
+
+    return functional.softsign(input)
+
+
+def rsqrt(input):
+    """Reciprocal square root evaluated by the Rust backend."""
+
+    return functional.rsqrt(input)
+
+
 def cross(a, b, axis=-1):
     """Compute the 3D cross product (NumPy compatibility)."""
     return numpy_compat.cross(a, b, axis=axis)
@@ -213,6 +243,16 @@ def reshape(input, shape):
 def view(input, *shape):
     """Return a view of ``input`` with a new shape."""
     return functional.view(input, *shape)
+
+
+def triu(input, diagonal: int = 0):
+    """Return the upper triangular part of ``input``."""
+    return functional.triu(input, diagonal)
+
+
+def tril(input, diagonal: int = 0):
+    """Return the lower triangular part of ``input``."""
+    return functional.tril(input, diagonal)
 
 
 def flatten(input, start_dim: int = 0, end_dim: int = -1):
@@ -297,6 +337,11 @@ def where(condition, input, other):
     return functional.where(condition, input, other)
 
 
+def masked_fill(input, mask, value):
+    """Fill elements of ``input`` where ``mask`` is ``True``."""
+    return functional.masked_fill(input, mask, value)
+
+
 # Device management
 def device(device_str):
     """Create a device object."""
@@ -337,6 +382,8 @@ __all__ = [
     "narrow",
     "reshape",
     "view",
+    "triu",
+    "tril",
     "flatten",
     "ravel",
     "transpose",
@@ -353,10 +400,16 @@ __all__ = [
     "flip",
     "roll",
     "where",
+    "masked_fill",
     "topk",
     "sort",
     "argsort",
     "median",
+    "softsign",
+    "softmax",
+    "log_softmax",
+    "rsqrt",
+    "logsumexp",
     "split",
     "cross",
     "device",

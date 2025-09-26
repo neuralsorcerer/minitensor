@@ -43,6 +43,24 @@ def test_where_requires_bool_condition():
         input_tensor.where(condition, other_tensor)
 
 
+def test_where_promotes_to_common_dtype():
+    condition = mt.Tensor([True, False, True], dtype="bool")
+    int_input = mt.Tensor([1, 2, 3], dtype="int64")
+    float_other = mt.Tensor([0.5, 1.5, 2.5], dtype="float32")
+
+    method_result = int_input.where(condition, float_other)
+    assert method_result.dtype == "float32"
+    np.testing.assert_allclose(
+        method_result.numpy(), np.array([1.0, 1.5, 3.0], dtype=np.float32)
+    )
+
+    functional_result = mt.functional.where(condition, int_input, [0.5, 1.5, 2.5])
+    assert functional_result.dtype == "float32"
+    np.testing.assert_allclose(
+        functional_result.numpy(), np.array([1.0, 1.5, 3.0], dtype=np.float32)
+    )
+
+
 def test_where_autograd_masks_gradients():
     condition = mt.Tensor([[True, False], [False, True]], dtype="bool")
     input_tensor = mt.Tensor(

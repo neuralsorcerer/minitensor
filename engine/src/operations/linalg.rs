@@ -285,6 +285,166 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     }
 }
 
+/// Return the upper triangular part of a matrix (or batch of matrices).
+pub fn triu(tensor: &Tensor, diagonal: i64) -> Result<Tensor> {
+    triangular_op(tensor, diagonal, true)
+}
+
+/// Return the lower triangular part of a matrix (or batch of matrices).
+pub fn tril(tensor: &Tensor, diagonal: i64) -> Result<Tensor> {
+    triangular_op(tensor, diagonal, false)
+}
+
+fn triangular_op(tensor: &Tensor, diagonal: i64, upper: bool) -> Result<Tensor> {
+    if tensor.ndim() < 2 {
+        return Err(MinitensorError::invalid_operation(
+            "triangular operations require tensors with at least 2 dimensions",
+        ));
+    }
+
+    let clamped_diagonal = diagonal.clamp(isize::MIN as i64, isize::MAX as i64) as isize;
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    apply_triangular_mask(tensor, &mut output_data, clamped_diagonal, upper)?;
+
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if tensor.requires_grad() {
+        let grad_fn = Arc::new(crate::autograd::TriangularBackward {
+            input_shape: tensor.shape().dims().to_vec(),
+            diagonal: clamped_diagonal,
+            upper,
+            input_requires_grad: tensor.requires_grad(),
+            input_id: tensor.id(),
+        });
+
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
+pub(crate) fn apply_triangular_mask(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    diagonal: isize,
+    upper: bool,
+) -> Result<()> {
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from tensor")
+            })?;
+            let output = output_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "Failed to get mutable f32 slice for triangular output",
+                )
+            })?;
+            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
+        }
+        DataType::Float64 => {
+            let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from tensor")
+            })?;
+            let output = output_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "Failed to get mutable f64 slice for triangular output",
+                )
+            })?;
+            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
+        }
+        DataType::Int32 => {
+            let input = tensor.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i32 slice from tensor")
+            })?;
+            let output = output_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "Failed to get mutable i32 slice for triangular output",
+                )
+            })?;
+            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
+        }
+        DataType::Int64 => {
+            let input = tensor.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i64 slice from tensor")
+            })?;
+            let output = output_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "Failed to get mutable i64 slice for triangular output",
+                )
+            })?;
+            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
+        }
+        DataType::Bool => {
+            let input = tensor.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from tensor")
+            })?;
+            let output = output_data.as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "Failed to get mutable bool slice for triangular output",
+                )
+            })?;
+            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_and_mask<T: Copy + Default>(
+    input: &[T],
+    output: &mut [T],
+    shape: &Shape,
+    diagonal: isize,
+    upper: bool,
+) {
+    if input.is_empty() {
+        return;
+    }
+
+    output.copy_from_slice(input);
+
+    let dims = shape.dims();
+    debug_assert!(dims.len() >= 2);
+    let rows = dims[dims.len() - 2];
+    let cols = dims[dims.len() - 1];
+
+    if rows == 0 || cols == 0 {
+        return;
+    }
+
+    let batch = shape.numel() / (rows * cols);
+    let zero = T::default();
+
+    for b in 0..batch {
+        let base = b * rows * cols;
+        for r in 0..rows {
+            let row_offset = base + r * cols;
+            let row_idx = r as isize;
+            for c in 0..cols {
+                let col_idx = c as isize;
+                let keep = if upper {
+                    col_idx - row_idx >= diagonal
+                } else {
+                    col_idx - row_idx <= diagonal
+                };
+                if !keep {
+                    output[row_offset + c] = zero;
+                }
+            }
+        }
+    }
+}
+
 // Helper functions for matrix multiplication
 
 fn matmul_f32(
@@ -901,5 +1061,37 @@ mod tests {
 
         let result = matmul(&a, &b);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_triu_basic() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let result = triu(&tensor, 0).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[1.0, 2.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn test_triu_with_positive_diagonal() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let result = triu(&tensor, 1).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[0.0, 2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_tril_basic() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let result = tril(&tensor, 0).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[1.0, 0.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_tril_with_negative_diagonal() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let result = tril(&tensor, -1).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[0.0, 0.0, 3.0, 0.0]);
     }
 }

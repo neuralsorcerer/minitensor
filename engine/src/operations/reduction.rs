@@ -7,9 +7,12 @@
 use crate::{
     autograd::{CumprodBackward, CumsumBackward, ProdBackward, SumBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::simd::{
-        simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
-        simd_sum_i32, simd_sum_i64,
+    operations::{
+        activation, arithmetic, shape_ops,
+        simd::{
+            simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
+            simd_sum_i32, simd_sum_i64,
+        },
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -531,6 +534,76 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
     } else {
         Ok(result)
     }
+}
+
+/// Numerically stable log-sum-exp reduction along specified dimensions
+pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    match tensor.dtype() {
+        DataType::Float32 | DataType::Float64 => {}
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Logsumexp only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let ndim = tensor.ndim() as isize;
+    let dims = match dim {
+        Some(dims) => {
+            if dims.is_empty() {
+                Vec::new()
+            } else {
+                let mut normalized = Vec::with_capacity(dims.len());
+                for d in dims {
+                    let d = if d < 0 { d + ndim } else { d };
+                    if d < 0 || d >= ndim {
+                        return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+                    }
+                    normalized.push(d as usize);
+                }
+                normalized.sort_unstable();
+                normalized.dedup();
+                normalized
+            }
+        }
+        None => (0..tensor.ndim()).collect(),
+    };
+
+    if dims.is_empty() {
+        return Ok(tensor.clone());
+    }
+
+    let mut max_tensor = tensor.clone();
+    for &d in &dims {
+        max_tensor = max_along_dim(&max_tensor, d, true)?;
+    }
+    let max_tensor = max_tensor.detach();
+
+    let shifted = arithmetic::sub(tensor, &max_tensor)?;
+    let exp_shifted = activation::exp(&shifted)?;
+    let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+    let sum_exp = sum(&exp_shifted, Some(dims_isize), true)?;
+    let log_sum = activation::log(&sum_exp)?;
+    let mut result = arithmetic::add(&max_tensor, &log_sum)?;
+
+    if !keepdim {
+        let mut new_dims = Vec::with_capacity(result.ndim() - dims.len());
+        for (idx, &size) in result.shape().dims().iter().enumerate() {
+            if dims.binary_search(&idx).is_err() {
+                new_dims.push(size);
+            }
+        }
+
+        let target_shape = if new_dims.is_empty() {
+            Shape::scalar()
+        } else {
+            Shape::new(new_dims)
+        };
+
+        result = shape_ops::reshape(&result, target_shape)?;
+    }
+
+    Ok(result)
 }
 
 /// Product reduction along specified dimensions

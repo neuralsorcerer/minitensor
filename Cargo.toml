@@ -43,6 +43,9 @@ libc = "0.2"
 rand = "0.9"
 rand_distr = "0.5"
 
+# Special mathematical functions
+libm = "0.2"
+
 # Python bindings
 pyo3 = { version = "0.26", features = ["extension-module", "auto-initialize"] }
 numpy = "0.26"

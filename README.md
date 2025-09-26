@@ -228,10 +228,31 @@ for epoch in range(100):
         print(f"Epoch {epoch+1:03d} | Loss: {loss_val:.4f}")
 ```
 
+## Development & Testing
+
+The Python package is a thin wrapper around the compiled Rust engine. Whenever
+you make changes under `engine/` or `bindings/`, rebuild the extension so the
+Python layer talks to the latest native implementation before running tests:
+
+```bash
+# 1. Build the extension in editable mode (release profile)
+pip install -e . --config-settings=--release
+
+# 2. Run the Rust unit and integration tests
+cargo test
+
+# 3. Execute the Python test
+pytest
+```
+
+Running `pip install -e .` refreshes the `minitensor._core` module. Skipping this
+step leaves Python bound to an older shared library, which can surface as missing
+attributes or stale logic when validating changes locally.
+
 ### Code Style
 
 - **Rust**: Follow `rustfmt` and `clippy` recommendations
-- **Python**: Use `black` for formatting and `mypy` for type checking
+- **Python**: Use `black` and `isort` for formatting
 
 ## Performance
 

@@ -45,6 +45,7 @@ dev = [
     "isort",
     "mypy",
     "pre-commit",
+    "numpy",
 ]
 docs = [
     "sphinx",

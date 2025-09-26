@@ -120,6 +120,118 @@ fn test_cos_backward_correct() {
 }
 
 #[test]
+fn test_logsumexp_forward_matches_manual() {
+    autograd::clear_graph().unwrap();
+    let data = vec![1.0f32, -1.0, 0.5, 2.0, -2.0, 3.0];
+    let tensor = create_test_tensor_f32(data.clone(), vec![2, 3], false);
+    let reduced = reduction::logsumexp(&tensor, Some(vec![1]), false).unwrap();
+    let keepdim = reduction::logsumexp(&tensor, Some(vec![1]), true).unwrap();
+    let reduced_vals = reduced.data().as_f32_slice().unwrap();
+    let keepdim_vals = keepdim.data().as_f32_slice().unwrap();
+
+    for (row, (&value, chunk)) in reduced_vals.iter().zip(data.chunks(3)).enumerate() {
+        let max_val = chunk.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let sum_exp: f32 = chunk.iter().map(|v| (v - max_val).exp()).sum();
+        let expected = max_val + sum_exp.ln();
+        assert_relative_eq!(value, expected, epsilon = 1e-6);
+        assert_relative_eq!(keepdim_vals[row], expected, epsilon = 1e-6);
+    }
+
+    // Reduction across all dimensions should match manual computation
+    let full = reduction::logsumexp(&tensor, None, false).unwrap();
+    let full_val = full.data().as_f32_slice().unwrap()[0];
+    let max_all = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum_all: f32 = data.iter().map(|v| (v - max_all).exp()).sum();
+    let expected_all = max_all + sum_all.ln();
+    assert_relative_eq!(full_val, expected_all, epsilon = 1e-6);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_logsumexp_backward_matches_softmax() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(vec![1.0, 1.0, -1.0, 2.0], vec![2, 2], true);
+    let output = reduction::logsumexp(&input, Some(vec![1]), false).unwrap();
+    let grad_output = Tensor::ones(
+        output.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&output, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    let grad_vals = grad_input.data().as_f32_slice().unwrap();
+
+    let input_vals = input.data().as_f32_slice().unwrap();
+    let cols = input.shape().dims()[1];
+    let mut expected = Vec::with_capacity(input_vals.len());
+    for row in input_vals.chunks(cols) {
+        let max_val = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let sum_exp: f32 = row.iter().map(|v| (v - max_val).exp()).sum();
+        for &v in row {
+            expected.push((v - max_val).exp() / sum_exp);
+        }
+    }
+
+    for (grad, expected) in grad_vals.iter().zip(expected.iter()) {
+        assert_relative_eq!(*grad, *expected, epsilon = 1e-6);
+    }
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_log_softmax_forward_matches_softmax_log() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(vec![1.0, -2.0, 0.5, 4.0, 0.0, -1.0], vec![2, 3], false);
+
+    let log_softmax = activation::log_softmax(&input, Some(1)).unwrap();
+    let softmax = activation::softmax(&input, Some(1)).unwrap();
+
+    let log_vals = log_softmax.data().as_f32_slice().unwrap();
+    let softmax_vals = softmax.data().as_f32_slice().unwrap();
+
+    for (log_v, soft_v) in log_vals.iter().zip(softmax_vals.iter()) {
+        assert_relative_eq!(*log_v, soft_v.ln(), epsilon = 1e-6);
+    }
+
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_log_softmax_backward_matches_manual() {
+    autograd::clear_graph().unwrap();
+    let input_values = vec![1.0, 0.0, -1.0, 2.0, -2.0, 0.5];
+    let grad_values = vec![0.2, -0.1, 0.3, -0.4, 0.25, -0.15];
+    let input = create_test_tensor_f32(input_values.clone(), vec![2, 3], true);
+    let output = activation::log_softmax(&input, Some(1)).unwrap();
+    let grad_output = create_test_tensor_f32(grad_values.clone(), vec![2, 3], false);
+
+    let grads = autograd::backward(&output, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    let grad_vals = grad_input.data().as_f32_slice().unwrap();
+
+    let mut expected = Vec::with_capacity(grad_vals.len());
+    for (log_block, go_block) in output
+        .data()
+        .as_f32_slice()
+        .unwrap()
+        .chunks(3)
+        .zip(grad_values.chunks(3))
+    {
+        let sum: f32 = go_block.iter().sum();
+        for (&log_v, &go_v) in log_block.iter().zip(go_block.iter()) {
+            expected.push(go_v - log_v.exp() * sum);
+        }
+    }
+
+    for (grad, expected) in grad_vals.iter().zip(expected.iter()) {
+        assert_relative_eq!(*grad, *expected, epsilon = 1e-6);
+    }
+
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
 fn test_z_leaky_relu_backward_correct() {
     autograd::clear_graph().unwrap();
     let input = create_test_tensor_f32(vec![-1.0, 0.0, 1.0], vec![3], true);

@@ -823,6 +823,17 @@ class Tensor:
         result._tensor = self._tensor.pow(exp_tensor)
         return result
 
+    def logaddexp(self, other: Union["Tensor", float, int]) -> "Tensor":
+        """Stable logaddexp combining with ``other``."""
+        operands = self._coerce_binary_operands(other, "logaddexp")
+        if operands is NotImplemented:
+            return NotImplemented  # type: ignore[return-value]
+
+        lhs, rhs = operands
+        result = Tensor.__new__(Tensor)
+        result._tensor = lhs._tensor.logaddexp(rhs._tensor)
+        return result
+
     def _binary_op(
         self, other: Any, op_name: str, *, reverse: bool = False
     ) -> Union["Tensor", Any]:
@@ -937,6 +948,30 @@ class Tensor:
         """Matrix multiplication."""
         return self.matmul(other)
 
+    def triu(self, diagonal: int = 0) -> "Tensor":
+        """Return the upper triangular part of the matrix."""
+
+        if self.ndim < 2:
+            raise ValueError("triu requires tensors with at least 2 dims")
+
+        diag = int(diagonal)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.triu(diag)
+        return result
+
+    def tril(self, diagonal: int = 0) -> "Tensor":
+        """Return the lower triangular part of the matrix."""
+
+        if self.ndim < 2:
+            raise ValueError("tril requires tensors with at least 2 dims")
+
+        diag = int(diagonal)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.tril(diag)
+        return result
+
     def dot(self, other: "Tensor") -> "Tensor":
         """Dot product."""
         if self.ndim == 1 and other.ndim == 1:
@@ -961,22 +996,52 @@ class Tensor:
 
         if not isinstance(condition, Tensor):
             condition = Tensor(condition, dtype="bool", device=target_device)
-        if condition.dtype != "bool":
-            raise TypeError("where condition must be a bool tensor")
+        else:
+            if condition.dtype != "bool":
+                raise TypeError("where condition must be a bool tensor")
+            condition = Tensor._ensure_on_device(condition, target_device)
 
         if not isinstance(other, Tensor):
-            other = Tensor(other, dtype=self.dtype, device=target_device)
-
-        if self.dtype != other.dtype:
-            raise TypeError("where requires tensors to have the same dtype")
-
-        if condition.device != self.device or other.device != self.device:
-            raise ValueError(
-                "where requires condition, self, and other tensors on the same device"
-            )
+            other = Tensor(other, device=target_device)
+        else:
+            other = Tensor._ensure_on_device(other, target_device)
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.where(condition._tensor, other._tensor)
+        return result
+
+    def masked_fill(
+        self,
+        mask: "Tensor",
+        value: Union["Tensor", Real, bool],
+    ) -> "Tensor":
+        """Fill elements of the tensor where ``mask`` is ``True``."""
+
+        target_device = _normalize_device(self.device)
+
+        if not isinstance(mask, Tensor):
+            mask = Tensor(mask, dtype="bool", device=target_device)
+        elif mask.dtype != "bool":
+            raise TypeError("masked_fill mask must be a bool tensor")
+        elif mask.device != self.device:
+            mask = mask.to(target_device)
+
+        result = Tensor.__new__(Tensor)
+
+        if isinstance(value, Tensor):
+            if value.dtype != self.dtype:
+                raise TypeError("masked_fill requires tensors to have the same dtype")
+            if value.device != self.device:
+                value = value.to(target_device)
+            backend_value: object = value._tensor
+        elif isinstance(value, bool):
+            backend_value = bool(value)
+        elif isinstance(value, Real):
+            backend_value = float(value)
+        else:
+            raise TypeError("masked_fill value must be a Tensor or numeric scalar")
+
+        result._tensor = self._tensor.masked_fill(mask._tensor, backend_value)
         return result
 
     def cross(self, other: "Tensor", axis: int = -1) -> "Tensor":
@@ -1026,6 +1091,27 @@ class Tensor:
 
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.sum(dim, keepdim)
+        return result
+
+    def logsumexp(
+        self, dim: Optional[Union[int, Sequence[int]]] = None, keepdim: bool = False
+    ) -> "Tensor":
+        """Compute the log of summed exponentials along ``dim``."""
+
+        if self.dtype not in {"float32", "float64"}:
+            raise RuntimeError("logsumexp only supports floating point tensors")
+
+        if isinstance(dim, int):
+            dims = [dim]
+        elif isinstance(dim, tuple):
+            dims = list(dim)
+        elif dim is None:
+            dims = None
+        else:
+            dims = list(dim)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.logsumexp(dims, keepdim)
         return result
 
     def mean(
@@ -1193,6 +1279,12 @@ class Tensor:
         result._tensor = self._tensor.sqrt()
         return result
 
+    def rsqrt(self) -> "Tensor":
+        """Reciprocal square root computed in Rust."""
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.rsqrt()
+        return result
+
     def exp(self) -> "Tensor":
         """Exponential function."""
         result = Tensor.__new__(Tensor)
@@ -1203,6 +1295,18 @@ class Tensor:
         """Natural logarithm."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.log()
+        return result
+
+    def log1p(self) -> "Tensor":
+        """Compute ``log(1 + x)`` element-wise."""
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.log1p()
+        return result
+
+    def expm1(self) -> "Tensor":
+        """Compute ``exp(x) - 1`` element-wise."""
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.expm1()
         return result
 
     def sin(self) -> "Tensor":
@@ -1230,10 +1334,58 @@ class Tensor:
         result._tensor = self._tensor.relu()
         return result
 
+    def hardshrink(self, lambd: float = 0.5) -> "Tensor":
+        """Hardshrink activation that zeros values within ``[-lambd, lambd]``."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.hardshrink(lambd)
+        return result
+
     def sigmoid(self) -> "Tensor":
         """Sigmoid activation function."""
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.sigmoid()
+        return result
+
+    def softplus(self, beta: float = 1.0, threshold: float = 20.0) -> "Tensor":
+        """Softplus activation computed in Rust."""
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.softplus(beta, threshold)
+        return result
+
+    def gelu(self, approximate: str = "none") -> "Tensor":
+        """Gaussian Error Linear Unit activation."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.gelu(approximate)
+        return result
+
+    def elu(self, alpha: float = 1.0) -> "Tensor":
+        """Exponential Linear Unit activation."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.elu(alpha)
+        return result
+
+    def selu(self) -> "Tensor":
+        """Scaled Exponential Linear Unit activation."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.selu()
+        return result
+
+    def silu(self) -> "Tensor":
+        """Sigmoid Linear Unit (Swish) activation."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.silu()
+        return result
+
+    def softsign(self) -> "Tensor":
+        """Softsign activation computed in Rust."""
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.softsign()
         return result
 
     def tanh(self) -> "Tensor":
@@ -1244,15 +1396,39 @@ class Tensor:
 
     def softmax(self, dim: int = -1) -> "Tensor":
         """Softmax activation function."""
-        # Numerically stable softmax implementation
-        x_max, _ = self.max(dim=dim, keepdim=True)
-        x_shifted = self - x_max
-        exp_x = x_shifted.exp()
-        return exp_x / exp_x.sum(dim=dim, keepdim=True)
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.softmax(dim)
+        return result
 
     def log_softmax(self, dim: int = -1) -> "Tensor":
         """Log-softmax activation function."""
-        return self.softmax(dim).log()
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.log_softmax(dim)
+        return result
+
+    def layer_norm(
+        self,
+        normalized_shape: Union[int, Sequence[int]],
+        weight: Optional["Tensor"] = None,
+        bias: Optional["Tensor"] = None,
+        eps: float = 1e-5,
+    ) -> "Tensor":
+        """Layer normalization computed entirely within the Rust backend."""
+
+        if isinstance(normalized_shape, Integral):
+            shape_tuple = (int(normalized_shape),)
+        else:
+            shape_tuple = tuple(int(dim) for dim in normalized_shape)
+        if not shape_tuple:
+            raise ValueError("normalized_shape must contain at least one dimension")
+
+        result = Tensor.__new__(Tensor)
+        weight_tensor = None if weight is None else weight._tensor
+        bias_tensor = None if bias is None else bias._tensor
+        result._tensor = self._tensor.layer_norm(
+            list(shape_tuple), weight_tensor, bias_tensor, eps
+        )
+        return result
 
     # Comparison operations
     def eq(self, other: Any) -> "Tensor":

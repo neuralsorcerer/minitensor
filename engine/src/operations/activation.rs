@@ -6,13 +6,16 @@
 
 use crate::{
     autograd::{
-        CosBackward, ExpBackward, LeakyReluBackward, LogBackward, PowBackward, PowBroadcast,
-        ReluBackward, SigmoidBackward, SinBackward, SoftmaxBackward, TanBackward, TanhBackward,
-        add_to_graph,
+        CosBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward, HardshrinkBackward,
+        LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward, LogSoftmaxBackward,
+        PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward, SiluBackward,
+        SinBackward, SoftmaxBackward, SoftplusBackward, SoftsignBackward, TanBackward,
+        TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
-    tensor::{DataType, Tensor, TensorData},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
+use libm::{erf, erff};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -150,6 +153,82 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
         // Add to computation graph
         add_to_graph(&output_with_grad, Some(grad_fn))?;
 
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// log1p (log(1 + x)) function with gradient support
+pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => log1p_f32(tensor, &mut output_data)?,
+        DataType::Float64 => log1p_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "log1p is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(Log1pBackward {
+            input_id: tensor.id(),
+            input: tensor.clone().detach(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// expm1 (exp(x) - 1) with gradient support
+pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => expm1_f32(tensor, &mut output_data)?,
+        DataType::Float64 => expm1_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "expm1 is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(Expm1Backward {
+            input_id: tensor.id(),
+            output: output.clone().detach(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
         Ok(output_with_grad)
     } else {
         Ok(output)
@@ -563,6 +642,312 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
     pow(tensor, &exp_tensor)
 }
 
+/// Numerically stable logaddexp with gradient support
+pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+    use crate::operations::binary::{BinaryOpKind, coerce_binary_operands};
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+
+    let lhs_tensor = match lhs_cast {
+        std::borrow::Cow::Borrowed(t) => t.clone(),
+        std::borrow::Cow::Owned(t) => t,
+    };
+    let rhs_tensor = match rhs_cast {
+        std::borrow::Cow::Borrowed(t) => t.clone(),
+        std::borrow::Cow::Owned(t) => t,
+    };
+
+    if result_dtype != DataType::Float32 && result_dtype != DataType::Float64 {
+        return Err(MinitensorError::invalid_operation(
+            "logaddexp is only supported for floating point tensors",
+        ));
+    }
+
+    let output_shape = lhs_tensor.shape().broadcast_with(rhs_tensor.shape())?;
+    let mut output_data =
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
+
+    match result_dtype {
+        DataType::Float32 => {
+            logaddexp_f32(&lhs_tensor, &rhs_tensor, &mut output_data, &output_shape)?
+        }
+        DataType::Float64 => {
+            logaddexp_f64(&lhs_tensor, &rhs_tensor, &mut output_data, &output_shape)?
+        }
+        _ => unreachable!(),
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        output_shape.clone(),
+        result_dtype,
+        lhs.device(),
+        requires_grad,
+    );
+
+    if requires_grad {
+        let grad_fn = Arc::new(LogAddExpBackward {
+            lhs: lhs_tensor.detach(),
+            rhs: rhs_tensor.detach(),
+            output: output.clone().detach(),
+            input_ids: [lhs.id(), rhs.id()],
+            input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Softplus activation function with gradient support
+pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
+    if beta <= 0.0 {
+        return Err(MinitensorError::invalid_argument(
+            "softplus beta must be positive",
+        ));
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => softplus_f32(tensor, &mut output_data, beta as f32, threshold as f32)?,
+        DataType::Float64 => softplus_f64(tensor, &mut output_data, beta, threshold)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Softplus is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SoftplusBackward {
+            input_id: tensor.id(),
+            input: tensor.clone().detach(),
+            beta,
+            threshold,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// GELU activation function with optional tanh approximation
+pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => gelu_f32(tensor, &mut output_data, approximate)?,
+        DataType::Float64 => gelu_f64(tensor, &mut output_data, approximate)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "GELU is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(GeluBackward {
+            input_id: tensor.id(),
+            input: tensor.clone().detach(),
+            approximate,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// ELU activation function with configurable alpha
+pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => elu_f32(tensor, &mut output_data, alpha as f32)?,
+        DataType::Float64 => elu_f64(tensor, &mut output_data, alpha)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "ELU is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(EluBackward {
+            input_id: tensor.id(),
+            output: output.clone().detach(),
+            alpha,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// SELU activation function following PyTorch constants
+pub fn selu(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => selu_f32(tensor, &mut output_data)?,
+        DataType::Float64 => selu_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "SELU is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SeluBackward {
+            input_id: tensor.id(),
+            output: output.clone().detach(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// SiLU (Swish) activation function with gradient support
+pub fn silu(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => silu_f32(tensor, &mut output_data)?,
+        DataType::Float64 => silu_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "SiLU is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SiluBackward {
+            input_id: tensor.id(),
+            input: tensor.clone().detach(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Softsign activation function with gradient support
+pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => softsign_f32(tensor, &mut output_data)?,
+        DataType::Float64 => softsign_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Softsign is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SoftsignBackward {
+            input_id: tensor.id(),
+            input: tensor.clone().detach(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
 /// ReLU activation function with gradient support
 pub fn relu(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
@@ -606,6 +991,56 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
 
         Ok(output_with_grad)
     } else {
+        Ok(output)
+    }
+}
+
+/// Hardshrink activation that thresholds values to zero within ``[-lambd, lambd]``
+pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
+    if lambd < 0.0 {
+        return Err(MinitensorError::invalid_operation(
+            "hardshrink requires lambd to be non-negative",
+        ));
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    let store_mask = tensor.requires_grad();
+    let mask = match tensor.dtype() {
+        DataType::Float32 => hardshrink_f32(tensor, &mut output_data, lambd as f32, store_mask)?,
+        DataType::Float64 => hardshrink_f64(tensor, &mut output_data, lambd, store_mask)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "hardshrink is only supported for floating point tensors",
+            ));
+        }
+    };
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(HardshrinkBackward {
+            input_id: tensor.id(),
+            mask: mask.ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "hardshrink mask missing despite gradients being required",
+                )
+            })?,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        debug_assert!(mask.is_none());
         Ok(output)
     }
 }
@@ -708,6 +1143,53 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     }
 }
 
+/// Log-Softmax activation function with gradient support
+pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    let dim = dim.unwrap_or(tensor.ndim() - 1);
+
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => log_softmax_f32(tensor, &mut output_data, dim)?,
+        DataType::Float64 => log_softmax_f64(tensor, &mut output_data, dim)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "LogSoftmax function only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(LogSoftmaxBackward {
+            input_id: tensor.id(),
+            output: output.detach(),
+            dim,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
 // Helper functions for type-specific operations
 
 fn exp_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
@@ -767,6 +1249,74 @@ fn log_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
             val.ln()
         }
     });
+    Ok(())
+}
+
+fn log1p_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |val: f32| {
+        if val == -1.0 {
+            f32::NEG_INFINITY
+        } else if val < -1.0 {
+            f32::NAN
+        } else {
+            val.ln_1p()
+        }
+    });
+    Ok(())
+}
+
+fn log1p_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |val: f64| {
+        if val == -1.0 {
+            f64::NEG_INFINITY
+        } else if val < -1.0 {
+            f64::NAN
+        } else {
+            val.ln_1p()
+        }
+    });
+    Ok(())
+}
+
+fn expm1_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, f32::exp_m1);
+    Ok(())
+}
+
+fn expm1_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, f64::exp_m1);
     Ok(())
 }
 
@@ -840,6 +1390,324 @@ fn tan_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     })?;
     unary_apply(input_data, output_slice, f64::tan);
     Ok(())
+}
+
+fn softplus_f32(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    beta: f32,
+    threshold: f32,
+) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |val: f32| {
+        let scaled = beta * val;
+        if scaled > threshold {
+            val
+        } else {
+            scaled.exp().ln_1p() / beta
+        }
+    });
+    Ok(())
+}
+
+fn softplus_f64(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    beta: f64,
+    threshold: f64,
+) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |val: f64| {
+        let scaled = beta * val;
+        if scaled > threshold {
+            val
+        } else {
+            scaled.exp().ln_1p() / beta
+        }
+    });
+    Ok(())
+}
+
+fn gelu_f32(tensor: &Tensor, output_data: &mut TensorData, approximate: bool) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    if approximate {
+        let coeff = (2.0f32 / std::f32::consts::PI).sqrt();
+        unary_apply(input_data, output_slice, |x: f32| {
+            let x3 = x * x * x;
+            let inner = coeff * (x + 0.044715f32 * x3);
+            0.5f32 * x * (1.0f32 + inner.tanh())
+        });
+    } else {
+        let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+        unary_apply(input_data, output_slice, |x: f32| {
+            0.5f32 * x * (1.0f32 + erff(x * inv_sqrt_2))
+        });
+    }
+    Ok(())
+}
+
+fn gelu_f64(tensor: &Tensor, output_data: &mut TensorData, approximate: bool) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    if approximate {
+        let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
+        unary_apply(input_data, output_slice, |x: f64| {
+            let x3 = x * x * x;
+            let inner = coeff * (x + 0.044715f64 * x3);
+            0.5f64 * x * (1.0f64 + inner.tanh())
+        });
+    } else {
+        let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
+        unary_apply(input_data, output_slice, |x: f64| {
+            0.5f64 * x * (1.0f64 + erf(x * inv_sqrt_2))
+        });
+    }
+    Ok(())
+}
+
+fn elu_f32(tensor: &Tensor, output_data: &mut TensorData, alpha: f32) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f32| {
+        if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
+    });
+    Ok(())
+}
+
+fn elu_f64(tensor: &Tensor, output_data: &mut TensorData, alpha: f64) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f64| {
+        if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
+    });
+    Ok(())
+}
+
+fn selu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    const ALPHA: f32 = 1.6732632;
+    const SCALE: f32 = 1.050701;
+    unary_apply(input_data, output_slice, |x: f32| {
+        if x > 0.0 {
+            SCALE * x
+        } else {
+            SCALE * ALPHA * (x.exp() - 1.0)
+        }
+    });
+    Ok(())
+}
+
+fn selu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    const ALPHA: f64 = 1.6732632423543772848170429916717;
+    const SCALE: f64 = 1.0507009873554804934193349852946;
+    unary_apply(input_data, output_slice, |x: f64| {
+        if x > 0.0 {
+            SCALE * x
+        } else {
+            SCALE * ALPHA * (x.exp() - 1.0)
+        }
+    });
+    Ok(())
+}
+
+fn silu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f32| {
+        let sigmoid = 1.0 / (1.0 + (-x).exp());
+        x * sigmoid
+    });
+    Ok(())
+}
+
+fn silu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f64| {
+        let sigmoid = 1.0 / (1.0 + (-x).exp());
+        x * sigmoid
+    });
+    Ok(())
+}
+
+fn softsign_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f32| {
+        let denom = 1.0 + x.abs();
+        x / denom
+    });
+    Ok(())
+}
+
+fn softsign_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |x: f64| {
+        let denom = 1.0 + x.abs();
+        x / denom
+    });
+    Ok(())
+}
+
+fn logaddexp_f32(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    output_data: &mut TensorData,
+    output_shape: &Shape,
+) -> Result<()> {
+    let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
+    })?;
+    let rhs_data = rhs.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    crate::operations::arithmetic::broadcast_binary_op(
+        lhs_data,
+        rhs_data,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        |a, b| {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                let max = a.max(b);
+                if max.is_infinite() {
+                    max
+                } else {
+                    let exp_a = (a - max).exp();
+                    let exp_b = (b - max).exp();
+                    max + (exp_a + exp_b).ln()
+                }
+            }
+        },
+    )
+}
+
+fn logaddexp_f64(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    output_data: &mut TensorData,
+    output_shape: &Shape,
+) -> Result<()> {
+    let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
+    })?;
+    let rhs_data = rhs.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    crate::operations::arithmetic::broadcast_binary_op(
+        lhs_data,
+        rhs_data,
+        output_slice,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        |a, b| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                let max = a.max(b);
+                if max.is_infinite() {
+                    max
+                } else {
+                    let exp_a = (a - max).exp();
+                    let exp_b = (b - max).exp();
+                    max + (exp_a + exp_b).ln()
+                }
+            }
+        },
+    )
 }
 
 fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
@@ -1062,6 +1930,68 @@ fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
     Ok(mask)
 }
 
+fn hardshrink_f32(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    lambd: f32,
+    store_mask: bool,
+) -> Result<Option<Vec<bool>>> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    let mut mask = if store_mask {
+        Some(Vec::with_capacity(input_data.len()))
+    } else {
+        None
+    };
+
+    for (&value, out_slot) in input_data.iter().zip(output_slice.iter_mut()) {
+        let keep = value > lambd || value < -lambd;
+        *out_slot = if keep { value } else { 0.0 };
+        if let Some(ref mut mask_vec) = mask {
+            mask_vec.push(keep);
+        }
+    }
+
+    Ok(mask)
+}
+
+fn hardshrink_f64(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    lambd: f64,
+    store_mask: bool,
+) -> Result<Option<Vec<bool>>> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    let mut mask = if store_mask {
+        Some(Vec::with_capacity(input_data.len()))
+    } else {
+        None
+    };
+
+    for (&value, out_slot) in input_data.iter().zip(output_slice.iter_mut()) {
+        let keep = value > lambd || value < -lambd;
+        *out_slot = if keep { value } else { 0.0 };
+        if let Some(ref mut mask_vec) = mask {
+            mask_vec.push(keep);
+        }
+    }
+
+    Ok(mask)
+}
+
 fn leaky_relu_f32(
     tensor: &Tensor,
     output_data: &mut TensorData,
@@ -1233,6 +2163,112 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     Ok(())
 }
 
+fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    let dims = tensor.shape().dims();
+    let dim_size = dims[dim];
+
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+
+    let cutoff = (f32::MIN_POSITIVE * f32::EPSILON).ln();
+
+    input_data
+        .par_chunks(group)
+        .zip(output_slice.par_chunks_mut(group))
+        .for_each(|(in_block, out_block)| {
+            for a in 0..after {
+                let base = a;
+                let mut max_val = f32::NEG_INFINITY;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    max_val = max_val.max(in_block[idx]);
+                }
+                let mut sum = 0.0f32;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    sum += (in_block[idx] - max_val).exp();
+                }
+                let log_sum = sum.ln();
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let shifted = in_block[idx] - max_val;
+                    out_block[idx] = if shifted <= cutoff {
+                        f32::NEG_INFINITY
+                    } else {
+                        shifted - log_sum
+                    };
+                }
+            }
+        });
+
+    Ok(())
+}
+
+fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    let dims = tensor.shape().dims();
+    let dim_size = dims[dim];
+
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+
+    let cutoff = (f64::MIN_POSITIVE * f64::EPSILON).ln();
+
+    input_data
+        .par_chunks(group)
+        .zip(output_slice.par_chunks_mut(group))
+        .for_each(|(in_block, out_block)| {
+            for a in 0..after {
+                let base = a;
+                let mut max_val = f64::NEG_INFINITY;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    max_val = max_val.max(in_block[idx]);
+                }
+                let mut sum = 0.0f64;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    sum += (in_block[idx] - max_val).exp();
+                }
+                let log_sum = sum.ln();
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let shifted = in_block[idx] - max_val;
+                    out_block[idx] = if shifted <= cutoff {
+                        f64::NEG_INFINITY
+                    } else {
+                        shifted - log_sum
+                    };
+                }
+            }
+        });
+
+    Ok(())
+}
+
 /// Absolute value function
 pub fn abs(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
@@ -1265,6 +2301,12 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
     // Use powf implementation for gradient support: sqrt(x) = x.powf(0.5)
     powf(tensor, 0.5)
+}
+
+/// Reciprocal square root function
+pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
+    // Use powf implementation for gradient support: rsqrt(x) = x.powf(-0.5)
+    powf(tensor, -0.5)
 }
 
 /// Clip tensor values to range
@@ -1761,6 +2803,36 @@ mod tests {
     }
 
     #[test]
+    fn test_hardshrink_forward() {
+        let tensor = create_test_tensor_f32(vec![-1.2, -0.2, 0.0, 0.45, 0.9], vec![5], false);
+        let result = hardshrink(&tensor, 0.3).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[-1.2, 0.0, 0.0, 0.45, 0.9]);
+    }
+
+    #[test]
+    fn test_hardshrink_backward() {
+        let tensor = create_test_tensor_f32(vec![-1.2, -0.25, 0.0, 0.35, 0.8], vec![5], true);
+        let result = hardshrink(&tensor, 0.3).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad = grads.get(&tensor.id()).unwrap();
+        let grad_vals = grad.data().as_f32_slice().unwrap();
+        assert_eq!(grad_vals, &[1.0, 0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_hardshrink_invalid_lambda() {
+        let tensor = create_test_tensor_f32(vec![1.0], vec![1], false);
+        assert!(hardshrink(&tensor, -0.1).is_err());
+    }
+
+    #[test]
     fn test_leaky_relu() {
         let tensor = create_test_tensor_f32(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5], false);
         let result = leaky_relu(&tensor, 0.1).unwrap();
@@ -1953,6 +3025,74 @@ mod tests {
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - 0.25).abs() < 1e-6);
         assert!((g[1] - (1.0 / 6.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rsqrt() {
+        let tensor = create_test_tensor_f32(vec![0.25, 1.0, 4.0], vec![3], false);
+        let result = rsqrt(&tensor).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 1.0).abs() < 1e-6);
+        assert!((data[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rsqrt_gradient() {
+        let tensor = create_test_tensor_f32(vec![0.25, 4.0], vec![2], true);
+        let result = rsqrt(&tensor).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad = grads.get(&tensor.id()).unwrap();
+        let g = grad.data().as_f32_slice().unwrap();
+        assert!((g[0] - (-0.5 * 0.25_f32.powf(-1.5))).abs() < 1e-5);
+        assert!((g[1] - (-0.5 * 4.0_f32.powf(-1.5))).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_softsign_forward() {
+        let data = vec![-2.5f32, -0.5, 0.0, 0.25, 4.0];
+        let tensor = create_test_tensor_f32(data.clone(), vec![5], false);
+
+        let result = softsign(&tensor).unwrap();
+        let values = result.data().as_f32_slice().unwrap();
+
+        for (out, &x) in values.iter().zip(data.iter()) {
+            let denom = 1.0 + x.abs();
+            let expected = x / denom;
+            assert!((out - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_softsign_gradient() {
+        let data = vec![-1.5f32, -0.25, 0.5, 3.0];
+        let tensor = create_test_tensor_f32(data.clone(), vec![4], true);
+
+        let result = softsign(&tensor).unwrap();
+        let ones = Tensor::ones(
+            result.shape().clone(),
+            result.dtype(),
+            result.device(),
+            false,
+        );
+        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grad_tensor = grads.get(&tensor.id()).unwrap();
+        let grad_data = grad_tensor.data().as_f32_slice().unwrap();
+
+        for ((&grad, &x), idx) in grad_data.iter().zip(data.iter()).zip(0..) {
+            let denom = 1.0 + x.abs();
+            let expected = 1.0 / (denom * denom);
+            assert!(
+                (grad - expected).abs() < 1e-5,
+                "gradient mismatch at index {idx}: got {grad}, expected {expected}"
+            );
+        }
     }
 
     #[test]

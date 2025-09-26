@@ -278,10 +278,9 @@ impl PyTensor {
     }
 
     // Tensor operations
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+    fn clone(&self) -> PyResult<Self> {
+        let result = self.inner.deep_clone().map_err(_convert_error)?;
+        Ok(Self { inner: result })
     }
 
     fn detach(&self) -> Self {
@@ -290,9 +289,9 @@ impl PyTensor {
         }
     }
 
-    fn contiguous(&self) -> Self {
-        // For now, return clone since we assume contiguous
-        self.clone()
+    fn contiguous(&self) -> PyResult<Self> {
+        let result = self.inner.contiguous().map_err(_convert_error)?;
+        Ok(Self { inner: result })
     }
 
     fn to(&self, device: &PyDevice) -> PyResult<Self> {
@@ -387,6 +386,16 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    pub fn triu(&self, diagonal: i64) -> PyResult<Self> {
+        let result = self.inner.triu(diagonal).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn tril(&self, diagonal: i64) -> PyResult<Self> {
+        let result = self.inner.tril(diagonal).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     #[pyo3(name = "where")]
     pub fn where_method(&self, condition: &PyTensor, other: &PyTensor) -> PyResult<Self> {
         let result = self
@@ -394,6 +403,34 @@ impl PyTensor {
             .where_select(&condition.inner, &other.inner)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
+    }
+
+    pub fn masked_fill(&self, mask: &PyTensor, value: &Bound<PyAny>) -> PyResult<Self> {
+        if let Ok(tensor_value) = value.extract::<PyTensor>() {
+            let result = self
+                .inner
+                .masked_fill(&mask.inner, &tensor_value.inner)
+                .map_err(_convert_error)?;
+            Ok(Self { inner: result })
+        } else {
+            let scalar = if let Ok(v) = value.extract::<f64>() {
+                v
+            } else if let Ok(v) = value.extract::<i64>() {
+                v as f64
+            } else if let Ok(v) = value.extract::<bool>() {
+                if v { 1.0 } else { 0.0 }
+            } else {
+                return Err(PyTypeError::new_err(
+                    "masked_fill value must be a Tensor or numeric scalar",
+                ));
+            };
+
+            let result = self
+                .inner
+                .masked_fill_scalar(&mask.inner, scalar)
+                .map_err(_convert_error)?;
+            Ok(Self { inner: result })
+        }
     }
 
     pub fn maximum(&self, other: &PyTensor) -> PyResult<Self> {
@@ -406,13 +443,18 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    pub fn logaddexp(&self, other: &PyTensor) -> PyResult<Self> {
+        let result = self.inner.logaddexp(&other.inner).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     pub fn _coerce_binary_operands(
         &self,
         other: &PyTensor,
         op: &str,
     ) -> PyResult<(PyTensor, PyTensor)> {
         let op_kind = match op {
-            "__add__" | "add" => BinaryOpKind::Add,
+            "__add__" | "add" | "logaddexp" => BinaryOpKind::Add,
             "__sub__" | "sub" => BinaryOpKind::Sub,
             "__mul__" | "mul" => BinaryOpKind::Mul,
             "__truediv__" | "div" => BinaryOpKind::Div,
@@ -479,6 +521,12 @@ impl PyTensor {
     pub fn sum(&self, dim: Option<Vec<isize>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.sum(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn logsumexp(&self, dim: Option<Vec<isize>>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.logsumexp(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -652,6 +700,11 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    fn rsqrt(&self) -> PyResult<Self> {
+        let result = self.inner.rsqrt().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
             let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
@@ -670,6 +723,16 @@ impl PyTensor {
 
     fn log(&self) -> PyResult<Self> {
         let result = self.inner.log().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn log1p(&self) -> PyResult<Self> {
+        let result = self.inner.log1p().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn expm1(&self) -> PyResult<Self> {
+        let result = self.inner.expm1().map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -717,8 +780,131 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    fn hardshrink(&self, lambd: Option<f64>) -> PyResult<Self> {
+        let result = self
+            .inner
+            .hardshrink(lambd.unwrap_or(0.5))
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn softmax(&self, dim: Option<isize>) -> PyResult<Self> {
+        let resolved_dim = match dim {
+            Some(dim) => {
+                let ndim = self.inner.ndim() as isize;
+                let dim = if dim < 0 { dim + ndim } else { dim };
+                if dim < 0 || dim >= ndim {
+                    return Err(PyIndexError::new_err(format!(
+                        "Dimension out of range (expected to be in range of [-{ndim}, {ndim}), but got {dim})"
+                    )));
+                }
+                Some(dim as usize)
+            }
+            None => None,
+        };
+
+        let result = self.inner.softmax(resolved_dim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn log_softmax(&self, dim: Option<isize>) -> PyResult<Self> {
+        let resolved_dim = match dim {
+            Some(dim) => {
+                let ndim = self.inner.ndim() as isize;
+                let dim = if dim < 0 { dim + ndim } else { dim };
+                if dim < 0 || dim >= ndim {
+                    return Err(PyIndexError::new_err(format!(
+                        "Dimension out of range (expected to be in range of [-{ndim}, {ndim}), but got {dim})"
+                    )));
+                }
+                Some(dim as usize)
+            }
+            None => None,
+        };
+
+        let result = self
+            .inner
+            .log_softmax(resolved_dim)
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn layer_norm(
+        &self,
+        normalized_shape: Vec<usize>,
+        weight: Option<&PyTensor>,
+        bias: Option<&PyTensor>,
+        eps: Option<f64>,
+    ) -> PyResult<Self> {
+        if normalized_shape.is_empty() {
+            return Err(PyValueError::new_err(
+                "layer_norm requires normalized_shape to contain at least one dimension",
+            ));
+        }
+
+        let weight_inner = weight.map(|w| &w.inner);
+        let bias_inner = bias.map(|b| &b.inner);
+        let result = self
+            .inner
+            .layer_norm(
+                &normalized_shape,
+                weight_inner,
+                bias_inner,
+                eps.unwrap_or(1e-5),
+            )
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn gelu(&self, approximate: Option<&str>) -> PyResult<Self> {
+        let approx_mode = approximate.unwrap_or("none");
+        let approximate = if approx_mode.eq_ignore_ascii_case("none") {
+            false
+        } else if approx_mode.eq_ignore_ascii_case("tanh") {
+            true
+        } else {
+            return Err(PyValueError::new_err(
+                "approximate must be 'none' or 'tanh' for gelu",
+            ));
+        };
+
+        let result = self.inner.gelu(approximate).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     fn sigmoid(&self) -> PyResult<Self> {
         let result = self.inner.sigmoid().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn softplus(&self, beta: Option<f64>, threshold: Option<f64>) -> PyResult<Self> {
+        let result = self
+            .inner
+            .softplus(beta.unwrap_or(1.0), threshold.unwrap_or(20.0))
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn elu(&self, alpha: Option<f64>) -> PyResult<Self> {
+        let result = self
+            .inner
+            .elu(alpha.unwrap_or(1.0))
+            .map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn selu(&self) -> PyResult<Self> {
+        let result = self.inner.selu().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn silu(&self) -> PyResult<Self> {
+        let result = self.inner.silu().map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    fn softsign(&self) -> PyResult<Self> {
+        let result = self.inner.softsign().map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 

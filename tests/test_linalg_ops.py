@@ -117,3 +117,52 @@ def test_transpose_backward_permutation():
     y.backward(grad)
     expected = np.transpose(grad.numpy(), (2, 0, 1))
     np.testing.assert_allclose(x.grad.numpy(), expected)
+
+
+def test_triu_matches_numpy():
+    data = np.arange(9, dtype=np.float32).reshape(3, 3)
+    tensor = mt.Tensor(data)
+    result = tensor.triu()
+    np.testing.assert_allclose(result.numpy(), np.triu(data))
+
+
+def test_triu_diagonal_offset():
+    data = np.arange(9, dtype=np.float32).reshape(3, 3)
+    tensor = mt.Tensor(data)
+    result = tensor.triu(diagonal=1)
+    np.testing.assert_allclose(result.numpy(), np.triu(data, k=1))
+
+
+def test_triu_gradient_mask():
+    data = np.arange(9, dtype=np.float32).reshape(3, 3)
+    tensor = mt.Tensor(data, requires_grad=True)
+    tensor.triu(diagonal=-1).sum().backward()
+    expected_grad = np.triu(np.ones_like(data), k=-1)
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad)
+
+
+def test_triu_requires_minimum_rank():
+    tensor = mt.Tensor([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError):
+        tensor.triu()
+
+
+def test_tril_matches_numpy_batched():
+    data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    tensor = mt.Tensor(data)
+    result = tensor.tril(diagonal=-1)
+    np.testing.assert_allclose(result.numpy(), np.tril(data, k=-1))
+
+
+def test_tril_gradient_mask():
+    data = np.arange(9, dtype=np.float32).reshape(3, 3)
+    tensor = mt.Tensor(data, requires_grad=True)
+    tensor.tril(diagonal=0).sum().backward()
+    expected_grad = np.tril(np.ones_like(data), k=0)
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad)
+
+
+def test_tril_requires_minimum_rank():
+    tensor = mt.Tensor([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError):
+        tensor.tril()

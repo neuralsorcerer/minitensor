@@ -6,7 +6,9 @@
 
 use crate::{
     autograd::{WhereBackward, add_to_graph},
+    device::Device,
     error::{MinitensorError, Result},
+    operations::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use smallvec::{SmallVec, smallvec};
@@ -44,108 +46,109 @@ pub fn where_op(condition: &Tensor, input: &Tensor, other: &Tensor) -> Result<Te
         ));
     }
 
-    if input.dtype() != other.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", input.dtype()),
-            format!("{:?}", other.dtype()),
-        ));
-    }
+    let (input_cast, other_cast, result_dtype) =
+        coerce_binary_operands(input, other, BinaryOpKind::Add)?;
+    let input_tensor = input_cast.as_ref();
+    let other_tensor = other_cast.as_ref();
 
-    let tmp_shape = condition.shape().broadcast_with(input.shape())?;
-    let output_shape = tmp_shape.broadcast_with(other.shape())?;
+    let tmp_shape = condition.shape().broadcast_with(input_tensor.shape())?;
+    let output_shape = tmp_shape.broadcast_with(other_tensor.shape())?;
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), input.dtype(), input.device());
+    let mut output_data = TensorData::uninitialized_on_device(
+        output_shape.numel(),
+        result_dtype,
+        input_tensor.device(),
+    );
 
-    match input.dtype() {
+    match result_dtype {
         DataType::Float32 => where_kernel(
             condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
             })?,
-            input.data().as_f32_slice().ok_or_else(|| {
+            input_tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from input tensor")
             })?,
-            other.data().as_f32_slice().ok_or_else(|| {
+            other_tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from other tensor")
             })?,
             output_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice for where output")
             })?,
             condition.shape(),
-            input.shape(),
-            other.shape(),
+            input_tensor.shape(),
+            other_tensor.shape(),
             &output_shape,
         )?,
         DataType::Float64 => where_kernel(
             condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
             })?,
-            input.data().as_f64_slice().ok_or_else(|| {
+            input_tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from input tensor")
             })?,
-            other.data().as_f64_slice().ok_or_else(|| {
+            other_tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from other tensor")
             })?,
             output_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice for where output")
             })?,
             condition.shape(),
-            input.shape(),
-            other.shape(),
+            input_tensor.shape(),
+            other_tensor.shape(),
             &output_shape,
         )?,
         DataType::Int32 => where_kernel(
             condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
             })?,
-            input.data().as_i32_slice().ok_or_else(|| {
+            input_tensor.data().as_i32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i32 slice from input tensor")
             })?,
-            other.data().as_i32_slice().ok_or_else(|| {
+            other_tensor.data().as_i32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i32 slice from other tensor")
             })?,
             output_data.as_i32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i32 slice for where output")
             })?,
             condition.shape(),
-            input.shape(),
-            other.shape(),
+            input_tensor.shape(),
+            other_tensor.shape(),
             &output_shape,
         )?,
         DataType::Int64 => where_kernel(
             condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
             })?,
-            input.data().as_i64_slice().ok_or_else(|| {
+            input_tensor.data().as_i64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i64 slice from input tensor")
             })?,
-            other.data().as_i64_slice().ok_or_else(|| {
+            other_tensor.data().as_i64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i64 slice from other tensor")
             })?,
             output_data.as_i64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i64 slice for where output")
             })?,
             condition.shape(),
-            input.shape(),
-            other.shape(),
+            input_tensor.shape(),
+            other_tensor.shape(),
             &output_shape,
         )?,
         DataType::Bool => where_kernel(
             condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
             })?,
-            input.data().as_bool_slice().ok_or_else(|| {
+            input_tensor.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from input tensor")
             })?,
-            other.data().as_bool_slice().ok_or_else(|| {
+            other_tensor.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from other tensor")
             })?,
             output_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice for where output")
             })?,
             condition.shape(),
-            input.shape(),
-            other.shape(),
+            input_tensor.shape(),
+            other_tensor.shape(),
             &output_shape,
         )?,
     }
@@ -154,8 +157,8 @@ pub fn where_op(condition: &Tensor, input: &Tensor, other: &Tensor) -> Result<Te
     let mut output = Tensor::new(
         Arc::new(output_data),
         output_shape.clone(),
-        input.dtype(),
-        input.device(),
+        result_dtype,
+        input_tensor.device(),
         requires_grad,
     );
 
@@ -174,6 +177,44 @@ pub fn where_op(condition: &Tensor, input: &Tensor, other: &Tensor) -> Result<Te
     }
 
     Ok(output)
+}
+
+/// Fill elements of `input` where `mask` is `True` with values from `value`.
+pub fn masked_fill(input: &Tensor, mask: &Tensor, value: &Tensor) -> Result<Tensor> {
+    if mask.dtype() != DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "masked_fill mask must have bool dtype",
+        ));
+    }
+
+    if input.device() != mask.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", input.device()),
+            format!("{:?}", mask.device()),
+        ));
+    }
+
+    if input.device() != value.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", input.device()),
+            format!("{:?}", value.device()),
+        ));
+    }
+
+    if input.dtype() != value.dtype() {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", input.dtype()),
+            format!("{:?}", value.dtype()),
+        ));
+    }
+
+    where_op(mask, value, input)
+}
+
+/// Scalar convenience for [`masked_fill`].
+pub fn masked_fill_scalar(input: &Tensor, mask: &Tensor, value: f64) -> Result<Tensor> {
+    let scalar = scalar_tensor(value, input.dtype(), input.device())?;
+    masked_fill(input, mask, &scalar)
 }
 
 fn where_kernel<T: Copy>(
@@ -273,6 +314,24 @@ fn where_kernel<T: Copy>(
     Ok(())
 }
 
+fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
+    let data = match dtype {
+        DataType::Float32 => TensorData::from_vec_f32(vec![value as f32], device),
+        DataType::Float64 => TensorData::from_vec_f64(vec![value], device),
+        DataType::Int32 => TensorData::from_vec_i32(vec![value as i32], device),
+        DataType::Int64 => TensorData::from_vec_i64(vec![value as i64], device),
+        DataType::Bool => TensorData::from_vec_bool(vec![value != 0.0], device),
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::scalar(),
+        dtype,
+        device,
+        false,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +353,12 @@ mod tests {
             Device::cpu(),
             false,
         )
+    }
+
+    fn tensor_from_vec_i32(data: Vec<i32>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        let data = TensorData::from_vec_i32(data, Device::cpu());
+        Tensor::new(Arc::new(data), shape, DataType::Int32, Device::cpu(), false)
     }
 
     #[test]
@@ -328,16 +393,41 @@ mod tests {
     }
 
     #[test]
-    fn test_where_dtype_mismatch() {
+    fn test_where_dtype_promotion() {
         let condition = tensor_from_vec_bool(vec![true, false], vec![2]);
-        let input = tensor_from_vec_f32(vec![1.0, 2.0], vec![2]);
-        let other = Tensor::new(
-            Arc::new(TensorData::from_vec_i32(vec![1, 2], Device::cpu())),
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_i64(vec![1, 2], Device::cpu())),
             Shape::new(vec![2]),
-            DataType::Int32,
+            DataType::Int64,
             Device::cpu(),
             false,
         );
-        assert!(where_op(&condition, &input, &other).is_err());
+        let other = tensor_from_vec_f32(vec![0.5, 1.5], vec![2]);
+
+        let result = where_op(&condition, &input, &other).unwrap();
+        assert_eq!(result.dtype(), DataType::Float32);
+        let values = result.data().as_f32_slice().unwrap();
+        assert_eq!(values, &[1.0, 1.5]);
+    }
+
+    #[test]
+    fn test_masked_fill_scalar() {
+        let input = tensor_from_vec_f32(vec![1.0, 2.0, 3.0], vec![3]);
+        let mask = tensor_from_vec_bool(vec![true, false, true], vec![3]);
+
+        let result = masked_fill_scalar(&input, &mask, 0.5).unwrap();
+        let values = result.data().as_f32_slice().unwrap();
+        assert_eq!(values, &[0.5, 2.0, 0.5]);
+    }
+
+    #[test]
+    fn test_masked_fill_tensor_broadcast() {
+        let input = tensor_from_vec_i32(vec![1, 2, 3, 4], vec![2, 2]);
+        let mask = tensor_from_vec_bool(vec![true, false], vec![1, 2]);
+        let fill = tensor_from_vec_i32(vec![9], vec![]);
+
+        let result = masked_fill(&input, &mask, &fill).unwrap();
+        let values = result.data().as_i32_slice().unwrap();
+        assert_eq!(values, &[9, 2, 9, 4]);
     }
 }
