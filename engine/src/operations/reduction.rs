@@ -14,7 +14,426 @@ use crate::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use std::cmp::Ordering;
 use std::sync::Arc;
+
+fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
+    match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => match b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => a.0.cmp(&b.0),
+            order => order,
+        },
+    }
+}
+
+fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
+    match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => match a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => a.0.cmp(&b.0),
+            order => order,
+        },
+    }
+}
+
+fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+    match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => match b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => a.0.cmp(&b.0),
+            order => order,
+        },
+    }
+}
+
+fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+    match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => match a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => a.0.cmp(&b.0),
+            order => order,
+        },
+    }
+}
+
+fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
+    match b.1.cmp(&a.1) {
+        Ordering::Equal => a.0.cmp(&b.0),
+        order => order,
+    }
+}
+
+fn cmp_i32_asc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
+    match a.1.cmp(&b.1) {
+        Ordering::Equal => a.0.cmp(&b.0),
+        order => order,
+    }
+}
+
+fn cmp_i64_desc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
+    match b.1.cmp(&a.1) {
+        Ordering::Equal => a.0.cmp(&b.0),
+        order => order,
+    }
+}
+
+fn cmp_i64_asc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
+    match a.1.cmp(&b.1) {
+        Ordering::Equal => a.0.cmp(&b.0),
+        order => order,
+    }
+}
+
+fn cmp_bool_desc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
+    match (a.1, b.1) {
+        (true, true) | (false, false) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+    }
+}
+
+fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
+    match (a.1, b.1) {
+        (true, true) | (false, false) => a.0.cmp(&b.0),
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+    }
+}
+
+fn ensure_non_empty(numel: usize) -> Result<()> {
+    if numel == 0 {
+        Err(MinitensorError::invalid_argument(
+            "median() does not support empty tensors".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn median(
+    tensor: &Tensor,
+    dim: Option<isize>,
+    keepdim: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    ensure_non_empty(tensor.numel())?;
+
+    if tensor.ndim() == 0 {
+        return Ok((tensor.clone(), None));
+    }
+
+    match dim {
+        None => median_all(tensor),
+        Some(dim_value) => {
+            let axis = if tensor.ndim() == 0 {
+                if dim_value == 0 || dim_value == -1 {
+                    0
+                } else {
+                    return Err(MinitensorError::index_error(dim_value, 0, 1));
+                }
+            } else {
+                normalize_dim(dim_value, tensor.ndim())?
+            };
+            let (values, indices) = median_along_dim(tensor, axis, keepdim)?;
+            Ok((values, Some(indices)))
+        }
+    }
+}
+
+fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
+    let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let data = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let mut values: Vec<f32> = data.to_vec();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            let median = values[(values.len() - 1) / 2];
+            result_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?[0] = median;
+        }
+        DataType::Float64 => {
+            let data = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let mut values: Vec<f64> = data.to_vec();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            let median = values[(values.len() - 1) / 2];
+            result_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?[0] = median;
+        }
+        DataType::Int32 => {
+            let data = tensor
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+            let mut values: Vec<i32> = data.to_vec();
+            values.sort_unstable();
+            let median = values[(values.len() - 1) / 2];
+            result_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice")
+            })?[0] = median;
+        }
+        DataType::Int64 => {
+            let data = tensor
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+            let mut values: Vec<i64> = data.to_vec();
+            values.sort_unstable();
+            let median = values[(values.len() - 1) / 2];
+            result_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?[0] = median;
+        }
+        DataType::Bool => {
+            let data = tensor
+                .data()
+                .as_bool_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+            let mut values: Vec<bool> = data.to_vec();
+            values.sort_by(|a, b| match (a, b) {
+                (true, true) | (false, false) => Ordering::Equal,
+                (false, true) => Ordering::Less,
+                (true, false) => Ordering::Greater,
+            });
+            let median = values[(values.len() - 1) / 2];
+            result_data.as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable bool slice")
+            })?[0] = median;
+        }
+    }
+
+    let value = Tensor::new(
+        Arc::new(result_data),
+        Shape::scalar(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    Ok((value, None))
+}
+
+fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tensor, Tensor)> {
+    let dims = tensor.shape().dims();
+    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
+
+    ensure_non_empty(dim_size)?;
+
+    let mut out_dims = if dims.is_empty() {
+        vec![1]
+    } else {
+        dims.to_vec()
+    };
+
+    if keepdim {
+        if !out_dims.is_empty() {
+            out_dims[dim] = 1;
+        }
+    } else if !out_dims.is_empty() {
+        out_dims.remove(dim);
+    }
+
+    let values_shape = Shape::new(out_dims);
+    let num_out = values_shape.numel();
+
+    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
+    let mut indices_data = TensorData::zeros_on_device(num_out, DataType::Int64, tensor.device());
+
+    let outer = if dims.is_empty() || dim == 0 {
+        1
+    } else {
+        dims[..dim].iter().product()
+    };
+    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let outer_stride = dim_size * inner;
+    let median_pos = (dim_size - 1) / 2;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    entries.sort_by(cmp_f32_asc);
+                    let (index, value) = entries[median_pos];
+                    let base = o * inner + r;
+                    values[base] = value;
+                    indices[base] = index as i64;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    entries.sort_by(cmp_f64_asc);
+                    let (index, value) = entries[median_pos];
+                    let base = o * inner + r;
+                    values[base] = value;
+                    indices[base] = index as i64;
+                }
+            }
+        }
+        DataType::Int32 => {
+            let input = tensor
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    entries.sort_by(cmp_i32_asc);
+                    let (index, value) = entries[median_pos];
+                    let base = o * inner + r;
+                    values[base] = value;
+                    indices[base] = index as i64;
+                }
+            }
+        }
+        DataType::Int64 => {
+            let input = tensor
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    entries.sort_by(cmp_i64_asc);
+                    let (index, value) = entries[median_pos];
+                    let base = o * inner + r;
+                    values[base] = value;
+                    indices[base] = index as i64;
+                }
+            }
+        }
+        DataType::Bool => {
+            let input = tensor
+                .data()
+                .as_bool_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable bool slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    entries.sort_by(cmp_bool_asc);
+                    let (index, value) = entries[median_pos];
+                    let base = o * inner + r;
+                    values[base] = value;
+                    indices[base] = index as i64;
+                }
+            }
+        }
+    }
+
+    let values = Tensor::new(
+        Arc::new(values_data),
+        values_shape.clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    let indices = Tensor::new(
+        Arc::new(indices_data),
+        values_shape,
+        DataType::Int64,
+        tensor.device(),
+        false,
+    );
+
+    Ok((values, indices))
+}
 
 fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     let dim = if dim < 0 { dim + ndim as isize } else { dim };
@@ -1014,6 +1433,681 @@ pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
             argmin_along_dim(tensor, d, keepdim)
         }
     }
+}
+
+/// Return the top-``k`` values and their indices along ``dim``
+pub fn topk(
+    tensor: &Tensor,
+    k: usize,
+    dim: Option<isize>,
+    largest: bool,
+    sorted: bool,
+) -> Result<(Tensor, Tensor)> {
+    let ndim = tensor.ndim();
+
+    let axis = if ndim == 0 {
+        match dim {
+            Some(d) if d == 0 || d == -1 => 0,
+            Some(d) => return Err(MinitensorError::index_error(d, 0, 1)),
+            None => 0,
+        }
+    } else {
+        let dim_value = dim.unwrap_or(-1);
+        normalize_dim(dim_value, ndim)?
+    };
+
+    let dims = tensor.shape().dims();
+    let dim_size = if dims.is_empty() { 1 } else { dims[axis] };
+
+    if k > dim_size {
+        return Err(MinitensorError::invalid_argument(format!(
+            "selected index k out of range for dimension {axis} with size {dim_size}"
+        )));
+    }
+
+    let output_dims = if dims.is_empty() {
+        vec![k]
+    } else {
+        let mut dims_vec = dims.to_vec();
+        dims_vec[axis] = k;
+        dims_vec
+    };
+
+    let values_shape = Shape::new(output_dims.clone());
+    let indices_shape = Shape::new(output_dims);
+
+    let num_out = values_shape.numel();
+    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
+    let mut indices_data = TensorData::zeros_on_device(num_out, DataType::Int64, tensor.device());
+
+    if k == 0 || num_out == 0 {
+        let values = Tensor::new(
+            Arc::new(values_data),
+            values_shape,
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+        let indices = Tensor::new(
+            Arc::new(indices_data),
+            indices_shape,
+            DataType::Int64,
+            tensor.device(),
+            false,
+        );
+        return Ok((values, indices));
+    }
+
+    let outer = if dims.is_empty() || axis == 0 {
+        1
+    } else {
+        dims[..axis].iter().product()
+    };
+    let inner = if dims.is_empty() || axis + 1 >= dims.len() {
+        1
+    } else {
+        dims[axis + 1..].iter().product()
+    };
+    let outer_stride = dim_size * inner;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if sorted {
+                        if largest {
+                            entries.sort_by(cmp_f32_desc);
+                        } else {
+                            entries.sort_by(cmp_f32_asc);
+                        }
+                    } else if k < dim_size {
+                        if largest {
+                            entries.select_nth_unstable_by(k - 1, cmp_f32_desc);
+                        } else {
+                            entries.select_nth_unstable_by(k - 1, cmp_f32_asc);
+                        }
+                    }
+
+                    let base = (o * inner + r) * k;
+                    for j in 0..k {
+                        let (index, value) = entries[j];
+                        values[base + j] = value;
+                        indices[base + j] = index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if sorted {
+                        if largest {
+                            entries.sort_by(cmp_f64_desc);
+                        } else {
+                            entries.sort_by(cmp_f64_asc);
+                        }
+                    } else if k < dim_size {
+                        if largest {
+                            entries.select_nth_unstable_by(k - 1, cmp_f64_desc);
+                        } else {
+                            entries.select_nth_unstable_by(k - 1, cmp_f64_asc);
+                        }
+                    }
+
+                    let base = (o * inner + r) * k;
+                    for j in 0..k {
+                        let (index, value) = entries[j];
+                        values[base + j] = value;
+                        indices[base + j] = index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Int32 => {
+            let input = tensor
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if sorted {
+                        if largest {
+                            entries.sort_by(cmp_i32_desc);
+                        } else {
+                            entries.sort_by(cmp_i32_asc);
+                        }
+                    } else if k < dim_size {
+                        if largest {
+                            entries.select_nth_unstable_by(k - 1, cmp_i32_desc);
+                        } else {
+                            entries.select_nth_unstable_by(k - 1, cmp_i32_asc);
+                        }
+                    }
+
+                    let base = (o * inner + r) * k;
+                    for j in 0..k {
+                        let (index, value) = entries[j];
+                        values[base + j] = value;
+                        indices[base + j] = index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Int64 => {
+            let input = tensor
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if sorted {
+                        if largest {
+                            entries.sort_by(cmp_i64_desc);
+                        } else {
+                            entries.sort_by(cmp_i64_asc);
+                        }
+                    } else if k < dim_size {
+                        if largest {
+                            entries.select_nth_unstable_by(k - 1, cmp_i64_desc);
+                        } else {
+                            entries.select_nth_unstable_by(k - 1, cmp_i64_asc);
+                        }
+                    }
+
+                    let base = (o * inner + r) * k;
+                    for j in 0..k {
+                        let (index, value) = entries[j];
+                        values[base + j] = value;
+                        indices[base + j] = index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Bool => {
+            let input = tensor
+                .data()
+                .as_bool_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable bool slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if sorted {
+                        if largest {
+                            entries.sort_by(cmp_bool_desc);
+                        } else {
+                            entries.sort_by(cmp_bool_asc);
+                        }
+                    } else if k < dim_size {
+                        if largest {
+                            entries.select_nth_unstable_by(k - 1, cmp_bool_desc);
+                        } else {
+                            entries.select_nth_unstable_by(k - 1, cmp_bool_asc);
+                        }
+                    }
+
+                    let base = (o * inner + r) * k;
+                    for j in 0..k {
+                        let (index, value) = entries[j];
+                        values[base + j] = value;
+                        indices[base + j] = index as i64;
+                    }
+                }
+            }
+        }
+    }
+
+    let values = Tensor::new(
+        Arc::new(values_data),
+        values_shape,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+    let indices = Tensor::new(
+        Arc::new(indices_data),
+        indices_shape,
+        DataType::Int64,
+        tensor.device(),
+        false,
+    );
+
+    Ok((values, indices))
+}
+
+pub fn sort(
+    tensor: &Tensor,
+    dim: Option<isize>,
+    descending: bool,
+    stable: bool,
+) -> Result<(Tensor, Tensor)> {
+    let ndim = tensor.ndim();
+
+    let axis = if ndim == 0 {
+        match dim {
+            Some(d) if d == 0 || d == -1 => 0,
+            Some(d) => return Err(MinitensorError::index_error(d, 0, 1)),
+            None => 0,
+        }
+    } else {
+        let dim_value = dim.unwrap_or(-1);
+        normalize_dim(dim_value, ndim)?
+    };
+
+    if tensor.shape().dims().is_empty() {
+        let mut values_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+        let mut indices_data = TensorData::zeros_on_device(1, DataType::Int64, tensor.device());
+
+        match tensor.dtype() {
+            DataType::Float32 => {
+                let src = tensor
+                    .data()
+                    .as_f32_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+                let dst = values_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable f32 slice")
+                })?;
+                dst[0] = src[0];
+            }
+            DataType::Float64 => {
+                let src = tensor
+                    .data()
+                    .as_f64_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+                let dst = values_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable f64 slice")
+                })?;
+                dst[0] = src[0];
+            }
+            DataType::Int32 => {
+                let src = tensor
+                    .data()
+                    .as_i32_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+                let dst = values_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable i32 slice")
+                })?;
+                dst[0] = src[0];
+            }
+            DataType::Int64 => {
+                let src = tensor
+                    .data()
+                    .as_i64_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+                let dst = values_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable i64 slice")
+                })?;
+                dst[0] = src[0];
+            }
+            DataType::Bool => {
+                let src = tensor
+                    .data()
+                    .as_bool_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+                let dst = values_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable bool slice")
+                })?;
+                dst[0] = src[0];
+            }
+        }
+
+        let indices = indices_data
+            .as_i64_slice_mut()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+        indices[0] = 0;
+
+        let values = Tensor::new(
+            Arc::new(values_data),
+            Shape::scalar(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+        let indices = Tensor::new(
+            Arc::new(indices_data),
+            Shape::scalar(),
+            DataType::Int64,
+            tensor.device(),
+            false,
+        );
+        return Ok((values, indices));
+    }
+
+    let dims = tensor.shape().dims();
+    let dim_size = dims[axis];
+
+    let mut values_data =
+        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    let mut indices_data =
+        TensorData::zeros_on_device(tensor.numel(), DataType::Int64, tensor.device());
+
+    let outer = if axis == 0 {
+        1
+    } else {
+        dims[..axis].iter().product()
+    };
+    let inner = if axis + 1 >= dims.len() {
+        1
+    } else {
+        dims[axis + 1..].iter().product()
+    };
+    let outer_stride = dim_size * inner;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if stable {
+                        if descending {
+                            entries.sort_by(cmp_f32_desc);
+                        } else {
+                            entries.sort_by(cmp_f32_asc);
+                        }
+                    } else if descending {
+                        entries.sort_unstable_by(cmp_f32_desc);
+                    } else {
+                        entries.sort_unstable_by(cmp_f32_asc);
+                    }
+
+                    let base = o * outer_stride + r;
+                    for (j, (index, value)) in entries.iter().enumerate() {
+                        let offset = base + j * inner;
+                        values[offset] = *value;
+                        indices[offset] = *index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if stable {
+                        if descending {
+                            entries.sort_by(cmp_f64_desc);
+                        } else {
+                            entries.sort_by(cmp_f64_asc);
+                        }
+                    } else if descending {
+                        entries.sort_unstable_by(cmp_f64_desc);
+                    } else {
+                        entries.sort_unstable_by(cmp_f64_asc);
+                    }
+
+                    let base = o * outer_stride + r;
+                    for (j, (index, value)) in entries.iter().enumerate() {
+                        let offset = base + j * inner;
+                        values[offset] = *value;
+                        indices[offset] = *index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Int32 => {
+            let input = tensor
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
+            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i32 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if stable {
+                        if descending {
+                            entries.sort_by(cmp_i32_desc);
+                        } else {
+                            entries.sort_by(cmp_i32_asc);
+                        }
+                    } else if descending {
+                        entries.sort_unstable_by(cmp_i32_desc);
+                    } else {
+                        entries.sort_unstable_by(cmp_i32_asc);
+                    }
+
+                    let base = o * outer_stride + r;
+                    for (j, (index, value)) in entries.iter().enumerate() {
+                        let offset = base + j * inner;
+                        values[offset] = *value;
+                        indices[offset] = *index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Int64 => {
+            let input = tensor
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
+            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if stable {
+                        if descending {
+                            entries.sort_by(cmp_i64_desc);
+                        } else {
+                            entries.sort_by(cmp_i64_asc);
+                        }
+                    } else if descending {
+                        entries.sort_unstable_by(cmp_i64_desc);
+                    } else {
+                        entries.sort_unstable_by(cmp_i64_asc);
+                    }
+
+                    let base = o * outer_stride + r;
+                    for (j, (index, value)) in entries.iter().enumerate() {
+                        let offset = base + j * inner;
+                        values[offset] = *value;
+                        indices[offset] = *index as i64;
+                    }
+                }
+            }
+        }
+        DataType::Bool => {
+            let input = tensor
+                .data()
+                .as_bool_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable bool slice")
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            let mut entries = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    entries.clear();
+                    for d in 0..dim_size {
+                        let idx = o * outer_stride + d * inner + r;
+                        entries.push((d, input[idx]));
+                    }
+
+                    if stable {
+                        if descending {
+                            entries.sort_by(cmp_bool_desc);
+                        } else {
+                            entries.sort_by(cmp_bool_asc);
+                        }
+                    } else if descending {
+                        entries.sort_unstable_by(cmp_bool_desc);
+                    } else {
+                        entries.sort_unstable_by(cmp_bool_asc);
+                    }
+
+                    let base = o * outer_stride + r;
+                    for (j, (index, value)) in entries.iter().enumerate() {
+                        let offset = base + j * inner;
+                        values[offset] = *value;
+                        indices[offset] = *index as i64;
+                    }
+                }
+            }
+        }
+    }
+
+    let values = Tensor::new(
+        Arc::new(values_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+    let indices = Tensor::new(
+        Arc::new(indices_data),
+        tensor.shape().clone(),
+        DataType::Int64,
+        tensor.device(),
+        false,
+    );
+
+    Ok((values, indices))
+}
+
+pub fn argsort(
+    tensor: &Tensor,
+    dim: Option<isize>,
+    descending: bool,
+    stable: bool,
+) -> Result<Tensor> {
+    let (_, indices) = sort(tensor, dim, descending, stable)?;
+    Ok(indices)
 }
 
 /// Standard deviation along specified dimension
@@ -3316,6 +4410,46 @@ mod tests {
     }
 
     #[test]
+    fn test_median_global_even_length() {
+        let t = create_tensor_f32(vec![3.0, 1.0, 4.0, 2.0], vec![4]);
+        let (value, indices) = median(&t, None, false).unwrap();
+        assert!(indices.is_none());
+        assert!(value.shape().is_scalar());
+        let result = value.data().as_f32_slice().unwrap();
+        assert_eq!(result, &[2.0]);
+    }
+
+    #[test]
+    fn test_median_with_dim_returns_indices() {
+        let t = create_tensor_f32(vec![1.0, 3.0, 2.0, 4.0, 6.0, 5.0], vec![2, 3]);
+        let (values, indices_opt) = median(&t, Some(1), false).unwrap();
+        let indices = indices_opt.unwrap();
+        assert_eq!(values.shape().dims(), &[2]);
+        assert_eq!(indices.shape().dims(), &[2]);
+        let values_slice = values.data().as_f32_slice().unwrap();
+        let indices_slice = indices.data().as_i64_slice().unwrap();
+        assert_eq!(values_slice, &[2.0, 5.0]);
+        assert_eq!(indices_slice, &[2, 2]);
+    }
+
+    #[test]
+    fn test_median_keepdim_preserves_rank() {
+        let t = create_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let (values, indices_opt) = median(&t, Some(1), true).unwrap();
+        let indices = indices_opt.unwrap();
+        assert_eq!(values.shape().dims(), &[2, 1]);
+        assert_eq!(indices.shape().dims(), &[2, 1]);
+        assert_eq!(values.data().as_f32_slice().unwrap(), &[1.0, 3.0]);
+        assert_eq!(indices.data().as_i64_slice().unwrap(), &[0, 0]);
+    }
+
+    #[test]
+    fn test_median_empty_tensor_errors() {
+        let t = create_tensor_f32(vec![], vec![0]);
+        assert!(median(&t, None, false).is_err());
+    }
+
+    #[test]
     fn test_argmax_along_dim() {
         let t = create_tensor_f32(vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0], vec![2, 3]);
         let result = argmax(&t, Some(1), false).unwrap();
@@ -3357,6 +4491,35 @@ mod tests {
         let s_keep = sum(&t, None, true).unwrap();
         assert_eq!(s_keep.shape().dims(), &[1, 1]);
         assert_eq!(s_keep.data().as_f32_slice().unwrap()[0], 10.0);
+    }
+
+    #[test]
+    fn test_topk_largest_float() {
+        let t = create_tensor_f32(vec![1.0, 3.0, 2.0, 4.0, -1.0, 5.0], vec![2, 3]);
+        let (values, indices) = topk(&t, 2, Some(1), true, true).unwrap();
+        assert_eq!(values.shape().dims(), &[2, 2]);
+        assert_eq!(indices.shape().dims(), &[2, 2]);
+        let values_slice = values.data().as_f32_slice().unwrap();
+        let indices_slice = indices.data().as_i64_slice().unwrap();
+        assert_eq!(values_slice, &[3.0, 2.0, 5.0, 4.0]);
+        assert_eq!(indices_slice, &[1, 2, 2, 0]);
+    }
+
+    #[test]
+    fn test_topk_smallest_unsorted() {
+        let t = create_tensor_f32(vec![1.0, -2.0, 3.5, 0.0], vec![4]);
+        let (values, indices) = topk(&t, 2, None, false, false).unwrap();
+        assert_eq!(values.shape().dims(), &[2]);
+        let mut pairs: Vec<(i64, f32)> = indices
+            .data()
+            .as_i64_slice()
+            .unwrap()
+            .iter()
+            .zip(values.data().as_f32_slice().unwrap())
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        pairs.sort_by_key(|p| p.0);
+        assert_eq!(pairs, vec![(1, -2.0), (3, 0.0)]);
     }
 
     #[test]

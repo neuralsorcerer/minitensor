@@ -9,10 +9,10 @@ use crate::error::_convert_error;
 use engine::operations::binary::{BinaryOpKind, coerce_binary_operands};
 use engine::operations::shape_ops::RepeatInterleaveSpec;
 use engine::tensor::{Shape, TensorData};
-use engine::{DataType, Device, Tensor, TensorIndex};
+use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::conversion::IntoPyObjectExt;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use std::borrow::Cow;
@@ -528,6 +528,25 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    pub fn median(
+        &self,
+        axis: Option<isize>,
+        keepdims: Option<bool>,
+    ) -> PyResult<(Self, Option<Self>)> {
+        let keepdims = keepdims.unwrap_or(false);
+        match self.inner.median(axis, keepdims) {
+            Ok((values, indices_opt)) => {
+                let values_tensor = Self { inner: values };
+                let indices_tensor = indices_opt.map(|inner| Self { inner });
+                Ok((values_tensor, indices_tensor))
+            }
+            Err(err @ MinitensorError::InvalidArgument { .. }) => {
+                Err(PyRuntimeError::new_err(err.detailed_message()))
+            }
+            Err(err) => Err(_convert_error(err)),
+        }
+    }
+
     pub fn argmax(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmax(axis, keepdims).map_err(_convert_error)?;
@@ -538,6 +557,58 @@ impl PyTensor {
         let keepdims = keepdims.unwrap_or(false);
         let result = self.inner.argmin(axis, keepdims).map_err(_convert_error)?;
         Ok(Self { inner: result })
+    }
+
+    pub fn topk(
+        &self,
+        k: usize,
+        dim: Option<isize>,
+        largest: Option<bool>,
+        sorted: Option<bool>,
+    ) -> PyResult<(Self, Self)> {
+        let largest = largest.unwrap_or(true);
+        let sorted = sorted.unwrap_or(true);
+        match self.inner.topk(k, dim, largest, sorted) {
+            Ok((values, indices)) => Ok((Self { inner: values }, Self { inner: indices })),
+            Err(err @ MinitensorError::InvalidArgument { .. }) => {
+                Err(PyRuntimeError::new_err(err.detailed_message()))
+            }
+            Err(err) => Err(_convert_error(err)),
+        }
+    }
+
+    pub fn sort(
+        &self,
+        dim: Option<isize>,
+        descending: Option<bool>,
+        stable: Option<bool>,
+    ) -> PyResult<(Self, Self)> {
+        let descending = descending.unwrap_or(false);
+        let stable = stable.unwrap_or(false);
+        match self.inner.sort(dim, descending, stable) {
+            Ok((values, indices)) => Ok((Self { inner: values }, Self { inner: indices })),
+            Err(err @ MinitensorError::InvalidArgument { .. }) => {
+                Err(PyRuntimeError::new_err(err.detailed_message()))
+            }
+            Err(err) => Err(_convert_error(err)),
+        }
+    }
+
+    pub fn argsort(
+        &self,
+        dim: Option<isize>,
+        descending: Option<bool>,
+        stable: Option<bool>,
+    ) -> PyResult<Self> {
+        let descending = descending.unwrap_or(false);
+        let stable = stable.unwrap_or(false);
+        match self.inner.argsort(dim, descending, stable) {
+            Ok(indices) => Ok(Self { inner: indices }),
+            Err(err @ MinitensorError::InvalidArgument { .. }) => {
+                Err(PyRuntimeError::new_err(err.detailed_message()))
+            }
+            Err(err) => Err(_convert_error(err)),
+        }
     }
 
     pub fn std(
@@ -1230,9 +1301,12 @@ fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
             .try_into()
             .map_err(|_| PyValueError::new_err("dim_size too large"))?;
         let indices = slice.indices(dim_size_isize)?;
+        if indices.step <= 0 {
+            return Err(PyIndexError::new_err("slice step must be positive"));
+        }
         Ok(TensorIndex::Slice {
-            start: indices.start as usize,
-            end: indices.stop as usize,
+            start: indices.start.max(0) as usize,
+            end: indices.stop.max(0) as usize,
             step: indices.step as usize,
         })
     } else if item.is_none() {
@@ -1451,9 +1525,10 @@ fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyA
 
 fn convert_tensor_to_python_scalar(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     if tensor.numel() != 1 {
-        return Err(PyErr::new::<PyValueError, _>(
-            "only one element tensors can be converted to Python scalars",
-        ));
+        return Err(PyErr::new::<PyRuntimeError, _>(format!(
+            "a Tensor with {} elements cannot be converted to Scalar",
+            tensor.numel()
+        )));
     }
 
     match tensor.dtype() {

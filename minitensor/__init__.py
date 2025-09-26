@@ -104,6 +104,11 @@ def full(*args, **kwargs):
     return Tensor.full(*args, **kwargs)
 
 
+def tensor(data, *args, **kwargs):
+    """Create a tensor from data."""
+    return Tensor(data, *args, **kwargs)
+
+
 def arange(*args, **kwargs):
     """Create a tensor with values from a range."""
     return Tensor.arange(*args, **kwargs)
@@ -168,6 +173,30 @@ def gather(input, dim: int, index):
 def narrow(input, dim: int, start: int, length: int):
     """Narrow ``input`` along ``dim`` starting at ``start`` for ``length`` elements."""
     return functional.narrow(input, dim, start, length)
+
+
+def topk(input, k, dim=None, largest=True, sorted=True):
+    """Return the top-``k`` values and indices along ``dim``."""
+
+    return functional.topk(input, k, dim=dim, largest=largest, sorted=sorted)
+
+
+def sort(input, dim=-1, descending=False, stable=False):
+    """Return sorted values and indices of ``input`` along ``dim``."""
+
+    return functional.sort(input, dim=dim, descending=descending, stable=stable)
+
+
+def argsort(input, dim=-1, descending=False, stable=False):
+    """Return indices that would sort ``input`` along ``dim``."""
+
+    return functional.argsort(input, dim=dim, descending=descending, stable=stable)
+
+
+def median(input, dim=None, keepdim=False):
+    """Return the median of ``input`` optionally along ``dim``."""
+
+    return functional.median(input, dim=dim, keepdim=keepdim)
 
 
 def cross(a, b, axis=-1):
@@ -295,6 +324,7 @@ __all__ = [
     "randn",
     "eye",
     "full",
+    "tensor",
     "arange",
     "from_numpy",
     "from_numpy_shared",
@@ -323,6 +353,10 @@ __all__ = [
     "flip",
     "roll",
     "where",
+    "topk",
+    "sort",
+    "argsort",
+    "median",
     "split",
     "cross",
     "device",

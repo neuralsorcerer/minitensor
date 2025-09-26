@@ -43,6 +43,14 @@ def test_slice_with_start():
     assert sliced.tolist() == [5.0, 6.0, 7.0, 8.0, 9.0]
 
 
+def test_slice_with_positive_step():
+    t = mt.arange(6)
+    sliced = t[::2]
+    np.testing.assert_allclose(
+        sliced.numpy(), np.array([0.0, 2.0, 4.0], dtype=np.float32)
+    )
+
+
 def test_slice_out_of_range_empty():
     t = mt.arange(5)
     assert t[10:].tolist() == []
@@ -52,6 +60,14 @@ def test_reverse_slice_error():
     t = mt.arange(10)
     with pytest.raises(IndexError):
         _ = t[::-1]
+
+
+def test_slice_assignment_with_step():
+    t = mt.arange(6)
+    t[1::2] = mt.Tensor([10.0, 20.0, 30.0])
+    np.testing.assert_allclose(
+        t.numpy(), np.array([0.0, 10.0, 2.0, 20.0, 4.0, 30.0], dtype=np.float32)
+    )
 
 
 def test_multi_dim_slice():

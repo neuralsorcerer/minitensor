@@ -487,6 +487,40 @@ impl Tensor {
         argmin(self, dim, keepdim)
     }
 
+    /// Median value (optionally along a dimension)
+    #[inline(always)]
+    pub fn median(&self, dim: Option<isize>, keepdim: bool) -> Result<(Self, Option<Self>)> {
+        use crate::operations::reduction::median;
+        median(self, dim, keepdim)
+    }
+
+    /// Top-k values and indices along a dimension
+    #[inline(always)]
+    pub fn topk(
+        &self,
+        k: usize,
+        dim: Option<isize>,
+        largest: bool,
+        sorted: bool,
+    ) -> Result<(Self, Self)> {
+        use crate::operations::reduction::topk;
+        topk(self, k, dim, largest, sorted)
+    }
+
+    /// Sort tensor values along a dimension
+    #[inline(always)]
+    pub fn sort(&self, dim: Option<isize>, descending: bool, stable: bool) -> Result<(Self, Self)> {
+        use crate::operations::reduction::sort;
+        sort(self, dim, descending, stable)
+    }
+
+    /// Indices that would sort the tensor along a dimension
+    #[inline(always)]
+    pub fn argsort(&self, dim: Option<isize>, descending: bool, stable: bool) -> Result<Self> {
+        use crate::operations::reduction::argsort;
+        argsort(self, dim, descending, stable)
+    }
+
     /// Element-wise equality comparison
     #[inline(always)]
     pub fn eq(&self, other: &Tensor) -> Result<Self> {
@@ -1297,6 +1331,7 @@ impl Tensor {
         let mut out_dims = Vec::new();
         let mut orig_dim_map = Vec::new();
         let mut starts = Vec::new();
+        let mut steps: Vec<usize> = Vec::new();
 
         for i in 0..self.ndim() {
             let dim_size = shape_dims[i];
@@ -1324,6 +1359,7 @@ impl Tensor {
                     out_dims.push(size);
                     orig_dim_map.push(i);
                     starts.push(start);
+                    steps.push(step);
                 }
             }
         }
@@ -1395,7 +1431,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     *out_elem = input[src_idx];
                 }
@@ -1413,7 +1450,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     *out_elem = input[src_idx];
                 }
@@ -1431,7 +1469,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     *out_elem = input[src_idx];
                 }
@@ -1449,7 +1488,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     *out_elem = input[src_idx];
                 }
@@ -1467,7 +1507,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     *out_elem = input[src_idx];
                 }
@@ -1498,6 +1539,7 @@ impl Tensor {
         let mut out_dims = Vec::new();
         let mut orig_dim_map = Vec::new();
         let mut starts = Vec::new();
+        let mut steps: Vec<usize> = Vec::new();
 
         for i in 0..self.ndim() {
             let dim_size = shape_dims[i];
@@ -1525,6 +1567,7 @@ impl Tensor {
                     out_dims.push(size);
                     orig_dim_map.push(i);
                     starts.push(start);
+                    steps.push(step);
                 }
             }
         }
@@ -1556,7 +1599,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     slice[src_idx] = val;
                 }
@@ -1571,7 +1615,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     slice[src_idx] = val;
                 }
@@ -1586,7 +1631,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     slice[src_idx] = val;
                 }
@@ -1601,7 +1647,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     slice[src_idx] = val;
                 }
@@ -1616,7 +1663,8 @@ impl Tensor {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
-                        src_idx += (starts[j] + coord) * strides[orig_dim];
+                        let step = steps[j];
+                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
                     }
                     slice[src_idx] = val;
                 }

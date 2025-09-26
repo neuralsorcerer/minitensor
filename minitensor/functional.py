@@ -435,6 +435,48 @@ def gather(input: Tensor, dim: int, index: Tensor) -> Tensor:
     return input.gather(dim, index)
 
 
+def topk(
+    input: Tensor,
+    k: int,
+    dim: Optional[int] = None,
+    largest: bool = True,
+    sorted: bool = True,
+) -> tuple[Tensor, Tensor]:
+    """Return the top-``k`` elements and their indices along ``dim``."""
+
+    return input.topk(k, dim=dim, largest=largest, sorted=sorted)
+
+
+def sort(
+    input: Tensor,
+    dim: Optional[int] = -1,
+    descending: bool = False,
+    stable: bool = False,
+) -> tuple[Tensor, Tensor]:
+    """Return sorted values and indices of ``input`` along ``dim``."""
+
+    return input.sort(dim=dim, descending=descending, stable=stable)
+
+
+def argsort(
+    input: Tensor,
+    dim: Optional[int] = -1,
+    descending: bool = False,
+    stable: bool = False,
+) -> Tensor:
+    """Return indices that would sort ``input`` along ``dim``."""
+
+    return input.argsort(dim=dim, descending=descending, stable=stable)
+
+
+def median(
+    input: Tensor, dim: Optional[int] = None, keepdim: bool = False
+) -> Union[Tensor, tuple[Tensor, Tensor]]:
+    """Compute the median of ``input`` optionally along ``dim``."""
+
+    return input.median(dim=dim, keepdim=keepdim)
+
+
 def softmax(input: Tensor, dim: Optional[int] = None) -> Tensor:
     """Softmax activation function.
 

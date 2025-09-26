@@ -398,15 +398,16 @@ class Tensor:
 
         return NotImplemented
 
-    def tolist(self) -> List:
+    def tolist(self) -> Any:
         """Convert to Python list."""
         return self._tensor.tolist()
 
     def item(self) -> Union[float, int, bool]:
-        """Get scalar value from single-element tensor."""
-        if self.numel() != 1:
-            raise ValueError("item() can only be called on tensors with one element")
-        return self._tensor.item()
+        """Return the Python scalar value for a single-element tensor."""
+        try:
+            return self._tensor.item()
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
 
     # Tensor manipulation methods
     def reshape(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
@@ -1072,6 +1073,26 @@ class Tensor:
 
         return result, indices
 
+    def median(
+        self, dim: Optional[int] = None, keepdim: bool = False
+    ) -> Union["Tensor", Tuple["Tensor", "Tensor"]]:
+        """Median values along dimension, with indices when ``dim`` is provided."""
+        values_backend, indices_backend = self._tensor.median(dim, keepdim)
+
+        result = Tensor.__new__(Tensor)
+        result._tensor = values_backend
+
+        if dim is None:
+            return result
+
+        if indices_backend is None:
+            raise RuntimeError("median returned no indices for the requested dimension")
+
+        indices = Tensor.__new__(Tensor)
+        indices._tensor = indices_backend
+
+        return result, indices
+
     def argmax(self, dim: Optional[int] = None, keepdim: bool = False) -> "Tensor":
         """Indices of maximum values."""
         result = Tensor.__new__(Tensor)
@@ -1086,6 +1107,61 @@ class Tensor:
                 raise IndexError("Dimension out of range")
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.argmin(dim, keepdim)
+        return result
+
+    def topk(
+        self,
+        k: int,
+        dim: Optional[int] = None,
+        largest: bool = True,
+        sorted: bool = True,
+    ) -> Tuple["Tensor", "Tensor"]:
+        """Return the top-``k`` elements and their indices along ``dim``."""
+        if not isinstance(k, int):
+            raise TypeError("k must be an integer")
+        if k < 0:
+            raise RuntimeError("k must be non-negative")
+
+        values_backend, indices_backend = self._tensor.topk(k, dim, largest, sorted)
+
+        values = Tensor.__new__(Tensor)
+        values._tensor = values_backend
+
+        indices = Tensor.__new__(Tensor)
+        indices._tensor = indices_backend
+
+        return values, indices
+
+    def sort(
+        self,
+        dim: Optional[int] = -1,
+        descending: bool = False,
+        stable: bool = False,
+    ) -> Tuple["Tensor", "Tensor"]:
+        """Sort ``self`` along ``dim`` returning values and indices."""
+        backend_dim = dim if dim is not None else None
+        values_backend, indices_backend = self._tensor.sort(
+            backend_dim, descending, stable
+        )
+
+        values = Tensor.__new__(Tensor)
+        values._tensor = values_backend
+
+        indices = Tensor.__new__(Tensor)
+        indices._tensor = indices_backend
+
+        return values, indices
+
+    def argsort(
+        self,
+        dim: Optional[int] = -1,
+        descending: bool = False,
+        stable: bool = False,
+    ) -> "Tensor":
+        """Return the indices that would sort ``self`` along ``dim``."""
+        backend_dim = dim if dim is not None else None
+        result = Tensor.__new__(Tensor)
+        result._tensor = self._tensor.argsort(backend_dim, descending, stable)
         return result
 
     def std(
@@ -1364,19 +1440,9 @@ class Tensor:
     def __bool__(self) -> bool:
         return self._tensor.__bool__()
 
-    # Indexing and slicing (simplified)
+    # Indexing and slicing
     def __getitem__(self, key):
         """Tensor indexing and slicing."""
-
-        def _check_slice(k):
-            if isinstance(k, slice):
-                if k.step not in (None, 1):
-                    raise IndexError("slice step must be 1")
-            elif isinstance(k, tuple):
-                for item in k:
-                    _check_slice(item)
-
-        _check_slice(key)
         result = Tensor.__new__(Tensor)
         result._tensor = self._tensor.__getitem__(key)
         return result
