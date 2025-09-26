@@ -8,6 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "minitensor"
+version = "0.1.1"
 description = "A lightweight, high-performance tensor operations library."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,7 +36,6 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy",
 ]
-dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
