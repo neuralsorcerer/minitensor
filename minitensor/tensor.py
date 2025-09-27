@@ -1759,11 +1759,15 @@ class Tensor:
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with linearly spaced values."""
-        if steps <= 1:
-            raise ValueError("Number of steps must be greater than 1")
-        step = (end - start) / (steps - 1)
+        if steps <= 0:
+            raise ValueError("Number of steps must be positive")
+
         dtype = _resolve_dtype(dtype)
-        return Tensor.arange(start, end + step / 2, step, dtype, device, requires_grad)
+        result = Tensor.__new__(Tensor)
+        result._tensor = _minitensor_core.Tensor.linspace(
+            start, end, steps, dtype, device, requires_grad
+        )
+        return result
 
     @staticmethod
     def logspace(
@@ -1776,9 +1780,15 @@ class Tensor:
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with logarithmically spaced values."""
+        if steps <= 0:
+            raise ValueError("Number of steps must be positive")
+
         dtype = _resolve_dtype(dtype)
-        linear = Tensor.linspace(start, end, steps, dtype, device, requires_grad)
-        return Tensor(base) ** linear
+        result = Tensor.__new__(Tensor)
+        result._tensor = _minitensor_core.Tensor.logspace(
+            start, end, steps, base, dtype, device, requires_grad
+        )
+        return result
 
     @staticmethod
     def from_numpy(array: "np.ndarray", requires_grad: bool = False) -> "Tensor":

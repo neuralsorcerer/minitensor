@@ -1175,6 +1175,42 @@ impl PyTensor {
     }
 
     #[staticmethod]
+    fn linspace(
+        start: f64,
+        end: f64,
+        steps: usize,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let requires_grad = requires_grad.unwrap_or(false);
+
+        let tensor = create_linspace_tensor(start, end, steps, dtype, device, requires_grad)?;
+        Ok(Self { inner: tensor })
+    }
+
+    #[staticmethod]
+    fn logspace(
+        start: f64,
+        end: f64,
+        steps: usize,
+        base: Option<f64>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let requires_grad = requires_grad.unwrap_or(false);
+        let base = base.unwrap_or(10.0);
+
+        let tensor = create_logspace_tensor(start, end, steps, base, dtype, device, requires_grad)?;
+        Ok(Self { inner: tensor })
+    }
+
+    #[staticmethod]
     fn from_numpy(array: &Bound<PyAny>, requires_grad: Option<bool>) -> PyResult<Self> {
         let requires_grad = requires_grad.unwrap_or(false);
         let tensor = convert_numpy_to_tensor(array, requires_grad)?;
@@ -2047,6 +2083,203 @@ fn create_arange_tensor(
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
                     *val = (start + i as f64 * step) != 0.0;
+                }
+            }
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(tensor_data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
+fn create_linspace_tensor(
+    start: f64,
+    end: f64,
+    steps: usize,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    if steps == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Number of steps must be positive",
+        ));
+    }
+
+    let shape = Shape::new(vec![steps]);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
+    let denom = if steps > 1 { (steps - 1) as f64 } else { 1.0 };
+    let step = if steps > 1 {
+        (end - start) / denom
+    } else {
+        0.0
+    };
+
+    match dtype {
+        DataType::Float32 => {
+            if let Some(slice) = tensor_data.as_f32_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let value = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = value as f32;
+                }
+            }
+        }
+        DataType::Float64 => {
+            if let Some(slice) = tensor_data.as_f64_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let value = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = value;
+                }
+            }
+        }
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let value = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = value.round() as i32;
+                }
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let value = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = value.round() as i64;
+                }
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let value = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = value != 0.0;
+                }
+            }
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(tensor_data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
+fn create_logspace_tensor(
+    start: f64,
+    end: f64,
+    steps: usize,
+    base: f64,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    if steps == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Number of steps must be positive",
+        ));
+    }
+
+    if base <= 0.0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Base must be positive",
+        ));
+    }
+
+    let shape = Shape::new(vec![steps]);
+    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
+    let denom = if steps > 1 { (steps - 1) as f64 } else { 1.0 };
+    let step = if steps > 1 {
+        (end - start) / denom
+    } else {
+        0.0
+    };
+
+    match dtype {
+        DataType::Float32 => {
+            if let Some(slice) = tensor_data.as_f32_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let exponent = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = base.powf(exponent) as f32;
+                }
+            }
+        }
+        DataType::Float64 => {
+            if let Some(slice) = tensor_data.as_f64_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let exponent = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = base.powf(exponent);
+                }
+            }
+        }
+        DataType::Int32 => {
+            if let Some(slice) = tensor_data.as_i32_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let exponent = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = base.powf(exponent).round() as i32;
+                }
+            }
+        }
+        DataType::Int64 => {
+            if let Some(slice) = tensor_data.as_i64_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let exponent = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = base.powf(exponent).round() as i64;
+                }
+            }
+        }
+        DataType::Bool => {
+            if let Some(slice) = tensor_data.as_bool_slice_mut() {
+                for (i, val) in slice.iter_mut().enumerate() {
+                    let exponent = if steps == 1 {
+                        start
+                    } else {
+                        start + i as f64 * step
+                    };
+                    *val = base.powf(exponent) != 0.0;
                 }
             }
         }

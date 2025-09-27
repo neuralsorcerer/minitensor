@@ -55,3 +55,24 @@ def test_empty_like_shape_and_dtype():
 def test_mixed_type_creation_error():
     with pytest.raises(TypeError):
         Tensor([1, "a"])
+
+
+def test_linspace_matches_numpy_float32():
+    tensor = Tensor.linspace(0.0, 1.0, 5)
+    expected = np.linspace(0.0, 1.0, 5, dtype=np.float32)
+    assert tensor.shape == (5,)
+    np.testing.assert_allclose(tensor.numpy(), expected)
+    assert tensor.numpy().dtype == np.float32
+
+
+def test_linspace_single_step_returns_start():
+    tensor = Tensor.linspace(-3.5, 7.5, 1)
+    assert tensor.shape == (1,)
+    np.testing.assert_allclose(tensor.numpy(), np.array([-3.5], dtype=np.float32))
+
+
+def test_logspace_matches_numpy_float64():
+    tensor = Tensor.logspace(0.0, 3.0, 4, base=10.0, dtype="float64")
+    expected = np.logspace(0.0, 3.0, 4, base=10.0, dtype=np.float64)
+    np.testing.assert_allclose(tensor.numpy(), expected)
+    assert tensor.numpy().dtype == np.float64
