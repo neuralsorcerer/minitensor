@@ -15,6 +15,7 @@ use libm::{erf, erff};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -70,6 +71,10 @@ thread_local! {
         std::cell::RefCell::new(ComputationGraph::new());
 }
 
+thread_local! {
+    static GRAPH_CONSUMED: Cell<bool> = Cell::new(false);
+}
+
 /// Add a tensor and its gradient function to the global computation graph
 pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>) -> Result<()> {
     GLOBAL_GRAPH.with(|graph| {
@@ -77,6 +82,7 @@ pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>)
             g.add_tensor_with_grad_req(tensor.id(), grad_fn, tensor.requires_grad());
         }
     });
+    reset_graph_consumed();
     Ok(())
 }
 
@@ -121,7 +127,23 @@ pub fn clear_graph() -> Result<()> {
     GLOBAL_GRAPH.with(|graph| {
         *graph.borrow_mut() = ComputationGraph::new();
     });
+    reset_graph_consumed();
     Ok(())
+}
+
+/// Mark the computation graph as consumed after a backward pass completes.
+pub fn mark_graph_consumed() {
+    GRAPH_CONSUMED.with(|flag| flag.set(true));
+}
+
+/// Reset the consumed flag so that future backward passes are permitted.
+pub fn reset_graph_consumed() {
+    GRAPH_CONSUMED.with(|flag| flag.set(false));
+}
+
+/// Query whether the active computation graph has already been consumed.
+pub fn is_graph_consumed() -> bool {
+    GRAPH_CONSUMED.with(|flag| flag.get())
 }
 
 // Gradient function implementations for common operations
@@ -492,6 +514,38 @@ impl GradientFunction for MinimumBackward {
                 &Shape::new(self.input_shapes[1].clone()),
             )?;
             gradients.insert(self.input_ids[1], reduced);
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for dot product
+pub struct DotBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub input_ids: [TensorId; 2],
+    pub lhs_requires_grad: bool,
+    pub rhs_requires_grad: bool,
+}
+
+impl GradientFunction for DotBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
+
+        if self.lhs_requires_grad {
+            let grad = crate::operations::arithmetic::mul(&self.rhs, grad_output)?;
+            gradients.insert(self.input_ids[0], grad);
+        }
+
+        if self.rhs_requires_grad {
+            let grad = crate::operations::arithmetic::mul(&self.lhs, grad_output)?;
+            gradients.insert(self.input_ids[1], grad);
         }
 
         Ok(gradients)

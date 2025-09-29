@@ -14,12 +14,13 @@ use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use pyo3::types::{PyAny, PyList, PyModule, PySlice, PyTuple};
 use std::borrow::Cow;
 use std::convert::TryFrom;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
-/// Python wrapper for Tensor with comprehensive functionality
+/// Python wrapper for Tensor
 #[pyclass(name = "Tensor", module = "minitensor._core")]
 #[derive(Clone)]
 pub struct PyTensor {
@@ -383,6 +384,11 @@ impl PyTensor {
 
     pub fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
         let result = self.inner.matmul(&other.inner).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn dot(&self, other: &PyTensor) -> PyResult<Self> {
+        let result = self.inner.dot(&other.inner).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -1425,13 +1431,32 @@ fn convert_python_data_to_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     // First try NumPy array conversion for any supported dtype
-    if let Ok(tensor) = convert_numpy_to_tensor(data, requires_grad) {
-        let tensor = if tensor.dtype() != dtype {
-            tensor.astype(dtype).map_err(_convert_error)?
-        } else {
-            tensor
-        };
-        return Ok(tensor);
+    if let Ok(numpy_module) = PyModule::import(data.py(), "numpy") {
+        if let Ok(ndarray_type) = numpy_module.getattr("ndarray") {
+            if data.is_instance(&ndarray_type)? {
+                let maybe_tensor = panic::catch_unwind(AssertUnwindSafe(|| {
+                    convert_numpy_to_tensor(data, requires_grad)
+                }));
+
+                match maybe_tensor {
+                    Ok(Ok(tensor)) => {
+                        let tensor = if tensor.dtype() != dtype {
+                            tensor.astype(dtype).map_err(_convert_error)?
+                        } else {
+                            tensor
+                        };
+                        return Ok(tensor);
+                    }
+                    Ok(Err(err)) => {
+                        return Err(err);
+                    }
+                    Err(_) => {
+                        // Fall back to the slower Python list conversion path
+                        // when the NumPy capsule isn't available.
+                    }
+                }
+            }
+        }
     }
 
     // Handle Python lists and tuples by flattening to float32 then casting

@@ -225,6 +225,15 @@ impl ComputationGraph {
         gradient: Option<Tensor>,
     ) -> Result<FxHashMap<TensorId, Tensor>> {
         self.ensure_topological_order();
+        if !self.nodes.contains_key(&start_tensor) && crate::autograd::is_graph_consumed() {
+            return Err(
+                crate::error::MinitensorError::gradient_error_with_suggestion(
+                    "Computation graph for this tensor has already been freed",
+                    "Re-run the forward pass or call backward(retain_graph=True)",
+                    None,
+                ),
+            );
+        }
         // Clear previous gradients and ensure sufficient capacity for accumulation
         self.gradients.clear();
         self.gradients.reserve(self.nodes.len());

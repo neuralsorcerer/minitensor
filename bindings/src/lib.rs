@@ -20,6 +20,7 @@ mod serialization;
 mod tensor;
 
 use device::PyDevice;
+use error::_convert_error;
 use tensor::PyTensor;
 
 /// Python module for minitensor core
@@ -59,6 +60,9 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 
     // Autograd helpers
     m.add_function(wrap_pyfunction!(get_gradient, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_autograd_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(is_autograd_graph_consumed, m)?)?;
+    m.add_function(wrap_pyfunction!(mark_autograd_graph_consumed, m)?)?;
 
     Ok(())
 }
@@ -66,4 +70,20 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 #[pyfunction]
 fn get_gradient(tensor: &PyTensor) -> PyResult<Option<PyTensor>> {
     Ok(engine::autograd::get_gradient(tensor.tensor()).map(PyTensor::from_tensor))
+}
+
+#[pyfunction]
+fn clear_autograd_graph() -> PyResult<()> {
+    engine::autograd::clear_graph().map_err(_convert_error)
+}
+
+#[pyfunction]
+fn is_autograd_graph_consumed() -> PyResult<bool> {
+    Ok(engine::autograd::is_graph_consumed())
+}
+
+#[pyfunction]
+fn mark_autograd_graph_consumed() -> PyResult<()> {
+    engine::autograd::mark_graph_consumed();
+    Ok(())
 }

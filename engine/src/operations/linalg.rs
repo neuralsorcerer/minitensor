@@ -5,8 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{MatMulBackward, TransposeBackward, add_to_graph},
+    autograd::{DotBackward, MatMulBackward, TransposeBackward, add_to_graph},
     error::{MinitensorError, Result},
+    operations::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -176,6 +177,157 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         // Add to computation graph
         add_to_graph(&output_with_grad, Some(grad_fn))?;
 
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Dot product of two 1D tensors with gradient support
+pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let lhs_dims = lhs.ndim();
+    let rhs_dims = rhs.ndim();
+    if lhs_dims != 1 || rhs_dims != 1 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "dot: expected 1D tensors but got {}D and {}D tensors",
+            lhs_dims, rhs_dims
+        )));
+    }
+
+    if lhs.numel() != rhs.numel() {
+        return Err(MinitensorError::shape_mismatch(
+            lhs.shape().dims().to_vec(),
+            rhs.shape().dims().to_vec(),
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Mul)?;
+
+    if result_dtype == DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "dot does not support bool tensors",
+        ));
+    }
+
+    let lhs_view = lhs_cast.as_ref();
+    let rhs_view = rhs_cast.as_ref();
+
+    let numel = lhs_view.numel();
+    let device = lhs.device();
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+
+    let output_data = match result_dtype {
+        DataType::Float32 => {
+            let lhs_slice = lhs_view.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice for dot input")
+            })?;
+            let rhs_slice = rhs_view.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice for dot input")
+            })?;
+
+            let dot = if numel >= PAR_THRESHOLD {
+                lhs_slice
+                    .par_iter()
+                    .zip(rhs_slice.par_iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<f32>()
+            } else {
+                lhs_slice
+                    .iter()
+                    .zip(rhs_slice.iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<f32>()
+            };
+
+            TensorData::from_vec_f32(vec![dot], device)
+        }
+        DataType::Float64 => {
+            let lhs_slice = lhs_view.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice for dot input")
+            })?;
+            let rhs_slice = rhs_view.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice for dot input")
+            })?;
+
+            let dot = if numel >= PAR_THRESHOLD {
+                lhs_slice
+                    .par_iter()
+                    .zip(rhs_slice.par_iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<f64>()
+            } else {
+                lhs_slice
+                    .iter()
+                    .zip(rhs_slice.iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<f64>()
+            };
+
+            TensorData::from_vec_f64(vec![dot], device)
+        }
+        DataType::Int32 => {
+            let lhs_slice = lhs_view.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i32 slice for dot input")
+            })?;
+            let rhs_slice = rhs_view.data().as_i32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i32 slice for dot input")
+            })?;
+
+            let mut dot: i32 = 0;
+            for (&a, &b) in lhs_slice.iter().zip(rhs_slice.iter()) {
+                dot = dot.wrapping_add(a.wrapping_mul(b));
+            }
+
+            TensorData::from_vec_i32(vec![dot], device)
+        }
+        DataType::Int64 => {
+            let lhs_slice = lhs_view.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i64 slice for dot input")
+            })?;
+            let rhs_slice = rhs_view.data().as_i64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get i64 slice for dot input")
+            })?;
+
+            let mut dot: i64 = 0;
+            for (&a, &b) in lhs_slice.iter().zip(rhs_slice.iter()) {
+                dot = dot.wrapping_add(a.wrapping_mul(b));
+            }
+
+            TensorData::from_vec_i64(vec![dot], device)
+        }
+        DataType::Bool => unreachable!("Bool dtype handled earlier"),
+    };
+
+    let output_shape = Shape::new(Vec::new());
+    let output = Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        result_dtype,
+        device,
+        requires_grad,
+    );
+
+    if output.requires_grad() {
+        let lhs_requires_grad = lhs.requires_grad();
+        let rhs_requires_grad = rhs.requires_grad();
+        let grad_fn = Arc::new(DotBackward {
+            lhs: lhs_cast.into_owned().detach(),
+            rhs: rhs_cast.into_owned().detach(),
+            input_ids: [lhs.id(), rhs.id()],
+            lhs_requires_grad,
+            rhs_requires_grad,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
         Ok(output_with_grad)
     } else {
         Ok(output)

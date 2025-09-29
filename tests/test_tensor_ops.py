@@ -140,6 +140,43 @@ def test_backward_non_scalar_error():
         t.backward()
 
 
+def test_backward_requires_retain_graph_for_second_call():
+    x = mt.Tensor([2.0], requires_grad=True)
+    y = (x * x).sum()
+
+    y.backward()
+
+    with pytest.raises(RuntimeError) as exc:
+        y.backward()
+    assert "retain_graph" in str(exc.value).lower()
+
+    mt.clear_autograd_graph()
+
+
+def test_backward_with_retain_graph_allows_multiple_calls():
+    x = mt.Tensor([3.0], requires_grad=True)
+    y = (x * x).sum()
+
+    y.backward(retain_graph=True)
+    first_grad = x.grad.numpy().copy()
+    x.zero_grad()
+
+    y.backward(retain_graph=True)
+    np.testing.assert_allclose(x.grad.numpy(), first_grad)
+
+    mt.clear_autograd_graph()
+
+
+def test_backward_create_graph_not_supported():
+    x = mt.Tensor([1.0], requires_grad=True)
+    y = (x * x).sum()
+
+    with pytest.raises(NotImplementedError):
+        y.backward(create_graph=True)
+
+    mt.clear_autograd_graph()
+
+
 def test_sum_negative_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     r = t.sum(dim=[-1])

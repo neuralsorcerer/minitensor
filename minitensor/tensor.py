@@ -18,6 +18,9 @@ except ImportError as e:
         "Run `pip install -e .` or `maturin develop` to compile the Rust backend."
     ) from e
 
+_IS_GRAPH_CONSUMED = getattr(_minitensor_core, "is_autograd_graph_consumed", None)
+_MARK_GRAPH_CONSUMED = getattr(_minitensor_core, "mark_autograd_graph_consumed", None)
+
 from numbers import Integral, Real
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
@@ -747,10 +750,30 @@ class Tensor:
         create_graph: bool = False,
     ):
         """Compute gradients via backpropagation."""
+        if create_graph:
+            raise NotImplementedError(
+                "create_graph=True is not supported; all computations execute in the Rust backend"
+            )
+
+        if _IS_GRAPH_CONSUMED is not None and _IS_GRAPH_CONSUMED():
+            raise RuntimeError(
+                "Computation graph has been freed. Re-run the forward pass or call backward(retain_graph=True)."
+            )
+
+        if getattr(self, "_graph_consumed", False):
+            raise RuntimeError(
+                "Computation graph has been freed. Re-run the forward pass or call backward(retain_graph=True)."
+            )
+
         if gradient is None:
             self._tensor.backward(None)
         else:
             self._tensor.backward(gradient._tensor)
+
+        if not retain_graph:
+            if _MARK_GRAPH_CONSUMED is not None:
+                _MARK_GRAPH_CONSUMED()
+            self._graph_consumed = True
 
     def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
         """Set requires_grad flag in-place."""
@@ -973,11 +996,33 @@ class Tensor:
         return result
 
     def dot(self, other: "Tensor") -> "Tensor":
-        """Dot product."""
-        if self.ndim == 1 and other.ndim == 1:
-            return (self * other).sum()
-        else:
-            return self.matmul(other)
+        """Dot product of two 1D tensors computed via Rust kernels."""
+
+        if not isinstance(other, Tensor):
+            raise TypeError("dot requires another Tensor instance")
+
+        if self.ndim != 1 or other.ndim != 1:
+            raise ValueError("dot expects 1D tensors")
+
+        if self.shape[0] != other.shape[0]:
+            raise ValueError("dot requires tensors with the same length")
+
+        operands = self._coerce_binary_operands(other, "__mul__")
+        if operands is NotImplemented:  # pragma: no cover - should never happen
+            raise TypeError("dot could not coerce operands")
+
+        lhs, rhs = operands
+        if lhs.dtype == "bool":
+            raise ValueError("dot does not support bool tensors")
+
+        if hasattr(lhs._tensor, "dot"):
+            result = Tensor.__new__(Tensor)
+            result._tensor = lhs._tensor.dot(rhs._tensor)
+            return result
+
+        # Fall back to composing the Rust-backed multiply and sum kernels when the
+        # direct binding is not available (e.g. in pure-Python builds).
+        return (lhs * rhs).sum()
 
     def where(self, condition: "Tensor", other: "Tensor") -> "Tensor":
         """Select elements from ``self`` or ``other`` based on ``condition``.

@@ -166,3 +166,59 @@ def test_tril_requires_minimum_rank():
     tensor = mt.Tensor([1.0, 2.0, 3.0])
     with pytest.raises(ValueError):
         tensor.tril()
+
+
+def test_dot_matches_numpy_float():
+    a = mt.Tensor([1.0, 2.0, 3.0], dtype="float32")
+    b = mt.Tensor([4.0, 5.0, 6.0], dtype="float32")
+    result = a.dot(b)
+    assert result.dtype == "float32"
+    np.testing.assert_allclose(result.numpy(), np.dot(a.numpy(), b.numpy()))
+
+
+def test_top_level_dot_matches_tensor_method():
+    a = mt.Tensor([1.0, 2.0, 3.0], dtype="float32")
+    b = mt.Tensor([4.0, 5.0, 6.0], dtype="float32")
+    tensor_result = a.dot(b)
+    functional_result = mt.dot(a, b)
+    assert tensor_result.dtype == "float32"
+    assert functional_result.dtype == "float32"
+    np.testing.assert_allclose(functional_result.numpy(), tensor_result.numpy())
+
+
+def test_dot_matches_numpy_int():
+    a = mt.Tensor([2, 3, 4], dtype="int64")
+    b = mt.Tensor([5, 6, 7], dtype="int64")
+    result = a.dot(b)
+    assert result.dtype == "int64"
+    assert result.item() == int(np.dot(a.numpy(), b.numpy()))
+
+
+def test_dot_requires_1d_inputs():
+    a = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    b = mt.Tensor([1.0, 2.0])
+    with pytest.raises(ValueError):
+        a.dot(b)
+
+
+def test_dot_mismatched_lengths_raise():
+    a = mt.Tensor([1.0, 2.0, 3.0])
+    b = mt.Tensor([4.0, 5.0])
+    with pytest.raises(ValueError):
+        a.dot(b)
+
+
+def test_dot_backward_gradients():
+    a = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
+    b = mt.Tensor([4.0, 5.0, 6.0], requires_grad=True)
+    result = a.dot(b)
+    result.backward()
+    np.testing.assert_allclose(a.grad.numpy(), b.numpy())
+    np.testing.assert_allclose(b.grad.numpy(), a.numpy())
+
+
+def test_dot_bool_not_supported():
+    a = mt.Tensor([True, False, True], dtype="bool")
+    b = mt.Tensor([True, True, False], dtype="bool")
+    with pytest.raises(ValueError):
+        a.dot(b)

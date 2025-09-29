@@ -26,6 +26,17 @@ try:
 except ImportError:
     numpy_compat = None
 
+
+def _ensure_numpy_compat(feature: str) -> None:
+    """Raise a helpful error when NumPy interoperability is unavailable."""
+
+    if numpy_compat is None:
+        raise ModuleNotFoundError(
+            "NumPy support is not available; install the 'numpy' package to "
+            f"use minitensor.{feature}."
+        )
+
+
 # Custom operations and plugin system (if available)
 try:
     from ._core import (
@@ -109,6 +120,14 @@ def tensor(data, *args, **kwargs):
     return Tensor(data, *args, **kwargs)
 
 
+def dot(input: Tensor, other: Tensor) -> Tensor:
+    """Compute the dot product of two 1D tensors."""
+    if not isinstance(input, Tensor) or not isinstance(other, Tensor):
+        raise TypeError("dot expects Tensor inputs")
+
+    return input.dot(other)
+
+
 def arange(*args, **kwargs):
     """Create a tensor with values from a range."""
     return Tensor.arange(*args, **kwargs)
@@ -134,9 +153,48 @@ def from_numpy_shared(array, requires_grad=False):
         return from_numpy(array, requires_grad)
 
 
+def _require_tensor(value, *, argument: str) -> Tensor:
+    if not isinstance(value, Tensor):
+        raise TypeError(f"{argument} must be a Tensor instance")
+    return value
+
+
+def get_gradient(tensor: Tensor) -> Optional[Tensor]:
+    """Return the last computed gradient for ``tensor`` if it exists."""
+
+    tensor = _require_tensor(tensor, argument="tensor")
+    rust_grad = _minitensor_core.get_gradient(tensor._tensor)
+    if rust_grad is None:
+        return None
+
+    result = Tensor.__new__(Tensor)
+    result._tensor = rust_grad
+    return result
+
+
+def clear_autograd_graph() -> None:
+    """Explicitly clear the global autograd graph maintained by the Rust backend."""
+
+    _minitensor_core.clear_autograd_graph()
+
+
+def is_autograd_graph_consumed() -> bool:
+    """Check whether the global autograd graph has already been consumed."""
+
+    return _minitensor_core.is_autograd_graph_consumed()
+
+
+def mark_autograd_graph_consumed() -> None:
+    """Mark the global autograd graph as consumed after a backward call."""
+
+    _minitensor_core.mark_autograd_graph_consumed()
+
+
 # NumPy compatibility functions (commonly used ones at top level)
 def asarray(data, dtype=None, requires_grad=False):
     """Convert input to tensor (NumPy compatibility)."""
+    if numpy_compat is None:
+        return Tensor(data, dtype=dtype, requires_grad=requires_grad)
     return numpy_compat.asarray(data, dtype, requires_grad)
 
 
@@ -231,6 +289,7 @@ def rsqrt(input):
 
 def cross(a, b, axis=-1):
     """Compute the 3D cross product (NumPy compatibility)."""
+    _ensure_numpy_compat("cross")
     return numpy_compat.cross(a, b, axis=axis)
 
 
@@ -377,6 +436,7 @@ __all__ = [
     "cat",
     "stack",
     "chunk",
+    "dot",
     "index_select",
     "gather",
     "narrow",
@@ -415,6 +475,10 @@ __all__ = [
     "device",
     "cpu",
     "cuda",
+    "get_gradient",
+    "clear_autograd_graph",
+    "is_autograd_graph_consumed",
+    "mark_autograd_graph_consumed",
     "set_default_dtype",
     "get_default_dtype",
 ]

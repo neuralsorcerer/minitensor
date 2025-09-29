@@ -551,6 +551,12 @@ impl Tensor {
         crate::operations::selection::masked_fill_scalar(self, mask, value)
     }
 
+    /// Dot product between two 1D tensors
+    #[inline(always)]
+    pub fn dot(&self, other: &Tensor) -> Result<Self> {
+        crate::operations::linalg::dot(self, other)
+    }
+
     /// Matrix multiplication
     #[inline(always)]
     pub fn matmul(&self, other: &Tensor) -> Result<Self> {
