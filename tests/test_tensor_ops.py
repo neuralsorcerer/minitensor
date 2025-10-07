@@ -375,7 +375,9 @@ def test_masked_fill_index_like_scalar_retains_integer_dtype():
     filled = base.masked_fill(mask, IndexLike(7))
 
     assert filled.dtype == "int32"
-    np.testing.assert_array_equal(filled.numpy(), np.array([[7, 1], [2, 7]], dtype=np.int32))
+    np.testing.assert_array_equal(
+        filled.numpy(), np.array([[7, 1], [2, 7]], dtype=np.int32)
+    )
 
 
 def test_masked_fill_tensor_gradient():
@@ -419,7 +421,9 @@ def test_where_index_like_scalar_retains_integer_dtype():
     result = input_tensor.where(condition, IndexLike(9))
 
     assert result.dtype == "int32"
-    np.testing.assert_array_equal(result.numpy(), np.array([[0, 9], [9, 3]], dtype=np.int32))
+    np.testing.assert_array_equal(
+        result.numpy(), np.array([[0, 9], [9, 3]], dtype=np.int32)
+    )
 
 
 def test_where_decimal_scalar_promotes_int_tensor():
@@ -434,7 +438,7 @@ def test_where_decimal_scalar_promotes_int_tensor():
 
 
 def test_tensor_creation_int_list_preserves_large_values():
-    values = [2**40 + 3, -2**35 - 7]
+    values = [2**40 + 3, -(2**35) - 7]
     tensor = mt.Tensor(values, dtype="int64")
     np.testing.assert_array_equal(tensor.numpy(), np.array(values, dtype=np.int64))
 

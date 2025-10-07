@@ -17,8 +17,8 @@ try:
         autograd_get_gradient,
         autograd_is_graph_consumed,
         autograd_mark_graph_consumed,
-        core as _minitensor_core,
     )
+    from ._backend import core as _minitensor_core
 except ImportError as e:
     raise ImportError(
         "The minitensor core extension is not built. "
@@ -40,7 +40,9 @@ except AttributeError:  # pragma: no cover - debug module unavailable
 if _TensorDebugger is not None:  # pragma: no branch - evaluate once during import
     try:
         _TENSOR_DEBUGGER = _TensorDebugger()
-    except Exception:  # pragma: no cover - instantiation failures should not break import
+    except (
+        Exception
+    ):  # pragma: no cover - instantiation failures should not break import
         _TENSOR_DEBUGGER = None
 else:
     _TENSOR_DEBUGGER = None
@@ -165,7 +167,6 @@ def _query_tensor_debug_flag(tensor_core: Any, attribute: str, default: bool) ->
     return bool(value)
 
 
-
 def _normalize_device(device: Optional[str]) -> Optional[str]:
     """Normalize device strings returned from the Rust backend."""
 
@@ -196,7 +197,7 @@ def _normalize_device(device: Optional[str]) -> Optional[str]:
 
 def set_default_dtype(dtype: str) -> None:
     """Set the global default data type for new tensors."""
-    
+
     try:
         _minitensor_core.set_default_dtype(dtype)
     except Exception as exc:  # pragma: no cover - backend reports invalid dtype
@@ -205,7 +206,7 @@ def set_default_dtype(dtype: str) -> None:
 
 def get_default_dtype() -> str:
     """Get the current global default data type."""
-    
+
     return _minitensor_core.get_default_dtype()
 
 
@@ -951,8 +952,6 @@ class Tensor:
         """Stable logaddexp combining with ``other``."""
         return self._wrap_core_tensor(self._tensor.logaddexp(other))
 
-
-
     def pow(self, exponent: Union["Tensor", float, int]) -> "Tensor":
         """Alias for the ``**`` operator."""
         return self.__pow__(exponent)
@@ -988,7 +987,7 @@ class Tensor:
         """Matrix multiplication."""
         if not isinstance(other, Tensor):
             raise TypeError("matmul requires another Tensor")
-        
+
         return self._wrap_core_tensor(self._tensor.matmul(other._tensor))
 
     def mm(self, other: "Tensor") -> "Tensor":
@@ -1056,9 +1055,7 @@ class Tensor:
             other = Tensor(other, dtype=self.dtype)
 
         return Tensor._wrap_core_tensor(
-            _minitensor_core.numpy_compat.cross(
-                self._tensor, other._tensor, axis=axis
-            )
+            _minitensor_core.numpy_compat.cross(self._tensor, other._tensor, axis=axis)
         )
 
     # Reduction operations
@@ -1188,7 +1185,9 @@ class Tensor:
     ) -> "Tensor":
         """Return the indices that would sort ``self`` along ``dim``."""
         backend_dim = dim if dim is not None else None
-        return self._wrap_core_tensor(self._tensor.argsort(backend_dim, descending, stable))
+        return self._wrap_core_tensor(
+            self._tensor.argsort(backend_dim, descending, stable)
+        )
 
     def std(
         self, dim: Optional[int] = None, keepdim: bool = False, unbiased: bool = True
@@ -1317,9 +1316,7 @@ class Tensor:
         weight_tensor = None if weight is None else weight._tensor
         bias_tensor = None if bias is None else bias._tensor
         return Tensor._wrap_core_tensor(
-            self._tensor.layer_norm(
-                list(shape_tuple), weight_tensor, bias_tensor, eps
-            )
+            self._tensor.layer_norm(list(shape_tuple), weight_tensor, bias_tensor, eps)
         )
 
     # Comparison operations
@@ -1529,7 +1526,9 @@ class Tensor:
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create an identity matrix."""
-        return Tensor._wrap_core_tensor(_minitensor_core.Tensor.eye(n, m, dtype, device, requires_grad))
+        return Tensor._wrap_core_tensor(
+            _minitensor_core.Tensor.eye(n, m, dtype, device, requires_grad)
+        )
 
     @staticmethod
     def arange(
@@ -1595,7 +1594,9 @@ class Tensor:
         _ensure_numpy_available(
             "NumPy is required to construct tensors from NumPy arrays."
         )
-        return Tensor._wrap_core_tensor(_minitensor_core.Tensor.from_numpy(array, requires_grad))
+        return Tensor._wrap_core_tensor(
+            _minitensor_core.Tensor.from_numpy(array, requires_grad)
+        )
 
     @staticmethod
     def from_numpy_shared(array: "np.ndarray", requires_grad: bool = False) -> "Tensor":
@@ -1603,7 +1604,9 @@ class Tensor:
         _ensure_numpy_available(
             "NumPy is required to construct tensors from NumPy arrays."
         )
-        return Tensor._wrap_core_tensor(_minitensor_core.Tensor.from_numpy_shared(array, requires_grad))
+        return Tensor._wrap_core_tensor(
+            _minitensor_core.Tensor.from_numpy_shared(array, requires_grad)
+        )
 
 
 # Convenience functions for tensor creation (NumPy-style)
@@ -1708,9 +1711,7 @@ def linspace(
 
 def from_numpy(array: "np.ndarray", requires_grad: bool = False) -> Tensor:
     """Create a tensor from a NumPy array."""
-    _ensure_numpy_available(
-        "NumPy is required to construct tensors from NumPy arrays."
-    )
+    _ensure_numpy_available("NumPy is required to construct tensors from NumPy arrays.")
     return Tensor.from_numpy(array, requires_grad=requires_grad)
 
 

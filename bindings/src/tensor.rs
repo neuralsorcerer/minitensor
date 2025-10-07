@@ -2005,7 +2005,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
             }
             return Ok(());
         }
-        
+
         if let Ok(nested_tuple) = item.downcast::<PyTuple>() {
             let list = nested_tuple.to_list();
             let length = list.len();

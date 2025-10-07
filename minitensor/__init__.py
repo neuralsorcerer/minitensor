@@ -10,16 +10,16 @@ import subprocess
 import sys
 from typing import Optional, Sequence, Union
 
-# Import the compiled Rust extension and backend helpers
-from ._backend import (
-    autograd_clear_graph as _backend_clear_autograd_graph,
-    autograd_get_gradient as _backend_get_gradient,
-    autograd_is_graph_consumed as _backend_is_autograd_graph_consumed,
-    autograd_mark_graph_consumed as _backend_mark_autograd_graph_consumed,
-    core as _minitensor_core,
-)
-
 from . import functional, nn, optim
+
+# Import the compiled Rust extension and backend helpers
+from ._backend import autograd_clear_graph as _backend_clear_autograd_graph
+from ._backend import autograd_get_gradient as _backend_get_gradient
+from ._backend import autograd_is_graph_consumed as _backend_is_autograd_graph_consumed
+from ._backend import (
+    autograd_mark_graph_consumed as _backend_mark_autograd_graph_consumed,
+)
+from ._backend import core as _minitensor_core
 
 # Re-export core classes and functions
 from .tensor import Tensor, get_default_dtype, set_default_dtype
@@ -72,7 +72,6 @@ else:
         from . import numpy_compat  # type: ignore  # noqa: F401
     except ImportError:
         numpy_compat = None
-
 
 
 def _ensure_numpy_compat(feature: str) -> None:
