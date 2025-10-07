@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::device::PyDevice;
+use crate::dtype;
 use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
@@ -22,7 +23,6 @@ use engine::operations::batch_norm as batch_norm_op;
 use engine::operations::conv2d as conv2d_op;
 use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
-use engine::tensor::DataType;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
@@ -609,7 +609,7 @@ impl PyDenseLayer {
     ) -> PyResult<(Self, PyModule)> {
         let bias = bias.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
-        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let dense_layer = DenseLayer::new(in_features, out_features, bias, device, dtype)
             .map_err(_convert_error)?;
@@ -894,7 +894,7 @@ impl PyConv2d {
         };
         let bias = bias.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
-        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let conv2d = Conv2d::new(
             in_channels,
@@ -971,7 +971,7 @@ impl PyBatchNorm1d {
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
-        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm1d::new(num_features, Some(eps), Some(momentum), device, dtype)
             .map_err(_convert_error)?;
@@ -1013,7 +1013,7 @@ impl PyBatchNorm2d {
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
-        let dtype = parse_dtype(dtype.unwrap_or("float32"))?;
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm2d::new(num_features, Some(eps), Some(momentum), device, dtype)
             .map_err(_convert_error)?;
@@ -1074,20 +1074,6 @@ fn parse_tuple2(obj: &Bound<PyAny>) -> PyResult<(usize, usize)> {
         Ok((val, val))
     } else {
         obj.extract::<(usize, usize)>()
-    }
-}
-
-fn parse_dtype(dtype_str: &str) -> PyResult<DataType> {
-    match dtype_str {
-        "float32" | "f32" => Ok(DataType::Float32),
-        "float64" | "f64" => Ok(DataType::Float64),
-        "int32" | "i32" => Ok(DataType::Int32),
-        "int64" | "i64" => Ok(DataType::Int64),
-        "bool" => Ok(DataType::Bool),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "Unsupported data type: {}",
-            dtype_str
-        ))),
     }
 }
 

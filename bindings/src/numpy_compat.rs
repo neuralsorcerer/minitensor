@@ -297,8 +297,12 @@ fn array_equal(a: &PyTensor, b: &PyTensor) -> PyResult<bool> {
 
 /// Compute mean along axis
 #[pyfunction]
-fn mean(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.mean(axis.map(|a| vec![a]), keepdims)
+fn mean(
+    tensor: &PyTensor,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    tensor.mean(axis, keepdims)
 }
 
 /// Compute standard deviation along axis
@@ -337,14 +341,22 @@ fn var(
 
 /// Compute product along axis
 #[pyfunction]
-fn prod(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.prod(axis.map(|a| vec![a]), keepdims)
+fn prod(
+    tensor: &PyTensor,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    tensor.prod(axis, keepdims)
 }
 
 /// Compute sum along axis
 #[pyfunction]
-fn sum(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.sum(axis.map(|a| vec![a]), keepdims)
+fn sum(
+    tensor: &PyTensor,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    tensor.sum(axis, keepdims)
 }
 
 /// Compute maximum along axis

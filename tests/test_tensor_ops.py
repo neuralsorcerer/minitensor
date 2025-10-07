@@ -4,10 +4,20 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import decimal
+
 import numpy as np
 import pytest
 
 import minitensor as mt
+
+
+class IndexLike:
+    def __init__(self, value: int):
+        self._value = value
+
+    def __index__(self) -> int:
+        return self._value
 
 
 def test_reshape_and_transpose_roundtrip():
@@ -140,6 +150,46 @@ def test_backward_non_scalar_error():
         t.backward()
 
 
+def test_backward_requires_grad_flag():
+    t = mt.Tensor([1.0])
+    with pytest.raises(
+        RuntimeError, match="does not require grad and does not have a grad_fn"
+    ):
+        t.backward()
+
+
+def test_detach_inplace_clears_grad_and_stops_tracking():
+    base = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
+    out = (base * base).sum()
+    out.backward()
+    assert base.grad is not None
+
+    base.detach_()
+    assert base.requires_grad is False
+    assert base.grad is None
+
+    new_out = (base * 3).sum()
+    assert new_out.requires_grad is False
+    with pytest.raises(
+        RuntimeError, match="does not require grad and does not have a grad_fn"
+    ):
+        new_out.backward()
+
+
+def test_detach_inplace_updates_future_views():
+    base = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+
+    base.detach_()
+
+    assert base.requires_grad is False
+
+    new_view = base[0]
+    assert new_view.requires_grad is False
+
+    result = (new_view * 2).sum()
+    assert result.requires_grad is False
+
+
 def test_backward_requires_retain_graph_for_second_call():
     x = mt.Tensor([2.0], requires_grad=True)
     y = (x * x).sum()
@@ -197,6 +247,18 @@ def test_sum_invalid_dim():
         t.sum(dim=[2])
     with pytest.raises(IndexError):
         t.sum(dim=[-3])
+
+
+def test_sum_rejects_boolean_dims():
+    t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(TypeError):
+        t.sum(dim=True)
+    with pytest.raises(TypeError):
+        t.sum(dim=[0, True])
+    with pytest.raises(TypeError):
+        t.sum(dim=np.bool_(True))
+    with pytest.raises(TypeError):
+        t.sum(dim=[np.bool_(False)])
 
 
 def test_prod_all():
@@ -284,6 +346,38 @@ def test_masked_fill_with_scalar():
     np.testing.assert_allclose(filled.numpy(), expected)
 
 
+def test_masked_fill_float_scalar_promotes_int_tensor():
+    base = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+    mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
+
+    filled = base.masked_fill(mask, 0.5)
+    expected = np.array([[0.5, 1.0], [2.0, 0.5]], dtype=np.float32)
+
+    assert filled.dtype == "float32"
+    np.testing.assert_allclose(filled.numpy(), expected)
+
+
+def test_masked_fill_decimal_scalar_promotes_int_tensor():
+    base = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+    mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
+
+    filled = base.masked_fill(mask, decimal.Decimal("0.5"))
+    expected = np.array([[0.5, 1.0], [2.0, 0.5]], dtype=np.float32)
+
+    assert filled.dtype == "float32"
+    np.testing.assert_allclose(filled.numpy(), expected)
+
+
+def test_masked_fill_index_like_scalar_retains_integer_dtype():
+    base = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+    mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
+
+    filled = base.masked_fill(mask, IndexLike(7))
+
+    assert filled.dtype == "int32"
+    np.testing.assert_array_equal(filled.numpy(), np.array([[7, 1], [2, 7]], dtype=np.int32))
+
+
 def test_masked_fill_tensor_gradient():
     base = mt.arange(0.0, 4.0, dtype="float32", requires_grad=True).reshape(2, 2)
     mask = mt.Tensor([[True, False], [False, True]], dtype="bool")
@@ -305,6 +399,66 @@ def test_masked_fill_tensor_gradient():
     np.testing.assert_allclose(
         values_grad.numpy(), np.array([[1.0, 1.0]], dtype=np.float32)
     )
+
+
+def test_where_float_scalar_promotes_int_tensor():
+    condition = mt.Tensor([[True, False], [False, True]], dtype="bool")
+    input_tensor = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+
+    result = mt.where(condition, input_tensor, 0.5)
+    expected = np.array([[0.0, 0.5], [0.5, 3.0]], dtype=np.float32)
+
+    assert result.dtype == "float32"
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_where_index_like_scalar_retains_integer_dtype():
+    condition = mt.Tensor([[True, False], [False, True]], dtype="bool")
+    input_tensor = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+
+    result = input_tensor.where(condition, IndexLike(9))
+
+    assert result.dtype == "int32"
+    np.testing.assert_array_equal(result.numpy(), np.array([[0, 9], [9, 3]], dtype=np.int32))
+
+
+def test_where_decimal_scalar_promotes_int_tensor():
+    condition = mt.Tensor([[True, False], [False, True]], dtype="bool")
+    input_tensor = mt.arange(0, 4, dtype="int32").reshape(2, 2)
+
+    result = mt.where(condition, decimal.Decimal("0.5"), input_tensor)
+    expected = np.array([[0.5, 1.0], [2.0, 0.5]], dtype=np.float32)
+
+    assert result.dtype == "float32"
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_tensor_creation_int_list_preserves_large_values():
+    values = [2**40 + 3, -2**35 - 7]
+    tensor = mt.Tensor(values, dtype="int64")
+    np.testing.assert_array_equal(tensor.numpy(), np.array(values, dtype=np.int64))
+
+
+def test_tensor_creation_decimal_nested_sequence_uses_float64():
+    data = [[decimal.Decimal("0.1"), decimal.Decimal("0.2")]]
+    tensor = mt.Tensor(data, dtype="float64")
+    expected = np.array([[0.1, 0.2]], dtype=np.float64)
+    np.testing.assert_allclose(tensor.numpy(), expected)
+
+
+def test_tensor_creation_index_like_nested_sequence_uses_integer_dtype():
+    data = [[IndexLike(1), IndexLike(2)], [IndexLike(3), IndexLike(4)]]
+    tensor = mt.Tensor(data, dtype="int64")
+
+    assert tensor.dtype == "int64"
+    np.testing.assert_array_equal(
+        tensor.numpy(), np.array([[1, 2], [3, 4]], dtype=np.int64)
+    )
+
+
+def test_tensor_creation_inconsistent_nested_lengths_errors():
+    with pytest.raises(ValueError, match="Inconsistent nested sequence lengths"):
+        mt.Tensor([[1, 2], [3]])
 
 
 def test_cumprod_and_backward():

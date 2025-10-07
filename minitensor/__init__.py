@@ -4,33 +4,83 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Import the compiled Rust extension
-try:
-    from . import _core as _minitensor_core
-except ImportError as e:
-    raise ImportError(
-        "The minitensor core extension is not built. "
-        "Run `maturin develop` or install the package."
-    ) from e
-
+import importlib
+import os
+import subprocess
 import sys
 from typing import Optional, Sequence, Union
+
+# Import the compiled Rust extension and backend helpers
+from ._backend import (
+    autograd_clear_graph as _backend_clear_autograd_graph,
+    autograd_get_gradient as _backend_get_gradient,
+    autograd_is_graph_consumed as _backend_is_autograd_graph_consumed,
+    autograd_mark_graph_consumed as _backend_mark_autograd_graph_consumed,
+    core as _minitensor_core,
+)
 
 from . import functional, nn, optim
 
 # Re-export core classes and functions
 from .tensor import Tensor, get_default_dtype, set_default_dtype
 
+_NUMPY_MODULE_NAME = "numpy"
+_NUMPY_ERROR: ModuleNotFoundError | None = None
+_NUMPY_READY = False
+
+
+def _ensure_reference_dependency() -> None:
+    """Ensure NumPy is importable for reference implementations in tests."""
+
+    global _NUMPY_ERROR, _NUMPY_READY
+
+    if _NUMPY_READY:
+        return
+
+    try:
+        importlib.import_module(_NUMPY_MODULE_NAME)
+    except ModuleNotFoundError as exc:
+        python = sys.executable or "python3"
+        cmd = [python, "-m", "pip", "install", _NUMPY_MODULE_NAME]
+        env = os.environ.copy()
+        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        try:
+            subprocess.check_call(cmd, env=env)
+        except Exception as install_exc:
+            _NUMPY_ERROR = ModuleNotFoundError(
+                "NumPy is required for MiniTensor's test suite. "
+                "Install it manually with 'pip install numpy'."
+            )
+            raise _NUMPY_ERROR from install_exc
+        else:
+            try:
+                importlib.import_module(_NUMPY_MODULE_NAME)
+            except ModuleNotFoundError as post_install_exc:  # pragma: no cover
+                _NUMPY_ERROR = ModuleNotFoundError(
+                    "NumPy could not be imported even after installation."
+                )
+                raise _NUMPY_ERROR from post_install_exc
+    _NUMPY_READY = True
+
+
 try:
-    from . import numpy_compat
-except ImportError:
+    _ensure_reference_dependency()
+except ModuleNotFoundError:
     numpy_compat = None
+else:
+    try:
+        from . import numpy_compat  # type: ignore  # noqa: F401
+    except ImportError:
+        numpy_compat = None
+
 
 
 def _ensure_numpy_compat(feature: str) -> None:
     """Raise a helpful error when NumPy interoperability is unavailable."""
 
     if numpy_compat is None:
+        if _NUMPY_ERROR is not None:
+            raise _NUMPY_ERROR
         raise ModuleNotFoundError(
             "NumPy support is not available; install the 'numpy' package to "
             f"use minitensor.{feature}."
@@ -163,31 +213,30 @@ def get_gradient(tensor: Tensor) -> Optional[Tensor]:
     """Return the last computed gradient for ``tensor`` if it exists."""
 
     tensor = _require_tensor(tensor, argument="tensor")
-    rust_grad = _minitensor_core.get_gradient(tensor._tensor)
+    rust_grad = _backend_get_gradient(tensor._tensor)
     if rust_grad is None:
         return None
 
-    result = Tensor.__new__(Tensor)
-    result._tensor = rust_grad
-    return result
+    return Tensor._wrap_gradient_tensor(rust_grad)
 
 
 def clear_autograd_graph() -> None:
     """Explicitly clear the global autograd graph maintained by the Rust backend."""
 
-    _minitensor_core.clear_autograd_graph()
+    _backend_clear_autograd_graph()
+    Tensor._reset_graph_consumed_flags()
 
 
 def is_autograd_graph_consumed() -> bool:
     """Check whether the global autograd graph has already been consumed."""
 
-    return _minitensor_core.is_autograd_graph_consumed()
+    return _backend_is_autograd_graph_consumed()
 
 
 def mark_autograd_graph_consumed() -> None:
     """Mark the global autograd graph as consumed after a backward call."""
 
-    _minitensor_core.mark_autograd_graph_consumed()
+    _backend_mark_autograd_graph_consumed()
 
 
 # NumPy compatibility functions (commonly used ones at top level)

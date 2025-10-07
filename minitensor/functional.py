@@ -22,7 +22,7 @@ except ImportError as e:
 from numbers import Real
 from typing import Optional, Sequence, Union
 
-from .tensor import Tensor, _normalize_device
+from .tensor import Tensor
 
 
 def relu(input: Tensor) -> Tensor:
@@ -174,20 +174,6 @@ def where(condition: Tensor, input: Tensor, other: Tensor) -> Tensor:
 
     if not isinstance(input, Tensor):
         input = Tensor(input)
-
-    target_device = _normalize_device(input.device)
-
-    if not isinstance(condition, Tensor):
-        condition = Tensor(condition, dtype="bool", device=target_device)
-    else:
-        if condition.dtype != "bool":
-            raise TypeError("where condition must be a bool tensor")
-        condition = Tensor._ensure_on_device(condition, target_device)
-
-    if not isinstance(other, Tensor):
-        other = Tensor(other, device=target_device)
-    else:
-        other = Tensor._ensure_on_device(other, target_device)
 
     return input.where(condition, other)
 

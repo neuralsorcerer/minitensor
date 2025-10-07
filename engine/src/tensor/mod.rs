@@ -1218,6 +1218,13 @@ impl Tensor {
         detached
     }
 
+    /// Detach tensor from the computation graph in-place
+    #[inline(always)]
+    pub fn detach_inplace(&mut self) {
+        self.requires_grad = false;
+        self.refresh_autograd_metadata();
+    }
+
     /// Check if tensors are approximately equal
     #[inline(always)]
     pub fn allclose(&self, other: &Tensor, rtol: f64, atol: f64) -> bool {

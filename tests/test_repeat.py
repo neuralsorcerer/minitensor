@@ -12,6 +12,14 @@ from minitensor import repeat as top_repeat
 from minitensor.functional import repeat as F_repeat
 
 
+class IndexLike:
+    def __init__(self, value: int):
+        self._value = value
+
+    def __index__(self) -> int:  # pragma: no cover - simple accessor
+        return self._value
+
+
 def test_tensor_repeat_basic():
     t = Tensor([1, 2])
     r = t.repeat(2)
@@ -48,3 +56,25 @@ def test_repeat_zero():
     r = t.repeat(0, 2)
     assert r.shape == (0, 4)
     assert r.numel() == 0
+
+
+def test_repeat_accepts_index_like_scalars():
+    t = Tensor([[1, 2], [3, 4]])
+    repeated = t.repeat(IndexLike(1), IndexLike(2))
+    assert repeated.shape == (2, 4)
+
+    via_sequence = t.repeat([IndexLike(1), IndexLike(2)])
+    assert via_sequence.shape == (2, 4)
+
+    numpy_repeats = (np.int64(2), np.int64(1))
+    repeated_numpy = t.repeat(*numpy_repeats)
+    assert repeated_numpy.shape == (4, 2)
+
+
+def test_repeat_rejects_non_integer_values():
+    t = Tensor([1, 2])
+    with pytest.raises(TypeError):
+        t.repeat(2.5)
+
+    with pytest.raises(TypeError):
+        t.repeat([1, 2.2])

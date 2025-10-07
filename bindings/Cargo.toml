@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { version = "0.26", features = ["resolve-config"] }

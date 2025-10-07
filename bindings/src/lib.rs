@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 mod custom_ops;
 mod debug;
 mod device;
+mod dtype;
 mod error;
 mod nn;
 mod numpy_compat;
@@ -64,6 +65,9 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_autograd_graph_consumed, m)?)?;
     m.add_function(wrap_pyfunction!(mark_autograd_graph_consumed, m)?)?;
 
+    m.add_function(wrap_pyfunction!(get_default_dtype, m)?)?;
+    m.add_function(wrap_pyfunction!(set_default_dtype, m)?)?;
+
     Ok(())
 }
 
@@ -86,4 +90,14 @@ fn is_autograd_graph_consumed() -> PyResult<bool> {
 fn mark_autograd_graph_consumed() -> PyResult<()> {
     engine::autograd::mark_graph_consumed();
     Ok(())
+}
+
+#[pyfunction]
+fn get_default_dtype() -> PyResult<String> {
+    Ok(dtype::get_default_dtype())
+}
+
+#[pyfunction]
+fn set_default_dtype(dtype: &str) -> PyResult<()> {
+    dtype::set_default_dtype(dtype)
 }
