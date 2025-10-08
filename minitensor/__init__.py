@@ -10,16 +10,9 @@ import subprocess
 import sys
 from typing import Optional, Sequence, Union
 
-from . import functional, nn, optim
-
 # Import the compiled Rust extension and backend helpers
-from ._backend import autograd_clear_graph as _backend_clear_autograd_graph
-from ._backend import autograd_get_gradient as _backend_get_gradient
-from ._backend import autograd_is_graph_consumed as _backend_is_autograd_graph_consumed
-from ._backend import (
-    autograd_mark_graph_consumed as _backend_mark_autograd_graph_consumed,
-)
-from ._backend import core as _minitensor_core
+from . import _core as _minitensor_core
+from . import functional, nn, optim
 
 # Re-export core classes and functions
 from .tensor import Tensor, get_default_dtype, set_default_dtype
@@ -133,40 +126,17 @@ except (AttributeError, NameError):
     pass
 
 
-# Core tensor creation functions
-def zeros(*args, **kwargs):
-    """Create a tensor filled with zeros."""
-    return Tensor.zeros(*args, **kwargs)
-
-
-def ones(*args, **kwargs):
-    """Create a tensor filled with ones."""
-    return Tensor.ones(*args, **kwargs)
-
-
-def rand(*args, **kwargs):
-    """Create a tensor with random values from uniform distribution."""
-    return Tensor.rand(*args, **kwargs)
-
-
-def randn(*args, **kwargs):
-    """Create a tensor with random values from normal distribution."""
-    return Tensor.randn(*args, **kwargs)
-
-
-def eye(*args, **kwargs):
-    """Create an identity matrix."""
-    return Tensor.eye(*args, **kwargs)
-
-
-def full(*args, **kwargs):
-    """Create a tensor filled with a specific value."""
-    return Tensor.full(*args, **kwargs)
-
-
-def tensor(data, *args, **kwargs):
-    """Create a tensor from data."""
-    return Tensor(data, *args, **kwargs)
+# Core tensor creation helpers map directly to the backend-backed Tensor APIs.
+tensor = Tensor
+zeros = Tensor.zeros
+ones = Tensor.ones
+rand = Tensor.rand
+randn = Tensor.randn
+eye = Tensor.eye
+full = Tensor.full
+arange = Tensor.arange
+from_numpy = Tensor.from_numpy
+from_numpy_shared = Tensor.from_numpy_shared
 
 
 def dot(input: Tensor, other: Tensor) -> Tensor:
@@ -175,31 +145,6 @@ def dot(input: Tensor, other: Tensor) -> Tensor:
         raise TypeError("dot expects Tensor inputs")
 
     return input.dot(other)
-
-
-def arange(*args, **kwargs):
-    """Create a tensor with values from a range."""
-    return Tensor.arange(*args, **kwargs)
-
-
-def from_numpy(array, requires_grad=False):
-    """Create a tensor from a NumPy array."""
-    try:
-        return Tensor.from_numpy(array, requires_grad)
-    except AttributeError:
-        # Fallback if Rust extension is not available
-        raise NotImplementedError(
-            "from_numpy requires the Rust extension to be built. Please build the project with 'maturin develop' or 'pip install -e .'"
-        )
-
-
-def from_numpy_shared(array, requires_grad=False):
-    """Create a tensor from a NumPy array with zero-copy when possible."""
-    try:
-        return Tensor.from_numpy_shared(array, requires_grad)
-    except AttributeError:
-        # Fallback to regular from_numpy
-        return from_numpy(array, requires_grad)
 
 
 def _require_tensor(value, *, argument: str) -> Tensor:
@@ -212,7 +157,7 @@ def get_gradient(tensor: Tensor) -> Optional[Tensor]:
     """Return the last computed gradient for ``tensor`` if it exists."""
 
     tensor = _require_tensor(tensor, argument="tensor")
-    rust_grad = _backend_get_gradient(tensor._tensor)
+    rust_grad = _minitensor_core.get_gradient(tensor._tensor)
     if rust_grad is None:
         return None
 
@@ -222,20 +167,20 @@ def get_gradient(tensor: Tensor) -> Optional[Tensor]:
 def clear_autograd_graph() -> None:
     """Explicitly clear the global autograd graph maintained by the Rust backend."""
 
-    _backend_clear_autograd_graph()
+    _minitensor_core.clear_autograd_graph()
     Tensor._reset_graph_consumed_flags()
 
 
 def is_autograd_graph_consumed() -> bool:
     """Check whether the global autograd graph has already been consumed."""
 
-    return _backend_is_autograd_graph_consumed()
+    return _minitensor_core.is_autograd_graph_consumed()
 
 
 def mark_autograd_graph_consumed() -> None:
     """Mark the global autograd graph as consumed after a backward call."""
 
-    _backend_mark_autograd_graph_consumed()
+    _minitensor_core.mark_autograd_graph_consumed()
 
 
 # NumPy compatibility functions (commonly used ones at top level)
@@ -246,207 +191,54 @@ def asarray(data, dtype=None, requires_grad=False):
     return numpy_compat.asarray(data, dtype, requires_grad)
 
 
-def cat(tensors, dim: int = 0):
-    """Concatenate tensors along an existing dimension."""
-    return functional.cat(tensors, dim)
+_FUNCTIONAL_FORWARDERS = (
+    "cat",
+    "stack",
+    "split",
+    "chunk",
+    "index_select",
+    "gather",
+    "narrow",
+    "topk",
+    "sort",
+    "argsort",
+    "median",
+    "logsumexp",
+    "softmax",
+    "log_softmax",
+    "softsign",
+    "rsqrt",
+    "reshape",
+    "view",
+    "triu",
+    "tril",
+    "flatten",
+    "ravel",
+    "transpose",
+    "permute",
+    "movedim",
+    "moveaxis",
+    "swapaxes",
+    "swapdims",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "repeat",
+    "repeat_interleave",
+    "flip",
+    "roll",
+    "where",
+    "masked_fill",
+)
 
-
-def stack(tensors, dim: int = 0):
-    """Stack tensors along a new dimension."""
-    return functional.stack(tensors, dim)
-
-
-def split(input, split_size_or_sections, dim: int = 0):
-    """Split ``input`` into chunks along ``dim``."""
-    return functional.split(input, split_size_or_sections, dim)
-
-
-def chunk(input, chunks: int, dim: int = 0):
-    """Split ``input`` into ``chunks`` along ``dim``."""
-    return functional.chunk(input, chunks, dim)
-
-
-def index_select(input, dim: int, indices):
-    """Select elements along ``dim`` using integer ``indices``."""
-    return functional.index_select(input, dim, indices)
-
-
-def gather(input, dim: int, index):
-    """Gather elements from ``input`` along ``dim`` using ``index`` tensor."""
-    return functional.gather(input, dim, index)
-
-
-def narrow(input, dim: int, start: int, length: int):
-    """Narrow ``input`` along ``dim`` starting at ``start`` for ``length`` elements."""
-    return functional.narrow(input, dim, start, length)
-
-
-def topk(input, k, dim=None, largest=True, sorted=True):
-    """Return the top-``k`` values and indices along ``dim``."""
-
-    return functional.topk(input, k, dim=dim, largest=largest, sorted=sorted)
-
-
-def sort(input, dim=-1, descending=False, stable=False):
-    """Return sorted values and indices of ``input`` along ``dim``."""
-
-    return functional.sort(input, dim=dim, descending=descending, stable=stable)
-
-
-def argsort(input, dim=-1, descending=False, stable=False):
-    """Return indices that would sort ``input`` along ``dim``."""
-
-    return functional.argsort(input, dim=dim, descending=descending, stable=stable)
-
-
-def median(input, dim=None, keepdim=False):
-    """Return the median of ``input`` optionally along ``dim``."""
-
-    return functional.median(input, dim=dim, keepdim=keepdim)
-
-
-def logsumexp(input, dim=None, keepdim: bool = False):
-    """Compute a numerically stable log-sum-exp reduction."""
-
-    return functional.logsumexp(input, dim=dim, keepdim=keepdim)
-
-
-def softmax(input, dim=None):
-    """Compute softmax along ``dim``."""
-
-    return functional.softmax(input, dim=dim)
-
-
-def log_softmax(input, dim=None):
-    """Compute log-softmax along ``dim``."""
-
-    return functional.log_softmax(input, dim=dim)
-
-
-def softsign(input):
-    """Softsign activation computed in Rust."""
-
-    return functional.softsign(input)
-
-
-def rsqrt(input):
-    """Reciprocal square root evaluated by the Rust backend."""
-
-    return functional.rsqrt(input)
+for _name in _FUNCTIONAL_FORWARDERS:
+    globals()[_name] = getattr(functional, _name)
 
 
 def cross(a, b, axis=-1):
     """Compute the 3D cross product (NumPy compatibility)."""
     _ensure_numpy_compat("cross")
     return numpy_compat.cross(a, b, axis=axis)
-
-
-# Functional operation wrappers
-def reshape(input, shape):
-    """Return ``input`` with a new shape."""
-    return functional.reshape(input, shape)
-
-
-def view(input, *shape):
-    """Return a view of ``input`` with a new shape."""
-    return functional.view(input, *shape)
-
-
-def triu(input, diagonal: int = 0):
-    """Return the upper triangular part of ``input``."""
-    return functional.triu(input, diagonal)
-
-
-def tril(input, diagonal: int = 0):
-    """Return the lower triangular part of ``input``."""
-    return functional.tril(input, diagonal)
-
-
-def flatten(input, start_dim: int = 0, end_dim: int = -1):
-    """Return a view of ``input`` with dimensions flattened."""
-    return functional.flatten(input, start_dim, end_dim)
-
-
-def ravel(input):
-    """Flatten all dimensions of ``input``."""
-    return functional.ravel(input)
-
-
-def transpose(input, dim0: int, dim1: int):
-    """Swap two dimensions of ``input``."""
-    return functional.transpose(input, dim0, dim1)
-
-
-def permute(input, dims: Sequence[int]):
-    """Reorder dimensions of ``input`` according to ``dims``."""
-    return functional.permute(input, dims)
-
-
-def movedim(input, source, destination):
-    """Move tensor dimensions to new positions."""
-    return functional.movedim(input, source, destination)
-
-
-moveaxis = movedim
-
-
-def swapaxes(input, axis0: int, axis1: int):
-    """Swap two axes of ``input``."""
-    return functional.swapaxes(input, axis0, axis1)
-
-
-swapdims = swapaxes
-
-
-def squeeze(input, dim: Optional[int] = None):
-    """Remove dimensions of size 1 from ``input``."""
-    return functional.squeeze(input, dim)
-
-
-def unsqueeze(input, dim: int):
-    """Insert a dimension of size 1 at position ``dim`` in ``input``."""
-    return functional.unsqueeze(input, dim)
-
-
-def expand(input, *shape: int):
-    """Return ``input`` expanded to a larger ``shape``."""
-    return functional.expand(input, *shape)
-
-
-def repeat(input, *repeats: int):
-    """Repeat ``input`` along each dimension."""
-    return functional.repeat(input, *repeats)
-
-
-def repeat_interleave(
-    input,
-    repeats,
-    dim: Optional[Union[int, Sequence[int]]] = None,
-    output_size: Optional[int] = None,
-):
-    """Repeat elements of ``input`` along a dimension."""
-
-    return functional.repeat_interleave(input, repeats, dim, output_size)
-
-
-def flip(input, dims: Union[int, Sequence[int]]):
-    """Flip ``input`` along specified dimensions."""
-    return functional.flip(input, dims)
-
-
-def roll(input, shifts, dims: Optional[Union[int, Sequence[int]]] = None):
-    """Roll ``input`` along specified dimensions."""
-    return functional.roll(input, shifts, dims)
-
-
-def where(condition, input, other):
-    """Select elements from ``input`` or ``other`` based on ``condition``."""
-    return functional.where(condition, input, other)
-
-
-def masked_fill(input, mask, value):
-    """Fill elements of ``input`` where ``mask`` is ``True``."""
-    return functional.masked_fill(input, mask, value)
 
 
 # Device management

@@ -13,16 +13,22 @@ from __future__ import annotations
 import importlib
 
 try:
-    from ._backend import (
-        autograd_get_gradient,
-        autograd_is_graph_consumed,
-        autograd_mark_graph_consumed,
-    )
-    from ._backend import core as _minitensor_core
+    from . import _core as _minitensor_core
 except ImportError as e:
     raise ImportError(
         "The minitensor core extension is not built. "
         "Run `pip install -e .` or `maturin develop` to compile the Rust backend."
+    ) from e
+
+try:
+    autograd_get_gradient = _minitensor_core.get_gradient
+    autograd_is_graph_consumed = _minitensor_core.is_autograd_graph_consumed
+    autograd_mark_graph_consumed = _minitensor_core.mark_autograd_graph_consumed
+except AttributeError as e:  # pragma: no cover - surfaces when extension is out of date
+    raise RuntimeError(
+        "The loaded Rust backend is missing required autograd helpers. "
+        "Rebuild minitensor (for example with `pip install -e .`) so that the "
+        "Python package and compiled extension stay in sync."
     ) from e
 
 if not hasattr(_minitensor_core.Tensor, "detach_"):
@@ -50,6 +56,22 @@ else:
 from numbers import Integral, Real
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Union
 from weakref import WeakSet
+
+
+class _TensorMeta(type):
+    """Metaclass that treats backend tensors as native Tensor instances."""
+
+    def __instancecheck__(cls, instance: object) -> bool:  # pragma: no cover - trivial
+        try:
+            from . import _core as _minitensor_core
+        except Exception:
+            return super().__instancecheck__(instance)
+
+        if isinstance(instance, _minitensor_core.Tensor):
+            return True
+
+        return super().__instancecheck__(instance)
+
 
 np: Any | None = None
 _HAS_NUMPY = False
@@ -210,7 +232,7 @@ def get_default_dtype() -> str:
     return _minitensor_core.get_default_dtype()
 
 
-class Tensor:
+class Tensor(metaclass=_TensorMeta):
     """
     A multi-dimensional array with automatic differentiation support and NumPy compatibility.
     This class wraps a Rust backend for efficient tensor computations and provides a unified interface

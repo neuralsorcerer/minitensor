@@ -59,7 +59,7 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 /// Create a tensor of zeros with the same shape and dtype as input
 #[pyfunction]
 fn zeros_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape();
+    let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
     PyTensor::zeros(shape, Some(dtype_str), None, Some(false))
@@ -68,7 +68,7 @@ fn zeros_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
 /// Create a tensor of ones with the same shape and dtype as input
 #[pyfunction]
 fn ones_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape();
+    let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
     PyTensor::ones(shape, Some(dtype_str), None, Some(false))
@@ -78,7 +78,7 @@ fn ones_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
 #[pyfunction]
 #[pyo3(signature = (tensor, dtype=None))]
 fn empty_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape();
+    let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
     PyTensor::empty(shape, Some(dtype_str), None, Some(false))
@@ -87,7 +87,7 @@ fn empty_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
 /// Create a tensor filled with a value, same shape and dtype as input
 #[pyfunction]
 fn full_like(tensor: &PyTensor, fill_value: f64, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape();
+    let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
     PyTensor::full(shape, fill_value, Some(dtype_str), None, Some(false))
@@ -168,8 +168,8 @@ fn where_py(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyResult<PyTens
 #[pyo3(signature = (a, b, axis=None))]
 fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
     // Determine axes for each tensor separately (allow different ranks)
-    let shape_a = a.shape();
-    let shape_b = b.shape();
+    let shape_a = a.shape_vec();
+    let shape_b = b.shape_vec();
     let ndim_a = shape_a.len();
     let ndim_b = shape_b.len();
     let mut axis_i32 = axis.unwrap_or(-1);
@@ -235,8 +235,9 @@ fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
 
     // Helper to extract a component along a given axis
     let extract = |t: &PyTensor, axis: usize, idx: usize| -> PyResult<engine::tensor::Tensor> {
-        let mut indices = Vec::with_capacity(t.shape().len());
-        for (dim, &size) in t.shape().iter().enumerate() {
+        let dims = t.shape_vec();
+        let mut indices = Vec::with_capacity(dims.len());
+        for (dim, &size) in dims.iter().enumerate() {
             if dim == axis {
                 indices.push(TensorIndex::Index(idx));
             } else {

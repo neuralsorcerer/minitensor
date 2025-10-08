@@ -10,9 +10,9 @@ use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
 use engine::Device;
-use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss};
+use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss, MSELoss};
 use engine::nn::{
-    DenseLayer, HuberLoss, Layer, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
+    DenseLayer, HuberLoss, Layer, MAELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
     activation::{ELU, GELU, LeakyReLU},
     conv::Conv2d,
     dropout::{Dropout, Dropout2d},
@@ -21,28 +21,138 @@ use engine::nn::{
 };
 use engine::operations::batch_norm as batch_norm_op;
 use engine::operations::conv2d as conv2d_op;
+use engine::operations::linalg::matmul as matmul_op;
 use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
-use pyo3::exceptions::PyIndexError;
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
+
+fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
+    if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
+        return Ok(tensor);
+    }
+
+    let py = value.py();
+    let inner = value
+        .getattr(intern!(py, "_tensor"))
+        .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor or core Tensor"))?;
+    inner.extract::<PyRef<PyTensor>>()
+}
+
+fn borrow_optional_tensor<'py>(
+    value: Option<&'py Bound<'py, PyAny>>,
+) -> PyResult<Option<PyRef<'py, PyTensor>>> {
+    value.map(borrow_tensor).transpose()
+}
+
+fn borrow_tensor_mut<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRefMut<'py, PyTensor>> {
+    if let Ok(tensor) = value.extract::<PyRefMut<PyTensor>>() {
+        return Ok(tensor);
+    }
+
+    let py = value.py();
+    let inner = value
+        .getattr(intern!(py, "_tensor"))
+        .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor or core Tensor"))?;
+    inner.extract::<PyRefMut<PyTensor>>()
+}
+
+fn borrow_optional_tensor_mut<'py>(
+    value: Option<&'py Bound<'py, PyAny>>,
+) -> PyResult<Option<PyRefMut<'py, PyTensor>>> {
+    value.map(borrow_tensor_mut).transpose()
+}
+
+#[pyfunction]
+fn dense_layer(
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+
+    if weight_tensor.tensor().ndim() != 2 {
+        return Err(PyValueError::new_err("weight tensor must be 2-dimensional"));
+    }
+
+    let weight_t = weight_tensor
+        .tensor()
+        .transpose(0, 1)
+        .map_err(_convert_error)?;
+    let mut output = matmul_op(input_tensor.tensor(), &weight_t).map_err(_convert_error)?;
+
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    if let Some(bias_ref) = bias_tensor {
+        output = output.add(bias_ref.tensor()).map_err(_convert_error)?;
+    }
+
+    Ok(PyTensor::from_tensor(output))
+}
+
+fn parse_pair_arg(
+    name: &str,
+    value: Option<&Bound<PyAny>>,
+    default: (usize, usize),
+) -> PyResult<(usize, usize)> {
+    match value {
+        None => Ok(default),
+        Some(bound) => {
+            if let Ok(scalar) = bound.extract::<isize>() {
+                if scalar < 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "{name} must be non-negative"
+                    )));
+                }
+                let scalar = scalar as usize;
+                return Ok((scalar, scalar));
+            }
+
+            if let Ok(pair) = bound.extract::<(isize, isize)>() {
+                if pair.0 < 0 || pair.1 < 0 {
+                    return Err(PyValueError::new_err(format!(
+                        "{name} values must be non-negative"
+                    )));
+                }
+                return Ok((pair.0 as usize, pair.1 as usize));
+            }
+
+            let seq = bound.extract::<Vec<isize>>()?;
+            if seq.len() != 2 {
+                return Err(PyTypeError::new_err(format!(
+                    "{name} must be an int or a sequence of length 2"
+                )));
+            }
+            if seq[0] < 0 || seq[1] < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "{name} values must be non-negative"
+                )));
+            }
+            Ok((seq[0] as usize, seq[1] as usize))
+        }
+    }
+}
 
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None, stride=None, padding=None))]
 fn conv2d(
-    input: &PyTensor,
-    weight: &PyTensor,
-    bias: Option<&PyTensor>,
-    stride: Option<(usize, usize)>,
-    padding: Option<(usize, usize)>,
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+    stride: Option<&Bound<PyAny>>,
+    padding: Option<&Bound<PyAny>>,
 ) -> PyResult<PyTensor> {
-    let stride = stride.unwrap_or((1, 1));
-    let padding = padding.unwrap_or((0, 0));
-    let bias_tensor = bias.map(|b| b.tensor());
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    let stride = parse_pair_arg("stride", stride, (1, 1))?;
+    let padding = parse_pair_arg("padding", padding, (0, 0))?;
     let result = conv2d_op(
-        input.tensor(),
-        weight.tensor(),
-        bias_tensor,
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
         padding,
     )
@@ -53,25 +163,29 @@ fn conv2d(
 #[pyfunction]
 #[pyo3(signature = (input, running_mean=None, running_var=None, weight=None, bias=None, training=true, momentum=0.1, eps=1e-5))]
 fn batch_norm(
-    input: &PyTensor,
-    running_mean: Option<PyRefMut<PyTensor>>,
-    running_var: Option<PyRefMut<PyTensor>>,
-    weight: Option<&PyTensor>,
-    bias: Option<&PyTensor>,
+    input: &Bound<PyAny>,
+    running_mean: Option<&Bound<PyAny>>,
+    running_var: Option<&Bound<PyAny>>,
+    weight: Option<&Bound<PyAny>>,
+    bias: Option<&Bound<PyAny>>,
     training: bool,
     momentum: f64,
     eps: f64,
 ) -> PyResult<PyTensor> {
-    let mut rm_opt = running_mean;
-    let mut rv_opt = running_var;
-    let rm_tensor = rm_opt.as_mut().map(|t| t.tensor_mut());
-    let rv_tensor = rv_opt.as_mut().map(|t| t.tensor_mut());
+    let input_tensor = borrow_tensor(input)?;
+    let mut running_mean_tensor = borrow_optional_tensor_mut(running_mean)?;
+    let mut running_var_tensor = borrow_optional_tensor_mut(running_var)?;
+    let weight_tensor = borrow_optional_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+
+    let rm_tensor = running_mean_tensor.as_mut().map(|t| t.tensor_mut());
+    let rv_tensor = running_var_tensor.as_mut().map(|t| t.tensor_mut());
     let result = batch_norm_op(
-        input.tensor(),
+        input_tensor.tensor(),
         rm_tensor,
         rv_tensor,
-        weight.map(|w| w.tensor()),
-        bias.map(|b| b.tensor()),
+        weight_tensor.as_ref().map(|w| w.tensor()),
+        bias_tensor.as_ref().map(|b| b.tensor()),
         training,
         momentum,
         eps,
@@ -83,17 +197,85 @@ fn batch_norm(
 #[pyfunction]
 #[pyo3(signature = (input, target, reduction="mean", dim=1))]
 fn cross_entropy(
-    input: &PyTensor,
-    target: &PyTensor,
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
     reduction: &str,
     dim: isize,
 ) -> PyResult<PyTensor> {
-    let ndim = input.tensor().ndim() as isize;
+    let input_tensor = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+
+    let ndim = input_tensor.tensor().ndim() as isize;
     let axis = if dim < 0 { ndim + dim } else { dim };
     if axis < 0 || axis as usize >= ndim as usize {
         return Err(PyIndexError::new_err("dim out of range"));
     }
-    let result = cross_entropy_op(input.tensor(), target.tensor(), reduction, axis as usize)
+    let result = cross_entropy_op(
+        input_tensor.tensor(),
+        target_tensor.tensor(),
+        reduction,
+        axis as usize,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "dropout")]
+#[pyo3(signature = (input, p=0.5, training=true))]
+fn dropout_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let mut layer = Dropout::new(Some(p)).map_err(_convert_error)?;
+    if training {
+        layer.train();
+    } else {
+        layer.eval();
+    }
+    let result = layer.forward(tensor.tensor()).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "dropout2d")]
+#[pyo3(signature = (input, p=0.5, training=true))]
+fn dropout2d_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let mut layer = Dropout2d::new(Some(p)).map_err(_convert_error)?;
+    if training {
+        layer.train();
+    } else {
+        layer.eval();
+    }
+    let result = layer.forward(tensor.tensor()).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "mse_loss")]
+fn mse_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let loss = MSELoss::new(reduction);
+    let result = loss
+        .forward(prediction.tensor(), target_tensor.tensor())
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "binary_cross_entropy")]
+#[pyo3(signature = (input, target, reduction="mean"))]
+fn binary_cross_entropy_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: &str,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let loss = BCELoss::new(reduction);
+    let result = loss
+        .forward(prediction.tensor(), target_tensor.tensor())
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
@@ -126,26 +308,32 @@ enum ModuleType {
 #[pymethods]
 impl PyModule {
     /// Forward pass through the module
-    fn forward(&mut self, input: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&mut self, input: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let input_tensor = borrow_tensor(input)?;
         let result = match &mut self.inner {
-            ModuleType::DenseLayer(layer) => layer.forward(input.tensor()),
-            ModuleType::ReLU(layer) => layer.forward(input.tensor()),
-            ModuleType::Sigmoid(layer) => layer.forward(input.tensor()),
-            ModuleType::Tanh(layer) => layer.forward(input.tensor()),
-            ModuleType::Softmax(layer) => layer.forward(input.tensor()),
-            ModuleType::LeakyReLU(layer) => layer.forward(input.tensor()),
-            ModuleType::ELU(layer) => layer.forward(input.tensor()),
-            ModuleType::GELU(layer) => layer.forward(input.tensor()),
-            ModuleType::Sequential(layer) => layer.forward(input.tensor()),
-            ModuleType::Conv2d(layer) => layer.forward(input.tensor()),
-            ModuleType::BatchNorm1d(layer) => layer.forward(input.tensor()),
-            ModuleType::BatchNorm2d(layer) => layer.forward(input.tensor()),
-            ModuleType::Dropout(layer) => layer.forward(input.tensor()),
-            ModuleType::Dropout2d(layer) => layer.forward(input.tensor()),
+            ModuleType::DenseLayer(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::ReLU(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Sigmoid(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Tanh(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Softmax(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::LeakyReLU(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::ELU(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::GELU(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Sequential(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Conv2d(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::BatchNorm1d(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::BatchNorm2d(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Dropout(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Dropout2d(layer) => layer.forward(input_tensor.tensor()),
         }
         .map_err(_convert_error)?;
 
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&mut self, input: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(input)
     }
 
     /// Get all parameters of the module
@@ -289,7 +477,8 @@ impl PyModule {
         Ok(dict.into())
     }
 
-    /// Generate a human readable summary
+    /// Generate summary
+    #[pyo3(signature = (name=None))]
     fn summary(&self, name: Option<&str>) -> PyResult<String> {
         match &self.inner {
             ModuleType::Sequential(model) => Ok(SequentialUtils::model_summary(model, name)),
@@ -600,6 +789,7 @@ pub struct PyDenseLayer;
 impl PyDenseLayer {
     /// Create a new dense layer
     #[new]
+    #[pyo3(signature = (in_features, out_features, bias=None, device=None, dtype=None))]
     fn new(
         in_features: usize,
         out_features: usize,
@@ -720,6 +910,7 @@ pub struct PySoftmax;
 impl PySoftmax {
     /// Create a new Softmax layer
     #[new]
+    #[pyo3(signature = (dim=None))]
     fn new(dim: Option<usize>) -> (Self, PyModule) {
         let softmax = Softmax::new(dim);
         (Self, PyModule::from_softmax(softmax))
@@ -747,6 +938,7 @@ pub struct PyLeakyReLU;
 impl PyLeakyReLU {
     /// Create a new LeakyReLU layer
     #[new]
+    #[pyo3(signature = (negative_slope=None))]
     fn new(negative_slope: Option<f64>) -> (Self, PyModule) {
         let negative_slope = negative_slope.unwrap_or(0.01);
         let leaky_relu = LeakyReLU::new(Some(negative_slope));
@@ -775,6 +967,7 @@ pub struct PyELU;
 impl PyELU {
     /// Create a new ELU layer
     #[new]
+    #[pyo3(signature = (alpha=None))]
     fn new(alpha: Option<f64>) -> (Self, PyModule) {
         let alpha = alpha.unwrap_or(1.0);
         let elu = ELU::new(Some(alpha));
@@ -817,6 +1010,7 @@ pub struct PyDropout;
 impl PyDropout {
     /// Create a new Dropout layer
     #[new]
+    #[pyo3(signature = (p=None))]
     fn new(p: Option<f64>) -> PyResult<(Self, PyModule)> {
         let p = p.unwrap_or(0.5);
         let dropout = Dropout::new(Some(p)).map_err(_convert_error)?;
@@ -845,6 +1039,7 @@ pub struct PyDropout2d;
 impl PyDropout2d {
     /// Create a new Dropout2d layer
     #[new]
+    #[pyo3(signature = (p=None))]
     fn new(p: Option<f64>) -> PyResult<(Self, PyModule)> {
         let p = p.unwrap_or(0.5);
         let dropout = Dropout2d::new(Some(p)).map_err(_convert_error)?;
@@ -873,6 +1068,16 @@ pub struct PyConv2d;
 impl PyConv2d {
     /// Create a new Conv2d layer
     #[new]
+    #[pyo3(signature = (
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=None,
+        padding=None,
+        bias=None,
+        device=None,
+        dtype=None
+    ))]
     fn new(
         in_channels: usize,
         out_channels: usize,
@@ -959,6 +1164,7 @@ pub struct PyBatchNorm1d;
 impl PyBatchNorm1d {
     /// Create a new BatchNorm1d layer
     #[new]
+    #[pyo3(signature = (num_features, eps=None, momentum=None, affine=None, device=None, dtype=None))]
     fn new(
         num_features: usize,
         eps: Option<f64>,
@@ -1001,6 +1207,7 @@ pub struct PyBatchNorm2d;
 impl PyBatchNorm2d {
     /// Create a new BatchNorm2d layer
     #[new]
+    #[pyo3(signature = (num_features, eps=None, momentum=None, affine=None, device=None, dtype=None))]
     fn new(
         num_features: usize,
         eps: Option<f64>,
@@ -1087,6 +1294,7 @@ pub struct PyMSELoss {
 impl PyMSELoss {
     /// Create a new MSE loss
     #[new]
+    #[pyo3(signature = (reduction=None))]
     fn new(reduction: Option<&str>) -> Self {
         let reduction = reduction.unwrap_or("mean");
         Self {
@@ -1095,12 +1303,19 @@ impl PyMSELoss {
     }
 
     /// Compute the MSE loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the reduction mode
@@ -1125,6 +1340,7 @@ pub struct PyMAELoss {
 impl PyMAELoss {
     /// Create a new MAE loss
     #[new]
+    #[pyo3(signature = (reduction=None))]
     fn new(reduction: Option<&str>) -> Self {
         let reduction = reduction.unwrap_or("mean");
         Self {
@@ -1133,12 +1349,19 @@ impl PyMAELoss {
     }
 
     /// Compute the MAE loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the reduction mode
@@ -1163,6 +1386,7 @@ pub struct PyHuberLoss {
 impl PyHuberLoss {
     /// Create a new Huber loss
     #[new]
+    #[pyo3(signature = (delta=None, reduction=None))]
     fn new(delta: Option<f64>, reduction: Option<&str>) -> Self {
         let delta = delta.unwrap_or(1.0);
         let reduction = reduction.unwrap_or("mean");
@@ -1172,12 +1396,19 @@ impl PyHuberLoss {
     }
 
     /// Compute the Huber loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the delta parameter
@@ -1212,6 +1443,7 @@ pub struct PyCrossEntropyLoss {
 impl PyCrossEntropyLoss {
     /// Create a new Cross Entropy loss
     #[new]
+    #[pyo3(signature = (reduction=None))]
     fn new(reduction: Option<&str>) -> Self {
         let reduction = reduction.unwrap_or("mean");
         Self {
@@ -1220,12 +1452,19 @@ impl PyCrossEntropyLoss {
     }
 
     /// Compute the Cross Entropy loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the reduction mode
@@ -1250,6 +1489,7 @@ pub struct PyBCELoss {
 impl PyBCELoss {
     /// Create a new BCE loss
     #[new]
+    #[pyo3(signature = (reduction=None))]
     fn new(reduction: Option<&str>) -> Self {
         let reduction = reduction.unwrap_or("mean");
         Self {
@@ -1258,12 +1498,19 @@ impl PyBCELoss {
     }
 
     /// Compute the BCE loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the reduction mode
@@ -1288,6 +1535,7 @@ pub struct PyFocalLoss {
 impl PyFocalLoss {
     /// Create a new Focal loss
     #[new]
+    #[pyo3(signature = (alpha=None, gamma=None, reduction=None))]
     fn new(alpha: Option<f64>, gamma: Option<f64>, reduction: Option<&str>) -> Self {
         let alpha = alpha.unwrap_or(0.25);
         let gamma = gamma.unwrap_or(2.0);
@@ -1298,12 +1546,19 @@ impl PyFocalLoss {
     }
 
     /// Compute the Focal loss
-    fn forward(&self, predictions: &PyTensor, targets: &PyTensor) -> PyResult<PyTensor> {
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
         let result = self
             .inner
             .forward(predictions.tensor(), targets.tensor())
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
     }
 
     /// Get the alpha parameter
@@ -1357,9 +1612,17 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PySequential>()?;
 
     // Add functional APIs
+    nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(batch_norm, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(cross_entropy, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(dropout_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(dropout2d_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(mse_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        binary_cross_entropy_functional,
+        &nn_module
+    )?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;

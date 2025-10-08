@@ -13,6 +13,7 @@ mod debug;
 mod device;
 mod dtype;
 mod error;
+mod functional;
 mod nn;
 mod numpy_compat;
 mod optim;
@@ -22,7 +23,7 @@ mod tensor;
 
 use device::PyDevice;
 use error::_convert_error;
-use tensor::PyTensor;
+use tensor::{PyTensor, ShapeSequence};
 
 /// Python module for minitensor core
 #[pymodule]
@@ -32,11 +33,16 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 
     // Add core classes
     m.add_class::<PyTensor>()?;
+    m.add_class::<ShapeSequence>()?;
     m.add_class::<PyDevice>()?;
 
     // Register submodules
     nn::register_nn_module(py, m)?;
     optim::register_optim_module(py, m)?;
+
+    let functional_module = PyModule::new(py, "functional")?;
+    functional::register_functional_module(py, &functional_module)?;
+    m.add_submodule(&functional_module)?;
 
     // Add debugging utilities
     let debug_module = PyModule::new(py, "debug")?;
