@@ -256,7 +256,11 @@ impl PyTensor {
 
     #[getter]
     fn has_grad(&self) -> bool {
-        self.inner.has_grad()
+        if self.inner.has_grad() {
+            return true;
+        }
+
+        engine::autograd::get_gradient(&self.inner).is_some()
     }
 
     #[getter]
