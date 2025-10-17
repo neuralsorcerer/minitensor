@@ -11,6 +11,7 @@ Tensor class with NumPy compatibility and automatic differentiation support.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Iterable
 
 try:
     from . import _core as _minitensor_core
@@ -542,12 +543,7 @@ class Tensor(metaclass=_TensorMeta):
     # Tensor manipulation methods
     def reshape(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
         """Reshape tensor to new shape."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = list(shape[0])
-        else:
-            shape = list(shape)
-
-        return self._wrap_core_tensor(self._tensor.reshape(shape))
+        return self._wrap_core_tensor(self._tensor.reshape(*shape))
 
     def view(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
         """Alias for reshape."""
@@ -559,11 +555,7 @@ class Tensor(metaclass=_TensorMeta):
 
     def permute(self, *dims: int) -> "Tensor":
         """Permute tensor dimensions."""
-        if len(dims) == 1 and isinstance(dims[0], (list, tuple)):
-            dims = list(dims[0])
-        else:
-            dims = list(dims)
-        return self._wrap_core_tensor(self._tensor.permute(dims))
+        return self._wrap_core_tensor(self._tensor.permute(*dims))
 
     def movedim(
         self, source: Union[int, Sequence[int]], destination: Union[int, Sequence[int]]
@@ -591,11 +583,7 @@ class Tensor(metaclass=_TensorMeta):
 
     def expand(self, *shape: int) -> "Tensor":
         """Expand tensor dimensions without allocating new memory."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            dims = list(shape[0])
-        else:
-            dims = list(shape)
-        return self._wrap_core_tensor(self._tensor.expand(dims))
+        return self._wrap_core_tensor(self._tensor.expand(*shape))
 
     def repeat(self, *repeats: int) -> "Tensor":
         """Repeat the tensor along each dimension."""
@@ -1469,6 +1457,60 @@ class Tensor(metaclass=_TensorMeta):
 
     # Static tensor creation methods
     @staticmethod
+    def _coerce_shape_like(shape_like: Any) -> Tuple[int, ...]:
+        """Normalize arbitrary ``shape_like`` inputs into a tuple of Python ints."""
+
+        if isinstance(shape_like, Integral):
+            return (int(shape_like),)
+
+        if isinstance(shape_like, Tensor):
+            return tuple(int(dim) for dim in shape_like.shape)
+
+        if isinstance(shape_like, (list, tuple)):
+            return tuple(int(dim) for dim in shape_like)
+
+        if hasattr(shape_like, "tolist"):
+            converted = shape_like.tolist()
+            return Tensor._coerce_shape_like(converted)
+
+        if isinstance(shape_like, Iterable) and not isinstance(
+            shape_like, (str, bytes, bytearray)
+        ):
+            return tuple(int(dim) for dim in shape_like)
+
+        raise TypeError("shape arguments must be integers or sequences of integers")
+
+    @staticmethod
+    def _normalize_factory_shape(
+        shape: Tuple[Union[int, Sequence[int]], ...],
+    ) -> Tuple[int, ...]:
+        """Collapse PyTorch-style varargs into a backend-friendly shape tuple."""
+
+        if not shape:
+            return ()
+
+        if len(shape) == 1:
+            return Tensor._coerce_shape_like(shape[0])
+
+        return tuple(int(dim) for dim in shape)
+
+    @staticmethod
+    def _coerce_factory_device(device: Any) -> Optional[_minitensor_core.Device]:
+        """Convert optional device arguments into ``_minitensor_core.Device``."""
+
+        if device is None:
+            return None
+
+        if isinstance(device, _minitensor_core.Device):
+            return device
+
+        normalized = _normalize_device(device)
+        if normalized is None:
+            return None
+
+        return _minitensor_core.Device(normalized)
+
+    @staticmethod
     def zeros(
         *shape: Union[int, Sequence[int]],
         dtype: Optional[str] = None,
@@ -1476,10 +1518,17 @@ class Tensor(metaclass=_TensorMeta):
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with zeros."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = shape[0]
+
+        normalized_shape = Tensor._normalize_factory_shape(shape)
+        device_obj = Tensor._coerce_factory_device(device)
+
         return Tensor._wrap_core_tensor(
-            _minitensor_core.Tensor.zeros(list(shape), dtype, device, requires_grad)
+            _minitensor_core.Tensor.zeros(
+                *normalized_shape,
+                dtype=dtype,
+                device=device_obj,
+                requires_grad=requires_grad,
+            )
         )
 
     @staticmethod
@@ -1490,10 +1539,16 @@ class Tensor(metaclass=_TensorMeta):
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with ones."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = shape[0]
+        normalized_shape = Tensor._normalize_factory_shape(shape)
+        device_obj = Tensor._coerce_factory_device(device)
+
         return Tensor._wrap_core_tensor(
-            _minitensor_core.Tensor.ones(list(shape), dtype, device, requires_grad)
+            _minitensor_core.Tensor.ones(
+                *normalized_shape,
+                dtype=dtype,
+                device=device_obj,
+                requires_grad=requires_grad,
+            )
         )
 
     @staticmethod
@@ -1505,9 +1560,16 @@ class Tensor(metaclass=_TensorMeta):
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor filled with a specific value."""
+        normalized_shape = Tensor._normalize_factory_shape((shape,))
+        device_obj = Tensor._coerce_factory_device(device)
+
         return Tensor._wrap_core_tensor(
             _minitensor_core.Tensor.full(
-                list(shape), fill_value, dtype, device, requires_grad
+                list(normalized_shape),
+                fill_value,
+                dtype,
+                device_obj,
+                requires_grad,
             )
         )
 
@@ -1519,10 +1581,16 @@ class Tensor(metaclass=_TensorMeta):
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with random values from uniform distribution [0, 1)."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = shape[0]
+        normalized_shape = Tensor._normalize_factory_shape(shape)
+        device_obj = Tensor._coerce_factory_device(device)
+
         return Tensor._wrap_core_tensor(
-            _minitensor_core.Tensor.rand(list(shape), dtype, device, requires_grad)
+            _minitensor_core.Tensor.rand(
+                *normalized_shape,
+                dtype=dtype,
+                device=device_obj,
+                requires_grad=requires_grad,
+            )
         )
 
     @staticmethod
@@ -1533,10 +1601,16 @@ class Tensor(metaclass=_TensorMeta):
         requires_grad: bool = False,
     ) -> "Tensor":
         """Create a tensor with random values from standard normal distribution."""
-        if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
-            shape = shape[0]
+        normalized_shape = Tensor._normalize_factory_shape(shape)
+        device_obj = Tensor._coerce_factory_device(device)
+
         return Tensor._wrap_core_tensor(
-            _minitensor_core.Tensor.randn(list(shape), dtype, device, requires_grad)
+            _minitensor_core.Tensor.randn(
+                *normalized_shape,
+                dtype=dtype,
+                device=device_obj,
+                requires_grad=requires_grad,
+            )
         )
 
     @staticmethod

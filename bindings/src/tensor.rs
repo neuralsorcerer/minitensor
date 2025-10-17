@@ -7,6 +7,7 @@
 use crate::device::PyDevice;
 use crate::dtype;
 use crate::error::_convert_error;
+use crate::numpy_compat::cross_impl;
 use engine::operations::binary::{BinaryOpKind, coerce_binary_operands};
 use engine::operations::shape_ops::RepeatInterleaveSpec;
 use engine::tensor::{Shape, TensorData};
@@ -15,12 +16,14 @@ use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use once_cell::sync::OnceCell;
 use pyo3::Py;
 use pyo3::conversion::IntoPyObjectExt;
-use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyBool, PyInt, PyList, PyModule, PySequence, PySequenceMethods, PySlice, PyString,
-    PyTuple,
+    PyAny, PyBool, PyDict, PyInt, PyList, PyModule, PySequence, PySequenceMethods, PySlice,
+    PyString, PyTuple,
 };
 use std::borrow::Cow;
 use std::convert::TryFrom;
@@ -142,12 +145,46 @@ impl PyTensor {
             convert_python_data_to_tensor(value, dtype::default_dtype(), Device::cpu(), false)?;
         Ok(Self { inner: tensor })
     }
+
+    pub fn max_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.max(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn min_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.min(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
+    pub fn median_with_indices(
+        &self,
+        dim: Option<isize>,
+        keepdim: bool,
+    ) -> PyResult<(Self, Option<Self>)> {
+        match self.inner.median(dim, keepdim) {
+            Ok((values, indices_opt)) => {
+                let values_tensor = Self { inner: values };
+                let indices_tensor = indices_opt.map(|inner| Self { inner });
+                Ok((values_tensor, indices_tensor))
+            }
+            Err(err @ MinitensorError::InvalidArgument { .. }) => {
+                Err(PyRuntimeError::new_err(err.detailed_message()))
+            }
+            Err(err) => Err(_convert_error(err)),
+        }
+    }
 }
 
 #[pymethods]
 impl PyTensor {
+    #[classattr]
+    fn __array_priority__() -> f64 {
+        1000.0
+    }
+
     /// Create a new tensor from Python data
     #[new]
+    #[pyo3(signature = (data, dtype=None, device=None, requires_grad=false))]
     fn new(
         data: &Bound<PyAny>,
         dtype: Option<&str>,
@@ -183,7 +220,20 @@ impl PyTensor {
     }
 
     #[getter]
-    fn requires_grad(&self) -> bool {
+    fn _tensor(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+
+    #[setter]
+    #[allow(non_snake_case)]
+    fn set__tensor(&mut self, value: &PyTensor) {
+        self.inner = value.inner.clone();
+    }
+
+    #[getter]
+    pub fn requires_grad(&self) -> bool {
         self.inner.requires_grad()
     }
 
@@ -247,8 +297,10 @@ impl PyTensor {
     }
 
     // Tensor manipulation methods
-    pub fn reshape(&self, shape: Vec<isize>) -> PyResult<Self> {
-        let reshaped = engine::operations::reshape_with_inference(&self.inner, shape)
+    #[pyo3(signature = (*shape))]
+    pub fn reshape(&self, shape: &Bound<PyTuple>) -> PyResult<Self> {
+        let dims = normalize_variadic_isize_args(shape, "shape")?;
+        let reshaped = engine::operations::reshape_with_inference(&self.inner, dims)
             .map_err(_convert_error)?;
         Ok(Self { inner: reshaped })
     }
@@ -260,8 +312,10 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    pub fn permute(&self, dims: Vec<isize>) -> PyResult<Self> {
-        let result = self.inner.permute(dims).map_err(_convert_error)?;
+    #[pyo3(signature = (*dims))]
+    pub fn permute(&self, dims: &Bound<PyTuple>) -> PyResult<Self> {
+        let dims_vec = normalize_variadic_isize_args(dims, "dims")?;
+        let result = self.inner.permute(dims_vec).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -279,6 +333,29 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(name = "moveaxis")]
+    #[pyo3(signature = (source, destination))]
+    pub fn moveaxis_alias(
+        &self,
+        source: &Bound<PyAny>,
+        destination: &Bound<PyAny>,
+    ) -> PyResult<Self> {
+        self.movedim(source, destination)
+    }
+
+    #[pyo3(name = "swapaxes")]
+    #[pyo3(signature = (dim0, dim1))]
+    pub fn swapaxes_alias(&self, dim0: isize, dim1: isize) -> PyResult<Self> {
+        self.transpose(Some(dim0), Some(dim1))
+    }
+
+    #[pyo3(name = "swapdims")]
+    #[pyo3(signature = (dim0, dim1))]
+    pub fn swapdims_alias(&self, dim0: isize, dim1: isize) -> PyResult<Self> {
+        self.transpose(Some(dim0), Some(dim1))
+    }
+
+    #[pyo3(signature = (dim=None))]
     pub fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
         let result = if let Some(d) = dim {
             self.inner.squeeze_dim(d)
@@ -289,35 +366,54 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim))]
     pub fn unsqueeze(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.unsqueeze(dim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn expand(&self, dims: Vec<isize>) -> PyResult<Self> {
-        let result = self.inner.expand(dims).map_err(_convert_error)?;
+    #[pyo3(signature = (*dims))]
+    pub fn expand(&self, dims: &Bound<PyTuple>) -> PyResult<Self> {
+        let dims_vec = normalize_variadic_isize_args(dims, "shape")?;
+        let result = self.inner.expand(dims_vec).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn repeat(&self, repeats: &Bound<PyAny>) -> PyResult<Self> {
-        let repeat_vec = normalize_repeat_spec(repeats)?;
+    #[pyo3(signature = (*repeats))]
+    pub fn repeat(&self, repeats: &Bound<PyTuple>) -> PyResult<Self> {
+        let repeats_any = if repeats.len() == 1 {
+            let first = repeats.get_item(0)?;
+            if first.downcast::<PySequence>().is_ok() {
+                first.clone().into_any()
+            } else {
+                repeats.clone().into_any()
+            }
+        } else {
+            repeats.clone().into_any()
+        };
+        let repeat_vec = normalize_repeat_spec(&repeats_any)?;
         let result = self.inner.repeat(repeat_vec).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn flip(&self, dims: Vec<isize>) -> PyResult<Self> {
+    pub fn flip(&self, dims: &Bound<PyAny>) -> PyResult<Self> {
+        let dims_vec = normalize_required_axes(dims, "dims")?;
         let result =
-            engine::operations::shape_ops::flip(&self.inner, &dims).map_err(_convert_error)?;
+            engine::operations::shape_ops::flip(&self.inner, &dims_vec).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn roll(&self, shifts: Vec<isize>, dims: Option<Vec<isize>>) -> PyResult<Self> {
-        let dims_ref = dims.as_ref().map(|d| d.as_slice());
-        let result = engine::operations::shape_ops::roll(&self.inner, &shifts, dims_ref)
+    #[pyo3(signature = (shifts, dims=None))]
+    pub fn roll(&self, shifts: &Bound<PyAny>, dims: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let shift_vec = normalize_roll_shifts(shifts)?;
+        let dims_vec = normalize_optional_axes(dims)?;
+        let dims_ref = dims_vec.as_ref().map(|d| d.as_slice());
+        let result = engine::operations::shape_ops::roll(&self.inner, &shift_vec, dims_ref)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (repeats, dim=None, output_size=None))]
     pub fn repeat_interleave(
         &self,
         repeats: &Bound<PyAny>,
@@ -427,9 +523,109 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn to(&self, device: &PyDevice) -> PyResult<Self> {
-        let result = self.inner.to(device.device()).map_err(_convert_error)?;
-        Ok(Self { inner: result })
+    #[pyo3(signature = (*args, **kwargs))]
+    fn to(&self, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDict>>) -> PyResult<Self> {
+        let mut dtype_spec: Option<DataType> = None;
+        let mut device_spec: Option<Device> = None;
+
+        if let Some(mapping) = kwargs {
+            for (key, value) in mapping.iter() {
+                let key_string = key.str()?.to_str()?.to_owned();
+                match key_string.as_str() {
+                    "dtype" => {
+                        if !value.is_none() {
+                            dtype_spec = Some(parse_dtype_like(&value)?);
+                        }
+                    }
+                    "device" => {
+                        if !value.is_none() {
+                            device_spec = Some(parse_device_like(&value)?);
+                        }
+                    }
+                    _ => {
+                        return Err(PyTypeError::new_err(format!(
+                            "to() got an unexpected keyword argument '{key_string}'"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if args.len() > 1 {
+            return Err(PyTypeError::new_err(format!(
+                "to() takes at most 1 positional argument but {} were given",
+                args.len()
+            )));
+        }
+
+        if args.len() == 1 {
+            let arg0 = args.get_item(0)?;
+            if arg0.is_none() {
+                // Explicit None does nothing
+            } else if let Ok(py_device) = arg0.extract::<PyDevice>() {
+                if device_spec.is_some() {
+                    return Err(PyTypeError::new_err(
+                        "to() received multiple device specifications",
+                    ));
+                }
+                device_spec = Some(py_device.device());
+            } else if let Ok(string_value) = arg0.extract::<String>() {
+                match dtype::parse_dtype(&string_value) {
+                    Ok(dtype) => {
+                        if let Some(existing) = dtype_spec {
+                            if existing != dtype {
+                                return Err(PyTypeError::new_err(
+                                    "dtype specified both positionally and via keyword",
+                                ));
+                            }
+                        }
+                        dtype_spec = Some(dtype);
+                    }
+                    Err(_) => {
+                        let device = Device::from_str(&string_value).map_err(|err| {
+                            PyValueError::new_err(format!(
+                                "Unsupported device specification '{string_value}': {err}"
+                            ))
+                        })?;
+                        if device_spec.is_some() {
+                            return Err(PyTypeError::new_err(
+                                "to() received multiple device specifications",
+                            ));
+                        }
+                        device_spec = Some(device);
+                    }
+                }
+            } else {
+                return Err(PyTypeError::new_err(
+                    "to() expects dtype strings, device strings, or Device objects",
+                ));
+            }
+        }
+
+        let mut result = self.inner.clone();
+        let mut mutated = false;
+
+        if let Some(dtype) = dtype_spec {
+            if result.dtype() != dtype {
+                result = result.astype(dtype).map_err(_convert_error)?;
+                mutated = true;
+            }
+        }
+
+        if let Some(device) = device_spec {
+            if result.device() != device {
+                result = result.to(device).map_err(_convert_error)?;
+                mutated = true;
+            }
+        }
+
+        if mutated {
+            Ok(Self { inner: result })
+        } else {
+            Ok(Self {
+                inner: self.inner.clone(),
+            })
+        }
     }
 
     fn cpu(&self) -> PyResult<Self> {
@@ -437,21 +633,55 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
-    fn astype(&self, dtype: &str) -> PyResult<Self> {
+    pub fn astype(&self, dtype: &str) -> PyResult<Self> {
         let dtype = dtype::parse_dtype(dtype)?;
         let result = self.inner.astype(dtype).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
     // Gradient operations
-    #[pyo3(signature = (gradient=None))]
-    fn backward(&self, gradient: Option<&PyTensor>) -> PyResult<()> {
-        let grad = gradient.map(|g| g.inner.clone());
-        self.inner.backward(grad).map_err(_convert_error)?;
+    #[pyo3(signature = (gradient=None, retain_graph=false, create_graph=false))]
+    fn backward(
+        &self,
+        gradient: Option<&Bound<PyAny>>,
+        retain_graph: bool,
+        create_graph: bool,
+    ) -> PyResult<()> {
+        if create_graph {
+            return Err(PyNotImplementedError::new_err(
+                "create_graph=True is not supported; all computations execute in the Rust backend",
+            ));
+        }
+
+        if !self.requires_grad() && self.is_leaf() {
+            return Err(PyRuntimeError::new_err(
+                "element 0 of tensors does not require grad and does not have a grad_fn",
+            ));
+        }
+
+        let grad_tensor = if let Some(value) = gradient {
+            if value.is_none() {
+                None
+            } else if let Ok(py_tensor) = value.extract::<PyTensor>() {
+                let mut tensor = py_tensor.inner.clone();
+                ensure_backward_gradient_compatible(&self.inner, &mut tensor)?;
+                Some(tensor)
+            } else {
+                let mut tensor = tensor_from_py_value(&self.inner, value)?;
+                ensure_backward_gradient_compatible(&self.inner, &mut tensor)?;
+                Some(tensor)
+            }
+        } else {
+            None
+        };
+
+        let _ = retain_graph;
+        self.inner.backward(grad_tensor).map_err(_convert_error)?;
+
         Ok(())
     }
 
-    fn requires_grad_(&mut self, requires_grad: bool) -> PyResult<()> {
+    pub fn requires_grad_(&mut self, requires_grad: bool) -> PyResult<()> {
         self.inner = self.inner.clone().requires_grad_(requires_grad);
         Ok(())
     }
@@ -554,13 +784,15 @@ impl PyTensor {
         self.ge_from_py(other)
     }
 
-    pub fn matmul(&self, other: &PyTensor) -> PyResult<Self> {
-        let result = self.inner.matmul(&other.inner).map_err(_convert_error)?;
+    pub fn matmul(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let other_tensor = tensor_from_py_value(&self.inner, other)?;
+        let result = self.inner.matmul(&other_tensor).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn dot(&self, other: &PyTensor) -> PyResult<Self> {
-        let result = self.inner.dot(&other.inner).map_err(_convert_error)?;
+    pub fn dot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let other_tensor = tensor_from_py_value(&self.inner, other)?;
+        let result = self.inner.dot(&other_tensor).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
@@ -628,6 +860,30 @@ impl PyTensor {
             .masked_fill(&mask_tensor, &value_tensor)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
+    }
+
+    #[pyo3(signature = (other, axis=None))]
+    pub fn cross(&self, other: &Bound<PyAny>, axis: Option<i32>) -> PyResult<Self> {
+        let py = other.py();
+
+        let maybe_tensor = if let Ok(tensor) = other.extract::<PyTensor>() {
+            Some(tensor)
+        } else if let Ok(attr) = other.getattr(intern!(py, "_tensor")) {
+            attr.extract::<PyTensor>().ok()
+        } else {
+            None
+        };
+
+        let other_tensor = if let Some(tensor) = maybe_tensor {
+            tensor
+        } else {
+            let dtype = self.inner.dtype();
+            let device = self.inner.device();
+            let converted = convert_python_data_to_tensor(other, dtype, device, false)?;
+            PyTensor::from_tensor(converted)
+        };
+
+        cross_impl(self, &other_tensor, axis)
     }
 
     pub fn maximum(&self, other: &Bound<PyAny>) -> PyResult<Self> {
@@ -763,6 +1019,7 @@ impl PyTensor {
     }
 
     // Reduction operations
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn sum(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
@@ -770,6 +1027,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn logsumexp(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
@@ -780,6 +1038,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn prod(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
@@ -787,6 +1046,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn mean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
@@ -794,71 +1054,69 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn all(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.all(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn any(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let result = self.inner.any(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim))]
     pub fn cumsum(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumsum(dim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim))]
     pub fn cumprod(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumprod(dim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn max(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.max(axis, keepdims).map_err(_convert_error)?;
-        Ok(Self { inner: result })
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn max(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        self.max_values(dim, keepdim)
     }
 
-    pub fn min(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.min(axis, keepdims).map_err(_convert_error)?;
-        Ok(Self { inner: result })
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn min(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        self.min_values(dim, keepdim)
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn median(
         &self,
-        axis: Option<isize>,
-        keepdims: Option<bool>,
+        dim: Option<isize>,
+        keepdim: Option<bool>,
     ) -> PyResult<(Self, Option<Self>)> {
-        let keepdims = keepdims.unwrap_or(false);
-        match self.inner.median(axis, keepdims) {
-            Ok((values, indices_opt)) => {
-                let values_tensor = Self { inner: values };
-                let indices_tensor = indices_opt.map(|inner| Self { inner });
-                Ok((values_tensor, indices_tensor))
-            }
-            Err(err @ MinitensorError::InvalidArgument { .. }) => {
-                Err(PyRuntimeError::new_err(err.detailed_message()))
-            }
-            Err(err) => Err(_convert_error(err)),
-        }
+        let keepdim = keepdim.unwrap_or(false);
+        self.median_with_indices(dim, keepdim)
     }
 
-    pub fn argmax(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.argmax(axis, keepdims).map_err(_convert_error)?;
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn argmax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.argmax(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
-    pub fn argmin(&self, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
-        let result = self.inner.argmin(axis, keepdims).map_err(_convert_error)?;
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn argmin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.argmin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (k, dim=None, largest=true, sorted=true))]
     pub fn topk(
         &self,
         k: usize,
@@ -877,6 +1135,7 @@ impl PyTensor {
         }
     }
 
+    #[pyo3(signature = (dim=None, descending=false, stable=false))]
     pub fn sort(
         &self,
         dim: Option<isize>,
@@ -894,6 +1153,7 @@ impl PyTensor {
         }
     }
 
+    #[pyo3(signature = (dim=None, descending=false, stable=false))]
     pub fn argsort(
         &self,
         dim: Option<isize>,
@@ -911,32 +1171,34 @@ impl PyTensor {
         }
     }
 
+    #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn std(
         &self,
-        axis: Option<isize>,
-        keepdims: Option<bool>,
+        dim: Option<isize>,
         unbiased: Option<bool>,
+        keepdim: Option<bool>,
     ) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
+        let keepdim = keepdim.unwrap_or(false);
         let unbiased = unbiased.unwrap_or(true);
         let result = self
             .inner
-            .std(axis, keepdims, unbiased)
+            .std(dim, keepdim, unbiased)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn var(
         &self,
-        axis: Option<isize>,
-        keepdims: Option<bool>,
+        dim: Option<isize>,
         unbiased: Option<bool>,
+        keepdim: Option<bool>,
     ) -> PyResult<Self> {
-        let keepdims = keepdims.unwrap_or(false);
+        let keepdim = keepdim.unwrap_or(false);
         let unbiased = unbiased.unwrap_or(true);
         let result = self
             .inner
-            .var(axis, keepdims, unbiased)
+            .var(dim, keepdim, unbiased)
             .map_err(_convert_error)?;
         Ok(Self { inner: result })
     }
@@ -960,12 +1222,17 @@ impl PyTensor {
     fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
             let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
-            Ok(Self { inner: result })
-        } else {
-            let exp = exponent.extract::<f64>()?;
-            let result = self.inner.powf(exp).map_err(_convert_error)?;
-            Ok(Self { inner: result })
+            return Ok(Self { inner: result });
         }
+
+        if let Ok(exp) = exponent.extract::<f64>() {
+            let result = self.inner.powf(exp).map_err(_convert_error)?;
+            return Ok(Self { inner: result });
+        }
+
+        let exp_tensor = tensor_from_py_value(&self.inner, exponent)?;
+        let result = self.inner.pow(&exp_tensor).map_err(_convert_error)?;
+        Ok(Self { inner: result })
     }
 
     fn exp(&self) -> PyResult<Self> {
@@ -1027,6 +1294,12 @@ impl PyTensor {
         self.pow(exponent)
     }
 
+    fn __rpow__(&self, base: &Bound<PyAny>, _mod: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let base_tensor = tensor_from_py_value(&self.inner, base)?;
+        let result = base_tensor.pow(&self.inner).map_err(_convert_error)?;
+        Ok(Self { inner: result })
+    }
+
     pub fn relu(&self) -> PyResult<Self> {
         let result = self.inner.relu().map_err(_convert_error)?;
         Ok(Self { inner: result })
@@ -1081,6 +1354,7 @@ impl PyTensor {
         Ok(Self { inner: result })
     }
 
+    #[pyo3(signature = (normalized_shape, weight=None, bias=None, eps=1e-5))]
     pub fn layer_norm(
         &self,
         normalized_shape: Vec<usize>,
@@ -1172,6 +1446,96 @@ impl PyTensor {
 
     fn numpy_copy(&self, py: Python) -> PyResult<Py<PyAny>> {
         convert_tensor_to_numpy(&self.inner, py, true)
+    }
+
+    #[pyo3(signature = (dtype=None))]
+    fn __array__(&self, py: Python, dtype: Option<&Bound<PyAny>>) -> PyResult<Py<PyAny>> {
+        let array = self.numpy(py)?;
+        if let Some(dtype_obj) = dtype {
+            let array_bound = array.bind(py);
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "copy"), false)?;
+            let casted =
+                array_bound.call_method(intern!(py, "astype"), (dtype_obj,), Some(&kwargs))?;
+            Ok(casted.into())
+        } else {
+            Ok(array)
+        }
+    }
+
+    #[pyo3(signature = (ufunc, method, *inputs, **kwargs))]
+    fn __array_ufunc__(
+        &self,
+        py: Python,
+        ufunc: &Bound<PyAny>,
+        method: &str,
+        inputs: &Bound<PyTuple>,
+        kwargs: Option<&Bound<PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if method != "__call__" {
+            return py_not_implemented(py);
+        }
+
+        if let Some(mapping) = kwargs {
+            if let Some(out) = mapping.get_item("out")? {
+                if !out.is_none() {
+                    return py_not_implemented(py);
+                }
+            }
+        }
+
+        let mut operands: Vec<Tensor> = Vec::with_capacity(inputs.len());
+        for value in inputs.iter() {
+            match tensor_from_py_value(&self.inner, &value) {
+                Ok(tensor) => operands.push(tensor),
+                Err(_) => return py_not_implemented(py),
+            }
+        }
+
+        let Some(name_obj) = ufunc.getattr(intern!(py, "__name__")).ok() else {
+            return py_not_implemented(py);
+        };
+        let name = name_obj.str()?.to_str()?.to_ascii_lowercase();
+
+        let result = match (name.as_str(), operands.len()) {
+            ("add", 2) => {
+                apply_binary_ufunc(&operands, BinaryOpKind::Add, |lhs, rhs| lhs.add(rhs))?
+            }
+            ("subtract", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Sub, |lhs, rhs| {
+                engine::operations::arithmetic::sub(lhs, rhs)
+            })?,
+            ("multiply", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Mul, |lhs, rhs| {
+                engine::operations::arithmetic::mul(lhs, rhs)
+            })?,
+            ("true_divide", 2) | ("divide", 2) => {
+                apply_binary_ufunc(&operands, BinaryOpKind::Div, |lhs, rhs| {
+                    engine::operations::arithmetic::div(lhs, rhs)
+                })?
+            }
+            ("power", 2) => {
+                apply_binary_ufunc(&operands, BinaryOpKind::Mul, |lhs, rhs| lhs.pow(rhs))?
+            }
+            ("maximum", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Maximum, |lhs, rhs| {
+                lhs.maximum(rhs)
+            })?,
+            ("minimum", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Minimum, |lhs, rhs| {
+                lhs.minimum(rhs)
+            })?,
+            ("negative", 1) => apply_unary_ufunc(&operands, |tensor| {
+                engine::operations::arithmetic::neg(tensor)
+            })?,
+            ("absolute", 1) | ("abs", 1) => apply_unary_ufunc(&operands, |tensor| tensor.abs())?,
+            ("exp", 1) => apply_unary_ufunc(&operands, |tensor| tensor.exp())?,
+            ("log", 1) => apply_unary_ufunc(&operands, |tensor| tensor.log())?,
+            ("sin", 1) => apply_unary_ufunc(&operands, |tensor| tensor.sin())?,
+            ("cos", 1) => apply_unary_ufunc(&operands, |tensor| tensor.cos())?,
+            ("tan", 1) => apply_unary_ufunc(&operands, |tensor| tensor.tan())?,
+            ("sqrt", 1) => apply_unary_ufunc(&operands, |tensor| tensor.sqrt())?,
+            _ => return py_not_implemented(py),
+        };
+
+        let py_tensor = Py::new(py, PyTensor::from_tensor(result))?;
+        Ok(py_tensor.into_any())
     }
 
     fn tolist(&self) -> PyResult<Py<PyAny>> {
@@ -1296,86 +1660,97 @@ impl PyTensor {
 
     // Static tensor creation methods
     #[staticmethod]
+    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn empty(
-        shape: Vec<usize>,
+        shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let shape = Shape::new(shape);
+        let shape = Shape::new(dims);
         let tensor = Tensor::empty(shape, dtype, device, requires_grad);
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn zeros(
-        shape: Vec<usize>,
+        shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let shape = Shape::new(shape);
+        let shape = Shape::new(dims);
         let tensor = Tensor::zeros(shape, dtype, device, requires_grad);
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn ones(
-        shape: Vec<usize>,
+        shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let shape = Shape::new(shape);
+        let shape = Shape::new(dims);
         let tensor = Tensor::ones(shape, dtype, device, requires_grad);
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     fn rand(
-        shape: Vec<usize>,
+        shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let shape = Shape::new(shape);
+        let shape = Shape::new(dims);
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, false)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     fn randn(
-        shape: Vec<usize>,
+        shape: &Bound<PyTuple>,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let shape = Shape::new(shape);
+        let shape = Shape::new(dims);
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, true)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (n, m=None, dtype=None, device=None, requires_grad=false))]
     fn eye(
         n: usize,
         m: Option<usize>,
@@ -1393,40 +1768,48 @@ impl PyTensor {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (shape, fill_value, dtype=None, device=None, requires_grad=false))]
     pub fn full(
-        shape: Vec<usize>,
+        shape: &Bound<PyAny>,
         fill_value: f64,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
-        let tensor = create_full_tensor(shape, fill_value, dtype, device, requires_grad)?;
+        let dims = parse_shape_like(shape, "shape")?;
+        let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (start, end=None, step=1.0, dtype=None, device=None, requires_grad=false))]
     fn arange(
         start: f64,
-        end: f64,
-        step: Option<f64>,
+        end: Option<f64>,
+        step: f64,
         dtype: Option<&str>,
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
-        let step = step.unwrap_or(1.0);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
+
+        let (start, end) = match end {
+            Some(value) => (start, value),
+            None => (0.0, start),
+        };
 
         let tensor = create_arange_tensor(start, end, step, dtype, device, requires_grad)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
+    #[pyo3(signature = (start, end, steps, dtype=None, device=None, requires_grad=false))]
     fn linspace(
         start: f64,
         end: f64,
@@ -1435,8 +1818,12 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        if steps == 0 {
+            return Err(PyValueError::new_err("steps must be greater than zero"));
+        }
+
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
         let tensor = create_linspace_tensor(start, end, steps, dtype, device, requires_grad)?;
@@ -1444,6 +1831,7 @@ impl PyTensor {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (start, end, steps, base=None, dtype=None, device=None, requires_grad=false))]
     fn logspace(
         start: f64,
         end: f64,
@@ -1453,8 +1841,12 @@ impl PyTensor {
         device: Option<&PyDevice>,
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
+        if steps == 0 {
+            return Err(PyValueError::new_err("steps must be greater than zero"));
+        }
+
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
         let base = base.unwrap_or(10.0);
 
@@ -1463,14 +1855,15 @@ impl PyTensor {
     }
 
     #[staticmethod]
-    fn from_numpy(array: &Bound<PyAny>, requires_grad: Option<bool>) -> PyResult<Self> {
-        let requires_grad = requires_grad.unwrap_or(false);
+    #[pyo3(signature = (array, requires_grad=false))]
+    fn from_numpy(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
         let tensor = convert_numpy_to_tensor(array, requires_grad)?;
         Ok(Self { inner: tensor })
     }
 
     #[staticmethod]
-    fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: Option<bool>) -> PyResult<Self> {
+    #[pyo3(signature = (array, requires_grad=false))]
+    fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
         // For now, same as from_numpy - true zero-copy would require more complex memory management
         Self::from_numpy(array, requires_grad)
     }
@@ -1568,21 +1961,22 @@ impl PyTensor {
     }
 
     /// Split tensor by chunk size or explicit sections along an axis
+    #[pyo3(signature = (split_size_or_sections, dim=0))]
     pub fn split(
         &self,
         split_size_or_sections: &Bound<PyAny>,
-        axis: Option<isize>,
+        dim: Option<isize>,
     ) -> PyResult<Vec<PyTensor>> {
-        let axis = axis.unwrap_or(0);
+        let dim = dim.unwrap_or(0);
         let ndim = self.inner.ndim() as isize;
-        let axis = if axis < 0 { axis + ndim } else { axis };
-        if axis < 0 || axis >= ndim {
+        let dim = if dim < 0 { dim + ndim } else { dim };
+        if dim < 0 || dim >= ndim {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "Dimension {} out of range",
-                axis
+                dim
             )));
         }
-        let axis = axis as usize;
+        let axis = dim as usize;
         let dim_size = self.inner.shape().dims()[axis];
 
         let mut sections: Vec<usize> = Vec::new();
@@ -1652,6 +2046,172 @@ impl PyTensor {
             start = end;
         }
         Ok(outputs)
+    }
+}
+
+fn convert_dimension(value: isize, arg_name: &str) -> PyResult<usize> {
+    if value < 0 {
+        return Err(PyValueError::new_err(format!(
+            "{arg_name} must contain non-negative integers",
+        )));
+    }
+
+    usize::try_from(value).map_err(|_| {
+        PyValueError::new_err(format!("{arg_name} value is too large for this platform",))
+    })
+}
+
+fn convert_dimensions(values: Vec<isize>, arg_name: &str) -> PyResult<Vec<usize>> {
+    let mut dims = Vec::with_capacity(values.len());
+    for value in values {
+        dims.push(convert_dimension(value, arg_name)?);
+    }
+    Ok(dims)
+}
+
+fn normalize_variadic_isize_args(tuple: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<isize>> {
+    if tuple.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if tuple.len() == 1 {
+        let first = tuple.get_item(0)?;
+
+        if let Ok(nested) = first.downcast::<PyTuple>() {
+            return normalize_variadic_isize_args(&nested, arg_name);
+        }
+
+        if let Ok(list) = first.downcast::<PyList>() {
+            let mut dims = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                dims.push(item.extract::<isize>()?);
+            }
+            return Ok(dims);
+        }
+
+        if let Ok(shape_sequence) = first.extract::<ShapeSequence>() {
+            return convert_usize_list_to_isize(shape_sequence.to_list(), arg_name);
+        }
+
+        if let Ok(values) = first.extract::<Vec<isize>>() {
+            return Ok(values);
+        }
+
+        if let Ok(values) = first.extract::<Vec<usize>>() {
+            return convert_usize_list_to_isize(values, arg_name);
+        }
+
+        if let Ok(value) = first.extract::<isize>() {
+            return Ok(vec![value]);
+        }
+
+        if let Ok(value) = first.extract::<usize>() {
+            return Ok(vec![convert_usize_to_isize(value, arg_name)?]);
+        }
+    }
+
+    let mut dims = Vec::with_capacity(tuple.len());
+    for item in tuple.iter() {
+        dims.push(item.extract::<isize>()?);
+    }
+    Ok(dims)
+}
+
+fn convert_usize_list_to_isize(values: Vec<usize>, arg_name: &str) -> PyResult<Vec<isize>> {
+    let mut converted = Vec::with_capacity(values.len());
+    for value in values {
+        converted.push(convert_usize_to_isize(value, arg_name)?);
+    }
+    Ok(converted)
+}
+
+fn convert_usize_to_isize(value: usize, arg_name: &str) -> PyResult<isize> {
+    isize::try_from(value).map_err(|_| {
+        PyValueError::new_err(format!(
+            "{arg_name} dimension {value} is too large for this platform"
+        ))
+    })
+}
+
+fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
+    if shape.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if shape.len() == 1 {
+        let first = shape.get_item(0)?;
+        if let Ok(tuple) = first.downcast::<PyTuple>() {
+            return parse_shape_tuple(&tuple, arg_name);
+        }
+        if let Ok(list) = first.downcast::<PyList>() {
+            let mut dims = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                let value: isize = item.extract()?;
+                dims.push(convert_dimension(value, arg_name)?);
+            }
+            return Ok(dims);
+        }
+        if let Ok(shape_seq) = first.extract::<ShapeSequence>() {
+            return Ok(shape_seq.to_list());
+        }
+        if let Ok(values) = first.extract::<Vec<isize>>() {
+            return convert_dimensions(values, arg_name);
+        }
+        if let Ok(value) = first.extract::<isize>() {
+            return Ok(vec![convert_dimension(value, arg_name)?]);
+        }
+    }
+
+    let mut dims = Vec::with_capacity(shape.len());
+    for item in shape.iter() {
+        let value: isize = item.extract()?;
+        dims.push(convert_dimension(value, arg_name)?);
+    }
+    Ok(dims)
+}
+
+fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
+    if let Ok(tuple) = obj.downcast::<PyTuple>() {
+        return parse_shape_tuple(&tuple, arg_name);
+    }
+
+    if let Ok(list) = obj.downcast::<PyList>() {
+        let mut dims = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            let value: isize = item.extract()?;
+            dims.push(convert_dimension(value, arg_name)?);
+        }
+        return Ok(dims);
+    }
+
+    if let Ok(shape_seq) = obj.extract::<ShapeSequence>() {
+        return Ok(shape_seq.to_list());
+    }
+
+    if let Ok(values) = obj.extract::<Vec<isize>>() {
+        return convert_dimensions(values, arg_name);
+    }
+
+    if let Ok(value) = obj.extract::<isize>() {
+        return Ok(vec![convert_dimension(value, arg_name)?]);
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "{arg_name} must be an int or sequence of ints",
+    )))
+}
+
+fn normalize_roll_shifts(shifts: &Bound<PyAny>) -> PyResult<Vec<isize>> {
+    normalize_required_axes(shifts, "shifts")
+}
+
+fn normalize_required_axes<'py>(dim: &'py Bound<'py, PyAny>, name: &str) -> PyResult<Vec<isize>> {
+    match normalize_optional_axes(Some(dim))? {
+        Some(values) => Ok(values),
+        None => Err(PyTypeError::new_err(format!(
+            "{} must be an int or a sequence of ints",
+            name
+        ))),
     }
 }
 
@@ -1857,6 +2417,100 @@ fn convert_python_data_to_tensor(
     Err(PyErr::new::<PyTypeError, _>(
         "Unsupported data type for tensor creation",
     ))
+}
+
+fn apply_binary_ufunc<F>(operands: &[Tensor], kind: BinaryOpKind, op: F) -> PyResult<Tensor>
+where
+    F: Fn(&Tensor, &Tensor) -> Result<Tensor, MinitensorError>,
+{
+    if operands.len() != 2 {
+        return Err(PyValueError::new_err(
+            "Binary ufuncs require exactly two operands",
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, _) =
+        coerce_binary_operands(&operands[0], &operands[1], kind).map_err(_convert_error)?;
+
+    let lhs_tensor = match lhs_cast {
+        Cow::Borrowed(tensor) => tensor.clone(),
+        Cow::Owned(tensor) => tensor,
+    };
+    let rhs_tensor = match rhs_cast {
+        Cow::Borrowed(tensor) => tensor.clone(),
+        Cow::Owned(tensor) => tensor,
+    };
+
+    op(&lhs_tensor, &rhs_tensor).map_err(_convert_error)
+}
+
+fn apply_unary_ufunc<F>(operands: &[Tensor], op: F) -> PyResult<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor, MinitensorError>,
+{
+    if operands.len() != 1 {
+        return Err(PyValueError::new_err(
+            "Unary ufuncs require exactly one operand",
+        ));
+    }
+
+    let tensor = operands[0].clone();
+    op(&tensor).map_err(_convert_error)
+}
+
+fn py_not_implemented(py: Python) -> PyResult<Py<PyAny>> {
+    unsafe { Ok(Py::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented())) }
+}
+
+fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
+    if let Ok(name) = value.extract::<String>() {
+        dtype::parse_dtype(&name)
+    } else {
+        Err(PyTypeError::new_err(
+            "dtype must be specified as a string such as 'float32'",
+        ))
+    }
+}
+
+fn parse_device_like(value: &Bound<PyAny>) -> PyResult<Device> {
+    if let Ok(device) = value.extract::<PyDevice>() {
+        return Ok(device.device());
+    }
+
+    if let Ok(spec) = value.extract::<String>() {
+        return Device::from_str(&spec).map_err(|err| {
+            PyValueError::new_err(format!("Unsupported device specification '{spec}': {err}"))
+        });
+    }
+
+    Err(PyTypeError::new_err(
+        "device must be specified as a Device object or string like 'cpu' or 'cuda:0'",
+    ))
+}
+
+fn ensure_backward_gradient_compatible(reference: &Tensor, gradient: &mut Tensor) -> PyResult<()> {
+    let expected_shape = reference.shape().dims();
+    let actual_shape = gradient.shape().dims();
+    if expected_shape != actual_shape {
+        return Err(PyRuntimeError::new_err(format!(
+            "backward() expected gradient tensor with shape {:?}, but got {:?}",
+            expected_shape, actual_shape
+        )));
+    }
+
+    if gradient.device() != reference.device() {
+        *gradient = gradient.to(reference.device()).map_err(_convert_error)?;
+    }
+
+    if gradient.dtype() != reference.dtype() {
+        *gradient = gradient.astype(reference.dtype()).map_err(_convert_error)?;
+    }
+
+    if gradient.requires_grad() {
+        *gradient = gradient.detach();
+    }
+
+    Ok(())
 }
 
 fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {

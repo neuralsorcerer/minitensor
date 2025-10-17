@@ -4,129 +4,37 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
-import os
-import subprocess
+from __future__ import annotations
+
 import sys
-from typing import Optional, Sequence, Union
+from typing import Any, Iterable
 
 # Import the compiled Rust extension and backend helpers
-from . import _core as _minitensor_core
+from . import _core as _C
 from . import functional, nn, optim
-
-# Re-export core classes and functions
 from .tensor import Tensor, get_default_dtype, set_default_dtype
 
-_NUMPY_MODULE_NAME = "numpy"
-_NUMPY_ERROR: ModuleNotFoundError | None = None
-_NUMPY_READY = False
-
-
-def _ensure_reference_dependency() -> None:
-    """Ensure NumPy is importable for reference implementations in tests."""
-
-    global _NUMPY_ERROR, _NUMPY_READY
-
-    if _NUMPY_READY:
-        return
-
-    try:
-        importlib.import_module(_NUMPY_MODULE_NAME)
-    except ModuleNotFoundError as exc:
-        python = sys.executable or "python3"
-        cmd = [python, "-m", "pip", "install", _NUMPY_MODULE_NAME]
-        env = os.environ.copy()
-        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-        try:
-            subprocess.check_call(cmd, env=env)
-        except Exception as install_exc:
-            _NUMPY_ERROR = ModuleNotFoundError(
-                "NumPy is required for MiniTensor's test suite. "
-                "Install it manually with 'pip install numpy'."
-            )
-            raise _NUMPY_ERROR from install_exc
-        else:
-            try:
-                importlib.import_module(_NUMPY_MODULE_NAME)
-            except ModuleNotFoundError as post_install_exc:  # pragma: no cover
-                _NUMPY_ERROR = ModuleNotFoundError(
-                    "NumPy could not be imported even after installation."
-                )
-                raise _NUMPY_ERROR from post_install_exc
-    _NUMPY_READY = True
-
-
-try:
-    _ensure_reference_dependency()
-except ModuleNotFoundError:
-    numpy_compat = None
-else:
-    try:
-        from . import numpy_compat  # type: ignore  # noqa: F401
-    except ImportError:
-        numpy_compat = None
-
-
-def _ensure_numpy_compat(feature: str) -> None:
-    """Raise a helpful error when NumPy interoperability is unavailable."""
-
-    if numpy_compat is None:
-        if _NUMPY_ERROR is not None:
-            raise _NUMPY_ERROR
-        raise ModuleNotFoundError(
-            "NumPy support is not available; install the 'numpy' package to "
-            f"use minitensor.{feature}."
-        )
-
-
-# Custom operations and plugin system (if available)
-try:
-    from ._core import (
-        execute_custom_op_py,
-        is_custom_op_registered_py,
-        list_custom_ops_py,
-    )
-    from ._core import plugins as _plugins
-    from ._core import (
-        register_example_custom_ops,
-        unregister_custom_op_py,
-    )
-
-    plugins = _plugins
-    sys.modules[__name__ + ".plugins"] = plugins
-except Exception:
-    execute_custom_op_py = None
-    is_custom_op_registered_py = None
-    list_custom_ops_py = None
-    register_example_custom_ops = None
-    unregister_custom_op_py = None
-    plugins = None
-
-# Serialization (if available)
-try:
-    serialization = _minitensor_core.serialization
-except Exception:
-    serialization = None
-
-# Version information
 try:
     from ._version import __version__, __version_tuple__
-except ImportError:
-    # Fallback version if _version.py is not available
+except ImportError:  # pragma: no cover - fallback for editable installs
     __version__ = "0.1.0"
     __version_tuple__ = (0, 1, 0)
 
-# Also try to get version from Rust extension if available
 try:
-    _rust_version = _minitensor_core.__version__
-    # Use Rust version if it's different (for development builds)
-    if _rust_version != __version__:
+    _rust_version = _C.__version__
+except AttributeError:
+    _rust_version = None
+else:
+    if _rust_version and _rust_version != __version__:
         __version__ = _rust_version
-except (AttributeError, NameError):
-    pass
 
 
-# Core tensor creation helpers map directly to the backend-backed Tensor APIs.
+functional = functional
+nn = nn
+optim = optim
+numpy_compat = getattr(_C, "numpy_compat", None)
+
+# Tensor factories map directly to backend implementations.
 tensor = Tensor
 zeros = Tensor.zeros
 ones = Tensor.ones
@@ -138,60 +46,45 @@ arange = Tensor.arange
 from_numpy = Tensor.from_numpy
 from_numpy_shared = Tensor.from_numpy_shared
 
+_DEVICE_CLASS = _C.Device
+device = _DEVICE_CLASS
+cpu = _DEVICE_CLASS.cpu
+cuda = _DEVICE_CLASS.cuda
 
-def dot(input: Tensor, other: Tensor) -> Tensor:
-    """Compute the dot product of two 1D tensors."""
-    if not isinstance(input, Tensor) or not isinstance(other, Tensor):
-        raise TypeError("dot expects Tensor inputs")
+get_gradient = _C.get_gradient
+clear_autograd_graph = _C.clear_autograd_graph
+is_autograd_graph_consumed = _C.is_autograd_graph_consumed
+mark_autograd_graph_consumed = _C.mark_autograd_graph_consumed
 
-    return input.dot(other)
+_plugins = getattr(_C, "plugins", None)
+if _plugins is not None:
+    plugins = _plugins
+    sys.modules[__name__ + ".plugins"] = plugins
+else:  # pragma: no cover - plugins optional in lightweight builds
+    plugins = None
 
+serialization = getattr(_C, "serialization", None)
 
-def _require_tensor(value, *, argument: str) -> Tensor:
-    if not isinstance(value, Tensor):
-        raise TypeError(f"{argument} must be a Tensor instance")
-    return value
+_execute_custom = getattr(_C, "execute_custom_op_py", None)
+_is_registered = getattr(_C, "is_custom_op_registered_py", None)
+_list_ops = getattr(_C, "list_custom_ops_py", None)
+_register_examples = getattr(_C, "register_example_custom_ops", None)
+_unregister = getattr(_C, "unregister_custom_op_py", None)
 
+if _execute_custom is not None:
+    execute_custom_op_py = _execute_custom
+    is_custom_op_registered_py = _is_registered
+    list_custom_ops_py = _list_ops
+    register_example_custom_ops = _register_examples
+    unregister_custom_op_py = _unregister
+else:  # pragma: no cover - custom ops optional
+    execute_custom_op_py = None
+    is_custom_op_registered_py = None
+    list_custom_ops_py = None
+    register_example_custom_ops = None
+    unregister_custom_op_py = None
 
-def get_gradient(tensor: Tensor) -> Optional[Tensor]:
-    """Return the last computed gradient for ``tensor`` if it exists."""
-
-    tensor = _require_tensor(tensor, argument="tensor")
-    rust_grad = _minitensor_core.get_gradient(tensor._tensor)
-    if rust_grad is None:
-        return None
-
-    return Tensor._wrap_gradient_tensor(rust_grad)
-
-
-def clear_autograd_graph() -> None:
-    """Explicitly clear the global autograd graph maintained by the Rust backend."""
-
-    _minitensor_core.clear_autograd_graph()
-    Tensor._reset_graph_consumed_flags()
-
-
-def is_autograd_graph_consumed() -> bool:
-    """Check whether the global autograd graph has already been consumed."""
-
-    return _minitensor_core.is_autograd_graph_consumed()
-
-
-def mark_autograd_graph_consumed() -> None:
-    """Mark the global autograd graph as consumed after a backward call."""
-
-    _minitensor_core.mark_autograd_graph_consumed()
-
-
-# NumPy compatibility functions (commonly used ones at top level)
-def asarray(data, dtype=None, requires_grad=False):
-    """Convert input to tensor (NumPy compatibility)."""
-    if numpy_compat is None:
-        return Tensor(data, dtype=dtype, requires_grad=requires_grad)
-    return numpy_compat.asarray(data, dtype, requires_grad)
-
-
-_FUNCTIONAL_FORWARDERS = (
+_FUNCTIONAL_FORWARDERS: Iterable[str] = (
     "cat",
     "stack",
     "split",
@@ -234,41 +127,43 @@ _FUNCTIONAL_FORWARDERS = (
 for _name in _FUNCTIONAL_FORWARDERS:
     globals()[_name] = getattr(functional, _name)
 
-
-def cross(a, b, axis=-1):
-    """Compute the 3D cross product (NumPy compatibility)."""
-    _ensure_numpy_compat("cross")
-    return numpy_compat.cross(a, b, axis=axis)
+dot = getattr(functional, "dot")
 
 
-# Device management
-def device(device_str):
-    """Create a device object."""
-    return _minitensor_core.Device(device_str)
+def _require_numpy(feature: str) -> None:
+    if numpy_compat is None:
+        raise ModuleNotFoundError(
+            "NumPy support is not available; install the 'numpy' package to "
+            f"use minitensor.{feature}.",
+        )
 
 
-def cpu():
-    """Get CPU device."""
-    return device("cpu")
+def asarray(data: Any, dtype: str | None = None, requires_grad: bool = False):
+    _require_numpy("asarray")
+    return numpy_compat.asarray(data, dtype=dtype, requires_grad=requires_grad)
 
 
-def cuda(device_id=0):
-    """Get CUDA device."""
-    return device(f"cuda:{device_id}")
+if numpy_compat is not None:
+    cross = numpy_compat.cross
+else:  # pragma: no cover - executed only when NumPy missing
+
+    def cross(*_args, **_kwargs):  # type: ignore[override]
+        _require_numpy("cross")
 
 
 __all__ = [
     "Tensor",
+    "tensor",
+    "functional",
     "nn",
     "optim",
-    "functional",
+    "numpy_compat",
     "zeros",
     "ones",
     "rand",
     "randn",
     "eye",
     "full",
-    "tensor",
     "arange",
     "from_numpy",
     "from_numpy_shared",
@@ -323,20 +218,18 @@ __all__ = [
     "get_default_dtype",
 ]
 
-if numpy_compat is not None:
-    __all__.append("numpy_compat")
-# Add plugins to __all__ if available
 if plugins is not None:
     __all__.append("plugins")
-if register_example_custom_ops is not None:
-    __all__.extend(
-        [
-            "register_example_custom_ops",
-            "unregister_custom_op_py",
-            "execute_custom_op_py",
-            "list_custom_ops_py",
-            "is_custom_op_registered_py",
-        ]
-    )
+    if execute_custom_op_py is not None:
+        __all__.extend(
+            [
+                "execute_custom_op_py",
+                "list_custom_ops_py",
+                "is_custom_op_registered_py",
+                "register_example_custom_ops",
+                "unregister_custom_op_py",
+            ]
+        )
+
 if serialization is not None:
     __all__.append("serialization")

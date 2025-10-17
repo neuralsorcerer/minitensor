@@ -9,7 +9,7 @@ use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySequence, PyTuple};
+use pyo3::types::{PyAny, PyList, PyTuple};
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
@@ -51,52 +51,6 @@ fn parse_normalized_shape(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
     ))
 }
 
-fn normalize_dims_tuple(dims: &Bound<PyTuple>) -> PyResult<Vec<isize>> {
-    if dims.len() == 1 {
-        let first = dims.get_item(0)?;
-        if let Ok(seq) = first.extract::<Vec<isize>>() {
-            return Ok(seq);
-        }
-    }
-
-    dims.extract::<Vec<isize>>()
-}
-
-fn normalize_shape_args(shape: &Bound<PyTuple>) -> PyResult<Vec<isize>> {
-    normalize_dims_tuple(shape)
-}
-
-fn normalize_axis_arg(arg: &Bound<PyAny>) -> PyResult<Vec<isize>> {
-    if let Ok(value) = arg.extract::<isize>() {
-        return Ok(vec![value]);
-    }
-
-    if let Ok(seq) = arg.extract::<Vec<isize>>() {
-        return Ok(seq);
-    }
-
-    Err(PyTypeError::new_err(
-        "expected an int or sequence of ints for dimension arguments",
-    ))
-}
-
-fn normalize_optional_axis_arg(arg: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<isize>>> {
-    match arg {
-        None => Ok(None),
-        Some(value) => normalize_axis_arg(value).map(Some),
-    }
-}
-
-fn normalize_repeat_args<'py>(args: &'py Bound<'py, PyTuple>) -> PyResult<Bound<'py, PyAny>> {
-    if args.len() == 1 {
-        let first = args.get_item(0)?;
-        if first.downcast::<PySequence>().is_ok() {
-            return Ok(first.clone().into_any());
-        }
-    }
-    Ok(args.clone().into_any())
-}
-
 fn to_pylist<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
     if let Ok(list) = value.downcast::<PyList>() {
         return Ok(list.clone());
@@ -127,9 +81,8 @@ pub fn ravel(input: &Bound<PyAny>) -> PyResult<PyTensor> {
 #[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn reshape(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
-    let dims = normalize_shape_args(shape)?;
     let tensor = borrow_tensor(input)?;
-    tensor.reshape(dims)
+    tensor.reshape(shape)
 }
 
 #[pyfunction]
@@ -181,9 +134,8 @@ pub fn swapdims(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<Py
 #[pyfunction]
 #[pyo3(signature = (input, *dims))]
 pub fn permute(input: &Bound<PyAny>, dims: &Bound<PyTuple>) -> PyResult<PyTensor> {
-    let dims_vec = normalize_dims_tuple(dims)?;
     let tensor = borrow_tensor(input)?;
-    tensor.permute(dims_vec)
+    tensor.permute(dims)
 }
 
 #[pyfunction]
@@ -210,17 +162,15 @@ pub fn moveaxis(
 #[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn expand(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
-    let dims = normalize_shape_args(shape)?;
     let tensor = borrow_tensor(input)?;
-    tensor.expand(dims)
+    tensor.expand(shape)
 }
 
 #[pyfunction]
 #[pyo3(signature = (input, *repeats))]
 pub fn repeat(input: &Bound<PyAny>, repeats: &Bound<PyTuple>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    let repeat_args = normalize_repeat_args(repeats)?;
-    tensor.repeat(&repeat_args)
+    tensor.repeat(repeats)
 }
 
 #[pyfunction]
@@ -239,8 +189,7 @@ pub fn repeat_interleave(
 #[pyo3(signature = (input, dims))]
 pub fn flip(input: &Bound<PyAny>, dims: &Bound<PyAny>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    let dims_vec = normalize_axis_arg(dims)?;
-    tensor.flip(dims_vec)
+    tensor.flip(dims)
 }
 
 #[pyfunction]
@@ -251,9 +200,7 @@ pub fn roll(
     dims: Option<&Bound<PyAny>>,
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    let shift_vec = normalize_axis_arg(shifts)?;
-    let dims_vec = normalize_optional_axis_arg(dims)?;
-    tensor.roll(shift_vec, dims_vec)
+    tensor.roll(shifts, dims)
 }
 
 #[pyfunction]
@@ -510,7 +457,7 @@ pub fn argsort(
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
     let tensor = borrow_tensor(input)?;
-    let (values, indices_opt) = tensor.median(dim, Some(keepdim))?;
+    let (values, indices_opt) = tensor.median_with_indices(dim, keepdim)?;
     let py = input.py();
     if dim.is_some() {
         let indices = indices_opt.ok_or_else(|| {
@@ -558,6 +505,12 @@ pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
 #[pyo3(signature = (tensors, dim=0))]
 pub fn stack(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, Some(dim))
+}
+
+#[pyfunction]
+pub fn dot(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.dot(other)
 }
 
 pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
@@ -614,5 +567,6 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(layer_norm, parent)?)?;
     parent.add_function(wrap_pyfunction!(cat, parent)?)?;
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
+    parent.add_function(wrap_pyfunction!(dot, parent)?)?;
     Ok(())
 }

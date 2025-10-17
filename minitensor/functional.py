@@ -4,93 +4,22 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Functional interface exposing Rust-backed tensor operations."""
+"""Expose functional and NN helpers directly from the Rust backend."""
 
-from __future__ import annotations
+from ._core import functional as _functional
+from ._core import nn as _nn
 
-try:
-    from . import _core as _backend
-except ImportError as exc:  # pragma: no cover - surfaced during import
-    raise ImportError(
-        "The minitensor core extension is not built. "
-        "Run `maturin develop` or install the package."
-    ) from exc
+__all__ = [name for name in dir(_functional) if not name.startswith("_")]
+for name in __all__:
+    globals()[name] = getattr(_functional, name)
 
+_NN_FUNCTION_EXPORTS = [
+    name
+    for name in dir(_nn)
+    if not name.startswith("_") and name[0].islower() and callable(getattr(_nn, name))
+]
 
-_FUNCTIONAL_EXPORTS = (
-    "flatten",
-    "ravel",
-    "reshape",
-    "view",
-    "transpose",
-    "permute",
-    "movedim",
-    "moveaxis",
-    "swapaxes",
-    "swapdims",
-    "squeeze",
-    "unsqueeze",
-    "expand",
-    "repeat",
-    "repeat_interleave",
-    "flip",
-    "roll",
-    "narrow",
-    "cat",
-    "stack",
-    "split",
-    "chunk",
-    "index_select",
-    "gather",
-    "where",
-    "masked_fill",
-    "softmax",
-    "log_softmax",
-    "logsumexp",
-    "relu",
-    "hardshrink",
-    "sigmoid",
-    "softplus",
-    "gelu",
-    "elu",
-    "selu",
-    "silu",
-    "softsign",
-    "tanh",
-    "log1p",
-    "expm1",
-    "sin",
-    "cos",
-    "tan",
-    "rsqrt",
-    "logaddexp",
-    "triu",
-    "tril",
-    "topk",
-    "sort",
-    "argsort",
-    "median",
-    "layer_norm",
-)
-
-_NN_EXPORTS = (
-    "dense_layer",
-    "conv2d",
-    "batch_norm",
-    "dropout",
-    "dropout2d",
-    "mse_loss",
-    "cross_entropy",
-    "binary_cross_entropy",
-)
-
-_FUNCTIONAL_MODULE = _backend.functional
-_NN_MODULE = _backend.nn
-
-for _name in _FUNCTIONAL_EXPORTS:
-    globals()[_name] = getattr(_FUNCTIONAL_MODULE, _name)
-
-for _name in _NN_EXPORTS:
-    globals()[_name] = getattr(_NN_MODULE, _name)
-
-__all__ = sorted(set(_FUNCTIONAL_EXPORTS) | set(_NN_EXPORTS))
+for name in _NN_FUNCTION_EXPORTS:
+    globals()[name] = getattr(_nn, name)
+    if name not in __all__:
+        __all__.append(name)

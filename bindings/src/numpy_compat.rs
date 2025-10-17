@@ -12,13 +12,15 @@ use engine::operations::reduction::sum as tensor_sum;
 use engine::operations::selection::where_op as tensor_where;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
+use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyAny, PyList, PyModule, PyTuple};
 
 /// NumPy-style array creation functions
 #[pymodule]
 pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(asarray, m)?)?;
     // Array creation functions
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
     m.add_function(wrap_pyfunction!(ones_like, m)?)?;
@@ -56,13 +58,33 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[pyfunction]
+#[pyo3(signature = (data, dtype=None, requires_grad=false))]
+fn asarray(data: &Bound<PyAny>, dtype: Option<&str>, requires_grad: bool) -> PyResult<PyTensor> {
+    let mut tensor = PyTensor::from_python_value(data)?;
+    if let Some(target_dtype) = dtype {
+        if tensor.dtype() != target_dtype {
+            tensor = tensor.astype(target_dtype)?;
+        }
+    }
+
+    if tensor.requires_grad() != requires_grad {
+        tensor.requires_grad_(requires_grad)?;
+    }
+
+    Ok(tensor)
+}
+
 /// Create a tensor of zeros with the same shape and dtype as input
 #[pyfunction]
 fn zeros_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
     let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    PyTensor::zeros(shape, Some(dtype_str), None, Some(false))
+    Python::attach(|py| {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        PyTensor::zeros(&shape_tuple, Some(dtype_str), None, Some(false))
+    })
 }
 
 /// Create a tensor of ones with the same shape and dtype as input
@@ -71,17 +93,24 @@ fn ones_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
     let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    PyTensor::ones(shape, Some(dtype_str), None, Some(false))
+    Python::attach(|py| {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        PyTensor::ones(&shape_tuple, Some(dtype_str), None, Some(false))
+    })
 }
 
 /// Create an uninitialized tensor with the same shape and dtype as input
 #[pyfunction]
 #[pyo3(signature = (tensor, dtype=None))]
-fn empty_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
+fn empty_like(tensor: &Bound<PyAny>, dtype: Option<&str>) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     let shape = tensor.shape_vec();
-    let tensor_dtype = tensor.dtype();
-    let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    PyTensor::empty(shape, Some(dtype_str), None, Some(false))
+    let inferred_dtype = tensor.dtype();
+    let dtype_str = dtype.unwrap_or_else(|| inferred_dtype.as_str());
+    Python::attach(|py| {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        PyTensor::empty(&shape_tuple, Some(dtype_str), None, Some(false))
+    })
 }
 
 /// Create a tensor filled with a value, same shape and dtype as input
@@ -90,7 +119,16 @@ fn full_like(tensor: &PyTensor, fill_value: f64, dtype: Option<&str>) -> PyResul
     let shape = tensor.shape_vec();
     let tensor_dtype = tensor.dtype();
     let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    PyTensor::full(shape, fill_value, Some(dtype_str), None, Some(false))
+    Python::attach(|py| {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        PyTensor::full(
+            shape_tuple.as_any(),
+            fill_value,
+            Some(dtype_str),
+            None,
+            Some(false),
+        )
+    })
 }
 
 /// Concatenate tensors along an axis
@@ -145,14 +183,16 @@ fn dot(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
         let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(summed))
     } else {
-        a.matmul(b)
+        let result = a.tensor().matmul(b.tensor()).map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
     }
 }
 
 /// Matrix multiplication
 #[pyfunction]
 fn matmul(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
-    a.matmul(b)
+    let result = a.tensor().matmul(b.tensor()).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
 }
 
 /// Element-wise selection based on a boolean condition
@@ -163,10 +203,7 @@ fn where_py(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyResult<PyTens
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Cross product of two tensors along a given axis
-#[pyfunction]
-#[pyo3(signature = (a, b, axis=None))]
-fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
+pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
     // Determine axes for each tensor separately (allow different ranks)
     let shape_a = a.shape_vec();
     let shape_b = b.shape_vec();
@@ -284,6 +321,15 @@ fn cross(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Cross product of two tensors along a given axis
+#[pyfunction]
+#[pyo3(signature = (a, b, axis=None))]
+fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, axis: Option<i32>) -> PyResult<PyTensor> {
+    let a_tensor = PyTensor::from_python_value(a)?;
+    let b_tensor = PyTensor::from_python_value(b)?;
+    cross_impl(&a_tensor, &b_tensor, axis)
+}
+
 /// Check if arrays are approximately equal
 #[pyfunction]
 fn allclose(a: &PyTensor, b: &PyTensor, rtol: Option<f64>, atol: Option<f64>) -> PyResult<bool> {
@@ -363,11 +409,13 @@ fn sum(
 /// Compute maximum along axis
 #[pyfunction]
 fn max(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.max(axis, keepdims)
+    let keepdim = keepdims.unwrap_or(false);
+    tensor.max_values(axis, keepdim)
 }
 
 /// Compute minimum along axis
 #[pyfunction]
 fn min(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
-    tensor.min(axis, keepdims)
+    let keepdim = keepdims.unwrap_or(false);
+    tensor.min_values(axis, keepdim)
 }
