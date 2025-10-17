@@ -256,16 +256,24 @@ impl PyTensor {
 
     #[getter]
     fn has_grad(&self) -> bool {
-        if self.inner.has_grad() {
+        if engine::autograd::get_gradient(&self.inner).is_some() {
             return true;
         }
 
-        engine::autograd::get_gradient(&self.inner).is_some()
+        self.inner.has_grad() || self.inner.grad().is_some()
     }
 
     #[getter]
-    fn grad(&self) -> Option<Self> {
-        engine::autograd::get_gradient(&self.inner).map(Self::from_tensor)
+    fn grad(&self) -> PyResult<Option<Self>> {
+        if let Some(grad) = engine::autograd::get_gradient(&self.inner) {
+            return Ok(Some(Self::from_tensor(grad)));
+        }
+
+        if let Some(stored) = self.inner.grad() {
+            return Ok(Some(Self::from_tensor((**stored).clone())));
+        }
+
+        Ok(None)
     }
 
     #[getter]
@@ -510,18 +518,17 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    #[pyo3(signature = (start_dim=None, end_dim=None))]
-    pub fn flatten(&self, start_dim: Option<isize>, end_dim: Option<isize>) -> PyResult<Self> {
-        let ndim = self.ndim() as isize;
-        let start = start_dim.unwrap_or(0);
-        let end = end_dim.unwrap_or(ndim - 1);
-
-        let result = self.inner.flatten(start, end).map_err(_convert_error)?;
+    #[pyo3(signature = (start_dim=0, end_dim=-1))]
+    pub fn flatten(&self, start_dim: isize, end_dim: isize) -> PyResult<Self> {
+        let result = self
+            .inner
+            .flatten(start_dim, end_dim)
+            .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     pub fn ravel(&self) -> PyResult<Self> {
-        self.flatten(None, None)
+        self.flatten(0, -1)
     }
 
     // Tensor operations
@@ -1998,16 +2005,15 @@ impl PyTensor {
 
     /// Split tensor into multiple sub-tensors of equal size (``chunk``)
     #[pyo3(signature = (sections, dim=0))]
-    pub fn chunk(&self, sections: usize, dim: Option<isize>) -> PyResult<Vec<PyTensor>> {
+    pub fn chunk(&self, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
         if sections <= 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Sections must be greater than zero",
             ));
         }
 
-        let axis = dim.unwrap_or(0);
         let ndim = self.inner.ndim() as isize;
-        let axis = if axis < 0 { axis + ndim } else { axis };
+        let axis = if dim < 0 { dim + ndim } else { dim };
         if axis < 0 || axis >= ndim {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "Dimension {} out of range",

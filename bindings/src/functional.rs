@@ -69,7 +69,9 @@ pub fn flatten(
     end_dim: Option<isize>,
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.flatten(start_dim, end_dim)
+    let start = start_dim.unwrap_or(0);
+    let end = end_dim.unwrap_or(-1);
+    tensor.flatten(start, end)
 }
 
 #[pyfunction]
@@ -207,7 +209,7 @@ pub fn roll(
 #[pyo3(signature = (input, chunks, dim=0))]
 pub fn chunk(input: &Bound<PyAny>, chunks: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
     let tensor = borrow_tensor(input)?;
-    tensor.chunk(chunks, Some(dim))
+    tensor.chunk(chunks, dim)
 }
 
 #[pyfunction]
