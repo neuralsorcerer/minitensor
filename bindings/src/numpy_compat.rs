@@ -4,18 +4,49 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::device::PyDevice;
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use engine::Device;
 use engine::TensorIndex;
 use engine::operations::arithmetic::{mul, sub};
 use engine::operations::reduction::sum as tensor_sum;
-use engine::operations::selection::where_op as tensor_where;
 use engine::operations::shape_ops::concatenate as tensor_concatenate;
 use engine::tensor::shape::Shape;
 use pyo3::Bound;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PyModule, PyTuple};
+
+struct LikeArgs {
+    shape: Vec<usize>,
+    dtype: String,
+    requires_grad: bool,
+    device: Device,
+}
+
+impl LikeArgs {
+    fn from_source(source: &Bound<PyAny>, dtype_override: Option<&str>) -> PyResult<Self> {
+        let tensor = PyTensor::from_python_value(source)?;
+
+        Ok(Self {
+            shape: tensor.shape_vec(),
+            dtype: dtype_override
+                .map(str::to_owned)
+                .unwrap_or_else(|| tensor.dtype()),
+            requires_grad: tensor.requires_grad(),
+            device: tensor.tensor().device(),
+        })
+    }
+
+    fn shape_tuple<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.shape)
+    }
+
+    fn py_device(&self) -> PyDevice {
+        PyDevice::from_device(self.device)
+    }
+}
 
 /// NumPy-style array creation functions
 #[pymodule]
@@ -77,58 +108,71 @@ fn asarray(data: &Bound<PyAny>, dtype: Option<&str>, requires_grad: bool) -> PyR
 
 /// Create a tensor of zeros with the same shape and dtype as input
 #[pyfunction]
-fn zeros_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape_vec();
-    let tensor_dtype = tensor.dtype();
-    let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    Python::attach(|py| {
-        let shape_tuple = PyTuple::new(py, &shape)?;
-        PyTensor::zeros(&shape_tuple, Some(dtype_str), None, Some(false))
-    })
+#[pyo3(signature = (tensor, dtype=None))]
+fn zeros_like(tensor: &Bound<PyAny>, dtype: Option<&str>) -> PyResult<PyTensor> {
+    let args = LikeArgs::from_source(tensor, dtype)?;
+    let py = tensor.py();
+    let shape_tuple = args.shape_tuple(py)?;
+    let device = args.py_device();
+
+    PyTensor::zeros(
+        &shape_tuple,
+        Some(args.dtype.as_str()),
+        Some(&device),
+        Some(args.requires_grad),
+    )
 }
 
 /// Create a tensor of ones with the same shape and dtype as input
 #[pyfunction]
-fn ones_like(tensor: &PyTensor, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape_vec();
-    let tensor_dtype = tensor.dtype();
-    let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    Python::attach(|py| {
-        let shape_tuple = PyTuple::new(py, &shape)?;
-        PyTensor::ones(&shape_tuple, Some(dtype_str), None, Some(false))
-    })
+#[pyo3(signature = (tensor, dtype=None))]
+fn ones_like(tensor: &Bound<PyAny>, dtype: Option<&str>) -> PyResult<PyTensor> {
+    let args = LikeArgs::from_source(tensor, dtype)?;
+    let py = tensor.py();
+    let shape_tuple = args.shape_tuple(py)?;
+    let device = args.py_device();
+
+    PyTensor::ones(
+        &shape_tuple,
+        Some(args.dtype.as_str()),
+        Some(&device),
+        Some(args.requires_grad),
+    )
 }
 
 /// Create an uninitialized tensor with the same shape and dtype as input
 #[pyfunction]
 #[pyo3(signature = (tensor, dtype=None))]
 fn empty_like(tensor: &Bound<PyAny>, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let tensor = PyTensor::from_python_value(tensor)?;
-    let shape = tensor.shape_vec();
-    let inferred_dtype = tensor.dtype();
-    let dtype_str = dtype.unwrap_or_else(|| inferred_dtype.as_str());
-    Python::attach(|py| {
-        let shape_tuple = PyTuple::new(py, &shape)?;
-        PyTensor::empty(&shape_tuple, Some(dtype_str), None, Some(false))
-    })
+    let args = LikeArgs::from_source(tensor, dtype)?;
+    let py = tensor.py();
+    let shape_tuple = args.shape_tuple(py)?;
+    let device = args.py_device();
+
+    PyTensor::empty(
+        &shape_tuple,
+        Some(args.dtype.as_str()),
+        Some(&device),
+        Some(args.requires_grad),
+    )
 }
 
 /// Create a tensor filled with a value, same shape and dtype as input
 #[pyfunction]
-fn full_like(tensor: &PyTensor, fill_value: f64, dtype: Option<&str>) -> PyResult<PyTensor> {
-    let shape = tensor.shape_vec();
-    let tensor_dtype = tensor.dtype();
-    let dtype_str = dtype.unwrap_or(&tensor_dtype);
-    Python::attach(|py| {
-        let shape_tuple = PyTuple::new(py, &shape)?;
-        PyTensor::full(
-            shape_tuple.as_any(),
-            fill_value,
-            Some(dtype_str),
-            None,
-            Some(false),
-        )
-    })
+#[pyo3(signature = (tensor, fill_value, dtype=None))]
+fn full_like(tensor: &Bound<PyAny>, fill_value: f64, dtype: Option<&str>) -> PyResult<PyTensor> {
+    let args = LikeArgs::from_source(tensor, dtype)?;
+    let py = tensor.py();
+    let shape_tuple = args.shape_tuple(py)?;
+    let device = args.py_device();
+
+    PyTensor::full(
+        shape_tuple.as_any(),
+        fill_value,
+        Some(args.dtype.as_str()),
+        Some(&device),
+        Some(args.requires_grad),
+    )
 }
 
 /// Concatenate tensors along an axis
@@ -176,32 +220,33 @@ fn vsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
 
 /// Dot product of two tensors
 #[pyfunction]
-fn dot(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
-    // For 1D tensors, compute inner product using Rust operations directly
-    // to minimize Python-level overhead. For higher dimensions, use matmul.
-    if a.ndim() == 1 && b.ndim() == 1 {
-        let product = mul(a.tensor(), b.tensor()).map_err(_convert_error)?;
-        let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(summed))
-    } else {
-        let result = a.tensor().matmul(b.tensor()).map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
+fn dot(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let a_tensor = PyTensor::from_python_value(a)?;
+    if a_tensor.ndim() == 1 {
+        let b_tensor = PyTensor::from_python_value(b)?;
+        if b_tensor.ndim() == 1 {
+            let product = mul(a_tensor.tensor(), b_tensor.tensor()).map_err(_convert_error)?;
+            let summed = tensor_sum(&product, None, false).map_err(_convert_error)?;
+            return Ok(PyTensor::from_tensor(summed));
+        }
+        return a_tensor.matmul(b);
     }
+
+    a_tensor.matmul(b)
 }
 
 /// Matrix multiplication
 #[pyfunction]
-fn matmul(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
-    let result = a.tensor().matmul(b.tensor()).map_err(_convert_error)?;
-    Ok(PyTensor::from_tensor(result))
+fn matmul(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let a_tensor = PyTensor::from_python_value(a)?;
+    a_tensor.matmul(b)
 }
 
 /// Element-wise selection based on a boolean condition
 #[pyfunction(name = "where")]
-fn where_py(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyResult<PyTensor> {
-    let result =
-        tensor_where(condition.tensor(), x.tensor(), y.tensor()).map_err(_convert_error)?;
-    Ok(PyTensor::from_tensor(result))
+fn where_py(condition: &Bound<PyAny>, x: &Bound<PyAny>, y: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let x_tensor = PyTensor::from_python_value(x)?;
+    x_tensor.where_method(condition, y)
 }
 
 pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyResult<PyTensor> {
@@ -333,30 +378,43 @@ fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, axis: Option<i32>) -> PyResult<PyTe
 
 /// Check if arrays are approximately equal
 #[pyfunction]
-fn allclose(a: &PyTensor, b: &PyTensor, rtol: Option<f64>, atol: Option<f64>) -> PyResult<bool> {
-    a.allclose(b, rtol, atol)
+#[pyo3(signature = (a, b, rtol=None, atol=None))]
+fn allclose(
+    a: &Bound<PyAny>,
+    b: &Bound<PyAny>,
+    rtol: Option<f64>,
+    atol: Option<f64>,
+) -> PyResult<bool> {
+    let a_tensor = PyTensor::from_python_value(a)?;
+    let b_tensor = PyTensor::from_python_value(b)?;
+    a_tensor.allclose(&b_tensor, rtol, atol)
 }
 
 /// Check if arrays are exactly equal
 #[pyfunction]
-fn array_equal(a: &PyTensor, b: &PyTensor) -> PyResult<bool> {
-    a.array_equal(b)
+fn array_equal(a: &Bound<PyAny>, b: &Bound<PyAny>) -> PyResult<bool> {
+    let a_tensor = PyTensor::from_python_value(a)?;
+    let b_tensor = PyTensor::from_python_value(b)?;
+    a_tensor.array_equal(&b_tensor)
 }
 
 /// Compute mean along axis
 #[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
 fn mean(
-    tensor: &PyTensor,
+    tensor: &Bound<PyAny>,
     axis: Option<&Bound<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     tensor.mean(axis, keepdims)
 }
 
 /// Compute standard deviation along axis
 #[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None, ddof=None))]
 fn tensor_std(
-    tensor: &PyTensor,
+    tensor: &Bound<PyAny>,
     axis: Option<isize>,
     keepdims: Option<bool>,
     ddof: Option<usize>,
@@ -367,13 +425,15 @@ fn tensor_std(
             "minitensor only supports ddof values of 0 or 1",
         ));
     }
+    let tensor = PyTensor::from_python_value(tensor)?;
     tensor.std(axis, keepdims, Some(ddof == 1))
 }
 
 /// Compute variance along axis
 #[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None, ddof=None))]
 fn var(
-    tensor: &PyTensor,
+    tensor: &Bound<PyAny>,
     axis: Option<isize>,
     keepdims: Option<bool>,
     ddof: Option<usize>,
@@ -384,39 +444,48 @@ fn var(
             "minitensor only supports ddof values of 0 or 1",
         ));
     }
+    let tensor = PyTensor::from_python_value(tensor)?;
     tensor.var(axis, keepdims, Some(ddof == 1))
 }
 
 /// Compute product along axis
 #[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
 fn prod(
-    tensor: &PyTensor,
+    tensor: &Bound<PyAny>,
     axis: Option<&Bound<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     tensor.prod(axis, keepdims)
 }
 
 /// Compute sum along axis
 #[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
 fn sum(
-    tensor: &PyTensor,
+    tensor: &Bound<PyAny>,
     axis: Option<&Bound<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     tensor.sum(axis, keepdims)
 }
 
 /// Compute maximum along axis
 #[pyfunction]
-fn max(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn max(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
     tensor.max_values(axis, keepdim)
 }
 
 /// Compute minimum along axis
 #[pyfunction]
-fn min(tensor: &PyTensor, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn min(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
     tensor.min_values(axis, keepdim)
 }

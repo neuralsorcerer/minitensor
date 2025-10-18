@@ -95,4 +95,8 @@ impl PyDevice {
     pub fn device(&self) -> Device {
         self.inner
     }
+
+    pub(crate) fn from_device(device: Device) -> Self {
+        Self { inner: device }
+    }
 }
