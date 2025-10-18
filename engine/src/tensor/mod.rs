@@ -578,6 +578,20 @@ impl Tensor {
         tril(self, diagonal)
     }
 
+    /// Extract a diagonal along two dimensions.
+    #[inline(always)]
+    pub fn diagonal(&self, offset: isize, dim1: isize, dim2: isize) -> Result<Self> {
+        use crate::operations::linalg::diagonal;
+        diagonal(self, offset, dim1, dim2)
+    }
+
+    /// Sum the diagonal elements along two dimensions.
+    #[inline(always)]
+    pub fn trace(&self, offset: isize, dim1: isize, dim2: isize) -> Result<Self> {
+        use crate::operations::linalg::trace;
+        trace(self, offset, dim1, dim2)
+    }
+
     /// Sum reduction
     #[inline(always)]
     pub fn sum(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {

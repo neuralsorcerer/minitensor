@@ -416,6 +416,25 @@ pub fn tril(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+pub fn diagonal(
+    input: &Bound<PyAny>,
+    offset: isize,
+    dim1: isize,
+    dim2: isize,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.diagonal(offset, dim1, dim2)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+pub fn trace(input: &Bound<PyAny>, offset: isize, dim1: isize, dim2: isize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.trace(offset, dim1, dim2)
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
 pub fn topk(
     input: &Bound<PyAny>,
@@ -562,6 +581,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(triu, parent)?)?;
     parent.add_function(wrap_pyfunction!(tril, parent)?)?;
+    parent.add_function(wrap_pyfunction!(diagonal, parent)?)?;
+    parent.add_function(wrap_pyfunction!(trace, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;

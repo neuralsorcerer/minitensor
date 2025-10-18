@@ -353,6 +353,145 @@ impl GradientFunction for WhereBackward {
     }
 }
 
+/// Gradient function for diagonal extraction.
+pub struct DiagonalBackward {
+    pub input_shape: Vec<usize>,
+    pub input_strides: Vec<usize>,
+    pub input_dtype: DataType,
+    pub dim1: usize,
+    pub dim2: usize,
+    pub offset: isize,
+    pub input_requires_grad: bool,
+    pub input_id: TensorId,
+}
+
+impl GradientFunction for DiagonalBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+
+        if !self.input_requires_grad {
+            return Ok(gradients);
+        }
+
+        if grad_output.dtype() != self.input_dtype {
+            return Err(MinitensorError::type_mismatch(
+                format!("{:?}", grad_output.dtype()),
+                format!("{:?}", self.input_dtype),
+            ));
+        }
+
+        let spec = linalg::compute_diagonal_spec(
+            &self.input_shape,
+            &self.input_strides,
+            self.dim1,
+            self.dim2,
+            self.offset,
+        )?;
+
+        if grad_output.shape().dims() != spec.output_dims {
+            return Err(MinitensorError::shape_mismatch(
+                grad_output.shape().dims().to_vec(),
+                spec.output_dims.clone(),
+            ));
+        }
+
+        let numel = self.input_shape.iter().product();
+        let mut grad_data =
+            TensorData::zeros_on_device(numel, self.input_dtype, grad_output.device());
+
+        match self.input_dtype {
+            DataType::Float32 => {
+                let grad_out = grad_output.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice for diagonal backward")
+                })?;
+                let grad_in = grad_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice for diagonal backward",
+                    )
+                })?;
+                linalg::diagonal_scatter(
+                    grad_out,
+                    grad_in,
+                    &self.input_shape,
+                    &self.input_strides,
+                    &spec,
+                );
+            }
+            DataType::Float64 => {
+                let grad_out = grad_output.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice for diagonal backward")
+                })?;
+                let grad_in = grad_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice for diagonal backward",
+                    )
+                })?;
+                linalg::diagonal_scatter(
+                    grad_out,
+                    grad_in,
+                    &self.input_shape,
+                    &self.input_strides,
+                    &spec,
+                );
+            }
+            DataType::Int32 => {
+                let grad_out = grad_output.data().as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice for diagonal backward")
+                })?;
+                let grad_in = grad_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i32 slice for diagonal backward",
+                    )
+                })?;
+                linalg::diagonal_scatter(
+                    grad_out,
+                    grad_in,
+                    &self.input_shape,
+                    &self.input_strides,
+                    &spec,
+                );
+            }
+            DataType::Int64 => {
+                let grad_out = grad_output.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice for diagonal backward")
+                })?;
+                let grad_in = grad_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i64 slice for diagonal backward",
+                    )
+                })?;
+                linalg::diagonal_scatter(
+                    grad_out,
+                    grad_in,
+                    &self.input_shape,
+                    &self.input_strides,
+                    &spec,
+                );
+            }
+            DataType::Bool => {
+                return Err(MinitensorError::invalid_operation(
+                    "diagonal backward is not defined for bool tensors",
+                ));
+            }
+        }
+
+        let grad_tensor = Tensor::new(
+            Arc::new(grad_data),
+            Shape::new(self.input_shape.clone()),
+            self.input_dtype,
+            grad_output.device(),
+            false,
+        );
+        gradients.insert(self.input_id, grad_tensor);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for triangular masking operations (triu/tril)
 pub struct TriangularBackward {
     pub input_shape: Vec<usize>,

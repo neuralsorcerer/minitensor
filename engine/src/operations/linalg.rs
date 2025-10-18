@@ -7,7 +7,10 @@
 use crate::{
     autograd::{DotBackward, MatMulBackward, TransposeBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::binary::{BinaryOpKind, coerce_binary_operands},
+    operations::{
+        binary::{BinaryOpKind, coerce_binary_operands},
+        reduction,
+    },
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -17,6 +20,180 @@ use std::sync::Arc;
 use cblas::{Layout, Transpose};
 
 const PAR_THRESHOLD: usize = 1 << 12;
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiagonalSpec {
+    pub diag_len: usize,
+    pub base_offset: usize,
+    pub diag_stride: usize,
+    pub kept_dims: Vec<usize>,
+    pub output_dims: Vec<usize>,
+}
+
+fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+    let dim = if dim < 0 { dim + ndim as isize } else { dim };
+    if dim < 0 || dim >= ndim as isize {
+        Err(MinitensorError::index_error(dim, 0, ndim))
+    } else {
+        Ok(dim as usize)
+    }
+}
+
+pub(crate) fn compute_diagonal_spec(
+    dims: &[usize],
+    strides: &[usize],
+    dim1: usize,
+    dim2: usize,
+    offset: isize,
+) -> Result<DiagonalSpec> {
+    debug_assert!(dim1 != dim2);
+
+    let dim1_size = dims
+        .get(dim1)
+        .ok_or_else(|| MinitensorError::index_error(dim1 as isize, 0, dims.len()))?;
+    let dim2_size = dims
+        .get(dim2)
+        .ok_or_else(|| MinitensorError::index_error(dim2 as isize, 0, dims.len()))?;
+    let stride1 = strides
+        .get(dim1)
+        .ok_or_else(|| MinitensorError::index_error(dim1 as isize, 0, strides.len()))?;
+    let stride2 = strides
+        .get(dim2)
+        .ok_or_else(|| MinitensorError::index_error(dim2 as isize, 0, strides.len()))?;
+
+    let diag_stride = stride1.saturating_add(*stride2);
+
+    let (diag_len, base_offset) = if offset >= 0 {
+        let offset = offset as usize;
+        if offset >= *dim2_size {
+            (0, 0)
+        } else {
+            (
+                (*dim1_size).min(dim2_size - offset),
+                offset.saturating_mul(*stride2),
+            )
+        }
+    } else {
+        let neg = (-offset) as usize;
+        if neg >= *dim1_size {
+            (0, 0)
+        } else {
+            (
+                (dim1_size - neg).min(*dim2_size),
+                neg.saturating_mul(*stride1),
+            )
+        }
+    };
+
+    let mut kept_dims = Vec::with_capacity(dims.len().saturating_sub(2));
+    let mut output_dims = Vec::with_capacity(kept_dims.capacity() + 1);
+    for (idx, &size) in dims.iter().enumerate() {
+        if idx == dim1 || idx == dim2 {
+            continue;
+        }
+        kept_dims.push(idx);
+        output_dims.push(size);
+    }
+    output_dims.push(diag_len);
+
+    Ok(DiagonalSpec {
+        diag_len,
+        base_offset,
+        diag_stride,
+        kept_dims,
+        output_dims,
+    })
+}
+
+fn diagonal_copy<T: Copy + Send + Sync>(
+    input: &[T],
+    output: &mut [T],
+    dims: &[usize],
+    strides: &[usize],
+    spec: &DiagonalSpec,
+) {
+    if output.is_empty() {
+        return;
+    }
+
+    let mut axis_sizes: Vec<usize> = spec.kept_dims.iter().map(|&dim| dims[dim]).collect();
+    axis_sizes.push(spec.diag_len);
+
+    let mut axis_strides: Vec<usize> = spec.kept_dims.iter().map(|&dim| strides[dim]).collect();
+    axis_strides.push(spec.diag_stride);
+
+    let axes = axis_sizes.len();
+    let mut indices = vec![0usize; axes];
+    let mut out_idx = 0usize;
+
+    loop {
+        let mut input_offset = spec.base_offset;
+        for axis in 0..axes {
+            input_offset += indices[axis] * axis_strides[axis];
+        }
+        output[out_idx] = input[input_offset];
+        out_idx += 1;
+
+        let mut done = true;
+        for axis in (0..axes).rev() {
+            indices[axis] += 1;
+            if indices[axis] < axis_sizes[axis] {
+                done = false;
+                break;
+            }
+            indices[axis] = 0;
+        }
+        if done {
+            break;
+        }
+    }
+}
+
+pub(crate) fn diagonal_scatter<T>(
+    grad_output: &[T],
+    grad_input: &mut [T],
+    dims: &[usize],
+    strides: &[usize],
+    spec: &DiagonalSpec,
+) where
+    T: Copy + Send + Sync + std::ops::AddAssign,
+{
+    if grad_output.is_empty() {
+        return;
+    }
+
+    let mut axis_sizes: Vec<usize> = spec.kept_dims.iter().map(|&dim| dims[dim]).collect();
+    axis_sizes.push(spec.diag_len);
+
+    let mut axis_strides: Vec<usize> = spec.kept_dims.iter().map(|&dim| strides[dim]).collect();
+    axis_strides.push(spec.diag_stride);
+
+    let axes = axis_sizes.len();
+    let mut indices = vec![0usize; axes];
+    let mut out_idx = 0usize;
+
+    loop {
+        let mut input_offset = spec.base_offset;
+        for axis in 0..axes {
+            input_offset += indices[axis] * axis_strides[axis];
+        }
+        grad_input[input_offset] += grad_output[out_idx];
+        out_idx += 1;
+
+        let mut done = true;
+        for axis in (0..axes).rev() {
+            indices[axis] += 1;
+            if indices[axis] < axis_sizes[axis] {
+                done = false;
+                break;
+            }
+            indices[axis] = 0;
+        }
+        if done {
+            break;
+        }
+    }
+}
 
 #[cfg(feature = "blas")]
 #[inline]
@@ -435,6 +612,134 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     } else {
         Ok(output)
     }
+}
+
+/// Extract a diagonal from the tensor, reducing two dimensions into one.
+pub fn diagonal(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Result<Tensor> {
+    if tensor.ndim() < 2 {
+        return Err(MinitensorError::invalid_operation(
+            "diagonal requires tensors with at least 2 dimensions",
+        ));
+    }
+
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "diagonal currently supports only CPU tensors",
+        ));
+    }
+
+    let ndim = tensor.ndim();
+    let dim1 = normalize_dim(dim1, ndim)?;
+    let dim2 = normalize_dim(dim2, ndim)?;
+    if dim1 == dim2 {
+        return Err(MinitensorError::invalid_operation(
+            "diagonal dimensions must be distinct",
+        ));
+    }
+
+    let dims = tensor.shape().dims();
+    let strides = tensor.strides().as_slice();
+    let spec = compute_diagonal_spec(dims, strides, dim1, dim2, offset)?;
+    let out_shape = Shape::new(spec.output_dims.clone());
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+    let mut output_data = TensorData::zeros_on_device(out_shape.numel(), dtype, device);
+
+    if out_shape.numel() > 0 {
+        match dtype {
+            DataType::Float32 => {
+                let input = tensor.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from tensor")
+                })?;
+                let output = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice for diagonal output",
+                    )
+                })?;
+                diagonal_copy(input, output, dims, strides, &spec);
+            }
+            DataType::Float64 => {
+                let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from tensor")
+                })?;
+                let output = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice for diagonal output",
+                    )
+                })?;
+                diagonal_copy(input, output, dims, strides, &spec);
+            }
+            DataType::Int32 => {
+                let input = tensor.data().as_i32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i32 slice from tensor")
+                })?;
+                let output = output_data.as_i32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i32 slice for diagonal output",
+                    )
+                })?;
+                diagonal_copy(input, output, dims, strides, &spec);
+            }
+            DataType::Int64 => {
+                let input = tensor.data().as_i64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get i64 slice from tensor")
+                })?;
+                let output = output_data.as_i64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable i64 slice for diagonal output",
+                    )
+                })?;
+                diagonal_copy(input, output, dims, strides, &spec);
+            }
+            DataType::Bool => {
+                let input = tensor.data().as_bool_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get bool slice from tensor")
+                })?;
+                let output = output_data.as_bool_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable bool slice for diagonal output",
+                    )
+                })?;
+                diagonal_copy(input, output, dims, strides, &spec);
+            }
+        }
+    }
+
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        out_shape,
+        dtype,
+        device,
+        tensor.requires_grad(),
+    );
+
+    if tensor.requires_grad() {
+        let grad_fn = Arc::new(crate::autograd::DiagonalBackward {
+            input_shape: dims.to_vec(),
+            input_strides: strides.to_vec(),
+            input_dtype: dtype,
+            dim1,
+            dim2,
+            offset,
+            input_requires_grad: tensor.requires_grad(),
+            input_id: tensor.id(),
+        });
+
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
+/// Sum of the diagonal elements along two dimensions.
+pub fn trace(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Result<Tensor> {
+    let diag = diagonal(tensor, offset, dim1, dim2)?;
+    if diag.ndim() == 0 {
+        return Ok(diag);
+    }
+
+    reduction::sum(&diag, Some(vec![-1]), false)
 }
 
 /// Return the upper triangular part of a matrix (or batch of matrices).
@@ -1039,7 +1344,7 @@ fn transpose_generic<T: Copy + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{device::Device, tensor::TensorData};
+    use crate::{autograd::GradientFunction, device::Device, tensor::TensorData};
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);
@@ -1213,6 +1518,63 @@ mod tests {
 
         let result = matmul(&a, &b);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diagonal_main() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let result = diagonal(&tensor, 0, 0, 1).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[1.0, 4.0]);
+        assert_eq!(result.shape().dims(), &[2]);
+    }
+
+    #[test]
+    fn test_diagonal_with_offset() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let upper = diagonal(&tensor, 1, 0, 1).unwrap();
+        assert_eq!(upper.data().as_f32_slice().unwrap(), &[2.0, 6.0]);
+
+        let lower = diagonal(&tensor, -1, 0, 1).unwrap();
+        assert_eq!(lower.data().as_f32_slice().unwrap(), &[4.0]);
+    }
+
+    #[test]
+    fn test_diagonal_high_dim_shape() {
+        let tensor =
+            create_test_tensor_f32((0..24).map(|v| v as f32).collect(), vec![2, 3, 4], false);
+        let result = diagonal(&tensor, 0, 1, 2).unwrap();
+        assert_eq!(result.shape().dims(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_diagonal_backward_gradients() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
+        let grad_output = create_test_tensor_f32(vec![1.0, 1.0], vec![2], false);
+
+        let backward_fn = crate::autograd::DiagonalBackward {
+            input_shape: tensor.shape().dims().to_vec(),
+            input_strides: tensor.strides().as_slice().to_vec(),
+            input_dtype: DataType::Float32,
+            dim1: 0,
+            dim2: 1,
+            offset: 0,
+            input_requires_grad: true,
+            input_id: tensor.id(),
+        };
+
+        let gradients = backward_fn.backward(&grad_output).unwrap();
+        let grad_tensor = gradients.get(&tensor.id()).unwrap();
+        let grad = grad_tensor.data().as_f32_slice().unwrap();
+        assert_eq!(grad, &[1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_trace_matches_manual_sum() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let traced = trace(&tensor, 0, 0, 1).unwrap();
+        let value = traced.data().as_f32_slice().unwrap();
+        assert_eq!(value, &[5.0]);
     }
 
     #[test]

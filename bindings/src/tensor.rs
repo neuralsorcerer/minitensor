@@ -847,6 +847,24 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    pub fn diagonal(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
+        let result = self
+            .inner
+            .diagonal(offset, dim1, dim2)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    pub fn trace(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
+        let result = self
+            .inner
+            .trace(offset, dim1, dim2)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(name = "where")]
     pub fn where_method(&self, condition: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<Self> {
         let device = self.inner.device();
