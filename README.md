@@ -11,6 +11,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 <div align="center">
 
+[![PyPI version](https://badge.fury.io/py/minitensor.svg)](https://badge.fury.io/py/minitensor)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![rustc 1.85+](https://img.shields.io/badge/rustc-1.85+-blue.svg?logo=rust&logoColor=white)](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
 [![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
