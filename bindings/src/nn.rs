@@ -38,7 +38,7 @@ fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTe
     let inner = value
         .getattr(intern!(py, "_tensor"))
         .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor or core Tensor"))?;
-    inner.extract::<PyRef<PyTensor>>()
+    Ok(inner.extract::<PyRef<PyTensor>>()?)
 }
 
 fn borrow_optional_tensor<'py>(
@@ -56,7 +56,7 @@ fn borrow_tensor_mut<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRefMut<'p
     let inner = value
         .getattr(intern!(py, "_tensor"))
         .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor or core Tensor"))?;
-    inner.extract::<PyRefMut<PyTensor>>()
+    Ok(inner.extract::<PyRefMut<PyTensor>>()?)
 }
 
 fn borrow_optional_tensor_mut<'py>(

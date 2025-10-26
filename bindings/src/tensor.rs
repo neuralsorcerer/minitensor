@@ -76,7 +76,7 @@ impl ShapeSequence {
                     .map_err(|_| PyValueError::new_err("Shape dimension too large"))?;
                 Ok(PyInt::new(py, py_value).into())
             }
-        } else if let Ok(slice) = index.downcast::<PySlice>() {
+        } else if let Ok(slice) = index.cast::<PySlice>() {
             let indices = slice.indices(self.dims.len() as isize)?;
             let mut values = Vec::with_capacity(indices.slicelength as usize);
             let mut current = indices.start;
@@ -411,7 +411,7 @@ impl PyTensor {
     pub fn repeat(&self, repeats: &Bound<PyTuple>) -> PyResult<Self> {
         let repeats_any = if repeats.len() == 1 {
             let first = repeats.get_item(0)?;
-            if first.downcast::<PySequence>().is_ok() {
+            if first.cast::<PySequence>().is_ok() {
                 first.clone().into_any()
             } else {
                 repeats.clone().into_any()
@@ -2084,7 +2084,7 @@ impl PyTensor {
                 sections.push(chunk);
                 remaining -= chunk;
             }
-        } else if let Ok(list) = split_size_or_sections.downcast::<PyList>() {
+        } else if let Ok(list) = split_size_or_sections.cast::<PyList>() {
             for obj in list.iter() {
                 let size: usize = obj.extract()?;
                 if size == 0 {
@@ -2100,7 +2100,7 @@ impl PyTensor {
                     "split sizes do not sum to dimension size",
                 ));
             }
-        } else if let Ok(tuple) = split_size_or_sections.downcast::<PyTuple>() {
+        } else if let Ok(tuple) = split_size_or_sections.cast::<PyTuple>() {
             for obj in tuple.iter() {
                 let size: usize = obj.extract()?;
                 if size == 0 {
@@ -2168,11 +2168,11 @@ fn normalize_variadic_isize_args(tuple: &Bound<PyTuple>, arg_name: &str) -> PyRe
     if tuple.len() == 1 {
         let first = tuple.get_item(0)?;
 
-        if let Ok(nested) = first.downcast::<PyTuple>() {
+        if let Ok(nested) = first.cast::<PyTuple>() {
             return normalize_variadic_isize_args(&nested, arg_name);
         }
 
-        if let Ok(list) = first.downcast::<PyList>() {
+        if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
             for item in list.iter() {
                 dims.push(item.extract::<isize>()?);
@@ -2231,10 +2231,10 @@ fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usi
 
     if shape.len() == 1 {
         let first = shape.get_item(0)?;
-        if let Ok(tuple) = first.downcast::<PyTuple>() {
+        if let Ok(tuple) = first.cast::<PyTuple>() {
             return parse_shape_tuple(&tuple, arg_name);
         }
-        if let Ok(list) = first.downcast::<PyList>() {
+        if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
             for item in list.iter() {
                 let value: isize = item.extract()?;
@@ -2262,11 +2262,11 @@ fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usi
 }
 
 fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
-    if let Ok(tuple) = obj.downcast::<PyTuple>() {
+    if let Ok(tuple) = obj.cast::<PyTuple>() {
         return parse_shape_tuple(&tuple, arg_name);
     }
 
-    if let Ok(list) = obj.downcast::<PyList>() {
+    if let Ok(list) = obj.cast::<PyList>() {
         let mut dims = Vec::with_capacity(list.len());
         for item in list.iter() {
             let value: isize = item.extract()?;
@@ -2331,7 +2331,7 @@ fn normalize_optional_axes(dim: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<is
         ));
     }
 
-    if let Ok(sequence) = obj.downcast::<PySequence>() {
+    if let Ok(sequence) = obj.cast::<PySequence>() {
         let length = sequence.len()? as usize;
         let mut axes = Vec::with_capacity(length);
         for index in 0..length {
@@ -2440,7 +2440,7 @@ fn convert_python_data_to_tensor(
     }
 
     // Handle Python lists and tuples by flattening values into scalar variants
-    if let Ok(list) = data.downcast::<PyList>() {
+    if let Ok(list) = data.cast::<PyList>() {
         let (shape, flat_data) = flatten_python_data(list)?;
         let (base_tensor, base_dtype) =
             tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
@@ -2452,7 +2452,7 @@ fn convert_python_data_to_tensor(
         return base_tensor.astype(dtype).map_err(_convert_error);
     }
 
-    if let Ok(tuple) = data.downcast::<PyTuple>() {
+    if let Ok(tuple) = data.cast::<PyTuple>() {
         let list = tuple.to_list();
         return convert_python_data_to_tensor(list.as_any(), dtype, device, requires_grad);
     }
@@ -2792,11 +2792,11 @@ fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
         }
     }
 
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         return infer_sequence_dtype(list.iter());
     }
 
-    if let Ok(tuple) = value.downcast::<PyTuple>() {
+    if let Ok(tuple) = value.cast::<PyTuple>() {
         return infer_sequence_dtype(tuple.iter());
     }
 
@@ -2860,7 +2860,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
         shape: &mut Vec<usize>,
         flat_data: &mut Vec<ScalarValue>,
     ) -> PyResult<()> {
-        if let Ok(nested_list) = item.downcast::<PyList>() {
+        if let Ok(nested_list) = item.cast::<PyList>() {
             let length = nested_list.len();
             if depth >= shape.len() {
                 shape.push(length);
@@ -2875,7 +2875,7 @@ fn flatten_python_data(list: &Bound<PyList>) -> PyResult<(Vec<usize>, Vec<Scalar
             return Ok(());
         }
 
-        if let Ok(nested_tuple) = item.downcast::<PyTuple>() {
+        if let Ok(nested_tuple) = item.cast::<PyTuple>() {
             let list = nested_tuple.to_list();
             let length = list.len();
             if depth >= shape.len() {
@@ -3065,7 +3065,7 @@ fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
             return Err(PyIndexError::new_err("Index out of bounds"));
         }
         Ok(TensorIndex::Index(idx as usize))
-    } else if let Ok(slice) = item.downcast::<PySlice>() {
+    } else if let Ok(slice) = item.cast::<PySlice>() {
         use std::convert::TryInto;
 
         let dim_size_isize: isize = dim_size
@@ -3092,7 +3092,7 @@ fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
 }
 
 fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
-    if let Ok(tup) = key.downcast::<PyTuple>() {
+    if let Ok(tup) = key.cast::<PyTuple>() {
         if tup.len() > shape.len() {
             return Err(PyIndexError::new_err("Too many indices"));
         }
@@ -3123,7 +3123,7 @@ fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorInde
 }
 
 fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Tensor> {
-    if let Ok(array_f32) = array.downcast::<PyArrayDyn<f32>>() {
+    if let Ok(array_f32) = array.cast::<PyArrayDyn<f32>>() {
         let readonly = array_f32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
         let data_vec: Vec<f32> = readonly.as_slice()?.to_vec();
@@ -3139,7 +3139,7 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
             Device::cpu(),
             requires_grad,
         ))
-    } else if let Ok(array_f64) = array.downcast::<PyArrayDyn<f64>>() {
+    } else if let Ok(array_f64) = array.cast::<PyArrayDyn<f64>>() {
         let readonly = array_f64.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
         let data_vec: Vec<f64> = readonly.as_slice()?.to_vec();
@@ -3155,7 +3155,7 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
             Device::cpu(),
             requires_grad,
         ))
-    } else if let Ok(array_i32) = array.downcast::<PyArrayDyn<i32>>() {
+    } else if let Ok(array_i32) = array.cast::<PyArrayDyn<i32>>() {
         let readonly = array_i32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
         let data_vec: Vec<i32> = readonly.as_slice()?.to_vec();
@@ -3171,7 +3171,7 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
             Device::cpu(),
             requires_grad,
         ))
-    } else if let Ok(array_i64) = array.downcast::<PyArrayDyn<i64>>() {
+    } else if let Ok(array_i64) = array.cast::<PyArrayDyn<i64>>() {
         let readonly = array_i64.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
         let data_vec: Vec<i64> = readonly.as_slice()?.to_vec();
@@ -3187,7 +3187,7 @@ fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResul
             Device::cpu(),
             requires_grad,
         ))
-    } else if let Ok(array_bool) = array.downcast::<PyArrayDyn<bool>>() {
+    } else if let Ok(array_bool) = array.cast::<PyArrayDyn<bool>>() {
         let readonly = array_bool.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
         let data_vec: Vec<bool> = readonly.as_slice()?.to_vec();

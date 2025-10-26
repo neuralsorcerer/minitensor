@@ -20,7 +20,7 @@ fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTe
     let inner = value
         .getattr(intern!(py, "_tensor"))
         .map_err(|_| PyTypeError::new_err("expected a minitensor Tensor"))?;
-    inner.extract::<PyRef<PyTensor>>()
+    Ok(inner.extract::<PyRef<PyTensor>>()?)
 }
 
 fn borrow_optional_tensor<'py>(
@@ -52,7 +52,7 @@ fn parse_normalized_shape(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
 }
 
 fn to_pylist<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         return Ok(list.clone());
     }
 

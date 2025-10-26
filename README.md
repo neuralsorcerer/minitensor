@@ -24,7 +24,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 ## Features
 
-- **High Performance**: Rust backend for maximum speed and memory efficiency
+- **High Performance**: Rust engine for maximum speed and memory efficiency
 - **Python-Friendly**: Familiar PyTorch-like API for easy adoption
 - **Neural Networks**: Complete neural network layers and optimizers
 - **NumPy Integration**: Seamless interoperability with NumPy arrays
@@ -271,7 +271,7 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 @software{minitensor2025,
   author = {Soumyadip Sarkar},
   title = {MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
-  url = {http://github.com/neuralsorcerer/minitensor},
+  url = {https://doi.org/10.5281/zenodo.17384736},
   year = {2025},
 }
 ```

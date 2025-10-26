@@ -188,7 +188,7 @@ fn borrow_tensor_mut<'py>(
     let inner = bound
         .getattr(intern!(py, "_tensor"))
         .map_err(|_| PyTypeError::new_err("optimizer parameters must be Tensor instances"))?;
-    inner.extract::<PyRefMut<PyTensor>>()
+    Ok(inner.extract::<PyRefMut<PyTensor>>()?)
 }
 
 fn collect_parameters(parameters: &Bound<PyAny>) -> PyResult<Vec<Py<PyAny>>> {
