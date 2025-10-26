@@ -48,8 +48,8 @@ rand_distr = "0.5"
 libm = "0.2"
 
 # Python bindings
-pyo3 = { version = "0.26", features = ["extension-module", "auto-initialize"] }
-numpy = "0.26"
+pyo3 = { version = "0.27", features = ["extension-module", "auto-initialize"] }
+numpy = "0.27"
 
 [workspace.metadata.maturin]
 python-source = "py/src"
