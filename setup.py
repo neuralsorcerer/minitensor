@@ -38,7 +38,6 @@ EXTRAS_REQUIRE = {
         "pytest",
         "pytest-benchmark",
         "black",
-        "isort",
         "mypy",
         "maturin",
     ],
