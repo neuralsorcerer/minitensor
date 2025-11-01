@@ -73,6 +73,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(get_default_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(set_default_dtype, m)?)?;
+    m.add_function(wrap_pyfunction!(manual_seed, m)?)?;
 
     Ok(())
 }
@@ -106,4 +107,10 @@ fn get_default_dtype() -> PyResult<String> {
 #[pyfunction]
 fn set_default_dtype(dtype: &str) -> PyResult<()> {
     dtype::set_default_dtype(dtype)
+}
+
+#[pyfunction]
+fn manual_seed(seed: u64) -> PyResult<()> {
+    engine::manual_seed(seed);
+    Ok(())
 }

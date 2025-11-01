@@ -18,6 +18,7 @@ pub mod nn;
 pub mod operations;
 pub mod optim;
 pub mod plugins;
+pub mod random;
 pub mod serialization;
 pub mod tensor;
 
@@ -41,6 +42,7 @@ pub use plugins::{
     Plugin, PluginInfo, PluginManager, VersionInfo, get_plugin_info, is_plugin_loaded,
     list_plugins, register_plugin, unload_plugin,
 };
+pub use random::manual_seed;
 pub use serialization::{
     DeploymentModel, ModelMetadata, ModelSerializer, ModelVersion, SerializationFormat,
     SerializedModel, SerializedTensor, StateDict,

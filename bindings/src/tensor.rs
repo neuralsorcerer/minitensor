@@ -10,6 +10,7 @@ use crate::error::_convert_error;
 use crate::numpy_compat::cross_impl;
 use engine::operations::binary::{BinaryOpKind, coerce_binary_operands};
 use engine::operations::shape_ops::RepeatInterleaveSpec;
+use engine::random;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
@@ -1949,6 +1950,202 @@ impl PyTensor {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+    fn rand_like(
+        input: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => match reference_tensor.dtype() {
+                DataType::Float32 | DataType::Float64 => reference_tensor.dtype(),
+                _ => dtype::default_float_dtype(),
+            },
+        };
+
+        match dtype {
+            DataType::Float32 | DataType::Float64 => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "rand_like only supports float32 or float64 dtypes",
+                ));
+            }
+        }
+
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = create_random_tensor(shape, dtype, device, requires_grad, false)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+    fn randn_like(
+        input: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => match reference_tensor.dtype() {
+                DataType::Float32 | DataType::Float64 => reference_tensor.dtype(),
+                _ => dtype::default_float_dtype(),
+            },
+        };
+
+        match dtype {
+            DataType::Float32 | DataType::Float64 => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "randn_like only supports float32 or float64 dtypes",
+                ));
+            }
+        }
+
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = create_random_tensor(shape, dtype, device, requires_grad, true)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (input, low, high=None, dtype=None, device=None, requires_grad=None))]
+    fn randint_like(
+        input: &Bound<PyAny>,
+        low: i64,
+        high: Option<i64>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (0, low),
+        };
+
+        if low >= high {
+            return Err(PyValueError::new_err(
+                "randint_like requires that low < high",
+            ));
+        }
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => match reference_tensor.dtype() {
+                DataType::Int32 => DataType::Int32,
+                DataType::Int64 => DataType::Int64,
+                _ => DataType::Int64,
+            },
+        };
+
+        match dtype {
+            DataType::Int32 | DataType::Int64 => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "randint_like only supports int32 or int64 dtypes",
+                ));
+            }
+        }
+
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = create_randint_tensor(shape, dtype, device, requires_grad, low, high)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (low, high=None, *shape, dtype=None, device=None, requires_grad=false))]
+    fn randint(
+        low: i64,
+        high: Option<i64>,
+        shape: &Bound<PyTuple>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (0, low),
+        };
+
+        if low >= high {
+            return Err(PyValueError::new_err("randint requires that low < high"));
+        }
+
+        let dims = parse_shape_tuple(shape, "shape")?;
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => DataType::Int64,
+        };
+
+        match dtype {
+            DataType::Int32 | DataType::Int64 => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "randint only supports int32 or int64 dtypes",
+                ));
+            }
+        }
+
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let requires_grad = requires_grad.unwrap_or(false);
+
+        let shape = Shape::new(dims);
+        let tensor = create_randint_tensor(shape, dtype, device, requires_grad, low, high)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (n, dtype=None, device=None, requires_grad=false))]
+    fn randperm(
+        n: usize,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => DataType::Int64,
+        };
+
+        match dtype {
+            DataType::Int32 | DataType::Int64 => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "randperm only supports int32 or int64 dtypes",
+                ));
+            }
+        }
+
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let requires_grad = requires_grad.unwrap_or(false);
+
+        let tensor = create_randperm_tensor(n, dtype, device, requires_grad)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (n, m=None, dtype=None, device=None, requires_grad=false))]
     fn eye(
         n: usize,
@@ -3500,78 +3697,83 @@ fn create_random_tensor(
         DataType::Float32 => {
             if let Some(slice) = tensor_data.as_f32_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::rng();
-                if normal {
-                    use rand_distr::{Distribution, Normal};
-                    let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
-                    for val in slice.iter_mut() {
-                        *val = normal_dist.sample(&mut rng);
+                random::with_rng(|rng| {
+                    if normal {
+                        use rand_distr::{Distribution, Normal};
+                        let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
+                        for val in slice.iter_mut() {
+                            *val = normal_dist.sample(rng);
+                        }
+                    } else {
+                        for val in slice.iter_mut() {
+                            *val = rng.random::<f32>();
+                        }
                     }
-                } else {
-                    for val in slice.iter_mut() {
-                        *val = rng.random::<f32>();
-                    }
-                }
+                });
             }
         }
         DataType::Float64 => {
             if let Some(slice) = tensor_data.as_f64_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::rng();
-                if normal {
-                    use rand_distr::{Distribution, Normal};
-                    let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
-                    for val in slice.iter_mut() {
-                        *val = normal_dist.sample(&mut rng);
+                random::with_rng(|rng| {
+                    if normal {
+                        use rand_distr::{Distribution, Normal};
+                        let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
+                        for val in slice.iter_mut() {
+                            *val = normal_dist.sample(rng);
+                        }
+                    } else {
+                        for val in slice.iter_mut() {
+                            *val = rng.random::<f64>();
+                        }
                     }
-                } else {
-                    for val in slice.iter_mut() {
-                        *val = rng.random::<f64>();
-                    }
-                }
+                });
             }
         }
         DataType::Int32 => {
             if let Some(slice) = tensor_data.as_i32_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::rng();
-                if normal {
-                    use rand_distr::{Distribution, Normal};
-                    let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
-                    for val in slice.iter_mut() {
-                        *val = normal_dist.sample(&mut rng) as i32;
+                random::with_rng(|rng| {
+                    if normal {
+                        use rand_distr::{Distribution, Normal};
+                        let normal_dist = Normal::new(0.0f32, 1.0f32).unwrap();
+                        for val in slice.iter_mut() {
+                            *val = normal_dist.sample(rng) as i32;
+                        }
+                    } else {
+                        for val in slice.iter_mut() {
+                            *val = rng.random::<i32>();
+                        }
                     }
-                } else {
-                    for val in slice.iter_mut() {
-                        *val = rng.random::<i32>();
-                    }
-                }
+                });
             }
         }
         DataType::Int64 => {
             if let Some(slice) = tensor_data.as_i64_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::rng();
-                if normal {
-                    use rand_distr::{Distribution, Normal};
-                    let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
-                    for val in slice.iter_mut() {
-                        *val = normal_dist.sample(&mut rng) as i64;
+                random::with_rng(|rng| {
+                    if normal {
+                        use rand_distr::{Distribution, Normal};
+                        let normal_dist = Normal::new(0.0f64, 1.0f64).unwrap();
+                        for val in slice.iter_mut() {
+                            *val = normal_dist.sample(rng) as i64;
+                        }
+                    } else {
+                        for val in slice.iter_mut() {
+                            *val = rng.random::<i64>();
+                        }
                     }
-                } else {
-                    for val in slice.iter_mut() {
-                        *val = rng.random::<i64>();
-                    }
-                }
+                });
             }
         }
         DataType::Bool => {
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
                 use rand::Rng;
-                let mut rng = rand::rng();
-                for val in slice.iter_mut() {
-                    *val = rng.random::<bool>();
-                }
+                random::with_rng(|rng| {
+                    for val in slice.iter_mut() {
+                        *val = rng.random::<bool>();
+                    }
+                });
             }
         }
     }
@@ -3579,6 +3781,116 @@ fn create_random_tensor(
     Ok(Tensor::new(
         Arc::new(tensor_data),
         shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
+fn create_randint_tensor(
+    shape: Shape,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+    low: i64,
+    high: i64,
+) -> PyResult<Tensor> {
+    let tensor_data = match dtype {
+        DataType::Int32 => {
+            let low_i32 = i32::try_from(low)
+                .map_err(|_| PyValueError::new_err("low is out of range for dtype int32"))?;
+            let high_i32 = i32::try_from(high)
+                .map_err(|_| PyValueError::new_err("high is out of range for dtype int32"))?;
+            if low_i32 >= high_i32 {
+                return Err(PyValueError::new_err(
+                    "randint requires that low < high after casting to int32",
+                ));
+            }
+            let mut values = vec![0i32; shape.numel()];
+            random::with_rng(|rng| {
+                use rand::Rng;
+                for value in &mut values {
+                    *value = rng.random_range(low_i32..high_i32);
+                }
+            });
+            TensorData::from_vec_i32(values, device)
+        }
+        DataType::Int64 => {
+            if high <= low {
+                return Err(PyValueError::new_err("randint requires that low < high"));
+            }
+            let mut values = vec![0i64; shape.numel()];
+            random::with_rng(|rng| {
+                use rand::Rng;
+                for value in &mut values {
+                    *value = rng.random_range(low..high);
+                }
+            });
+            TensorData::from_vec_i64(values, device)
+        }
+        _ => {
+            return Err(PyValueError::new_err(
+                "randint only supports int32 or int64 dtypes",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(tensor_data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
+fn create_randperm_tensor(
+    n: usize,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    let tensor_data = match dtype {
+        DataType::Int32 => {
+            let _ = i32::try_from(n).map_err(|_| {
+                PyValueError::new_err("randperm with dtype int32 requires n <= i32::MAX")
+            })?;
+            let mut values = Vec::with_capacity(n);
+            for idx in 0..n {
+                values.push(i32::try_from(idx).map_err(|_| {
+                    PyValueError::new_err("randperm with dtype int32 requires n <= i32::MAX")
+                })?);
+            }
+            random::with_rng(|rng| {
+                use rand::seq::SliceRandom;
+                values.shuffle(rng);
+            });
+            TensorData::from_vec_i32(values, device)
+        }
+        DataType::Int64 => {
+            let _ = i64::try_from(n).map_err(|_| {
+                PyValueError::new_err("randperm with dtype int64 requires n <= i64::MAX")
+            })?;
+            let mut values = Vec::with_capacity(n);
+            for idx in 0..n {
+                values.push(idx as i64);
+            }
+            random::with_rng(|rng| {
+                use rand::seq::SliceRandom;
+                values.shuffle(rng);
+            });
+            TensorData::from_vec_i64(values, device)
+        }
+        _ => {
+            return Err(PyValueError::new_err(
+                "randperm only supports int32 or int64 dtypes",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(tensor_data),
+        Shape::new(vec![n]),
         dtype,
         device,
         requires_grad,

@@ -8,6 +8,7 @@ use super::Layer;
 use crate::{
     error::{MinitensorError, Result},
     operations::arithmetic,
+    random,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand_distr::{Bernoulli, Distribution};
@@ -36,12 +37,13 @@ fn generate_dropout_mask(
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
                 let scale = 1.0f32 / keep_prob as f32;
-                let mut rng = rand::rng();
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
-                for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
-                    *v = if b { scale } else { 0.0 };
-                }
+                random::with_rng(|rng| {
+                    for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
+                        *v = if b { scale } else { 0.0 };
+                    }
+                });
             } else {
                 data.fill(0.0);
             }
@@ -63,12 +65,13 @@ fn generate_dropout_mask(
                 data.fill(1.0);
             } else if keep_prob > 0.0 {
                 let scale = 1.0 / keep_prob;
-                let mut rng = rand::rng();
                 let bernoulli = Bernoulli::new(keep_prob)
                     .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
-                for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(&mut rng)) {
-                    *v = if b { scale } else { 0.0 };
-                }
+                random::with_rng(|rng| {
+                    for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
+                        *v = if b { scale } else { 0.0 };
+                    }
+                });
             } else {
                 data.fill(0.0);
             }

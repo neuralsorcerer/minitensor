@@ -23,7 +23,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 </div>
 
-## Features
+## Highlights
 
 - **High Performance**: Rust engine for maximum speed and memory efficiency
 - **Python-Friendly**: Familiar PyTorch-like API for easy adoption
@@ -269,7 +269,7 @@ Minitensor is designed for performance:
 If you use minitensor in your work and wish to refer to it, please use the following BibTeX entry.
 
 ```bibtex
-@software{minitensor2025,
+@software{minitensor,
   author = {Soumyadip Sarkar},
   title = {MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
   url = {https://doi.org/10.5281/zenodo.17384736},

@@ -7,6 +7,7 @@
 use crate::{
     device::Device,
     error::Result,
+    random,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand_distr::{Distribution, Normal, Uniform};
@@ -120,7 +121,6 @@ pub fn init_uniform(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
-    let mut rng = rand::rng();
     let data = match dtype {
         DataType::Float32 => {
             let dist = Uniform::new(a as f32, b as f32).unwrap();
@@ -128,9 +128,11 @@ pub fn init_uniform(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
@@ -139,9 +141,11 @@ pub fn init_uniform(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
@@ -150,9 +154,11 @@ pub fn init_uniform(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
@@ -161,9 +167,11 @@ pub fn init_uniform(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
@@ -172,9 +180,11 @@ pub fn init_uniform(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng) > 0.5
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng) > 0.5;
+                }
+            });
             TensorData::from_vec_bool(vec, device)
         }
     };
@@ -197,7 +207,6 @@ pub fn init_normal(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
-    let mut rng = rand::rng();
     let data = match dtype {
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
@@ -205,9 +214,11 @@ pub fn init_normal(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
@@ -216,9 +227,11 @@ pub fn init_normal(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng);
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng);
+                }
+            });
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
@@ -227,9 +240,11 @@ pub fn init_normal(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng).round() as i32;
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng).round() as i32;
+                }
+            });
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
@@ -238,9 +253,11 @@ pub fn init_normal(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng).round() as i64;
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng).round() as i64;
+                }
+            });
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
@@ -249,9 +266,11 @@ pub fn init_normal(
             unsafe {
                 vec.set_len(numel);
             }
-            for v in &mut vec {
-                *v = dist.sample(&mut rng) > 0.0;
-            }
+            random::with_rng(|rng| {
+                for v in &mut vec {
+                    *v = dist.sample(rng) > 0.0;
+                }
+            });
             TensorData::from_vec_bool(vec, device)
         }
     };

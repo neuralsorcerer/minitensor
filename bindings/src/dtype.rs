@@ -54,7 +54,7 @@ pub fn default_dtype() -> DataType {
     *DEFAULT_DTYPE.read()
 }
 
-fn default_float_dtype() -> DataType {
+pub fn default_float_dtype() -> DataType {
     match default_dtype() {
         DataType::Float64 => DataType::Float64,
         _ => DataType::Float32,

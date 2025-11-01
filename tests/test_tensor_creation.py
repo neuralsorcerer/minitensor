@@ -7,6 +7,7 @@
 import numpy as np
 import pytest
 
+import minitensor as mt
 from minitensor.numpy_compat import empty_like
 from minitensor.tensor import Tensor
 
@@ -43,6 +44,85 @@ def test_randn_int32_dtype():
     assert x.dtype == "int32"
     assert arr.dtype == np.int32
     assert arr.shape == (3,)
+
+
+def test_randint_defaults_to_int64_and_respects_bounds():
+    x = Tensor.randint(0, 10, 2, 3)
+    arr = x.numpy()
+    assert x.dtype == "int64"
+    assert arr.dtype == np.int64
+    assert arr.shape == (2, 3)
+    assert (arr >= 0).all()
+    assert (arr < 10).all()
+
+
+def test_randint_supports_int32_dtype():
+    x = Tensor.randint(-5, 5, (6,), dtype="int32")
+    arr = x.numpy()
+    assert x.dtype == "int32"
+    assert arr.dtype == np.int32
+    assert arr.shape == (6,)
+    assert (arr >= -5).all()
+    assert (arr < 5).all()
+
+
+def test_rand_like_matches_reference_metadata():
+    base = Tensor.ones((2, 3), dtype="float64", requires_grad=True)
+    result = Tensor.rand_like(base)
+
+    assert result.shape == base.shape
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+
+
+def test_rand_like_defaults_to_float_for_integer_inputs():
+    base = Tensor.ones((2, 2), dtype="int32")
+    result = Tensor.rand_like(base)
+
+    assert result.shape == base.shape
+    assert result.dtype == mt.get_default_dtype()
+
+
+def test_randn_like_can_override_dtype():
+    base = Tensor.ones((4,), dtype="float32")
+    result = Tensor.randn_like(base, dtype="float64")
+
+    assert result.shape == base.shape
+    assert result.dtype == "float64"
+
+
+def test_randint_like_honours_reference_shape_and_bounds():
+    base = Tensor.ones((5, 2), dtype="float32")
+    result = Tensor.randint_like(base, 3, 8)
+    values = result.numpy()
+
+    assert result.shape == base.shape
+    assert result.dtype == "int64"
+    assert (values >= 3).all()
+    assert (values < 8).all()
+
+
+def test_randint_like_respects_integer_reference_dtype():
+    base = Tensor.ones((6,), dtype="int32")
+    result = Tensor.randint_like(base, -2, 2)
+
+    assert result.dtype == "int32"
+
+
+def test_randperm_returns_a_permutation():
+    perm = Tensor.randperm(8)
+    arr = perm.numpy()
+    assert perm.dtype == "int64"
+    assert arr.dtype == np.int64
+    assert sorted(arr.tolist()) == list(range(8))
+
+
+def test_randperm_allows_int32_dtype():
+    perm = Tensor.randperm(5, dtype="int32")
+    arr = perm.numpy()
+    assert perm.dtype == "int32"
+    assert arr.dtype == np.int32
+    assert sorted(arr.tolist()) == list(range(5))
 
 
 def test_empty_like_shape_and_dtype():

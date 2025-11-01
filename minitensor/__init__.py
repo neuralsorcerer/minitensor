@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import sys as _sys
 import types as _types
 
@@ -35,6 +36,11 @@ zeros = Tensor.zeros
 ones = Tensor.ones
 rand = Tensor.rand
 randn = Tensor.randn
+rand_like = Tensor.rand_like
+randn_like = Tensor.randn_like
+randint = Tensor.randint
+randint_like = Tensor.randint_like
+randperm = Tensor.randperm
 eye = Tensor.eye
 full = Tensor.full
 arange = Tensor.arange
@@ -43,6 +49,7 @@ from_numpy_shared = Tensor.from_numpy_shared
 
 get_default_dtype = _C.get_default_dtype
 set_default_dtype = _C.set_default_dtype
+manual_seed = _C.manual_seed
 get_gradient = _C.get_gradient
 clear_autograd_graph = _C.clear_autograd_graph
 is_autograd_graph_consumed = _C.is_autograd_graph_consumed
@@ -71,6 +78,29 @@ if plugins is not None:
 serialization = getattr(_C, "serialization", None)
 if serialization is not None:
     _sys.modules[__name__ + ".serialization"] = serialization
+
+
+@contextmanager
+def default_dtype(dtype: str):
+    """Temporarily switch the global default dtype within a ``with`` block.
+
+    This helper restores the previous default dtype even if an exception is
+    raised inside the managed block. It relies on the Rust backend for
+    validation so any invalid ``dtype`` values will propagate the backend
+    ``ValueError`` after ensuring the prior dtype is reinstated.
+
+    Parameters
+    ----------
+    dtype:
+        The name of the dtype to activate (for example ``"float64"``).
+    """
+
+    previous = get_default_dtype()
+    try:
+        set_default_dtype(dtype)
+        yield
+    finally:
+        set_default_dtype(previous)
 
 
 _FUNCTIONAL_FORWARDERS = (
@@ -157,6 +187,11 @@ for _name in (
     "ones",
     "rand",
     "randn",
+    "rand_like",
+    "randn_like",
+    "randint",
+    "randint_like",
+    "randperm",
     "eye",
     "full",
     "arange",
@@ -164,6 +199,8 @@ for _name in (
     "from_numpy_shared",
     "get_default_dtype",
     "set_default_dtype",
+    "manual_seed",
+    "default_dtype",
 ):
     setattr(_tensor_module, _name, globals()[_name])
 
@@ -181,6 +218,11 @@ __all__ = [
     "ones",
     "rand",
     "randn",
+    "rand_like",
+    "randn_like",
+    "randint",
+    "randint_like",
+    "randperm",
     "eye",
     "full",
     "arange",
@@ -188,6 +230,7 @@ __all__ = [
     "from_numpy_shared",
     "get_default_dtype",
     "set_default_dtype",
+    "default_dtype",
     "get_gradient",
     "clear_autograd_graph",
     "is_autograd_graph_consumed",

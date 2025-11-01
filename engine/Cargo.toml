@@ -17,6 +17,7 @@ num-traits = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+once_cell = { workspace = true }
 
 # Memory management
 arc-swap = { workspace = true }
