@@ -36,6 +36,27 @@ fn register_leaf_tensor(tensor: &Tensor) {
     }
 }
 
+fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(bound) => {
+            if bound.is_none() {
+                return Ok(None);
+            }
+
+            if let Ok(val) = bound.extract::<f64>() {
+                Ok(Some(val))
+            } else if let Ok(int_val) = bound.extract::<i64>() {
+                Ok(Some(int_val as f64))
+            } else {
+                Err(PyTypeError::new_err(format!(
+                    "{name} must be a real number or None",
+                )))
+            }
+        }
+    }
+}
+
 #[pyclass(name = "Shape", module = "minitensor._core")]
 #[derive(Clone, Debug)]
 pub struct ShapeSequence {
@@ -655,6 +676,58 @@ impl PyTensor {
                 inner: self.inner.clone(),
             })
         }
+    }
+
+    #[pyo3(signature = (min=None, max=None))]
+    pub fn clip(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let min_val = parse_clip_bound(min, "min")?;
+        let max_val = parse_clip_bound(max, "max")?;
+        let result = self.inner.clip(min_val, max_val).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (min=None, max=None))]
+    pub fn clamp(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let min_val = parse_clip_bound(min, "min")?;
+        let max_val = parse_clip_bound(max, "max")?;
+        let result = self.inner.clamp(min_val, max_val).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn clamp_min(&self, min: f64) -> PyResult<Self> {
+        let result = self.inner.clamp_min(min).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn clamp_max(&self, max: f64) -> PyResult<Self> {
+        let result = self.inner.clamp_max(max).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (decimals=0))]
+    pub fn round(&self, decimals: i32) -> PyResult<Self> {
+        let result = self.inner.round(decimals).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn floor(&self) -> PyResult<Self> {
+        let result = self.inner.floor().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn ceil(&self) -> PyResult<Self> {
+        let result = self.inner.ceil().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn sign(&self) -> PyResult<Self> {
+        let result = self.inner.sign().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn reciprocal(&self) -> PyResult<Self> {
+        let result = self.inner.reciprocal().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
     }
 
     fn cpu(&self) -> PyResult<Self> {
@@ -1361,8 +1434,43 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    fn clamp(&self, min: Option<f64>, max: Option<f64>) -> PyResult<Self> {
-        let result = self.inner.clamp(min, max).map_err(_convert_error)?;
+    pub fn asin(&self) -> PyResult<Self> {
+        let result = self.inner.asin().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn acos(&self) -> PyResult<Self> {
+        let result = self.inner.acos().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn atan(&self) -> PyResult<Self> {
+        let result = self.inner.atan().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn sinh(&self) -> PyResult<Self> {
+        let result = self.inner.sinh().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn cosh(&self) -> PyResult<Self> {
+        let result = self.inner.cosh().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn asinh(&self) -> PyResult<Self> {
+        let result = self.inner.asinh().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn acosh(&self) -> PyResult<Self> {
+        let result = self.inner.acosh().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn atanh(&self) -> PyResult<Self> {
+        let result = self.inner.atanh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 

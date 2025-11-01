@@ -206,6 +206,71 @@ pub fn roll(
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, min=None, max=None))]
+pub fn clip(
+    input: &Bound<PyAny>,
+    min: Option<&Bound<PyAny>>,
+    max: Option<&Bound<PyAny>>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.clip(min, max)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, min=None, max=None))]
+pub fn clamp(
+    input: &Bound<PyAny>,
+    min: Option<&Bound<PyAny>>,
+    max: Option<&Bound<PyAny>>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.clamp(min, max)
+}
+
+#[pyfunction]
+pub fn clamp_min(input: &Bound<PyAny>, min: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.clamp_min(min)
+}
+
+#[pyfunction]
+pub fn clamp_max(input: &Bound<PyAny>, max: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.clamp_max(max)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, decimals=0))]
+pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.round(decimals)
+}
+
+#[pyfunction]
+pub fn floor(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.floor()
+}
+
+#[pyfunction]
+pub fn ceil(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.ceil()
+}
+
+#[pyfunction]
+pub fn sign(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.sign()
+}
+
+#[pyfunction]
+pub fn reciprocal(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.reciprocal()
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, chunks, dim=0))]
 pub fn chunk(input: &Bound<PyAny>, chunks: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
     let tensor = borrow_tensor(input)?;
@@ -390,6 +455,54 @@ pub fn tan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
 }
 
 #[pyfunction]
+pub fn asin(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.asin()
+}
+
+#[pyfunction]
+pub fn acos(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.acos()
+}
+
+#[pyfunction]
+pub fn atan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.atan()
+}
+
+#[pyfunction]
+pub fn sinh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.sinh()
+}
+
+#[pyfunction]
+pub fn cosh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.cosh()
+}
+
+#[pyfunction]
+pub fn asinh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.asinh()
+}
+
+#[pyfunction]
+pub fn acosh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.acosh()
+}
+
+#[pyfunction]
+pub fn atanh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.atanh()
+}
+
+#[pyfunction]
 pub fn rsqrt(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.rsqrt()
@@ -553,6 +666,15 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(repeat_interleave, parent)?)?;
     parent.add_function(wrap_pyfunction!(flip, parent)?)?;
     parent.add_function(wrap_pyfunction!(roll, parent)?)?;
+    parent.add_function(wrap_pyfunction!(clip, parent)?)?;
+    parent.add_function(wrap_pyfunction!(clamp, parent)?)?;
+    parent.add_function(wrap_pyfunction!(clamp_min, parent)?)?;
+    parent.add_function(wrap_pyfunction!(clamp_max, parent)?)?;
+    parent.add_function(wrap_pyfunction!(round, parent)?)?;
+    parent.add_function(wrap_pyfunction!(floor, parent)?)?;
+    parent.add_function(wrap_pyfunction!(ceil, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sign, parent)?)?;
+    parent.add_function(wrap_pyfunction!(reciprocal, parent)?)?;
     parent.add_function(wrap_pyfunction!(chunk, parent)?)?;
     parent.add_function(wrap_pyfunction!(split, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
@@ -577,6 +699,14 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(sin, parent)?)?;
     parent.add_function(wrap_pyfunction!(cos, parent)?)?;
     parent.add_function(wrap_pyfunction!(tan, parent)?)?;
+    parent.add_function(wrap_pyfunction!(asin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(acos, parent)?)?;
+    parent.add_function(wrap_pyfunction!(atan, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sinh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cosh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(asinh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(acosh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(atanh, parent)?)?;
     parent.add_function(wrap_pyfunction!(rsqrt, parent)?)?;
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(triu, parent)?)?;

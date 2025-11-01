@@ -814,6 +814,62 @@ impl Tensor {
         tan(self)
     }
 
+    /// Inverse sine function
+    #[inline(always)]
+    pub fn asin(&self) -> Result<Self> {
+        use crate::operations::activation::asin;
+        asin(self)
+    }
+
+    /// Inverse cosine function
+    #[inline(always)]
+    pub fn acos(&self) -> Result<Self> {
+        use crate::operations::activation::acos;
+        acos(self)
+    }
+
+    /// Inverse tangent function
+    #[inline(always)]
+    pub fn atan(&self) -> Result<Self> {
+        use crate::operations::activation::atan;
+        atan(self)
+    }
+
+    /// Hyperbolic sine
+    #[inline(always)]
+    pub fn sinh(&self) -> Result<Self> {
+        use crate::operations::activation::sinh;
+        sinh(self)
+    }
+
+    /// Hyperbolic cosine
+    #[inline(always)]
+    pub fn cosh(&self) -> Result<Self> {
+        use crate::operations::activation::cosh;
+        cosh(self)
+    }
+
+    /// Inverse hyperbolic sine
+    #[inline(always)]
+    pub fn asinh(&self) -> Result<Self> {
+        use crate::operations::activation::asinh;
+        asinh(self)
+    }
+
+    /// Inverse hyperbolic cosine
+    #[inline(always)]
+    pub fn acosh(&self) -> Result<Self> {
+        use crate::operations::activation::acosh;
+        acosh(self)
+    }
+
+    /// Inverse hyperbolic tangent
+    #[inline(always)]
+    pub fn atanh(&self) -> Result<Self> {
+        use crate::operations::activation::atanh;
+        atanh(self)
+    }
+
     /// Hyperbolic tangent
     #[inline(always)]
     pub fn tanh(&self) -> Result<Self> {
@@ -918,6 +974,67 @@ impl Tensor {
         abs(self)
     }
 
+    /// Element-wise sign (returns -1, 0, or 1 for each value).
+    #[inline(always)]
+    pub fn sign(&self) -> Result<Self> {
+        use crate::operations::activation::sign;
+        sign(self)
+    }
+
+    /// Clip tensor values to the provided range.
+    #[inline(always)]
+    pub fn clip(&self, min_val: Option<f64>, max_val: Option<f64>) -> Result<Self> {
+        if let (Some(min), Some(max)) = (min_val, max_val) {
+            if min > max {
+                return Err(MinitensorError::invalid_argument(format!(
+                    "clip minimum {min} cannot be greater than maximum {max}",
+                )));
+            }
+        }
+
+        use crate::operations::activation::clip;
+        clip(self, min_val, max_val)
+    }
+
+    /// Alias for [`Tensor::clip`] following PyTorch's `clamp` naming.
+    #[inline(always)]
+    pub fn clamp(&self, min_val: Option<f64>, max_val: Option<f64>) -> Result<Self> {
+        self.clip(min_val, max_val)
+    }
+
+    /// Clamp tensor values to be no smaller than `min_val`.
+    #[inline(always)]
+    pub fn clamp_min(&self, min_val: f64) -> Result<Self> {
+        self.clip(Some(min_val), None)
+    }
+
+    /// Clamp tensor values to be no larger than `max_val`.
+    #[inline(always)]
+    pub fn clamp_max(&self, max_val: f64) -> Result<Self> {
+        self.clip(None, Some(max_val))
+    }
+
+    /// Round tensor values to a specific number of decimal places.
+    #[inline(always)]
+    pub fn round(&self, decimals: i32) -> Result<Self> {
+        use crate::operations::activation::round;
+        round(self, decimals)
+    }
+
+    /// Floor tensor values element-wise.
+    #[inline(always)]
+    pub fn floor(&self) -> Result<Self> {
+        use crate::operations::activation::floor;
+        floor(self)
+    }
+
+    /// Ceil tensor values element-wise.
+    #[inline(always)]
+    pub fn ceil(&self) -> Result<Self> {
+        use crate::operations::activation::ceil;
+        ceil(self)
+    }
+
     /// Square root
     #[inline(always)]
     pub fn sqrt(&self) -> Result<Self> {
@@ -928,6 +1045,13 @@ impl Tensor {
     pub fn rsqrt(&self) -> Result<Self> {
         use crate::operations::activation::rsqrt;
         rsqrt(self)
+    }
+
+    /// Element-wise reciprocal (1/x).
+    #[inline(always)]
+    pub fn reciprocal(&self) -> Result<Self> {
+        use crate::operations::activation::reciprocal;
+        reciprocal(self)
     }
 
     /// Raise tensor elements to a scalar power
@@ -2137,101 +2261,6 @@ impl Tensor {
             DataType::Bool,
             self.device,
             false,
-        ))
-    }
-
-    /// Clamp tensor values between optional minimum and maximum
-    #[inline(always)]
-    pub fn clamp(&self, min: Option<f64>, max: Option<f64>) -> Result<Tensor> {
-        if min.is_none() && max.is_none() {
-            return Ok(self.clone());
-        }
-
-        let output = match self.dtype {
-            DataType::Float32 => {
-                let input = self
-                    .data
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
-                let mut vec = Vec::with_capacity(input.len());
-                for &x in input {
-                    let mut v = x;
-                    if let Some(mn) = min {
-                        v = v.max(mn as f32);
-                    }
-                    if let Some(mx) = max {
-                        v = v.min(mx as f32);
-                    }
-                    vec.push(v);
-                }
-                TensorData::from_vec_f32(vec, self.device)
-            }
-            DataType::Float64 => {
-                let input = self
-                    .data
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
-                let mut vec = Vec::with_capacity(input.len());
-                for &x in input {
-                    let mut v = x;
-                    if let Some(mn) = min {
-                        v = v.max(mn);
-                    }
-                    if let Some(mx) = max {
-                        v = v.min(mx);
-                    }
-                    vec.push(v);
-                }
-                TensorData::from_vec_f64(vec, self.device)
-            }
-            DataType::Int32 => {
-                let input = self
-                    .data
-                    .as_i32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?;
-                let mut vec = Vec::with_capacity(input.len());
-                for &x in input {
-                    let mut v = x;
-                    if let Some(mn) = min {
-                        v = v.max(mn as i32);
-                    }
-                    if let Some(mx) = max {
-                        v = v.min(mx as i32);
-                    }
-                    vec.push(v);
-                }
-                TensorData::from_vec_i32(vec, self.device)
-            }
-            DataType::Int64 => {
-                let input = self
-                    .data
-                    .as_i64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?;
-                let mut vec = Vec::with_capacity(input.len());
-                for &x in input {
-                    let mut v = x;
-                    if let Some(mn) = min {
-                        v = v.max(mn as i64);
-                    }
-                    if let Some(mx) = max {
-                        v = v.min(mx as i64);
-                    }
-                    vec.push(v);
-                }
-                TensorData::from_vec_i64(vec, self.device)
-            }
-            DataType::Bool => {
-                // Boolean values are already 0 or 1; clamping does nothing
-                return Ok(self.clone());
-            }
-        };
-
-        Ok(Tensor::new(
-            Arc::new(output),
-            self.shape.clone(),
-            self.dtype,
-            self.device,
-            self.requires_grad,
         ))
     }
 

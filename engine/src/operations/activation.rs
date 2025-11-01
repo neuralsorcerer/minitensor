@@ -6,11 +6,12 @@
 
 use crate::{
     autograd::{
-        CosBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward, HardshrinkBackward,
-        LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward, LogSoftmaxBackward,
-        PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward, SiluBackward,
-        SinBackward, SoftmaxBackward, SoftplusBackward, SoftsignBackward, TanBackward,
-        TanhBackward, add_to_graph,
+        AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
+        CosBackward, CoshBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward,
+        HardshrinkBackward, LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward,
+        LogSoftmaxBackward, PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward,
+        SiluBackward, SinBackward, SinhBackward, SoftmaxBackward, SoftplusBackward,
+        SoftsignBackward, TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -364,6 +365,310 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
         // Add to computation graph
         add_to_graph(&output_with_grad, Some(grad_fn))?;
 
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse sine function with gradient support
+pub fn asin(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => asin_f32(tensor, &mut output_data)?,
+        DataType::Float64 => asin_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Inverse sine only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AsinBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse cosine function with gradient support
+pub fn acos(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => acos_f32(tensor, &mut output_data)?,
+        DataType::Float64 => acos_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Inverse cosine only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AcosBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse tangent function with gradient support
+pub fn atan(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => atan_f32(tensor, &mut output_data)?,
+        DataType::Float64 => atan_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Inverse tangent only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AtanBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Hyperbolic sine with gradient support
+pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => sinh_f32(tensor, &mut output_data)?,
+        DataType::Float64 => sinh_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "sinh is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SinhBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Hyperbolic cosine with gradient support
+pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => cosh_f32(tensor, &mut output_data)?,
+        DataType::Float64 => cosh_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "cosh is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(CoshBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse hyperbolic sine with gradient support
+pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => asinh_f32(tensor, &mut output_data)?,
+        DataType::Float64 => asinh_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "asinh is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AsinhBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse hyperbolic cosine with gradient support
+pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => acosh_f32(tensor, &mut output_data)?,
+        DataType::Float64 => acosh_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "acosh is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AcoshBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Inverse hyperbolic tangent with gradient support
+pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => atanh_f32(tensor, &mut output_data)?,
+        DataType::Float64 => atanh_f64(tensor, &mut output_data)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "atanh is only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(AtanhBackward {
+            input_id: tensor.id(),
+            input: tensor.clone(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
         Ok(output_with_grad)
     } else {
         Ok(output)
@@ -1392,6 +1697,198 @@ fn tan_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
+fn asin_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::asin);
+    Ok(())
+}
+
+fn asin_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::asin);
+    Ok(())
+}
+
+fn acos_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::acos);
+    Ok(())
+}
+
+fn acos_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::acos);
+    Ok(())
+}
+
+fn atan_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::atan);
+    Ok(())
+}
+
+fn atan_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::atan);
+    Ok(())
+}
+
+fn sinh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::sinh);
+    Ok(())
+}
+
+fn sinh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::sinh);
+    Ok(())
+}
+
+fn cosh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::cosh);
+    Ok(())
+}
+
+fn cosh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::cosh);
+    Ok(())
+}
+
+fn asinh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::asinh);
+    Ok(())
+}
+
+fn asinh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::asinh);
+    Ok(())
+}
+
+fn acosh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::acosh);
+    Ok(())
+}
+
+fn acosh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::acosh);
+    Ok(())
+}
+
+fn atanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f32::atanh);
+    Ok(())
+}
+
+fn atanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    unary_apply(input_data, output_slice, f64::atanh);
+    Ok(())
+}
+
 fn softplus_f32(
     tensor: &Tensor,
     output_data: &mut TensorData,
@@ -2297,6 +2794,32 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
+/// Element-wise sign function (-1, 0, or 1 depending on value sign)
+pub fn sign(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => sign_f32(tensor, &mut output_data)?,
+        DataType::Float64 => sign_f64(tensor, &mut output_data)?,
+        DataType::Int32 => sign_i32(tensor, &mut output_data)?,
+        DataType::Int64 => sign_i64(tensor, &mut output_data)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(
+                "Sign operation not supported for boolean tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
 /// Square root function
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
     // Use powf implementation for gradient support: sqrt(x) = x.powf(0.5)
@@ -2307,6 +2830,16 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
 pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
     // Use powf implementation for gradient support: rsqrt(x) = x.powf(-0.5)
     powf(tensor, -0.5)
+}
+
+/// Element-wise reciprocal (1/x) with gradient support
+pub fn reciprocal(tensor: &Tensor) -> Result<Tensor> {
+    match tensor.dtype() {
+        DataType::Float32 | DataType::Float64 => powf(tensor, -1.0),
+        _ => Err(MinitensorError::invalid_operation(
+            "Reciprocal only supported for floating point tensors",
+        )),
+    }
 }
 
 /// Clip tensor values to range
@@ -2466,6 +2999,90 @@ fn abs_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     })?;
 
     unary_apply(input_data, output_slice, |v: i64| v.abs());
+    Ok(())
+}
+
+fn sign_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |v: f32| {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    });
+    Ok(())
+}
+
+fn sign_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |v: f64| {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    });
+    Ok(())
+}
+
+fn sign_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i32 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |v: i32| {
+        if v > 0 {
+            1
+        } else if v < 0 {
+            -1
+        } else {
+            0
+        }
+    });
+    Ok(())
+}
+
+fn sign_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+    let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get i64 slice from input tensor")
+    })?;
+
+    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
+    })?;
+
+    unary_apply(input_data, output_slice, |v: i64| {
+        if v > 0 {
+            1
+        } else if v < 0 {
+            -1
+        } else {
+            0
+        }
+    });
     Ok(())
 }
 

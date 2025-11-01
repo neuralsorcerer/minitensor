@@ -1152,6 +1152,246 @@ impl GradientFunction for TanBackward {
     }
 }
 
+/// Gradient function for inverse sine
+pub struct AsinBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AsinBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(asin(x)) = grad_output / sqrt(1 - x^2)
+        let square = arithmetic::mul(&self.input, &self.input)?;
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let denom = arithmetic::sub(&ones, &square)?;
+        let sqrt = denom.sqrt()?;
+        let grad = arithmetic::div(grad_output, &sqrt)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for inverse cosine
+pub struct AcosBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AcosBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(acos(x)) = -grad_output / sqrt(1 - x^2)
+        let square = arithmetic::mul(&self.input, &self.input)?;
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let denom = arithmetic::sub(&ones, &square)?;
+        let sqrt = denom.sqrt()?;
+        let frac = arithmetic::div(grad_output, &sqrt)?;
+        let grad = arithmetic::neg(&frac)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for inverse tangent
+pub struct AtanBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AtanBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(atan(x)) = grad_output / (1 + x^2)
+        let square = arithmetic::mul(&self.input, &self.input)?;
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let denom = arithmetic::add(&ones, &square)?;
+        let grad = arithmetic::div(grad_output, &denom)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for hyperbolic sine
+pub struct SinhBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for SinhBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(sinh(x)) = cosh(x) * grad_output
+        let cosh_x = self.input.cosh()?;
+        let grad = arithmetic::mul(&cosh_x, grad_output)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for hyperbolic cosine
+pub struct CoshBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for CoshBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(cosh(x)) = sinh(x) * grad_output
+        let sinh_x = self.input.sinh()?;
+        let grad = arithmetic::mul(&sinh_x, grad_output)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for inverse hyperbolic sine
+pub struct AsinhBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AsinhBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(asinh(x)) = grad_output / sqrt(1 + x^2)
+        let square = arithmetic::mul(&self.input, &self.input)?;
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let denom = arithmetic::add(&square, &ones)?;
+        let sqrt = denom.sqrt()?;
+        let grad = arithmetic::div(grad_output, &sqrt)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for inverse hyperbolic cosine
+pub struct AcoshBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AcoshBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(acosh(x)) = grad_output / sqrt((x - 1)(x + 1))
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let x_minus_one = arithmetic::sub(&self.input, &ones)?;
+        let x_plus_one = arithmetic::add(&self.input, &ones)?;
+        let product = arithmetic::mul(&x_minus_one, &x_plus_one)?;
+        let sqrt = product.sqrt()?;
+        let grad = arithmetic::div(grad_output, &sqrt)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for inverse hyperbolic tangent
+pub struct AtanhBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+}
+
+impl GradientFunction for AtanhBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx(atanh(x)) = grad_output / (1 - x^2)
+        let square = arithmetic::mul(&self.input, &self.input)?;
+        let ones = Tensor::ones(
+            self.input.shape().clone(),
+            self.input.dtype(),
+            self.input.device(),
+            false,
+        );
+        let denom = arithmetic::sub(&ones, &square)?;
+        let grad = arithmetic::div(grad_output, &denom)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for tanh
 pub struct TanhBackward {
     pub input_id: TensorId,
