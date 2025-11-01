@@ -132,6 +132,167 @@ def test_empty_like_shape_and_dtype():
     assert b.dtype == a.dtype
 
 
+def test_tensor_empty_like_matches_reference_metadata():
+    base = Tensor.ones((1, 4), dtype="float64", requires_grad=True)
+    result = Tensor.empty_like(base)
+
+    assert result.shape == base.shape
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+
+
+def test_tensor_zeros_like_preserves_shape_and_grad():
+    base = Tensor.rand((3, 2), requires_grad=True)
+    result = Tensor.zeros_like(base)
+
+    assert result.shape == base.shape
+    assert result.requires_grad is True
+    assert np.all(result.numpy() == 0)
+
+
+def test_tensor_ones_like_allows_dtype_override():
+    base = Tensor.zeros((5,), dtype="float32")
+    result = Tensor.ones_like(base, dtype="float64", requires_grad=True)
+
+    assert result.shape == base.shape
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+    np.testing.assert_allclose(result.numpy(), np.ones(5, dtype=np.float64))
+
+
+def test_tensor_full_like_respects_fill_value():
+    base = Tensor.ones((2, 2), dtype="float32")
+    result = Tensor.full_like(base, 7.5, dtype="float64")
+
+    assert result.shape == base.shape
+    assert result.dtype == "float64"
+    np.testing.assert_allclose(result.numpy(), np.full((2, 2), 7.5, dtype=np.float64))
+
+
+def test_tensor_new_empty_inherits_reference_metadata():
+    base = Tensor.ones((2, 3), dtype="float64", requires_grad=True)
+    result = base.new_empty((4,))
+
+    assert result.shape == (4,)
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+
+
+def test_tensor_new_zeros_allows_overrides():
+    base = Tensor.rand((2,), dtype="float32")
+    result = base.new_zeros([3, 1], dtype="float64", requires_grad=True)
+
+    assert result.shape == (3, 1)
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+    np.testing.assert_array_equal(result.numpy(), np.zeros((3, 1), dtype=np.float64))
+
+
+def test_tensor_new_ones_defaults_to_reference_metadata():
+    base = Tensor.zeros((2,), dtype="float32", requires_grad=True)
+    result = base.new_ones((2,))
+
+    assert result.shape == (2,)
+    assert result.dtype == "float32"
+    assert result.requires_grad is True
+    np.testing.assert_array_equal(result.numpy(), np.ones((2,), dtype=np.float32))
+
+
+def test_tensor_new_full_respects_fill_and_defaults():
+    base = Tensor.rand((1,), dtype="int32", requires_grad=True)
+    result = base.new_full(5, 3)
+
+    assert result.shape == (5,)
+    assert result.dtype == "int32"
+    assert result.requires_grad is True
+    np.testing.assert_array_equal(result.numpy(), np.full((5,), 3, dtype=np.int32))
+
+
+def test_tensor_new_tensor_defaults_to_reference_metadata():
+    base = Tensor.ones((2, 2), dtype="float64", requires_grad=True)
+    result = base.new_tensor([[1.5, 2.5], [3.5, 4.5]])
+
+    assert result.dtype == "float64"
+    assert result.device == base.device
+    assert result.requires_grad is True
+    np.testing.assert_allclose(
+        result.numpy(), np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float64)
+    )
+
+
+def test_tensor_new_tensor_overrides_dtype_and_requires_grad():
+    base = Tensor.zeros((2,), dtype="float32", requires_grad=False)
+    source = Tensor.arange(0, 4).reshape((2, 2))
+    result = base.new_tensor(source, dtype="float64", requires_grad=True)
+
+    assert result.dtype == "float64"
+    assert result.requires_grad is True
+    np.testing.assert_allclose(result.numpy(), source.numpy().astype(np.float64))
+
+
+def test_tensor_new_tensor_accepts_tensor_wrappers():
+    class Wrapper:
+        def __init__(self, tensor: Tensor) -> None:
+            self._tensor = tensor
+
+    base = Tensor.ones((1,), dtype="float32", requires_grad=True)
+    wrapped = Wrapper(Tensor.full((1,), 7, dtype="int32"))
+    result = base.new_tensor(wrapped, requires_grad=False)
+
+    assert result.dtype == "float32"
+    assert result.requires_grad is False
+    np.testing.assert_array_equal(result.numpy(), np.array([7.0], dtype=np.float32))
+
+
+def test_tensor_as_tensor_defaults_to_reference_tensor_metadata():
+    base = Tensor.arange(0, 4, dtype="float32", requires_grad=True).reshape((2, 2))
+    alias = Tensor.as_tensor(base)
+
+    assert alias.dtype == "float32"
+    assert alias.device == base.device
+    assert alias.requires_grad is True
+    np.testing.assert_allclose(alias.numpy(), base.numpy())
+
+    mt.clear_autograd_graph()
+    alias.sum().backward()
+
+    assert base.grad is not None
+    np.testing.assert_allclose(
+        base.grad.numpy(), np.ones((2, 2), dtype=np.float32)
+    )
+
+
+def test_tensor_as_tensor_respects_copy_flag_for_tensors():
+    base = Tensor.arange(0, 4, dtype="float32", requires_grad=True).reshape((2, 2))
+    expected = np.arange(0, 4, dtype=np.float32).reshape((2, 2))
+
+    clone = Tensor.as_tensor(base, copy=True)
+
+    mt.clear_autograd_graph()
+    clone.sum().backward()
+
+    assert base.grad is None
+    assert clone.grad is not None
+    np.testing.assert_allclose(clone.numpy(), expected)
+
+
+def test_tensor_as_tensor_infers_dtype_from_python_data():
+    data = [[1, 2, 3], [4, 5, 6]]
+    tensor = Tensor.as_tensor(data)
+
+    assert tensor.dtype == "int64"
+    np.testing.assert_array_equal(tensor.numpy(), np.array(data, dtype=np.int64))
+
+
+def test_tensor_as_tensor_allows_overrides():
+    array = np.arange(6, dtype=np.int32).reshape((2, 3))
+    tensor = Tensor.as_tensor(array, dtype="float64", requires_grad=True)
+
+    assert tensor.dtype == "float64"
+    assert tensor.requires_grad is True
+    np.testing.assert_allclose(tensor.numpy(), array.astype(np.float64))
+
+
 def test_mixed_type_creation_error():
     with pytest.raises(TypeError):
         Tensor([1, "a"])

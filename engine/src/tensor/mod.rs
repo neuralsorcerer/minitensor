@@ -19,7 +19,7 @@ use crate::{
     operations::arithmetic::add,
 };
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 /// Core tensor structure for minitensor
 #[derive(Clone)]
@@ -1344,6 +1344,191 @@ impl Tensor {
             self.device,
             self.requires_grad,
         ))
+    }
+
+    /// Copy data from ``source`` into this tensor in-place, preserving dtype and device.
+    pub fn copy_(&mut self, source: &Tensor) -> Result<()> {
+        if self.shape != *source.shape() {
+            return Err(MinitensorError::invalid_argument(format!(
+                "copy_ expected source with shape {:?}, but received {:?}",
+                self.shape.dims(),
+                source.shape().dims()
+            )));
+        }
+
+        if !self.device.is_cpu() {
+            return Err(MinitensorError::invalid_operation(
+                "copy_ currently supports only CPU tensors".to_string(),
+            ));
+        }
+
+        let mut prepared: Cow<'_, Tensor> = Cow::Borrowed(source);
+
+        if prepared.dtype() != self.dtype {
+            prepared = Cow::Owned(prepared.astype(self.dtype)?);
+        }
+
+        if prepared.device() != self.device {
+            prepared = Cow::Owned(prepared.to(self.device)?);
+        }
+
+        if !prepared.is_contiguous() {
+            prepared = Cow::Owned(prepared.contiguous()?);
+        }
+
+        if !self.is_contiguous() {
+            return Err(MinitensorError::invalid_operation(
+                "copy_ currently requires the destination tensor to be contiguous".to_string(),
+            ));
+        }
+
+        let dtype = self.dtype;
+        {
+            let dst_data = self.data_mut();
+            match dtype {
+                DataType::Float32 => {
+                    let dst = dst_data.as_f32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable float32 slice for copy_".to_string(),
+                        )
+                    })?;
+                    let src = prepared.data().as_f32_slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to access float32 source data for copy_".to_string(),
+                        )
+                    })?;
+                    dst.copy_from_slice(src);
+                }
+                DataType::Float64 => {
+                    let dst = dst_data.as_f64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable float64 slice for copy_".to_string(),
+                        )
+                    })?;
+                    let src = prepared.data().as_f64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to access float64 source data for copy_".to_string(),
+                        )
+                    })?;
+                    dst.copy_from_slice(src);
+                }
+                DataType::Int32 => {
+                    let dst = dst_data.as_i32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable int32 slice for copy_".to_string(),
+                        )
+                    })?;
+                    let src = prepared.data().as_i32_slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to access int32 source data for copy_".to_string(),
+                        )
+                    })?;
+                    dst.copy_from_slice(src);
+                }
+                DataType::Int64 => {
+                    let dst = dst_data.as_i64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable int64 slice for copy_".to_string(),
+                        )
+                    })?;
+                    let src = prepared.data().as_i64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to access int64 source data for copy_".to_string(),
+                        )
+                    })?;
+                    dst.copy_from_slice(src);
+                }
+                DataType::Bool => {
+                    let dst = dst_data.as_bool_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable bool slice for copy_".to_string(),
+                        )
+                    })?;
+                    let src = prepared.data().as_bool_slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to access bool source data for copy_".to_string(),
+                        )
+                    })?;
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+
+        self.refresh_autograd_metadata();
+        if self.requires_grad {
+            autograd::add_to_graph(self, None)?;
+        }
+
+        Ok(())
+    }
+
+    /// Fill the tensor in-place with ``value`` converted to the tensor dtype.
+    pub fn fill_(&mut self, value: f64) -> Result<()> {
+        if !self.device.is_cpu() {
+            return Err(MinitensorError::invalid_operation(
+                "fill_ currently supports only CPU tensors".to_string(),
+            ));
+        }
+
+        if !self.is_contiguous() {
+            return Err(MinitensorError::invalid_operation(
+                "fill_ currently requires contiguous tensors".to_string(),
+            ));
+        }
+
+        let dtype = self.dtype;
+        {
+            let data = self.data_mut();
+            match dtype {
+                DataType::Float32 => {
+                    let slice = data.as_f32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable float32 slice for fill_".to_string(),
+                        )
+                    })?;
+                    slice.fill(value as f32);
+                }
+                DataType::Float64 => {
+                    let slice = data.as_f64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable float64 slice for fill_".to_string(),
+                        )
+                    })?;
+                    slice.fill(value);
+                }
+                DataType::Int32 => {
+                    let slice = data.as_i32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable int32 slice for fill_".to_string(),
+                        )
+                    })?;
+                    slice.fill(value as i32);
+                }
+                DataType::Int64 => {
+                    let slice = data.as_i64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable int64 slice for fill_".to_string(),
+                        )
+                    })?;
+                    slice.fill(value as i64);
+                }
+                DataType::Bool => {
+                    let slice = data.as_bool_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "failed to obtain mutable bool slice for fill_".to_string(),
+                        )
+                    })?;
+                    slice.fill(value != 0.0);
+                }
+            }
+        }
+
+        self.refresh_autograd_metadata();
+        if self.requires_grad {
+            autograd::add_to_graph(self, None)?;
+        }
+
+        Ok(())
     }
 
     /// Detach tensor from computation graph

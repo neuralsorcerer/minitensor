@@ -512,6 +512,48 @@ def test_exp_extreme_values():
     assert result[1] == 0.0
 
 
+def test_tensor_copy_inplace_casts_dtype_and_preserves_requires_grad():
+    target = mt.zeros((2, 2), dtype="float32", requires_grad=True)
+    source = mt.Tensor([[1.5, -2.0], [3.25, 4.75]], dtype="float64")
+
+    returned = target.copy_(source)
+
+    assert returned is target
+    assert target.dtype == "float32"
+    assert target.requires_grad is True
+    np.testing.assert_allclose(
+        target.numpy(),
+        np.array([[1.5, -2.0], [3.25, 4.75]], dtype=np.float32),
+    )
+
+
+def test_tensor_copy_raises_for_shape_mismatch():
+    target = mt.zeros((2, 2), dtype="float32")
+    source = mt.ones((3,), dtype="float32")
+
+    with pytest.raises(ValueError, match="copy_ expected source"):
+        target.copy_(source)
+
+
+def test_tensor_fill_inplace_casts_scalar_to_tensor_dtype():
+    tensor = mt.ones((2, 3), dtype="int32", requires_grad=True)
+
+    returned = tensor.fill_(7.8)
+
+    assert returned is tensor
+    assert tensor.dtype == "int32"
+    assert tensor.requires_grad is True
+    np.testing.assert_array_equal(tensor.numpy(), np.full((2, 3), 7, dtype=np.int32))
+
+
+def test_tensor_fill_accepts_boolean_input():
+    tensor = mt.zeros((4,), dtype="bool")
+
+    tensor.fill_(True)
+
+    np.testing.assert_array_equal(tensor.numpy(), np.ones((4,), dtype=bool))
+
+
 def test_set_default_dtype():
     mt.set_default_dtype("float64")
     try:

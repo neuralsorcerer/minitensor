@@ -34,6 +34,7 @@ cuda = Device.cuda
 
 zeros = Tensor.zeros
 ones = Tensor.ones
+empty = Tensor.empty
 rand = Tensor.rand
 randn = Tensor.randn
 rand_like = Tensor.rand_like
@@ -43,9 +44,16 @@ randint_like = Tensor.randint_like
 randperm = Tensor.randperm
 eye = Tensor.eye
 full = Tensor.full
+full_like = Tensor.full_like
+empty_like = Tensor.empty_like
+zeros_like = Tensor.zeros_like
+ones_like = Tensor.ones_like
+linspace = Tensor.linspace
+logspace = Tensor.logspace
 arange = Tensor.arange
 from_numpy = Tensor.from_numpy
 from_numpy_shared = Tensor.from_numpy_shared
+as_tensor = Tensor.as_tensor
 
 get_default_dtype = _C.get_default_dtype
 set_default_dtype = _C.set_default_dtype
@@ -185,6 +193,7 @@ for _name in (
     "tensor",
     "zeros",
     "ones",
+    "empty",
     "rand",
     "randn",
     "rand_like",
@@ -194,9 +203,16 @@ for _name in (
     "randperm",
     "eye",
     "full",
+    "full_like",
+    "empty_like",
+    "zeros_like",
+    "ones_like",
+    "linspace",
+    "logspace",
     "arange",
     "from_numpy",
     "from_numpy_shared",
+    "as_tensor",
     "get_default_dtype",
     "set_default_dtype",
     "manual_seed",
@@ -216,6 +232,7 @@ __all__ = [
     "cuda",
     "zeros",
     "ones",
+    "empty",
     "rand",
     "randn",
     "rand_like",
@@ -225,9 +242,16 @@ __all__ = [
     "randperm",
     "eye",
     "full",
+    "full_like",
+    "empty_like",
+    "zeros_like",
+    "ones_like",
+    "linspace",
+    "logspace",
     "arange",
     "from_numpy",
     "from_numpy_shared",
+    "as_tensor",
     "get_default_dtype",
     "set_default_dtype",
     "default_dtype",

@@ -15,7 +15,6 @@ use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use once_cell::sync::OnceCell;
-use pyo3::Py;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{
     PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
@@ -26,6 +25,7 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyInt, PyList, PyModule, PySequence, PySequenceMethods, PySlice,
     PyString, PyTuple,
 };
+use pyo3::{Py, PyRefMut};
 use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::panic::{self, AssertUnwindSafe};
@@ -56,6 +56,24 @@ fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option
             }
         }
     }
+}
+
+fn extract_real_scalar(value: &Bound<PyAny>, name: &str) -> PyResult<f64> {
+    if let Ok(boolean) = value.extract::<bool>() {
+        return Ok(if boolean { 1.0 } else { 0.0 });
+    }
+
+    if let Ok(int_val) = value.extract::<i64>() {
+        return Ok(int_val as f64);
+    }
+
+    if let Ok(float_val) = value.extract::<f64>() {
+        return Ok(float_val);
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "{name} must be a real number or boolean",
+    )))
 }
 
 #[pyclass(name = "Shape", module = "minitensor._core")]
@@ -796,6 +814,36 @@ impl PyTensor {
     pub fn requires_grad_(&mut self, requires_grad: bool) -> PyResult<()> {
         self.inner = self.inner.clone().requires_grad_(requires_grad);
         Ok(())
+    }
+
+    #[pyo3(signature = (source, *, non_blocking=false))]
+    fn copy_<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        source: &Bound<PyAny>,
+        non_blocking: Option<bool>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        if non_blocking.unwrap_or(false) {
+            return Err(PyNotImplementedError::new_err(
+                "non_blocking copy_ is not implemented",
+            ));
+        }
+
+        let reference = PyTensor::from_python_value(source)?;
+        slf.inner
+            .copy_(reference.tensor())
+            .map_err(_convert_error)?;
+        register_leaf_tensor(&slf.inner);
+        Ok(slf)
+    }
+
+    fn fill_<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &Bound<PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let fill_value = extract_real_scalar(value, "value")?;
+        slf.inner.fill_(fill_value).map_err(_convert_error)?;
+        register_leaf_tensor(&slf.inner);
+        Ok(slf)
     }
 
     #[pyo3(signature = (set_to_none=false))]
@@ -2024,6 +2072,228 @@ impl PyTensor {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+    fn empty_like(
+        input: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => reference_tensor.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = Tensor::empty(shape, dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+    fn zeros_like(
+        input: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => reference_tensor.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = Tensor::zeros(shape, dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+    fn ones_like(
+        input: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => reference_tensor.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = Shape::new(reference.shape_vec());
+        let tensor = Tensor::ones(shape, dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (input, fill_value, dtype=None, device=None, requires_grad=None))]
+    fn full_like(
+        input: &Bound<PyAny>,
+        fill_value: f64,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let reference = PyTensor::from_python_value(input)?;
+        let reference_tensor = reference.tensor();
+
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => reference_tensor.dtype(),
+        };
+
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| reference_tensor.device());
+        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
+        let shape = reference.shape_vec();
+        let tensor = create_full_tensor(shape, fill_value, dtype, device, requires_grad)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[pyo3(signature = (shape, dtype=None, device=None, requires_grad=None))]
+    fn new_empty(
+        &self,
+        shape: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dims = parse_shape_like(shape, "shape")?;
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => self.inner.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| self.inner.device());
+        let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+        let tensor = Tensor::empty(Shape::new(dims), dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[pyo3(signature = (shape, dtype=None, device=None, requires_grad=None))]
+    fn new_zeros(
+        &self,
+        shape: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dims = parse_shape_like(shape, "shape")?;
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => self.inner.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| self.inner.device());
+        let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+        let tensor = Tensor::zeros(Shape::new(dims), dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[pyo3(signature = (shape, dtype=None, device=None, requires_grad=None))]
+    fn new_ones(
+        &self,
+        shape: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dims = parse_shape_like(shape, "shape")?;
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => self.inner.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| self.inner.device());
+        let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+        let tensor = Tensor::ones(Shape::new(dims), dtype, device, requires_grad);
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[pyo3(signature = (shape, fill_value, dtype=None, device=None, requires_grad=None))]
+    fn new_full(
+        &self,
+        shape: &Bound<PyAny>,
+        fill_value: f64,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dims = parse_shape_like(shape, "shape")?;
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => self.inner.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| self.inner.device());
+        let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+        let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[pyo3(signature = (data, dtype=None, device=None, requires_grad=None))]
+    fn new_tensor(
+        &self,
+        data: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+    ) -> PyResult<Self> {
+        let dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => self.inner.dtype(),
+        };
+        let device = device
+            .map(|d| d.device())
+            .unwrap_or_else(|| self.inner.device());
+        let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
+
+        if let Ok(py_tensor) = data.extract::<PyRef<PyTensor>>() {
+            let tensor =
+                prepare_new_tensor_from_existing(py_tensor.tensor(), dtype, device, requires_grad)?;
+            return Ok(Self::from_tensor(tensor));
+        }
+
+        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor")) {
+            if let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>() {
+                let tensor = prepare_new_tensor_from_existing(
+                    py_tensor.tensor(),
+                    dtype,
+                    device,
+                    requires_grad,
+                )?;
+                return Ok(Self::from_tensor(tensor));
+            }
+        }
+
+        let tensor = convert_python_data_to_tensor(data, dtype, device, requires_grad)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (input, low, high=None, dtype=None, device=None, requires_grad=None))]
     fn randint_like(
         input: &Bound<PyAny>,
@@ -2178,6 +2448,72 @@ impl PyTensor {
 
         let dims = parse_shape_like(shape, "shape")?;
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
+        Ok(Self::from_tensor(tensor))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (data, dtype=None, device=None, requires_grad=None, copy=false))]
+    fn as_tensor(
+        data: &Bound<PyAny>,
+        dtype: Option<&str>,
+        device: Option<&PyDevice>,
+        requires_grad: Option<bool>,
+        copy: Option<bool>,
+    ) -> PyResult<Self> {
+        let copy = copy.unwrap_or(false);
+
+        if let Ok(py_tensor) = data.extract::<PyRef<PyTensor>>() {
+            let source = py_tensor.tensor();
+            let target_dtype = match dtype {
+                Some(name) => dtype::parse_dtype(name)?,
+                None => source.dtype(),
+            };
+            let target_device = device
+                .map(|d| d.device())
+                .unwrap_or_else(|| source.device());
+            let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
+            let tensor = adapt_tensor_for_as_tensor(
+                source,
+                target_dtype,
+                target_device,
+                target_requires_grad,
+                copy,
+            )?;
+            return Ok(Self::from_tensor(tensor));
+        }
+
+        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor")) {
+            if let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>() {
+                let source = py_tensor.tensor();
+                let target_dtype = match dtype {
+                    Some(name) => dtype::parse_dtype(name)?,
+                    None => source.dtype(),
+                };
+                let target_device = device
+                    .map(|d| d.device())
+                    .unwrap_or_else(|| source.device());
+                let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
+                let tensor = adapt_tensor_for_as_tensor(
+                    source,
+                    target_dtype,
+                    target_device,
+                    target_requires_grad,
+                    copy,
+                )?;
+                return Ok(Self::from_tensor(tensor));
+            }
+        }
+
+        let target_dtype = match dtype {
+            Some(name) => dtype::parse_dtype(name)?,
+            None => infer_python_value_dtype(data).unwrap_or_else(|| dtype::default_dtype()),
+        };
+
+        let target_device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let target_requires_grad = requires_grad.unwrap_or(false);
+
+        let tensor =
+            convert_python_data_to_tensor(data, target_dtype, target_device, target_requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }
 
@@ -3785,6 +4121,71 @@ fn create_random_tensor(
         device,
         requires_grad,
     ))
+}
+
+fn prepare_new_tensor_from_existing(
+    source: &Tensor,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    let mut tensor = source.detach();
+
+    if tensor.device() != device {
+        tensor = tensor.to(device).map_err(_convert_error)?;
+    }
+
+    if tensor.dtype() != dtype {
+        tensor = tensor.astype(dtype).map_err(_convert_error)?;
+    }
+
+    tensor = tensor.deep_clone().map_err(_convert_error)?;
+
+    if requires_grad {
+        tensor = tensor.requires_grad_(true);
+    }
+
+    Ok(tensor)
+}
+
+fn adapt_tensor_for_as_tensor(
+    source: &Tensor,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+    copy: bool,
+) -> PyResult<Tensor> {
+    if !copy
+        && source.dtype() == dtype
+        && source.device() == device
+        && source.requires_grad() == requires_grad
+    {
+        return Ok(source.clone());
+    }
+
+    let mut tensor = if copy || (source.requires_grad() && !requires_grad) {
+        source.detach()
+    } else {
+        source.clone()
+    };
+
+    if tensor.device() != device {
+        tensor = tensor.to(device).map_err(_convert_error)?;
+    }
+
+    if tensor.dtype() != dtype {
+        tensor = tensor.astype(dtype).map_err(_convert_error)?;
+    }
+
+    if copy {
+        tensor = tensor.deep_clone().map_err(_convert_error)?;
+    }
+
+    if tensor.requires_grad() != requires_grad {
+        tensor = tensor.requires_grad_(requires_grad);
+    }
+
+    Ok(tensor)
 }
 
 fn create_randint_tensor(
