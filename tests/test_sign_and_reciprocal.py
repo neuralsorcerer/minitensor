@@ -25,7 +25,9 @@ def test_tensor_sign_integer_dtype():
 
     result = tensor.sign()
 
-    np.testing.assert_array_equal(result.numpy(), np.array([-1, 0, 1, -1], dtype=np.int32))
+    np.testing.assert_array_equal(
+        result.numpy(), np.array([-1, 0, 1, -1], dtype=np.int32)
+    )
     assert result.dtype == tensor.dtype
 
 
@@ -67,7 +69,13 @@ def test_reciprocal_rejects_integers():
 def test_functional_and_top_level_forwarders():
     tensor = mt.Tensor([-3.0, -1.0, 0.5], dtype="float32")
 
-    np.testing.assert_allclose(mt.functional.sign(tensor).numpy(), tensor.sign().numpy())
-    np.testing.assert_allclose(mt.functional.reciprocal(tensor).numpy(), tensor.reciprocal().numpy())
+    np.testing.assert_allclose(
+        mt.functional.sign(tensor).numpy(), tensor.sign().numpy()
+    )
+    np.testing.assert_allclose(
+        mt.functional.reciprocal(tensor).numpy(), tensor.reciprocal().numpy()
+    )
     np.testing.assert_allclose(mt.sign(tensor).numpy(), tensor.sign().numpy())
-    np.testing.assert_allclose(mt.reciprocal(tensor).numpy(), tensor.reciprocal().numpy())
+    np.testing.assert_allclose(
+        mt.reciprocal(tensor).numpy(), tensor.reciprocal().numpy()
+    )

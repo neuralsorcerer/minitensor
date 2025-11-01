@@ -20,10 +20,7 @@ def test_sinh_matches_numpy_and_grad():
     loss.backward()
 
     expected_grad = np.cosh(values).astype(np.float32)
-    np.testing.assert_allclose(
-        tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6
-    )
-
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6)
 
 
 def test_cosh_matches_numpy_and_grad():
@@ -42,7 +39,6 @@ def test_cosh_matches_numpy_and_grad():
     )
 
 
-
 def test_asinh_forward_and_backward():
     values = np.array([-3.0, -0.5, 0.0, 0.75, 2.5], dtype=np.float32)
     tensor = mt.Tensor(values.tolist(), dtype="float32", requires_grad=True)
@@ -54,10 +50,7 @@ def test_asinh_forward_and_backward():
     loss.backward()
 
     expected_grad = (1.0 / np.sqrt(1.0 + values**2)).astype(np.float32)
-    np.testing.assert_allclose(
-        tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6
-    )
-
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6)
 
 
 def test_acosh_domain_and_grad():
@@ -65,7 +58,9 @@ def test_acosh_domain_and_grad():
     tensor = mt.Tensor(values.tolist(), dtype="float64", requires_grad=True)
 
     result = tensor.acosh()
-    np.testing.assert_allclose(result.numpy(), np.arccosh(values), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        result.numpy(), np.arccosh(values), rtol=1e-12, atol=1e-12
+    )
 
     loss = result.sum()
     loss.backward()
@@ -76,12 +71,10 @@ def test_acosh_domain_and_grad():
     )
 
 
-
 def test_acosh_invalid_inputs_produce_nan():
     tensor = mt.Tensor([0.5, 0.75], dtype="float32")
     result = tensor.acosh()
     assert np.isnan(result.numpy()).all()
-
 
 
 def test_atanh_forward_and_backward():
@@ -95,10 +88,7 @@ def test_atanh_forward_and_backward():
     loss.backward()
 
     expected_grad = (1.0 / (1.0 - values**2)).astype(np.float32)
-    np.testing.assert_allclose(
-        tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6
-    )
-
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6)
 
 
 def test_functional_and_top_level_forwarders():

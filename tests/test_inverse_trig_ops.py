@@ -40,7 +40,9 @@ def test_acos_matches_numpy_and_grad():
     tensor = mt.Tensor(values.tolist(), dtype="float64", requires_grad=True)
 
     result = tensor.acos()
-    np.testing.assert_allclose(result.numpy(), np.arccos(values), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        result.numpy(), np.arccos(values), rtol=1e-12, atol=1e-12
+    )
 
     loss = result.sum()
     loss.backward()
@@ -70,9 +72,7 @@ def test_atan_forward_and_backward():
     loss.backward()
 
     expected_grad = (1.0 / (1.0 + values**2)).astype(np.float32)
-    np.testing.assert_allclose(
-        tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6
-    )
+    np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-5, atol=1e-6)
 
 
 def test_functional_and_top_level_forwarders():
@@ -83,4 +83,6 @@ def test_functional_and_top_level_forwarders():
         np.testing.assert_allclose(
             getattr(mt.functional, name)(tensor).numpy(), method_result.numpy()
         )
-        np.testing.assert_allclose(getattr(mt, name)(tensor).numpy(), method_result.numpy())
+        np.testing.assert_allclose(
+            getattr(mt, name)(tensor).numpy(), method_result.numpy()
+        )
