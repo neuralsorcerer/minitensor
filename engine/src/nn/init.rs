@@ -6,11 +6,12 @@
 
 use crate::{
     device::Device,
-    error::Result,
+    error::{MinitensorError, Result},
     random,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand_distr::{Distribution, Normal, Uniform};
+use statrs::distribution::{ContinuousCDF, Normal as StatrsNormal};
 use std::sync::Arc;
 
 /// Parameter initialization methods
@@ -274,6 +275,112 @@ pub fn init_normal(
             TensorData::from_vec_bool(vec, device)
         }
     };
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    ))
+}
+
+/// Initialize tensor with a normal distribution truncated to ``[lower, upper]``.
+pub fn truncated_normal_init(
+    shape: Shape,
+    mean: f64,
+    std: f64,
+    lower: f64,
+    upper: f64,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> Result<Tensor> {
+    if !mean.is_finite() {
+        return Err(MinitensorError::invalid_argument(
+            "truncated_normal requires a finite mean",
+        ));
+    }
+
+    if !std.is_finite() || std <= 0.0 {
+        return Err(MinitensorError::invalid_argument(
+            "truncated_normal requires a positive, finite std deviation",
+        ));
+    }
+
+    if lower.is_nan() || upper.is_nan() {
+        return Err(MinitensorError::invalid_argument(
+            "truncated_normal requires non-NaN bounds",
+        ));
+    }
+
+    if !(upper > lower) {
+        return Err(MinitensorError::invalid_argument(
+            "truncated_normal requires upper bound to be greater than lower bound",
+        ));
+    }
+
+    let normal = StatrsNormal::new(mean, std).map_err(|err| {
+        MinitensorError::invalid_argument(format!(
+            "truncated_normal could not construct distribution: {err}",
+        ))
+    })?;
+    let lower_cdf = normal.cdf(lower);
+    let upper_cdf = normal.cdf(upper);
+
+    if !(upper_cdf > lower_cdf) {
+        return Err(MinitensorError::invalid_argument(
+            "truncated_normal bounds must span non-zero probability mass",
+        ));
+    }
+
+    let numel = shape.numel();
+    let data = match dtype {
+        DataType::Float32 => {
+            let mut vec = Vec::with_capacity(numel);
+            unsafe {
+                vec.set_len(numel);
+            }
+            random::with_rng(|rng| {
+                let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
+                for value in &mut vec {
+                    let mut sample_cdf = uniform.sample(rng);
+                    if sample_cdf <= 0.0 {
+                        sample_cdf = f64::EPSILON;
+                    } else if sample_cdf >= 1.0 {
+                        sample_cdf = 1.0 - f64::EPSILON;
+                    }
+                    let sample = normal.inverse_cdf(sample_cdf);
+                    *value = sample as f32;
+                }
+            });
+            TensorData::from_vec_f32(vec, device)
+        }
+        DataType::Float64 => {
+            let mut vec = Vec::with_capacity(numel);
+            unsafe {
+                vec.set_len(numel);
+            }
+            random::with_rng(|rng| {
+                let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
+                for value in &mut vec {
+                    let mut sample_cdf = uniform.sample(rng);
+                    if sample_cdf <= 0.0 {
+                        sample_cdf = f64::EPSILON;
+                    } else if sample_cdf >= 1.0 {
+                        sample_cdf = 1.0 - f64::EPSILON;
+                    }
+                    *value = normal.inverse_cdf(sample_cdf);
+                }
+            });
+            TensorData::from_vec_f64(vec, device)
+        }
+        _ => {
+            return Err(MinitensorError::invalid_argument(
+                "truncated_normal only supports float32 or float64 dtypes",
+            ));
+        }
+    };
+
     Ok(Tensor::new(
         Arc::new(data),
         shape,

@@ -40,6 +40,7 @@ libc = { workspace = true }
 # Random number generation
 rand = { workspace = true }
 rand_distr = { workspace = true }
+statrs = { workspace = true }
 
 # BLAS integration (optional for now)
 blas-src = { version = "0.14", features = ["openblas"], optional = true }

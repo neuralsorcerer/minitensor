@@ -37,14 +37,30 @@ ones = Tensor.ones
 empty = Tensor.empty
 rand = Tensor.rand
 randn = Tensor.randn
+truncated_normal = Tensor.truncated_normal
 rand_like = Tensor.rand_like
 randn_like = Tensor.randn_like
+truncated_normal_like = Tensor.truncated_normal_like
 randint = Tensor.randint
 randint_like = Tensor.randint_like
 randperm = Tensor.randperm
 eye = Tensor.eye
 full = Tensor.full
 full_like = Tensor.full_like
+uniform = Tensor.uniform
+uniform_like = Tensor.uniform_like
+xavier_uniform = Tensor.xavier_uniform
+xavier_uniform_like = Tensor.xavier_uniform_like
+xavier_normal = Tensor.xavier_normal
+xavier_normal_like = Tensor.xavier_normal_like
+he_uniform = Tensor.he_uniform
+he_uniform_like = Tensor.he_uniform_like
+he_normal = Tensor.he_normal
+he_normal_like = Tensor.he_normal_like
+lecun_uniform = Tensor.lecun_uniform
+lecun_uniform_like = Tensor.lecun_uniform_like
+lecun_normal = Tensor.lecun_normal
+lecun_normal_like = Tensor.lecun_normal_like
 empty_like = Tensor.empty_like
 zeros_like = Tensor.zeros_like
 ones_like = Tensor.ones_like
@@ -198,6 +214,22 @@ for _name in (
     "randn",
     "rand_like",
     "randn_like",
+    "truncated_normal",
+    "truncated_normal_like",
+    "uniform",
+    "uniform_like",
+    "xavier_uniform",
+    "xavier_uniform_like",
+    "xavier_normal",
+    "xavier_normal_like",
+    "he_uniform",
+    "he_uniform_like",
+    "he_normal",
+    "he_normal_like",
+    "lecun_uniform",
+    "lecun_uniform_like",
+    "lecun_normal",
+    "lecun_normal_like",
     "randint",
     "randint_like",
     "randperm",
@@ -237,6 +269,22 @@ __all__ = [
     "randn",
     "rand_like",
     "randn_like",
+    "truncated_normal",
+    "truncated_normal_like",
+    "uniform",
+    "uniform_like",
+    "xavier_uniform",
+    "xavier_uniform_like",
+    "xavier_normal",
+    "xavier_normal_like",
+    "he_uniform",
+    "he_uniform_like",
+    "he_normal",
+    "he_normal_like",
+    "lecun_uniform",
+    "lecun_uniform_like",
+    "lecun_normal",
+    "lecun_normal_like",
     "randint",
     "randint_like",
     "randperm",
