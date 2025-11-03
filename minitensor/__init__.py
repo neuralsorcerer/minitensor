@@ -152,6 +152,7 @@ _FUNCTIONAL_FORWARDERS = (
     "tril",
     "diagonal",
     "trace",
+    "solve",
     "flatten",
     "ravel",
     "transpose",
@@ -202,6 +203,7 @@ for _name in dir(nn):
         setattr(functional, _name, _member)
 
 dot = getattr(functional, "dot")
+bmm = getattr(functional, "bmm")
 
 _tensor_module = _types.ModuleType(__name__ + ".tensor")
 for _name in (
@@ -320,6 +322,7 @@ __all__ = [
     "register_example_custom_ops",
     "unregister_custom_op_py",
     "dot",
+    "bmm",
     "cat",
     "stack",
     "split",
@@ -342,6 +345,7 @@ __all__ = [
     "tril",
     "diagonal",
     "trace",
+    "solve",
     "flatten",
     "ravel",
     "transpose",

@@ -548,6 +548,12 @@ pub fn trace(input: &Bound<PyAny>, offset: isize, dim1: isize, dim2: isize) -> P
 }
 
 #[pyfunction]
+pub fn solve(lhs: &Bound<PyAny>, rhs: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let lhs_tensor = borrow_tensor(lhs)?;
+    lhs_tensor.solve(rhs)
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
 pub fn topk(
     input: &Bound<PyAny>,
@@ -647,6 +653,12 @@ pub fn dot(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
     tensor.dot(other)
 }
 
+#[pyfunction]
+pub fn bmm(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.bmm(other)
+}
+
 pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     parent.add_function(wrap_pyfunction!(flatten, parent)?)?;
     parent.add_function(wrap_pyfunction!(ravel, parent)?)?;
@@ -713,6 +725,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(tril, parent)?)?;
     parent.add_function(wrap_pyfunction!(diagonal, parent)?)?;
     parent.add_function(wrap_pyfunction!(trace, parent)?)?;
+    parent.add_function(wrap_pyfunction!(solve, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;
@@ -721,5 +734,6 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(cat, parent)?)?;
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
     parent.add_function(wrap_pyfunction!(dot, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bmm, parent)?)?;
     Ok(())
 }

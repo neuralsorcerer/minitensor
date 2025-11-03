@@ -762,6 +762,66 @@ impl GradientFunction for MatMulBackward {
     }
 }
 
+/// Gradient function for solving linear systems.
+pub struct SolveBackward {
+    pub lhs: Tensor,
+    pub solution: Tensor,
+    pub input_ids: [TensorId; 2],
+    pub lhs_requires_grad: bool,
+    pub rhs_requires_grad: bool,
+}
+
+impl GradientFunction for SolveBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve((self.lhs_requires_grad as usize) + (self.rhs_requires_grad as usize));
+
+        let lhs_t = crate::operations::linalg::transpose(
+            &self.lhs,
+            (self.lhs.ndim() - 2) as isize,
+            (self.lhs.ndim() - 1) as isize,
+        )?;
+
+        if self.rhs_requires_grad {
+            let grad_rhs = crate::operations::linalg::solve(&lhs_t, grad_output)?;
+            gradients.insert(self.input_ids[1], grad_rhs);
+        }
+
+        if self.lhs_requires_grad {
+            let solution_view = if self.solution.ndim() == self.lhs.ndim() - 1 {
+                crate::operations::shape_ops::unsqueeze(
+                    &self.solution,
+                    self.solution.ndim() as isize,
+                )?
+            } else {
+                self.solution.clone()
+            };
+
+            let grad_output_view = if grad_output.ndim() == self.lhs.ndim() - 1 {
+                crate::operations::shape_ops::unsqueeze(grad_output, grad_output.ndim() as isize)?
+            } else {
+                grad_output.clone()
+            };
+
+            let solution_t = crate::operations::linalg::transpose(
+                &solution_view,
+                (solution_view.ndim() - 2) as isize,
+                (solution_view.ndim() - 1) as isize,
+            )?;
+            let gram = crate::operations::linalg::matmul(&grad_output_view, &solution_t)?;
+            let lhs_grad = crate::operations::linalg::solve(&lhs_t, &gram)?;
+            let lhs_grad = crate::operations::arithmetic::neg(&lhs_grad)?;
+            gradients.insert(self.input_ids[0], lhs_grad);
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient function for transpose operation
 pub struct TransposeBackward {
     pub dims: Vec<usize>,

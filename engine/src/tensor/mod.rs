@@ -564,6 +564,13 @@ impl Tensor {
         matmul(self, other)
     }
 
+    /// Batched matrix multiplication specialised for 3D tensors
+    #[inline(always)]
+    pub fn bmm(&self, other: &Tensor) -> Result<Self> {
+        use crate::operations::linalg::bmm;
+        bmm(self, other)
+    }
+
     /// Upper triangular part of the tensor's last two dimensions
     #[inline(always)]
     pub fn triu(&self, diagonal: i64) -> Result<Self> {
@@ -952,6 +959,12 @@ impl Tensor {
     pub fn log_softmax(&self, dim: Option<usize>) -> Result<Self> {
         use crate::operations::activation::log_softmax;
         log_softmax(self, dim)
+    }
+
+    /// Solve a linear system `AX = B` for `X` where `self` provides `A`.
+    pub fn solve(&self, rhs: &Self) -> Result<Self> {
+        use crate::operations::linalg::solve;
+        solve(self, rhs)
     }
 
     /// Layer normalization

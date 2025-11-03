@@ -17,6 +17,90 @@ def test_matmul_basic():
     np.testing.assert_allclose(result.numpy(), np.array([[58.0, 64.0], [139.0, 154.0]]))
 
 
+def test_solve_vector_matches_numpy():
+    a = mt.Tensor([[3.0, 1.0], [1.0, 2.0]])
+    b = mt.Tensor([9.0, 8.0])
+    result = a.solve(b)
+    expected = np.linalg.solve(a.numpy(), b.numpy())
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_functional_solve_matches_tensor():
+    a = mt.Tensor([[4.0, 2.0], [1.0, 3.0]])
+    b = mt.Tensor([10.0, 7.0])
+    tensor_result = a.solve(b)
+    functional_result = mt.solve(a, b)
+    np.testing.assert_allclose(functional_result.numpy(), tensor_result.numpy())
+
+
+def test_solve_multiple_rhs():
+    a = mt.Tensor(np.array([[2.0, 1.0], [5.0, 7.0]], dtype=np.float32))
+    b = mt.Tensor(np.array([[11.0, 5.0], [13.0, 6.0]], dtype=np.float32))
+    result = a.solve(b)
+    expected = np.linalg.solve(a.numpy(), b.numpy())
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_solve_batched_systems():
+    a = mt.Tensor(
+        np.array(
+            [
+                [[3.0, 1.0], [1.0, 2.0]],
+                [[4.0, 2.0], [2.0, 5.0]],
+            ],
+            dtype=np.float32,
+        )
+    )
+    b = mt.Tensor(
+        np.array(
+            [
+                [9.0, 8.0],
+                [13.0, 17.0],
+            ],
+            dtype=np.float32,
+        )
+    )
+    result = a.solve(b)
+    a_np = a.numpy()
+    b_np = b.numpy()
+    expected = np.stack([np.linalg.solve(a_np[i], b_np[i]) for i in range(a_np.shape[0])])
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_solve_handles_empty_rhs_columns():
+    a = mt.Tensor(np.eye(3, dtype=np.float32))
+    b = mt.Tensor(np.empty((3, 0), dtype=np.float32))
+
+    result = a.solve(b)
+
+    assert result.shape == (3, 0)
+    assert result.numpy().size == 0
+
+
+def test_solve_backward_gradients():
+    a = mt.Tensor([[3.0, 1.0], [1.0, 2.0]], requires_grad=True)
+    b = mt.Tensor([9.0, 8.0], requires_grad=True)
+    solution = a.solve(b)
+    solution.sum().backward()
+
+    a_np = a.numpy()
+    x_np = solution.detach().numpy()
+    grad_out = np.ones_like(x_np)
+    expected_grad_b = np.linalg.solve(a_np.T, grad_out)
+    grad_matrix = np.outer(grad_out, x_np)
+    expected_grad_a = -np.linalg.solve(a_np.T, grad_matrix)
+
+    np.testing.assert_allclose(b.grad.numpy(), expected_grad_b, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(a.grad.numpy(), expected_grad_a, rtol=1e-5, atol=1e-6)
+
+
+def test_solve_requires_square_matrix():
+    a = mt.Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    b = mt.Tensor([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError):
+        a.solve(b)
+
+
 def test_matmul_shape_mismatch():
     a = mt.Tensor([[1.0, 2.0]])
     b = mt.Tensor([[3.0, 4.0, 5.0]])
@@ -54,6 +138,38 @@ def test_matmul_batch_dimensions():
         np.arange(12, dtype=np.float32).reshape(2, 3, 2),
     )
     np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_bmm_matches_numpy():
+    a_data = np.arange(12, dtype=np.float32).reshape(2, 2, 3)
+    b_data = np.linspace(0.5, 6.0, 12, dtype=np.float32).reshape(2, 3, 2)
+    a = mt.Tensor(a_data)
+    b = mt.Tensor(b_data)
+    result = a.bmm(b)
+    expected = np.matmul(a_data, b_data)
+    np.testing.assert_allclose(result.numpy(), expected)
+
+
+def test_top_level_bmm_matches_method():
+    a = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 2, 3))
+    b = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 3, 2))
+    method_result = a.bmm(b)
+    functional_result = mt.bmm(a, b)
+    np.testing.assert_allclose(functional_result.numpy(), method_result.numpy())
+
+
+def test_bmm_requires_three_dimensions():
+    a = mt.Tensor(np.ones((2, 3), dtype=np.float32))
+    b = mt.Tensor(np.ones((2, 3, 3), dtype=np.float32))
+    with pytest.raises(ValueError):
+        a.bmm(b)
+
+
+def test_bmm_batch_mismatch_error():
+    a = mt.Tensor(np.arange(12, dtype=np.float32).reshape(2, 2, 3))
+    b = mt.Tensor(np.arange(18, dtype=np.float32).reshape(3, 3, 2))
+    with pytest.raises(ValueError):
+        a.bmm(b)
 
 
 def test_matmul_batch_mismatch_error():

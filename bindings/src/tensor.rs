@@ -952,6 +952,18 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    pub fn solve(&self, rhs: &Bound<PyAny>) -> PyResult<Self> {
+        let rhs_tensor = tensor_from_py_value(&self.inner, rhs)?;
+        let result = self.inner.solve(&rhs_tensor).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let other_tensor = tensor_from_py_value(&self.inner, other)?;
+        let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     pub fn dot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.dot(&other_tensor).map_err(_convert_error)?;

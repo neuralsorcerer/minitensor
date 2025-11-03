@@ -453,6 +453,34 @@ fn test_transpose_backward_correct() {
 }
 
 #[test]
+fn test_solve_backward_matches_manual() {
+    autograd::clear_graph().unwrap();
+    let a = create_test_tensor_f32(vec![3.0, 1.0, 1.0, 2.0], vec![2, 2], true);
+    let b = create_test_tensor_f32(vec![9.0, 8.0], vec![2], true);
+
+    let solution = linalg::solve(&a, &b).unwrap();
+    let grad_output = create_test_tensor_f32(vec![1.0, 1.0], vec![2], false);
+    let grads = autograd::backward(&solution, Some(grad_output)).unwrap();
+
+    let grad_a = grads.get(&a.id()).expect("gradient for A missing");
+    let grad_b = grads.get(&b.id()).expect("gradient for B missing");
+
+    let grad_a_vals = grad_a.data().as_f32_slice().unwrap();
+    let expected_grad_a = [-0.4, -0.6, -0.8, -1.2];
+    for (got, expected) in grad_a_vals.iter().zip(expected_grad_a.iter()) {
+        assert!((got - expected).abs() < 1e-5);
+    }
+
+    let grad_b_vals = grad_b.data().as_f32_slice().unwrap();
+    let expected_grad_b = [0.2, 0.4];
+    for (got, expected) in grad_b_vals.iter().zip(expected_grad_b.iter()) {
+        assert!((got - expected).abs() < 1e-6);
+    }
+
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
 fn test_gradient_accumulation_multiple_paths() {
     autograd::clear_graph().unwrap();
     let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], true);

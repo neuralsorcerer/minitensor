@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use approx::assert_relative_eq;
 use engine::{
     autograd,
     device::Device,
@@ -177,6 +178,34 @@ fn test_complex_computation_chain() {
     }
 
     // Clear computation graph
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_solve_matches_manual_solution() {
+    let a = create_test_tensor_f32(vec![3.0, 1.0, 1.0, 2.0], vec![2, 2], true);
+    let b = create_test_tensor_f32(vec![9.0, 8.0], vec![2], true);
+
+    let result = linalg::solve(&a, &b).unwrap();
+    assert!(result.requires_grad());
+
+    let values = result.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 2.0, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 3.0, epsilon = 1e-6);
+
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_solve_handles_empty_rhs_columns() {
+    let a = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+    let b = create_test_tensor_f32(vec![], vec![2, 0], false);
+
+    let result = linalg::solve(&a, &b).unwrap();
+
+    assert_eq!(result.shape().dims(), &[2, 0]);
+    assert!(result.data().as_f32_slice().unwrap().is_empty());
+
     let _ = autograd::clear_graph();
 }
 

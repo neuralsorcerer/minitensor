@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{DotBackward, MatMulBackward, TransposeBackward, add_to_graph},
+    autograd::{DotBackward, MatMulBackward, SolveBackward, TransposeBackward, add_to_graph},
     error::{MinitensorError, Result},
     operations::{
         binary::{BinaryOpKind, coerce_binary_operands},
@@ -358,6 +358,353 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     } else {
         Ok(output)
     }
+}
+
+/// Solve a linear system of equations `AX = B` for `X`.
+///
+/// Both `lhs` (`A`) and `rhs` (`B`) must be float tensors that live on the CPU.
+/// `lhs` must have shape `[..., n, n]` (square matrices) and `rhs` can either have
+/// shape `[..., n]` (a collection of vectors) or `[..., n, k]` (multiple right
+/// hand sides). Batch dimensions need to match exactly across the operands.
+pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    if lhs.dtype() != rhs.dtype() {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", lhs.dtype()),
+            format!("{:?}", rhs.dtype()),
+        ));
+    }
+
+    let lhs_ndim = lhs.ndim();
+    if lhs_ndim < 2 {
+        return Err(MinitensorError::invalid_operation(
+            "solve expects lhs to have at least 2 dimensions",
+        ));
+    }
+
+    let lhs_shape = lhs.shape().dims();
+    let n = lhs_shape[lhs_ndim - 1];
+    let m = lhs_shape[lhs_ndim - 2];
+    if n != m {
+        return Err(MinitensorError::invalid_operation(
+            "solve expects lhs matrices to be square",
+        ));
+    }
+
+    let rhs_ndim = rhs.ndim();
+    if rhs_ndim < 1 {
+        return Err(MinitensorError::invalid_operation(
+            "solve expects rhs to have at least 1 dimension",
+        ));
+    }
+
+    let rhs_shape = rhs.shape().dims();
+    let (rhs_cols, rhs_batch_dims) = if rhs_ndim == lhs_ndim {
+        if rhs_shape[rhs_ndim - 2] != n {
+            return Err(MinitensorError::shape_mismatch(
+                vec![n],
+                vec![rhs_shape[rhs_ndim - 2]],
+            ));
+        }
+        (rhs_shape[rhs_ndim - 1], &rhs_shape[..rhs_ndim - 2])
+    } else if rhs_ndim + 1 == lhs_ndim {
+        if rhs_shape[rhs_ndim - 1] != n {
+            return Err(MinitensorError::shape_mismatch(
+                vec![n],
+                vec![rhs_shape[rhs_ndim - 1]],
+            ));
+        }
+        (1usize, &rhs_shape[..rhs_ndim - 1])
+    } else {
+        return Err(MinitensorError::invalid_operation(
+            "solve expects rhs to have either the same rank as lhs or one less",
+        ));
+    };
+
+    if &lhs_shape[..lhs_ndim - 2] != rhs_batch_dims {
+        return Err(MinitensorError::shape_mismatch(
+            lhs_shape[..lhs_ndim - 2].to_vec(),
+            rhs_batch_dims.to_vec(),
+        ));
+    }
+
+    let requires_grad = lhs.requires_grad() || rhs.requires_grad();
+
+    let output_shape = rhs_shape.to_vec();
+    let output_shape = Shape::new(output_shape);
+
+    let mut output_data =
+        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+
+    match lhs.dtype() {
+        DataType::Float32 => solve_f32(lhs, rhs, &mut output_data, rhs_cols)?,
+        DataType::Float64 => solve_f64(lhs, rhs, &mut output_data, rhs_cols)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "solve currently supports only Float32 and Float64 tensors",
+            ));
+        }
+    }
+
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        lhs.dtype(),
+        lhs.device(),
+        requires_grad,
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SolveBackward {
+            lhs: lhs.detach(),
+            solution: output.detach(),
+            input_ids: [lhs.id(), rhs.id()],
+            lhs_requires_grad: lhs.requires_grad(),
+            rhs_requires_grad: rhs.requires_grad(),
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
+fn solve_f32(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usize) -> Result<()> {
+    use std::borrow::Cow;
+
+    let lhs_view = if lhs.is_contiguous() && lhs.data().is_contiguous() {
+        Cow::Borrowed(lhs)
+    } else {
+        Cow::Owned(lhs.contiguous()?)
+    };
+    let rhs_view = if rhs.is_contiguous() && rhs.data().is_contiguous() {
+        Cow::Borrowed(rhs)
+    } else {
+        Cow::Owned(rhs.contiguous()?)
+    };
+
+    let lhs_slice = lhs_view
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 data for lhs"))?;
+    let rhs_slice = rhs_view
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 data for rhs"))?;
+    let out_slice = output
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f32 output slice"))?;
+
+    solve_batched(
+        lhs.shape().dims(),
+        rhs_cols,
+        lhs_slice,
+        rhs_slice,
+        out_slice,
+    )
+}
+
+fn solve_f64(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usize) -> Result<()> {
+    use std::borrow::Cow;
+
+    let lhs_view = if lhs.is_contiguous() && lhs.data().is_contiguous() {
+        Cow::Borrowed(lhs)
+    } else {
+        Cow::Owned(lhs.contiguous()?)
+    };
+    let rhs_view = if rhs.is_contiguous() && rhs.data().is_contiguous() {
+        Cow::Borrowed(rhs)
+    } else {
+        Cow::Owned(rhs.contiguous()?)
+    };
+
+    let lhs_slice = lhs_view
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f64 data for lhs"))?;
+    let rhs_slice = rhs_view
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f64 data for rhs"))?;
+    let out_slice = output
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to access f64 output slice"))?;
+
+    solve_batched(
+        lhs.shape().dims(),
+        rhs_cols,
+        lhs_slice,
+        rhs_slice,
+        out_slice,
+    )
+}
+
+fn solve_batched<T>(
+    lhs_shape: &[usize],
+    rhs_cols: usize,
+    lhs_slice: &[T],
+    rhs_slice: &[T],
+    out_slice: &mut [T],
+) -> Result<()>
+where
+    T: Copy
+        + Send
+        + Sync
+        + std::ops::SubAssign
+        + std::ops::Mul<Output = T>
+        + std::ops::Div<Output = T>
+        + std::ops::Neg<Output = T>
+        + PartialOrd
+        + Default
+        + PartialEq,
+{
+    let n = *lhs_shape.last().expect("lhs has at least 2 dims");
+    let batch = lhs_shape[..lhs_shape.len() - 2]
+        .iter()
+        .copied()
+        .product::<usize>()
+        .max(1);
+    let rhs_stride = n * rhs_cols;
+
+    let matrix_stride = n * n;
+    let mut matrix = vec![T::default(); matrix_stride];
+    let mut rhs_buf = vec![T::default(); rhs_stride];
+
+    for batch_idx in 0..batch {
+        let lhs_offset = batch_idx * matrix_stride;
+        let rhs_offset = batch_idx * rhs_stride;
+
+        matrix.copy_from_slice(&lhs_slice[lhs_offset..lhs_offset + matrix_stride]);
+        rhs_buf[..rhs_stride].copy_from_slice(&rhs_slice[rhs_offset..rhs_offset + rhs_stride]);
+
+        gaussian_elimination(&mut matrix, &mut rhs_buf, n, rhs_cols)?;
+
+        out_slice[rhs_offset..rhs_offset + rhs_stride].copy_from_slice(&rhs_buf[..rhs_stride]);
+    }
+
+    Ok(())
+}
+
+fn gaussian_elimination<T>(matrix: &mut [T], rhs: &mut [T], n: usize, rhs_cols: usize) -> Result<()>
+where
+    T: Copy
+        + Send
+        + Sync
+        + std::ops::SubAssign
+        + std::ops::Mul<Output = T>
+        + std::ops::Div<Output = T>
+        + std::ops::Neg<Output = T>
+        + PartialOrd
+        + Default
+        + PartialEq,
+{
+    for k in 0..n {
+        // Pivot selection
+        let mut pivot_row = k;
+        let mut pivot_val = abs(matrix[k * n + k]);
+        for i in (k + 1)..n {
+            let candidate = abs(matrix[i * n + k]);
+            if candidate > pivot_val {
+                pivot_val = candidate;
+                pivot_row = i;
+            }
+        }
+
+        if pivot_val == T::default() {
+            return Err(MinitensorError::invalid_operation(
+                "solve received a singular matrix",
+            ));
+        }
+
+        if pivot_row != k {
+            for col in 0..n {
+                matrix.swap(k * n + col, pivot_row * n + col);
+            }
+            for col in 0..rhs_cols {
+                rhs.swap(k * rhs_cols + col, pivot_row * rhs_cols + col);
+            }
+        }
+
+        let pivot = matrix[k * n + k];
+
+        for i in (k + 1)..n {
+            let factor = matrix[i * n + k] / pivot;
+            matrix[i * n + k] = T::default();
+            for j in (k + 1)..n {
+                let idx = i * n + j;
+                matrix[idx] -= factor * matrix[k * n + j];
+            }
+            for col in 0..rhs_cols {
+                let idx = i * rhs_cols + col;
+                rhs[idx] -= factor * rhs[k * rhs_cols + col];
+            }
+        }
+    }
+
+    for i in (0..n).rev() {
+        let pivot = matrix[i * n + i];
+        if abs(pivot) == T::default() {
+            return Err(MinitensorError::invalid_operation(
+                "solve received a singular matrix",
+            ));
+        }
+        for col in 0..rhs_cols {
+            let mut value = rhs[i * rhs_cols + col];
+            for j in (i + 1)..n {
+                value -= matrix[i * n + j] * rhs[j * rhs_cols + col];
+            }
+            rhs[i * rhs_cols + col] = value / pivot;
+        }
+    }
+
+    Ok(())
+}
+
+fn abs<T>(value: T) -> T
+where
+    T: Copy + PartialOrd + std::ops::Neg<Output = T> + Default,
+{
+    if value < T::default() { -value } else { value }
+}
+
+/// Batched matrix multiplication specialized for 3D tensors.
+///
+/// This is a thin convenience wrapper around [`matmul`] that enforces the
+/// traditional batch matrix multiply constraints: both operands must be
+/// rank-3 tensors with matching batch dimensions. The actual computation is
+/// still delegated to the highly optimised [`matmul`] implementation so all
+/// execution happens inside the Rust backend.
+pub fn bmm(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.ndim() != 3 || rhs.ndim() != 3 {
+        return Err(MinitensorError::invalid_operation(
+            "bmm expects both inputs to be 3D tensors".to_string(),
+        ));
+    }
+
+    let lhs_shape = lhs.shape().dims();
+    let rhs_shape = rhs.shape().dims();
+
+    if lhs_shape[0] != rhs_shape[0] {
+        return Err(MinitensorError::shape_mismatch(
+            lhs_shape.to_vec(),
+            rhs_shape.to_vec(),
+        ));
+    }
+
+    if lhs_shape[2] != rhs_shape[1] {
+        return Err(MinitensorError::shape_mismatch(
+            vec![lhs_shape[2]],
+            vec![rhs_shape[1]],
+        ));
+    }
+
+    matmul(lhs, rhs)
 }
 
 /// Dot product of two 1D tensors with gradient support
@@ -1517,6 +1864,52 @@ mod tests {
         let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
 
         let result = matmul(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bmm_basic() {
+        let a = create_test_tensor_f32(
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 0
+                7.0, 8.0, 9.0, 10.0, 11.0, 12.0, // batch 1
+            ],
+            vec![2, 2, 3],
+            false,
+        );
+        let b = create_test_tensor_f32(
+            vec![
+                0.5, 1.0, 1.5, 2.0, 2.5, 3.0, // batch 0
+                3.5, 4.0, 4.5, 5.0, 5.5, 6.0, // batch 1
+            ],
+            vec![2, 3, 2],
+            false,
+        );
+
+        let result = bmm(&a, &b).unwrap();
+        let result_data = result.data().as_f32_slice().unwrap();
+        assert_eq!(result.shape().dims(), &[2, 2, 2]);
+        assert_eq!(
+            result_data,
+            &[11.0, 14.0, 24.5, 32.0, 110.0, 122.0, 150.5, 167.0]
+        );
+    }
+
+    #[test]
+    fn test_bmm_batch_mismatch() {
+        let a = create_test_tensor_f32(vec![1.0; 12], vec![2, 2, 3], false);
+        let b = create_test_tensor_f32(vec![2.0; 18], vec![3, 3, 2], false);
+
+        let result = bmm(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bmm_rank_error() {
+        let a = create_test_tensor_f32(vec![1.0; 6], vec![2, 3], false);
+        let b = create_test_tensor_f32(vec![2.0; 6], vec![1, 3, 2], false);
+
+        let result = bmm(&a, &b);
         assert!(result.is_err());
     }
 
