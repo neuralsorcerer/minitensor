@@ -59,7 +59,9 @@ def test_uniform_respects_bounds_and_dtype():
     assert (arr < high).all()
 
 
-def _truncated_normal_moments(mean: float, std: float, lower: float, upper: float) -> tuple[float, float]:
+def _truncated_normal_moments(
+    mean: float, std: float, lower: float, upper: float
+) -> tuple[float, float]:
     alpha = (lower - mean) / std
     beta = (upper - mean) / std
 
@@ -419,9 +421,7 @@ def test_tensor_as_tensor_defaults_to_reference_tensor_metadata():
     alias.sum().backward()
 
     assert base.grad is not None
-    np.testing.assert_allclose(
-        base.grad.numpy(), np.ones((2, 2), dtype=np.float32)
-    )
+    np.testing.assert_allclose(base.grad.numpy(), np.ones((2, 2), dtype=np.float32))
 
 
 def test_tensor_as_tensor_respects_copy_flag_for_tensors():

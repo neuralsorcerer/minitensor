@@ -63,7 +63,9 @@ def test_solve_batched_systems():
     result = a.solve(b)
     a_np = a.numpy()
     b_np = b.numpy()
-    expected = np.stack([np.linalg.solve(a_np[i], b_np[i]) for i in range(a_np.shape[0])])
+    expected = np.stack(
+        [np.linalg.solve(a_np[i], b_np[i]) for i in range(a_np.shape[0])]
+    )
     np.testing.assert_allclose(result.numpy(), expected)
 
 
