@@ -16,7 +16,7 @@ use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
     device::Device,
     error::{MinitensorError, Result},
-    operations::arithmetic::add,
+    operations::{arithmetic::add, reduction::QuantileInterpolation},
 };
 use rayon::prelude::*;
 use std::{borrow::Cow, sync::Arc};
@@ -688,6 +688,58 @@ impl Tensor {
     pub fn median(&self, dim: Option<isize>, keepdim: bool) -> Result<(Self, Option<Self>)> {
         use crate::operations::reduction::median;
         median(self, dim, keepdim)
+    }
+
+    /// Quantile reduction with configurable interpolation
+    #[inline(always)]
+    pub fn quantile(
+        &self,
+        q: f64,
+        dim: Option<isize>,
+        keepdim: bool,
+        interpolation: QuantileInterpolation,
+    ) -> Result<Self> {
+        use crate::operations::reduction::quantile;
+        quantile(self, q, dim, keepdim, interpolation)
+    }
+
+    /// Quantile reduction that ignores NaN values
+    #[inline(always)]
+    pub fn nanquantile(
+        &self,
+        q: f64,
+        dim: Option<isize>,
+        keepdim: bool,
+        interpolation: QuantileInterpolation,
+    ) -> Result<Self> {
+        use crate::operations::reduction::nanquantile;
+        nanquantile(self, q, dim, keepdim, interpolation)
+    }
+
+    /// Batched quantile reduction for multiple probabilities at once
+    #[inline(always)]
+    pub fn quantiles(
+        &self,
+        qs: &[f64],
+        dim: Option<isize>,
+        keepdim: bool,
+        interpolation: QuantileInterpolation,
+    ) -> Result<Self> {
+        use crate::operations::reduction::quantiles;
+        quantiles(self, qs, dim, keepdim, interpolation)
+    }
+
+    /// Batched quantile reduction that ignores NaN values
+    #[inline(always)]
+    pub fn nanquantiles(
+        &self,
+        qs: &[f64],
+        dim: Option<isize>,
+        keepdim: bool,
+        interpolation: QuantileInterpolation,
+    ) -> Result<Self> {
+        use crate::operations::reduction::nanquantiles;
+        nanquantiles(self, qs, dim, keepdim, interpolation)
     }
 
     /// Top-k values and indices along a dimension

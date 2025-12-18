@@ -8,7 +8,11 @@ use approx::assert_relative_eq;
 use engine::{
     autograd,
     device::Device,
-    operations::{activation, arithmetic, comparison, linalg, reduction, shape_ops},
+    operations::{
+        activation, arithmetic, comparison, linalg,
+        reduction::{self, QuantileInterpolation},
+        shape_ops,
+    },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
@@ -179,6 +183,81 @@ fn test_complex_computation_chain() {
 
     // Clear computation graph
     let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_quantile_linear_interpolation_matches_manual() {
+    let tensor = create_test_tensor_f32(vec![1.0, 3.0, 2.0, 4.0], vec![4], true);
+
+    let quantile =
+        reduction::quantile(&tensor, 0.25, None, false, QuantileInterpolation::Linear).unwrap();
+
+    assert!(quantile.requires_grad());
+    assert!(quantile.shape().is_scalar());
+
+    let values = quantile.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 1.75, epsilon = 1e-6);
+}
+
+#[test]
+fn test_quantile_keepdim_higher_mode() {
+    let tensor = create_test_tensor_f32(vec![1.0, 5.0, 2.0, 4.0, 3.0, 6.0], vec![2, 3], true);
+
+    let quantile =
+        reduction::quantile(&tensor, 0.5, Some(1), true, QuantileInterpolation::Higher).unwrap();
+
+    assert!(quantile.requires_grad());
+    assert_eq!(quantile.shape().dims(), &[2, 1]);
+
+    let values = quantile.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 2.0, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 4.0, epsilon = 1e-6);
+}
+
+#[test]
+fn test_nanquantile_ignores_nan_values() {
+    let tensor = create_test_tensor_f32(vec![f32::NAN, 1.0, 3.0, f32::NAN, 5.0], vec![5], true);
+
+    let quantile =
+        reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear).unwrap();
+
+    assert!(quantile.requires_grad());
+    assert!(quantile.shape().is_scalar());
+
+    let values = quantile.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 3.0, epsilon = 1e-6);
+}
+
+#[test]
+fn test_nanquantiles_dim_sequence_layout() {
+    let tensor = create_test_tensor_f32(
+        vec![1.0, f32::NAN, 5.0, 2.0, 4.0, f32::NAN],
+        vec![2, 3],
+        false,
+    );
+    let qs = [0.25, 0.75];
+
+    let quantiles =
+        reduction::nanquantiles(&tensor, &qs, Some(1), true, QuantileInterpolation::Linear)
+            .unwrap();
+
+    assert_eq!(quantiles.shape().dims(), &[2, 2, 1]);
+    let values = quantiles.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 2.0, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 2.5, epsilon = 1e-6);
+    assert_relative_eq!(values[2], 4.0, epsilon = 1e-6);
+    assert_relative_eq!(values[3], 3.5, epsilon = 1e-6);
+}
+
+#[test]
+fn test_nanquantile_all_nan_errors() {
+    let tensor = create_test_tensor_f32(vec![f32::NAN, f32::NAN], vec![2], false);
+
+    let error = reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear)
+        .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("nanquantile() encountered an all-NaN slice"));
 }
 
 #[test]

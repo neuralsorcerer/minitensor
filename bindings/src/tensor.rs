@@ -10,6 +10,7 @@ use crate::error::_convert_error;
 use crate::numpy_compat::cross_impl;
 use engine::nn;
 use engine::operations::binary::{BinaryOpKind, coerce_binary_operands};
+use engine::operations::reduction::QuantileInterpolation;
 use engine::operations::shape_ops::RepeatInterleaveSpec;
 use engine::random;
 use engine::tensor::{Shape, TensorData};
@@ -75,6 +76,50 @@ fn extract_real_scalar(value: &Bound<PyAny>, name: &str) -> PyResult<f64> {
     Err(PyTypeError::new_err(format!(
         "{name} must be a real number or boolean",
     )))
+}
+
+fn parse_quantile_interpolation(mode: Option<&str>) -> PyResult<QuantileInterpolation> {
+    let mode = mode.unwrap_or("linear");
+    if mode.eq_ignore_ascii_case("linear") {
+        Ok(QuantileInterpolation::Linear)
+    } else if mode.eq_ignore_ascii_case("lower") {
+        Ok(QuantileInterpolation::Lower)
+    } else if mode.eq_ignore_ascii_case("higher") {
+        Ok(QuantileInterpolation::Higher)
+    } else if mode.eq_ignore_ascii_case("midpoint") {
+        Ok(QuantileInterpolation::Midpoint)
+    } else if mode.eq_ignore_ascii_case("nearest") {
+        Ok(QuantileInterpolation::Nearest)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "Invalid interpolation mode '{mode}'. Expected one of: linear, lower, higher, midpoint, nearest",
+        )))
+    }
+}
+
+enum QuantileArg {
+    Scalar(f64),
+    Multiple(Vec<f64>),
+}
+
+fn parse_quantile_arg(q: &Bound<PyAny>) -> PyResult<QuantileArg> {
+    if let Ok(value) = q.extract::<f64>() {
+        return Ok(QuantileArg::Scalar(value));
+    }
+
+    if let Ok(values) = q.extract::<Vec<f64>>() {
+        if values.is_empty() {
+            Err(PyValueError::new_err(
+                "quantile() expected at least one probability value",
+            ))
+        } else {
+            Ok(QuantileArg::Multiple(values))
+        }
+    } else {
+        Err(PyTypeError::new_err(
+            "q must be a float or a sequence of floats",
+        ))
+    }
 }
 
 #[pyclass(name = "Shape", module = "minitensor._core")]
@@ -1325,6 +1370,62 @@ impl PyTensor {
             Ok(tuple.into_any().unbind())
         } else {
             Ok(Py::new(py, values)?.into_any())
+        }
+    }
+
+    #[pyo3(signature = (q, dim=None, keepdim=false, interpolation="linear"))]
+    pub fn quantile(
+        &self,
+        q: &Bound<PyAny>,
+        dim: Option<isize>,
+        keepdim: Option<bool>,
+        interpolation: Option<&str>,
+    ) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let interpolation = parse_quantile_interpolation(interpolation)?;
+        match parse_quantile_arg(q)? {
+            QuantileArg::Scalar(prob) => {
+                let result = self
+                    .inner
+                    .quantile(prob, dim, keepdim, interpolation)
+                    .map_err(_convert_error)?;
+                Ok(Self::from_tensor(result))
+            }
+            QuantileArg::Multiple(qs) => {
+                let result = self
+                    .inner
+                    .quantiles(&qs, dim, keepdim, interpolation)
+                    .map_err(_convert_error)?;
+                Ok(Self::from_tensor(result))
+            }
+        }
+    }
+
+    #[pyo3(signature = (q, dim=None, keepdim=false, interpolation="linear"))]
+    pub fn nanquantile(
+        &self,
+        q: &Bound<PyAny>,
+        dim: Option<isize>,
+        keepdim: Option<bool>,
+        interpolation: Option<&str>,
+    ) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let interpolation = parse_quantile_interpolation(interpolation)?;
+        match parse_quantile_arg(q)? {
+            QuantileArg::Scalar(prob) => {
+                let result = self
+                    .inner
+                    .nanquantile(prob, dim, keepdim, interpolation)
+                    .map_err(_convert_error)?;
+                Ok(Self::from_tensor(result))
+            }
+            QuantileArg::Multiple(qs) => {
+                let result = self
+                    .inner
+                    .nanquantiles(&qs, dim, keepdim, interpolation)
+                    .map_err(_convert_error)?;
+                Ok(Self::from_tensor(result))
+            }
         }
     }
 

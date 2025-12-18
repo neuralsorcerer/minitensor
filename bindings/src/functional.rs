@@ -615,6 +615,32 @@ pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, q, dim=None, keepdim=false, interpolation="linear"))]
+pub fn quantile(
+    input: &Bound<PyAny>,
+    q: &Bound<PyAny>,
+    dim: Option<isize>,
+    keepdim: bool,
+    interpolation: &str,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.quantile(q, dim, Some(keepdim), Some(interpolation))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, q, dim=None, keepdim=false, interpolation="linear"))]
+pub fn nanquantile(
+    input: &Bound<PyAny>,
+    q: &Bound<PyAny>,
+    dim: Option<isize>,
+    keepdim: bool,
+    interpolation: &str,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanquantile(q, dim, Some(keepdim), Some(interpolation))
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, normalized_shape, weight=None, bias=None, eps=1e-5))]
 pub fn layer_norm(
     input: &Bound<PyAny>,
@@ -730,6 +756,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;
     parent.add_function(wrap_pyfunction!(median, parent)?)?;
+    parent.add_function(wrap_pyfunction!(quantile, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanquantile, parent)?)?;
     parent.add_function(wrap_pyfunction!(layer_norm, parent)?)?;
     parent.add_function(wrap_pyfunction!(cat, parent)?)?;
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
