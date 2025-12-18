@@ -23,9 +23,7 @@ def test_quantile_matches_numpy_scalar():
 def test_quantile_dim_keepdim_higher():
     data = mt.tensor([[1.0, 5.0, 2.0], [4.0, 3.0, 6.0]], requires_grad=True)
     quant = data.quantile(0.5, dim=1, keepdim=True, interpolation="higher")
-    expected = np.quantile(
-        data.numpy(), 0.5, axis=1, keepdims=True, method="higher"
-    )
+    expected = np.quantile(data.numpy(), 0.5, axis=1, keepdims=True, method="higher")
 
     assert quant.shape == (2, 1)
     assert quant.requires_grad
@@ -92,7 +90,9 @@ def test_nanquantile_sequence_dim_keepdim():
     data = mt.tensor([[1.0, np.nan, 5.0], [2.0, 4.0, np.nan]])
     probs = [0.25, 0.75]
     quant = data.nanquantile(probs, dim=1, keepdim=True)
-    expected = np.nanquantile(data.numpy(), probs, axis=1, keepdims=True, method="linear")
+    expected = np.nanquantile(
+        data.numpy(), probs, axis=1, keepdims=True, method="linear"
+    )
 
     assert quant.shape == (2, 2, 1)
     np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
