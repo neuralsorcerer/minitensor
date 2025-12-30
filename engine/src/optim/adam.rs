@@ -31,6 +31,8 @@ pub struct Adam {
     weight_decay: f64,
     /// Whether to use AMSGrad variant
     amsgrad: bool,
+    /// Whether to use decoupled weight decay (AdamW)
+    decoupled_weight_decay: bool,
     /// First moment estimates
     m: FxHashMap<TensorId, Tensor>,
     /// Second moment estimates
@@ -61,6 +63,7 @@ impl Adam {
             epsilon: epsilon.unwrap_or(1e-8),
             weight_decay: weight_decay.unwrap_or(0.0),
             amsgrad: false,
+            decoupled_weight_decay: false,
             m: FxHashMap::default(),
             v: FxHashMap::default(),
             v_hat: FxHashMap::default(),
@@ -98,6 +101,7 @@ impl Adam {
             epsilon,
             weight_decay: 0.0,
             amsgrad: false,
+            decoupled_weight_decay: false,
             m: FxHashMap::default(),
             v: FxHashMap::default(),
             v_hat: FxHashMap::default(),
@@ -117,6 +121,12 @@ impl Adam {
     /// Set gradient clipping
     pub fn with_gradient_clipping(mut self, clipping: GradientClipping) -> Self {
         self.gradient_clipping = clipping;
+        self
+    }
+
+    /// Enable or disable decoupled weight decay (AdamW)
+    pub fn with_decoupled_weight_decay(mut self, enabled: bool) -> Self {
+        self.decoupled_weight_decay = enabled;
         self
     }
 
@@ -163,6 +173,11 @@ impl Adam {
     /// Check if using AMSGrad
     pub fn is_amsgrad(&self) -> bool {
         self.amsgrad
+    }
+
+    /// Check if decoupled weight decay is enabled
+    pub fn is_decoupled_weight_decay(&self) -> bool {
+        self.decoupled_weight_decay
     }
 
     /// Get learning rate for a specific parameter
@@ -235,6 +250,7 @@ impl Adam {
         let beta2_pow = beta2.powi(step);
         let bc1_inv = 1.0 / (1.0 - beta1_pow);
         let bc2_inv = 1.0 / (1.0 - beta2_pow);
+        let use_decoupled_weight_decay = self.decoupled_weight_decay && weight_decay != 0.0;
 
         match param.dtype() {
             crate::tensor::DataType::Float32 => {
@@ -245,9 +261,14 @@ impl Adam {
                 let lr = lr as f32;
                 let beta1_f = beta1 as f32;
                 let beta2_f = beta2 as f32;
-                let wd = weight_decay as f32;
                 let bc1_inv = bc1_inv as f32;
                 let bc2_inv = bc2_inv as f32;
+                let wd = weight_decay as f32;
+                let apply_weight_decay = |p: &mut f32| {
+                    if use_decoupled_weight_decay {
+                        *p -= lr * wd * *p;
+                    }
+                };
                 if let Some(vhat) = v_hat_opt {
                     let vhat_slice = vhat.data_mut().as_f32_slice_mut().unwrap();
                     p.par_iter_mut()
@@ -256,7 +277,12 @@ impl Adam {
                         .zip(v_buf.par_iter_mut())
                         .zip(vhat_slice.par_iter_mut())
                         .for_each(|((((p_i, &g_i), m_i), v_i), vhat_i)| {
-                            let g_val = g_i + wd * *p_i;
+                            apply_weight_decay(p_i);
+                            let g_val = if use_decoupled_weight_decay {
+                                g_i
+                            } else {
+                                g_i + wd * *p_i
+                            };
                             *m_i = beta1_f * *m_i + (1.0 - beta1_f) * g_val;
                             *v_i = beta2_f * *v_i + (1.0 - beta2_f) * g_val * g_val;
                             if *v_i > *vhat_i {
@@ -272,7 +298,12 @@ impl Adam {
                         .zip(m_buf.par_iter_mut())
                         .zip(v_buf.par_iter_mut())
                         .for_each(|(((p_i, &g_i), m_i), v_i)| {
-                            let g_val = g_i + wd * *p_i;
+                            apply_weight_decay(p_i);
+                            let g_val = if use_decoupled_weight_decay {
+                                g_i
+                            } else {
+                                g_i + wd * *p_i
+                            };
                             *m_i = beta1_f * *m_i + (1.0 - beta1_f) * g_val;
                             *v_i = beta2_f * *v_i + (1.0 - beta2_f) * g_val * g_val;
                             let m_hat = *m_i * bc1_inv;
@@ -286,6 +317,11 @@ impl Adam {
                 let g = grad.data().as_f64_slice().unwrap();
                 let m_buf = m.data_mut().as_f64_slice_mut().unwrap();
                 let v_buf = v.data_mut().as_f64_slice_mut().unwrap();
+                let apply_weight_decay = |p: &mut f64| {
+                    if use_decoupled_weight_decay {
+                        *p -= lr * weight_decay * *p;
+                    }
+                };
                 if let Some(vhat) = v_hat_opt {
                     let vhat_slice = vhat.data_mut().as_f64_slice_mut().unwrap();
                     p.par_iter_mut()
@@ -294,7 +330,12 @@ impl Adam {
                         .zip(v_buf.par_iter_mut())
                         .zip(vhat_slice.par_iter_mut())
                         .for_each(|((((p_i, &g_i), m_i), v_i), vhat_i)| {
-                            let g_val = g_i + weight_decay * *p_i;
+                            apply_weight_decay(p_i);
+                            let g_val = if use_decoupled_weight_decay {
+                                g_i
+                            } else {
+                                g_i + weight_decay * *p_i
+                            };
                             *m_i = beta1 * *m_i + (1.0 - beta1) * g_val;
                             *v_i = beta2 * *v_i + (1.0 - beta2) * g_val * g_val;
                             if *v_i > *vhat_i {
@@ -310,7 +351,12 @@ impl Adam {
                         .zip(m_buf.par_iter_mut())
                         .zip(v_buf.par_iter_mut())
                         .for_each(|(((p_i, &g_i), m_i), v_i)| {
-                            let g_val = g_i + weight_decay * *p_i;
+                            apply_weight_decay(p_i);
+                            let g_val = if use_decoupled_weight_decay {
+                                g_i
+                            } else {
+                                g_i + weight_decay * *p_i
+                            };
                             *m_i = beta1 * *m_i + (1.0 - beta1) * g_val;
                             *v_i = beta2 * *v_i + (1.0 - beta2) * g_val * g_val;
                             let m_hat = *m_i * bc1_inv;
@@ -327,6 +373,110 @@ impl Adam {
         }
 
         Ok(())
+    }
+}
+
+/// Decoupled Adam optimizer (AdamW)
+pub struct AdamW {
+    inner: Adam,
+}
+
+impl AdamW {
+    /// Create a new AdamW optimizer with single parameter group
+    pub fn new(
+        learning_rate: f64,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
+        epsilon: Option<f64>,
+        weight_decay: Option<f64>,
+    ) -> Self {
+        let adam = Adam::new(learning_rate, beta1, beta2, epsilon, weight_decay)
+            .with_decoupled_weight_decay(true);
+        Self { inner: adam }
+    }
+
+    /// Create a new AdamW optimizer with parameter groups
+    pub fn with_param_groups(
+        param_groups: Vec<ParameterGroup>,
+        beta1: f64,
+        beta2: f64,
+        epsilon: f64,
+    ) -> Self {
+        let adam = Adam::with_param_groups(param_groups, beta1, beta2, epsilon)
+            .with_decoupled_weight_decay(true);
+        Self { inner: adam }
+    }
+
+    /// Get beta1 coefficient
+    pub fn beta1(&self) -> f64 {
+        self.inner.beta1()
+    }
+
+    /// Get beta2 coefficient
+    pub fn beta2(&self) -> f64 {
+        self.inner.beta2()
+    }
+
+    /// Get epsilon value
+    pub fn epsilon(&self) -> f64 {
+        self.inner.epsilon()
+    }
+
+    /// Get weight decay coefficient
+    pub fn weight_decay(&self) -> f64 {
+        self.inner.weight_decay()
+    }
+
+    /// Get the learning rate (for single parameter group optimizers)
+    pub fn learning_rate(&self) -> f64 {
+        self.inner.learning_rate()
+    }
+
+    /// Set the learning rate (for single parameter group optimizers)
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        self.inner.set_learning_rate(lr);
+    }
+}
+
+impl Optimizer for AdamW {
+    fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
+        self.inner.step(parameters)
+    }
+
+    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()> {
+        self.inner.zero_grad(parameters, set_to_none)
+    }
+
+    fn learning_rate(&self) -> f64 {
+        self.inner.learning_rate()
+    }
+
+    fn set_learning_rate(&mut self, lr: f64) {
+        self.inner.set_learning_rate(lr)
+    }
+
+    fn param_groups(&self) -> &[ParameterGroup] {
+        self.inner.param_groups()
+    }
+
+    fn param_groups_mut(&mut self) -> &mut [ParameterGroup] {
+        self.inner.param_groups_mut()
+    }
+
+    fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
+        self.inner.add_param_group(group)
+    }
+
+    fn step_count(&self) -> usize {
+        self.inner.step_count()
+    }
+
+    fn clip_gradients(
+        &self,
+        parameters: &mut [&mut Tensor],
+        clipping: &GradientClipping,
+    ) -> Result<()> {
+        self.inner.clip_gradients(parameters, clipping)
     }
 }
 

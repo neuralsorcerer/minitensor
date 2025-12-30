@@ -6,7 +6,7 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
-use engine::optim::{Adam, Optimizer, RMSprop, SGD};
+use engine::optim::{Adam, AdamW, Optimizer, RMSprop, SGD};
 use engine::{autograd, tensor::Tensor};
 use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -24,6 +24,7 @@ pub struct PyOptimizer {
 enum OptimizerType {
     SGD(SGD),
     Adam(Adam),
+    AdamW(AdamW),
     RMSprop(RMSprop),
 }
 
@@ -49,6 +50,7 @@ impl PyOptimizer {
             match &mut self.inner {
                 OptimizerType::SGD(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
+                OptimizerType::AdamW(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
             }
             .map_err(_convert_error)?;
@@ -83,6 +85,7 @@ impl PyOptimizer {
             match &mut self.inner {
                 OptimizerType::SGD(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
+                OptimizerType::AdamW(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
             }
             .map_err(_convert_error)?;
@@ -97,6 +100,7 @@ impl PyOptimizer {
         match &self.inner {
             OptimizerType::SGD(optimizer) => optimizer.learning_rate(),
             OptimizerType::Adam(optimizer) => optimizer.learning_rate(),
+            OptimizerType::AdamW(optimizer) => optimizer.learning_rate(),
             OptimizerType::RMSprop(optimizer) => optimizer.learning_rate(),
         }
     }
@@ -107,6 +111,7 @@ impl PyOptimizer {
         match &mut self.inner {
             OptimizerType::SGD(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::Adam(optimizer) => optimizer.set_learning_rate(lr),
+            OptimizerType::AdamW(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::RMSprop(optimizer) => optimizer.set_learning_rate(lr),
         }
     }
@@ -120,11 +125,21 @@ impl PyOptimizer {
                 optimizer.momentum()
             ),
             OptimizerType::Adam(optimizer) => format!(
-                "Adam(lr={}, betas=({}, {}), eps={})",
+                "Adam(lr={}, betas=({}, {}), eps={}, weight_decay={}, decoupled_weight_decay={})",
                 optimizer.learning_rate(),
                 optimizer.beta1(),
                 optimizer.beta2(),
-                optimizer.epsilon()
+                optimizer.epsilon(),
+                optimizer.weight_decay(),
+                optimizer.is_decoupled_weight_decay()
+            ),
+            OptimizerType::AdamW(optimizer) => format!(
+                "AdamW(lr={}, betas=({}, {}), eps={}, weight_decay={})",
+                optimizer.learning_rate(),
+                optimizer.beta1(),
+                optimizer.beta2(),
+                optimizer.epsilon(),
+                optimizer.weight_decay()
             ),
             OptimizerType::RMSprop(optimizer) => format!(
                 "RMSprop(lr={}, alpha={}, eps={})",
@@ -147,6 +162,13 @@ impl PyOptimizer {
     fn from_adam(adam: Adam, parameters: Vec<Py<PyAny>>) -> Self {
         Self {
             inner: OptimizerType::Adam(adam),
+            parameters,
+        }
+    }
+
+    fn from_adamw(adamw: AdamW, parameters: Vec<Py<PyAny>>) -> Self {
+        Self {
+            inner: OptimizerType::AdamW(adamw),
             parameters,
         }
     }
@@ -216,6 +238,39 @@ fn validate_beta(name: &str, value: f64) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+fn resolve_betas(
+    betas: Option<(f64, f64)>,
+    beta1: Option<f64>,
+    beta2: Option<f64>,
+) -> PyResult<(f64, f64)> {
+    if let Some(_) = betas {
+        if beta1.is_some() || beta2.is_some() {
+            return Err(PyTypeError::new_err(
+                "specify either betas tuple or beta1/beta2, not both",
+            ));
+        }
+    }
+
+    let (beta1, beta2) = if let Some((b1, b2)) = betas {
+        (b1, b2)
+    } else {
+        match (beta1, beta2) {
+            (Some(b1), Some(b2)) => (b1, b2),
+            (None, None) => (0.9, 0.999),
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "both beta1 and beta2 must be provided",
+                ));
+            }
+        }
+    };
+
+    validate_beta("beta1", beta1)?;
+    validate_beta("beta2", beta2)?;
+
+    Ok((beta1, beta2))
 }
 
 /// SGD optimizer
@@ -326,14 +381,6 @@ impl PyAdam {
         epsilon: f64,
         weight_decay: f64,
     ) -> PyResult<(Self, PyOptimizer)> {
-        if let Some(_) = betas {
-            if beta1.is_some() || beta2.is_some() {
-                return Err(PyTypeError::new_err(
-                    "specify either betas tuple or beta1/beta2, not both",
-                ));
-            }
-        }
-
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
@@ -347,23 +394,7 @@ impl PyAdam {
         }
 
         let params = collect_parameters(parameters)?;
-
-        let (beta1, beta2) = if let Some((b1, b2)) = betas {
-            (b1, b2)
-        } else {
-            match (beta1, beta2) {
-                (Some(b1), Some(b2)) => (b1, b2),
-                (None, None) => (0.9, 0.999),
-                _ => {
-                    return Err(PyTypeError::new_err(
-                        "both beta1 and beta2 must be provided",
-                    ));
-                }
-            }
-        };
-
-        validate_beta("beta1", beta1)?;
-        validate_beta("beta2", beta2)?;
+        let (beta1, beta2) = resolve_betas(betas, beta1, beta2)?;
 
         let adam = Adam::new(
             lr,
@@ -415,6 +446,106 @@ impl PyAdam {
         let optimizer = slf.as_ref();
         if let OptimizerType::Adam(adam) = &optimizer.inner {
             Ok(adam.weight_decay())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+}
+
+/// AdamW optimizer
+#[pyclass(name = "AdamW", extends = PyOptimizer)]
+pub struct PyAdamW;
+
+#[pymethods]
+impl PyAdamW {
+    /// Create a new AdamW optimizer
+    #[new]
+    #[pyo3(
+        signature = (
+            parameters,
+            lr,
+            betas=None,
+            beta1=None,
+            beta2=None,
+            epsilon=1e-8,
+            weight_decay=0.01
+        )
+    )]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        betas: Option<(f64, f64)>,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
+        epsilon: f64,
+        weight_decay: f64,
+    ) -> PyResult<(Self, PyOptimizer)> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
+        }
+
+        if epsilon <= 0.0 {
+            return Err(PyValueError::new_err("Epsilon must be positive."));
+        }
+
+        if weight_decay < 0.0 {
+            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        }
+
+        let params = collect_parameters(parameters)?;
+        let (beta1, beta2) = resolve_betas(betas, beta1, beta2)?;
+
+        let adamw = AdamW::new(
+            lr,
+            Some(beta1),
+            Some(beta2),
+            Some(epsilon),
+            Some(weight_decay),
+        );
+
+        Ok((Self, PyOptimizer::from_adamw(adamw, params)))
+    }
+
+    /// Get beta1 parameter
+    #[getter]
+    fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
+            Ok(adamw.beta1())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get beta2 parameter
+    #[getter]
+    fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
+            Ok(adamw.beta2())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get epsilon parameter
+    #[getter]
+    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
+            Ok(adamw.epsilon())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get weight decay parameter
+    #[getter]
+    fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
+            Ok(adamw.weight_decay())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
         }
@@ -537,6 +668,7 @@ pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> P
     optim_module.add_class::<PyOptimizer>()?;
     optim_module.add_class::<PySGD>()?;
     optim_module.add_class::<PyAdam>()?;
+    optim_module.add_class::<PyAdamW>()?;
     optim_module.add_class::<PyRMSprop>()?;
 
     parent_module.add_submodule(&optim_module)?;

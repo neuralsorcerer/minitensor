@@ -13,7 +13,7 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
-pub use adam::Adam;
+pub use adam::{Adam, AdamW};
 pub use optimizer::{
     ConstantLR, CosineAnnealingLR, ExponentialLR, GradientClipping, LearningRateScheduler,
     Optimizer, ParameterGroup, StepLR,

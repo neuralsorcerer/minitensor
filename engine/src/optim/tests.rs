@@ -7,7 +7,7 @@
 #[cfg(test)]
 mod tests {
     use crate::optim::{
-        Adam, GradientClipping, GradientUtils, Optimizer, ParameterGroup, RMSprop, SGD,
+        Adam, AdamW, GradientClipping, GradientUtils, Optimizer, ParameterGroup, RMSprop, SGD,
     };
     use crate::{
         device::Device,
@@ -50,6 +50,49 @@ mod tests {
         assert!(adam.is_amsgrad());
         assert_eq!(adam.beta1(), 0.9); // Default value
         assert_eq!(adam.beta2(), 0.999); // Default value
+    }
+
+    #[test]
+    fn test_adamw_creation() {
+        let adamw = AdamW::new(0.001, Some(0.9), Some(0.999), Some(1e-8), Some(0.01));
+        assert_eq!(adamw.learning_rate(), 0.001);
+        assert_eq!(adamw.beta1(), 0.9);
+        assert_eq!(adamw.beta2(), 0.999);
+        assert_eq!(adamw.epsilon(), 1e-8);
+        assert_eq!(adamw.weight_decay(), 0.01);
+    }
+
+    #[test]
+    fn test_adamw_param_group_weight_decay() {
+        let mut t1 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut t2 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+
+        // Zero gradients so only weight decay contributes to the update.
+        let zero_grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        t1.set_grad(Some(zero_grad.clone()));
+        t2.set_grad(Some(zero_grad));
+
+        let id1 = t1.id();
+        let id2 = t2.id();
+
+        // Distinct weight decays per parameter group to verify decoupled handling.
+        let g1 = ParameterGroup::new(vec![id1], 0.1).with_weight_decay(0.4);
+        let g2 = ParameterGroup::new(vec![id2], 0.1).with_weight_decay(0.0);
+
+        let mut adamw = AdamW::with_param_groups(vec![g1, g2], 0.9, 0.999, 1e-8);
+
+        let mut params = vec![&mut t1, &mut t2];
+        adamw.step(&mut params).unwrap();
+
+        let v1 = t1.data().as_f32_slice().unwrap()[0];
+        let v2 = t2.data().as_f32_slice().unwrap()[0];
+
+        // With decoupled decay: p = p - lr * wd * p.
+        let expected_v1 = 1.0 - 0.1 * 0.4;
+        let expected_v2 = 1.0; // No weight decay on second group
+
+        assert!((v1 - expected_v1).abs() < 1e-6);
+        assert!((v2 - expected_v2).abs() < 1e-6);
     }
 
     #[test]
@@ -447,6 +490,19 @@ mod tests {
         adam.step(&mut params).unwrap();
         let val = tensor.data().as_f32_slice().unwrap()[0];
         assert!((val - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_adamw_decoupled_weight_decay() {
+        let mut adamw = AdamW::new(0.1, None, None, None, Some(0.5));
+        let mut tensor = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        tensor.set_grad(Some(grad));
+        let mut params = vec![&mut tensor];
+        adamw.step(&mut params).unwrap();
+        let val = tensor.data().as_f32_slice().unwrap()[0];
+        // With decoupled weight decay: p = p - lr * wd * p = 1 - 0.1*0.5
+        assert!((val - 0.95).abs() < 1e-6);
     }
 
     #[test]

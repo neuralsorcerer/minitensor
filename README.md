@@ -158,9 +158,10 @@ bce = nn.BCELoss()                  # Binary cross entropy
 from minitensor import optim
 
 # Optimizers
-sgd = optim.SGD(0.01, 0.9, 0.0, False)                      # SGD with momentum
-adam = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)  # Adam optimizer
-rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)         # RMSprop optimizer
+sgd = optim.SGD(0.01, 0.9, 0.0, False)                              # SGD with momentum
+adam = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)          # Adam optimizer
+adamw = optim.AdamW(0.001, betas=(0.9, 0.999), weight_decay=0.01)   # Decoupled AdamW
+rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)                 # RMSprop optimizer
 ```
 
 ## Architecture
