@@ -1398,6 +1398,57 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
 
 /// Softmax activation function with gradient support
 pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    if tensor.ndim() == 0 {
+        let mut output_data =
+            TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        match tensor.dtype() {
+            DataType::Float32 => {
+                let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from output data",
+                    )
+                })?;
+                output_slice[0] = 1.0;
+            }
+            DataType::Float64 => {
+                let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from output data",
+                    )
+                })?;
+                output_slice[0] = 1.0;
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "Softmax function only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let output = Tensor::new(
+            Arc::new(output_data),
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+
+        if output.requires_grad() {
+            let grad_fn = Arc::new(SoftmaxBackward {
+                input_id: tensor.id(),
+                output: output.detach(),
+                dim: 0,
+            });
+
+            let mut output_with_grad = output;
+            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output_with_grad, Some(grad_fn))?;
+            return Ok(output_with_grad);
+        }
+
+        return Ok(output);
+    }
+
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
     if dim >= tensor.ndim() {
@@ -1450,6 +1501,57 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
 
 /// Log-Softmax activation function with gradient support
 pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    if tensor.ndim() == 0 {
+        let mut output_data =
+            TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        match tensor.dtype() {
+            DataType::Float32 => {
+                let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from output data",
+                    )
+                })?;
+                output_slice[0] = 0.0;
+            }
+            DataType::Float64 => {
+                let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from output data",
+                    )
+                })?;
+                output_slice[0] = 0.0;
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "LogSoftmax function only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let output = Tensor::new(
+            Arc::new(output_data),
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+
+        if output.requires_grad() {
+            let grad_fn = Arc::new(LogSoftmaxBackward {
+                input_id: tensor.id(),
+                output: output.detach(),
+                dim: 0,
+            });
+
+            let mut output_with_grad = output;
+            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output_with_grad, Some(grad_fn))?;
+            return Ok(output_with_grad);
+        }
+
+        return Ok(output);
+    }
+
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
     if dim >= tensor.ndim() {
@@ -2567,14 +2669,13 @@ fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
 
+    if dim_size == 0 {
+        return Ok(());
+    }
+
     // Compute the number of groups before and after the softmax dimension. This
     // allows us to iterate over all slices along `dim` for tensors of arbitrary
     // rank using row-major indexing.
-    let _before: usize = if dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -2621,11 +2722,10 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
 
-    let _before: usize = if dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
+    if dim_size == 0 {
+        return Ok(());
+    }
+
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -2671,6 +2771,10 @@ fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
 
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
+
+    if dim_size == 0 {
+        return Ok(());
+    }
 
     let after: usize = if dim + 1 >= dims.len() {
         1
@@ -2724,6 +2828,10 @@ fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
 
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
+
+    if dim_size == 0 {
+        return Ok(());
+    }
 
     let after: usize = if dim + 1 >= dims.len() {
         1

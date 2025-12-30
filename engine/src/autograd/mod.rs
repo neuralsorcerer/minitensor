@@ -3193,7 +3193,17 @@ fn softmax_backward_f32(
     dims: &[usize],
     dim: usize,
 ) {
+    if dims.is_empty() {
+        if let Some(first) = grad_input.first_mut() {
+            *first = 0.0;
+        }
+        return;
+    }
+
     let dim_size = dims[dim];
+    if dim_size == 0 {
+        return;
+    }
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -3248,7 +3258,17 @@ fn softmax_backward_f64(
     dims: &[usize],
     dim: usize,
 ) {
+    if dims.is_empty() {
+        if let Some(first) = grad_input.first_mut() {
+            *first = 0.0;
+        }
+        return;
+    }
+
     let dim_size = dims[dim];
+    if dim_size == 0 {
+        return;
+    }
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -3303,7 +3323,17 @@ fn log_softmax_backward_f32(
     dims: &[usize],
     dim: usize,
 ) {
+    if dims.is_empty() {
+        if let Some(first) = grad_input.first_mut() {
+            *first = 0.0;
+        }
+        return;
+    }
+
     let dim_size = dims[dim];
+    if dim_size == 0 {
+        return;
+    }
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
@@ -3361,7 +3391,17 @@ fn log_softmax_backward_f64(
     dims: &[usize],
     dim: usize,
 ) {
+    if dims.is_empty() {
+        if let Some(first) = grad_input.first_mut() {
+            *first = 0.0;
+        }
+        return;
+    }
+
     let dim_size = dims[dim];
+    if dim_size == 0 {
+        return;
+    }
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {

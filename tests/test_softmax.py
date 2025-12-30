@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
+import pytest
 
 import minitensor as mt
 from minitensor import functional as F
@@ -37,3 +38,17 @@ def test_softmax_extreme_values():
     expected = expected / expected.sum(axis=1, keepdims=True)
     assert np.allclose(result.numpy(), expected)
     assert np.allclose(result.numpy().sum(axis=1), np.array([1.0, 1.0]))
+
+
+def test_softmax_scalar_returns_one():
+    x = mt.Tensor(3.5)
+    result = F.softmax(x)
+    assert result.shape == ()
+    assert result.item() == pytest.approx(1.0)
+
+
+def test_softmax_empty_dim_returns_empty():
+    x = mt.Tensor.zeros((2, 0, 3), dtype="float32")
+    result = F.softmax(x, dim=1)
+    assert result.shape == (2, 0, 3)
+    assert result.numel() == 0

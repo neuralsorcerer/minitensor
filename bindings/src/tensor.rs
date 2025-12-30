@@ -1675,6 +1675,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (dim=None))]
     pub fn softmax(&self, dim: Option<isize>) -> PyResult<Self> {
         let resolved_dim = match dim {
             Some(dim) => {
@@ -1694,6 +1695,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (dim=None))]
     pub fn log_softmax(&self, dim: Option<isize>) -> PyResult<Self> {
         let resolved_dim = match dim {
             Some(dim) => {

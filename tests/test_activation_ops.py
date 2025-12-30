@@ -82,6 +82,13 @@ def test_log_softmax_backward_matches_manual():
     np.testing.assert_allclose(tensor.grad.numpy(), expected, rtol=1e-6)
 
 
+def test_log_softmax_scalar_returns_zero():
+    t = mt.Tensor(2.5)
+    out = t.log_softmax()
+    assert out.shape == ()
+    assert out.item() == pytest.approx(0.0)
+
+
 def test_log1p_expm1_matches_numpy():
     values = np.array([-0.5, 0.0, 1.5], dtype=np.float32)
     t = mt.Tensor(values)
