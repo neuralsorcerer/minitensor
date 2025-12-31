@@ -374,8 +374,7 @@ fn quantile_all(
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
             let mut values: Vec<f32> = data.to_vec();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-            let quant = quantile_from_sorted_f32(&values, q, interpolation);
+            let quant = quantile_from_unsorted_f32(&mut values, q, interpolation);
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?[0] = quant;
@@ -386,8 +385,7 @@ fn quantile_all(
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
             let mut values: Vec<f64> = data.to_vec();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-            let quant = quantile_from_sorted_f64(&values, q, interpolation);
+            let quant = quantile_from_unsorted_f64(&mut values, q, interpolation);
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?[0] = quant;
@@ -459,8 +457,7 @@ fn nanquantile_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-            let quant = quantile_from_sorted_f32(&values, q, interpolation);
+            let quant = quantile_from_unsorted_f32(&mut values, q, interpolation);
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?[0] = quant;
@@ -476,8 +473,7 @@ fn nanquantile_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-            let quant = quantile_from_sorted_f64(&values, q, interpolation);
+            let quant = quantile_from_unsorted_f64(&mut values, q, interpolation);
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?[0] = quant;
@@ -565,8 +561,7 @@ fn quantile_along_dim(
                         buffer.push(input[idx]);
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-                    let quant = quantile_from_sorted_f32(&buffer, q, interpolation);
+                    let quant = quantile_from_unsorted_f32(&mut buffer, q, interpolation);
                     values[o * inner + r] = quant;
                 }
             }
@@ -589,8 +584,7 @@ fn quantile_along_dim(
                         buffer.push(input[idx]);
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-                    let quant = quantile_from_sorted_f64(&buffer, q, interpolation);
+                    let quant = quantile_from_unsorted_f64(&mut buffer, q, interpolation);
                     values[o * inner + r] = quant;
                 }
             }
@@ -681,8 +675,7 @@ fn nanquantile_along_dim(
                         ));
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-                    let quant = quantile_from_sorted_f32(&buffer, q, interpolation);
+                    let quant = quantile_from_unsorted_f32(&mut buffer, q, interpolation);
                     values[o * inner + r] = quant;
                 }
             }
@@ -714,8 +707,7 @@ fn nanquantile_along_dim(
                         ));
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
-                    let quant = quantile_from_sorted_f64(&buffer, q, interpolation);
+                    let quant = quantile_from_unsorted_f64(&mut buffer, q, interpolation);
                     values[o * inner + r] = quant;
                 }
             }
@@ -752,7 +744,7 @@ fn quantiles_all(
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
             let mut sorted: Vec<f32> = data.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let values = values_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
@@ -766,7 +758,7 @@ fn quantiles_all(
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
             let mut sorted: Vec<f64> = data.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let values = values_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
@@ -811,7 +803,7 @@ fn nanquantiles_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let values = values_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
@@ -830,7 +822,7 @@ fn nanquantiles_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            sorted.sort_by(|a, b| a.total_cmp(b));
             let values = values_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
@@ -915,7 +907,7 @@ fn quantiles_along_dim(
                         buffer.push(input[idx]);
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+                    buffer.sort_by(|a, b| a.total_cmp(b));
 
                     for (qi, &prob) in qs.iter().enumerate() {
                         let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
@@ -943,7 +935,7 @@ fn quantiles_along_dim(
                         buffer.push(input[idx]);
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+                    buffer.sort_by(|a, b| a.total_cmp(b));
 
                     for (qi, &prob) in qs.iter().enumerate() {
                         let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
@@ -1039,7 +1031,7 @@ fn nanquantiles_along_dim(
                         ));
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+                    buffer.sort_by(|a, b| a.total_cmp(b));
 
                     for (qi, &prob) in qs.iter().enumerate() {
                         let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
@@ -1076,7 +1068,7 @@ fn nanquantiles_along_dim(
                         ));
                     }
 
-                    buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+                    buffer.sort_by(|a, b| a.total_cmp(b));
 
                     for (qi, &prob) in qs.iter().enumerate() {
                         let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
@@ -1130,6 +1122,120 @@ fn quantile_from_sorted_f64(values: &[f64], q: f64, interpolation: QuantileInter
     interpolation.interpolate(lower, upper, weight)
 }
 
+fn quantile_from_unsorted_f32(
+    values: &mut [f32],
+    q: f64,
+    interpolation: QuantileInterpolation,
+) -> f32 {
+    if values.len() == 1 {
+        return values[0];
+    }
+
+    let max_index = (values.len() - 1) as f64;
+    let pos = (q * max_index).clamp(0.0, max_index);
+    let lower_idx = pos.floor() as usize;
+    let upper_idx = pos.ceil() as usize;
+    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+
+    if lower_idx == upper_idx {
+        return select_quantile_at_f32(values, lower_idx);
+    }
+
+    let value = match interpolation {
+        QuantileInterpolation::Lower => select_quantile_at_f32(values, lower_idx) as f64,
+        QuantileInterpolation::Higher => select_quantile_at_f32(values, upper_idx) as f64,
+        QuantileInterpolation::Nearest => {
+            let idx = if weight <= 0.5 { lower_idx } else { upper_idx };
+            select_quantile_at_f32(values, idx) as f64
+        }
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let (lower, upper) = select_quantile_bounds_f32(values, lower_idx, upper_idx);
+            interpolation.interpolate(lower as f64, upper as f64, weight)
+        }
+    };
+
+    value as f32
+}
+
+fn quantile_from_unsorted_f64(
+    values: &mut [f64],
+    q: f64,
+    interpolation: QuantileInterpolation,
+) -> f64 {
+    if values.len() == 1 {
+        return values[0];
+    }
+
+    let max_index = (values.len() - 1) as f64;
+    let pos = (q * max_index).clamp(0.0, max_index);
+    let lower_idx = pos.floor() as usize;
+    let upper_idx = pos.ceil() as usize;
+    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+
+    if lower_idx == upper_idx {
+        return select_quantile_at_f64(values, lower_idx);
+    }
+
+    match interpolation {
+        QuantileInterpolation::Lower => select_quantile_at_f64(values, lower_idx),
+        QuantileInterpolation::Higher => select_quantile_at_f64(values, upper_idx),
+        QuantileInterpolation::Nearest => {
+            let idx = if weight <= 0.5 { lower_idx } else { upper_idx };
+            select_quantile_at_f64(values, idx)
+        }
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let (lower, upper) = select_quantile_bounds_f64(values, lower_idx, upper_idx);
+            interpolation.interpolate(lower, upper, weight)
+        }
+    }
+}
+
+fn select_quantile_at_f32(values: &mut [f32], idx: usize) -> f32 {
+    let (_, pivot, _) = values.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+    *pivot
+}
+
+fn select_quantile_bounds_f32(
+    values: &mut [f32],
+    lower_idx: usize,
+    upper_idx: usize,
+) -> (f32, f32) {
+    if lower_idx == upper_idx {
+        let value = select_quantile_at_f32(values, lower_idx);
+        return (value, value);
+    }
+
+    let (_, upper_pivot, _) = values.select_nth_unstable_by(upper_idx, |a, b| a.total_cmp(b));
+    let upper = *upper_pivot;
+    let (_, lower_pivot, _) =
+        values[..upper_idx].select_nth_unstable_by(lower_idx, |a, b| a.total_cmp(b));
+    let lower = *lower_pivot;
+    (lower, upper)
+}
+
+fn select_quantile_at_f64(values: &mut [f64], idx: usize) -> f64 {
+    let (_, pivot, _) = values.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+    *pivot
+}
+
+fn select_quantile_bounds_f64(
+    values: &mut [f64],
+    lower_idx: usize,
+    upper_idx: usize,
+) -> (f64, f64) {
+    if lower_idx == upper_idx {
+        let value = select_quantile_at_f64(values, lower_idx);
+        return (value, value);
+    }
+
+    let (_, upper_pivot, _) = values.select_nth_unstable_by(upper_idx, |a, b| a.total_cmp(b));
+    let upper = *upper_pivot;
+    let (_, lower_pivot, _) =
+        values[..upper_idx].select_nth_unstable_by(lower_idx, |a, b| a.total_cmp(b));
+    let lower = *lower_pivot;
+    (lower, upper)
+}
+
 fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
     let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
@@ -1140,7 +1246,7 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
             let mut values: Vec<f32> = data.to_vec();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            values.sort_by(|a, b| a.total_cmp(b));
             let median = values[(values.len() - 1) / 2];
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
@@ -1152,7 +1258,7 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
             let mut values: Vec<f64> = data.to_vec();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater));
+            values.sort_by(|a, b| a.total_cmp(b));
             let median = values[(values.len() - 1) / 2];
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
