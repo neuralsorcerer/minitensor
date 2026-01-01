@@ -13,7 +13,7 @@ homepage = "https://github.com/neuralsorcerer/minitensor"
 
 [workspace.dependencies]
 # Core dependencies
-ndarray = "0.16"
+ndarray = "0.17"
 num-traits = "0.2"
 thiserror = "2.0"
 anyhow = "1.0"
@@ -26,14 +26,14 @@ parking_lot = "0.12"
 
 # SIMD and performance
 rayon = "1.7"
-wide = "0.8"
+wide = "1.1"
 matrixmultiply = { version = "0.3", features = ["threading"] }
 smallvec = "1.11"
 rustc-hash = "2.1"
 
 # GPU backends
-cudarc = "0.17"
-metal = "0.32"
+cudarc = "0.18"
+metal = "0.33"
 opencl3 = "0.12"
 
 # System information
