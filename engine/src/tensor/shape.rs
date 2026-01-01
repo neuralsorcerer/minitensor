@@ -15,6 +15,15 @@ pub struct Shape {
 }
 
 impl Shape {
+    #[inline(always)]
+    fn dim_from_right(dims: &[usize], ndim: usize, index_from_right: usize) -> usize {
+        if index_from_right < ndim {
+            dims[ndim - 1 - index_from_right]
+        } else {
+            1
+        }
+    }
+
     /// Create a new shape from dimensions
     #[inline(always)]
     pub fn new(dims: Vec<usize>) -> Self {
@@ -67,22 +76,15 @@ impl Shape {
     /// Check if shapes are compatible for broadcasting
     #[inline(always)]
     pub fn is_broadcastable_with(&self, other: &Shape) -> bool {
-        let max_ndim = self.ndim().max(other.ndim());
+        let self_ndim = self.ndim();
+        let other_ndim = other.ndim();
+        let max_ndim = self_ndim.max(other_ndim);
 
         // Compare dimensions from right to left (broadcasting rules)
         for i in 0..max_ndim {
             // Get dimension from the right (i=0 is rightmost)
-            let self_dim = if i < self.ndim() {
-                self.dims[self.ndim() - 1 - i]
-            } else {
-                1 // Implicit dimension of size 1
-            };
-
-            let other_dim = if i < other.ndim() {
-                other.dims[other.ndim() - 1 - i]
-            } else {
-                1 // Implicit dimension of size 1
-            };
+            let self_dim = Self::dim_from_right(&self.dims, self_ndim, i);
+            let other_dim = Self::dim_from_right(&other.dims, other_ndim, i);
 
             // Broadcasting rule: dimensions must be equal, or one must be 1
             if self_dim != other_dim && self_dim != 1 && other_dim != 1 {
@@ -96,27 +98,14 @@ impl Shape {
     /// Compute the broadcasted shape with another shape
     #[inline(always)]
     pub fn broadcast_with(&self, other: &Shape) -> Result<Shape> {
-        if !self.is_broadcastable_with(other) {
-            return Err(MinitensorError::shape_mismatch(
-                self.dims.clone(),
-                other.dims.clone(),
-            ));
-        }
-
-        let max_ndim = self.ndim().max(other.ndim());
+        let self_ndim = self.ndim();
+        let other_ndim = other.ndim();
+        let max_ndim = self_ndim.max(other_ndim);
         let mut result_dims = Vec::with_capacity(max_ndim);
 
         for i in 0..max_ndim {
-            let self_dim = if i < self.ndim() {
-                self.dims[self.ndim() - 1 - i]
-            } else {
-                1
-            };
-            let other_dim = if i < other.ndim() {
-                other.dims[other.ndim() - 1 - i]
-            } else {
-                1
-            };
+            let self_dim = Self::dim_from_right(&self.dims, self_ndim, i);
+            let other_dim = Self::dim_from_right(&other.dims, other_ndim, i);
 
             let result_dim = if self_dim == other_dim {
                 self_dim
@@ -125,8 +114,6 @@ impl Shape {
             } else if other_dim == 1 {
                 self_dim
             } else {
-                // Due to the prior broadcastability check this branch should be
-                // unreachable, but we keep it to ensure graceful error handling
                 return Err(MinitensorError::shape_mismatch(
                     self.dims.clone(),
                     other.dims.clone(),
@@ -216,6 +203,13 @@ impl Strides {
     /// Compute the linear index from multi-dimensional indices
     #[inline(always)]
     pub fn linear_index(&self, indices: &[usize]) -> usize {
+        assert_eq!(
+            indices.len(),
+            self.strides.len(),
+            "indices length {} must match strides length {}",
+            indices.len(),
+            self.strides.len()
+        );
         indices
             .iter()
             .zip(self.strides.iter())
