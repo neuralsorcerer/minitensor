@@ -74,6 +74,6 @@ dynamic-loading = ["dep:libloading"]
 blas = ["dep:blas-src", "dep:cblas"]
 
 [dev-dependencies]
-criterion = "0.7"
+criterion = "0.8"
 proptest = "1.0"
 approx = "0.5"
