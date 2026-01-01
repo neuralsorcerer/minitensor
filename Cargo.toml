@@ -26,7 +26,7 @@ parking_lot = "0.12"
 
 # SIMD and performance
 rayon = "1.7"
-wide = "0.8"
+wide = "1.1"
 matrixmultiply = { version = "0.3", features = ["threading"] }
 smallvec = "1.11"
 rustc-hash = "2.1"
