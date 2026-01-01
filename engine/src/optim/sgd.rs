@@ -12,6 +12,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::collections::hash_map::Entry;
 
 /// SGD optimizer with momentum support and parameter groups
 pub struct SGD {
@@ -146,14 +147,8 @@ impl SGD {
         }
     }
 
-    /// Apply simple SGD update without momentum and optional weight decay
-    fn apply_simple_update(
-        &mut self,
-        param: &mut Tensor,
-        grad: &Tensor,
-        lr: f64,
-        weight_decay: f64,
-    ) -> Result<()> {
+    /// Validate parameter and gradient compatibility
+    fn validate_param_grad(&self, param: &Tensor, grad: &Tensor) -> Result<()> {
         if param.device() != grad.device() {
             return Err(crate::error::MinitensorError::device_mismatch(
                 param.device().to_string(),
@@ -167,6 +162,19 @@ impl SGD {
                 grad.shape().dims().to_vec(),
             ));
         }
+
+        Ok(())
+    }
+
+    /// Apply simple SGD update without momentum and optional weight decay
+    fn apply_simple_update(
+        &mut self,
+        param: &mut Tensor,
+        grad: &Tensor,
+        lr: f64,
+        weight_decay: f64,
+    ) -> Result<()> {
+        self.validate_param_grad(param, grad)?;
 
         match param.dtype() {
             crate::tensor::DataType::Float32 => {
@@ -205,12 +213,33 @@ impl SGD {
         lr: f64,
         weight_decay: f64,
     ) -> Result<()> {
+        self.validate_param_grad(param, grad)?;
+
         let param_id = param.id();
 
         // Get or create velocity buffer
-        let velocity = self.velocity.entry(param_id).or_insert_with(|| {
-            Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
-        });
+        let velocity = match self.velocity.entry(param_id) {
+            Entry::Occupied(mut entry) => {
+                let needs_reset = entry.get().shape() != param.shape()
+                    || entry.get().dtype() != param.dtype()
+                    || entry.get().device() != param.device();
+                if needs_reset {
+                    entry.insert(Tensor::zeros(
+                        param.shape().clone(),
+                        param.dtype(),
+                        param.device(),
+                        false,
+                    ));
+                }
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => entry.insert(Tensor::zeros(
+                param.shape().clone(),
+                param.dtype(),
+                param.device(),
+                false,
+            )),
+        };
 
         match param.dtype() {
             crate::tensor::DataType::Float32 => {
