@@ -4248,7 +4248,17 @@ fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f32::NEG_INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
+            let v1 = if v1.is_nan() { f32::NEG_INFINITY } else { v1 };
+            let v2 = if v2.is_nan() { f32::NEG_INFINITY } else { v2 };
+            if v1 > v2 {
+                (i1, v1)
+            } else if v2 > v1 {
+                (i2, v2)
+            } else if i1 <= i2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
         },
     );
 
@@ -4269,7 +4279,17 @@ fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmax_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f64::NEG_INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 >= v2 { (i1, v1) } else { (i2, v2) }
+            let v1 = if v1.is_nan() { f64::NEG_INFINITY } else { v1 };
+            let v2 = if v2.is_nan() { f64::NEG_INFINITY } else { v2 };
+            if v1 > v2 {
+                (i1, v1)
+            } else if v2 > v1 {
+                (i2, v2)
+            } else if i1 <= i2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
         },
     );
 
@@ -4349,7 +4369,17 @@ fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f32::INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
+            let v1 = if v1.is_nan() { f32::INFINITY } else { v1 };
+            let v2 = if v2.is_nan() { f32::INFINITY } else { v2 };
+            if v1 < v2 {
+                (i1, v1)
+            } else if v2 < v1 {
+                (i2, v2)
+            } else if i1 <= i2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
         },
     );
 
@@ -4370,7 +4400,17 @@ fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let (argmin_idx, _) = data.par_iter().enumerate().map(|(i, &v)| (i, v)).reduce(
         || (0, f64::INFINITY),
         |(i1, v1), (i2, v2)| {
-            if v1 <= v2 { (i1, v1) } else { (i2, v2) }
+            let v1 = if v1.is_nan() { f64::INFINITY } else { v1 };
+            let v2 = if v2.is_nan() { f64::INFINITY } else { v2 };
+            if v1 < v2 {
+                (i1, v1)
+            } else if v2 < v1 {
+                (i2, v2)
+            } else if i1 <= i2 {
+                (i1, v1)
+            } else {
+                (i2, v2)
+            }
         },
     );
 
@@ -4763,7 +4803,7 @@ fn argmax_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
                         let val = input[idx];
-                        if val > max_val {
+                        if !val.is_nan() && val > max_val {
                             max_val = val;
                             max_idx = d;
                         }
@@ -4784,7 +4824,7 @@ fn argmax_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
                         let val = input[idx];
-                        if val > max_val {
+                        if !val.is_nan() && val > max_val {
                             max_val = val;
                             max_idx = d;
                         }
@@ -4903,7 +4943,7 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
                         let val = input[idx];
-                        if val < min_val {
+                        if !val.is_nan() && val < min_val {
                             min_val = val;
                             min_idx = d;
                         }
@@ -4924,7 +4964,7 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
                         let val = input[idx];
-                        if val < min_val {
+                        if !val.is_nan() && val < min_val {
                             min_val = val;
                             min_idx = d;
                         }
