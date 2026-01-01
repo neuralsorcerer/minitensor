@@ -33,7 +33,7 @@ rustc-hash = "2.1"
 
 # GPU backends
 cudarc = "0.17"
-metal = "0.32"
+metal = "0.33"
 opencl3 = "0.12"
 
 # System information
