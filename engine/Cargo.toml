@@ -52,7 +52,7 @@ metal = { workspace = true, optional = true }
 opencl3 = { workspace = true, optional = true }
 
 # Plugin system (optional)
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 
 # Serialization dependencies
 serde_json = "1.0"
