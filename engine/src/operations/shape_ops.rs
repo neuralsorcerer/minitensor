@@ -289,7 +289,6 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     // Compute output shape
     let mut output_shape = first_tensor.shape().dims().to_vec();
     output_shape[dim] = tensors.iter().map(|t| t.shape().dims()[dim]).sum();
-    let output_shape_vec = output_shape.clone();
     let output_shape_obj = Shape::new(output_shape);
 
     let dtype = first_tensor.dtype();
@@ -300,10 +299,22 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     let inner: usize = dims[dim + 1..].iter().product();
     let _outer: usize = dims[..dim].iter().product();
 
+    if output_shape_obj.numel() == 0 {
+        let data = TensorData::zeros_on_device(0, dtype, device);
+        return Ok(Tensor::new(
+            Arc::new(data),
+            output_shape_obj,
+            dtype,
+            device,
+            requires_grad,
+        ));
+    }
+
     macro_rules! concat_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            out.par_chunks_mut(output_shape_vec[dim] * inner)
+            let chunk_size = output_shape_obj.dims()[dim] * inner;
+            out.par_chunks_mut(chunk_size)
                 .enumerate()
                 .for_each(|(o, out_chunk)| {
                     let mut dst_offset = 0;

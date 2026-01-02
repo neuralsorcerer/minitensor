@@ -30,6 +30,15 @@ def test_cat_negative_dim():
     )
 
 
+def test_cat_zero_dim():
+    a = mt.zeros((2, 0, 3))
+    b = mt.zeros((2, 0, 3))
+    res = mt.cat([a, b], dim=1)
+    np.testing.assert_array_equal(
+        res.numpy(), np.concatenate([a.numpy(), b.numpy()], axis=1)
+    )
+
+
 def test_stack_functional_and_top_level():
     a = mt.arange(0, 6).reshape((2, 3))
     b = mt.arange(6, 12).reshape((2, 3))
