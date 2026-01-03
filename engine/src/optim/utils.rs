@@ -339,6 +339,16 @@ mod tests {
     }
 
     #[test]
+    fn test_step_lr_zero_step_size_defaults() {
+        use super::super::optimizer::StepLR;
+        let scheduler = StepLR::new(0, 0.5);
+        let base_lr = 1.0;
+
+        assert_eq!(scheduler.get_lr(0, base_lr), 1.0);
+        assert_eq!(scheduler.get_lr(1, base_lr), 1.0);
+    }
+
+    #[test]
     fn test_exponential_lr_scheduler() {
         use super::super::optimizer::ExponentialLR;
         let scheduler = ExponentialLR::new(0.9);
@@ -361,5 +371,15 @@ mod tests {
         assert!((scheduler.get_lr(50, base_lr) - 0.5).abs() < 1e-10);
         // At step 100, due to modulo, it's like step 0, so back to base_lr
         assert_eq!(scheduler.get_lr(100, base_lr), 1.0);
+    }
+
+    #[test]
+    fn test_cosine_annealing_zero_t_max_defaults() {
+        use super::super::optimizer::CosineAnnealingLR;
+        let scheduler = CosineAnnealingLR::new(0, 0.1);
+        let base_lr = 1.0;
+
+        assert_eq!(scheduler.get_lr(0, base_lr), 1.0);
+        assert_eq!(scheduler.get_lr(1, base_lr), 1.0);
     }
 }

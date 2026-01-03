@@ -101,6 +101,9 @@ impl StepLR {
 
 impl LearningRateScheduler for StepLR {
     fn get_lr(&self, step: usize, base_lr: f64) -> f64 {
+        if self.step_size == 0 {
+            return base_lr;
+        }
         let decay_factor = self.gamma.powi((step / self.step_size) as i32);
         base_lr * decay_factor
     }
@@ -140,6 +143,9 @@ impl CosineAnnealingLR {
 impl LearningRateScheduler for CosineAnnealingLR {
     fn get_lr(&self, step: usize, base_lr: f64) -> f64 {
         if step == 0 {
+            return base_lr;
+        }
+        if self.t_max == 0 {
             return base_lr;
         }
 
