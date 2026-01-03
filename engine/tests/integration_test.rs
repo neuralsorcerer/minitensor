@@ -229,6 +229,20 @@ fn test_nanquantile_ignores_nan_values() {
 }
 
 #[test]
+fn test_quantiles_keepdim_no_dim_layout() {
+    let tensor = create_test_tensor_f32(vec![1.0, 5.0, 2.0, 4.0, 3.0, 6.0], vec![2, 3], false);
+    let qs = [0.25, 0.75];
+
+    let quantiles =
+        reduction::quantiles(&tensor, &qs, None, true, QuantileInterpolation::Linear).unwrap();
+
+    assert_eq!(quantiles.shape().dims(), &[2, 1, 1]);
+    let values = quantiles.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 2.25, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 4.75, epsilon = 1e-6);
+}
+
+#[test]
 fn test_nanquantiles_dim_sequence_layout() {
     let tensor = create_test_tensor_f32(
         vec![1.0, f32::NAN, 5.0, 2.0, 4.0, f32::NAN],
@@ -247,6 +261,24 @@ fn test_nanquantiles_dim_sequence_layout() {
     assert_relative_eq!(values[1], 2.5, epsilon = 1e-6);
     assert_relative_eq!(values[2], 4.0, epsilon = 1e-6);
     assert_relative_eq!(values[3], 3.5, epsilon = 1e-6);
+}
+
+#[test]
+fn test_nanquantiles_keepdim_no_dim_layout() {
+    let tensor = create_test_tensor_f32(
+        vec![1.0, f32::NAN, 5.0, 2.0, 4.0, f32::NAN],
+        vec![2, 3],
+        false,
+    );
+    let qs = [0.25, 0.75];
+
+    let quantiles =
+        reduction::nanquantiles(&tensor, &qs, None, true, QuantileInterpolation::Linear).unwrap();
+
+    assert_eq!(quantiles.shape().dims(), &[2, 1, 1]);
+    let values = quantiles.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], 1.75, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 4.25, epsilon = 1e-6);
 }
 
 #[test]

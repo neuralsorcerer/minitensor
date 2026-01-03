@@ -731,7 +731,14 @@ fn quantiles_all(
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
     let q_len = qs.len();
-    let output_dims = if keepdim { vec![q_len, 1] } else { vec![q_len] };
+    let output_dims = if keepdim && tensor.ndim() > 0 {
+        let mut dims = Vec::with_capacity(tensor.ndim() + 1);
+        dims.push(q_len);
+        dims.extend(std::iter::repeat(1).take(tensor.ndim()));
+        dims
+    } else {
+        vec![q_len]
+    };
 
     let shape = Shape::new(output_dims);
     let mut values_data =
@@ -785,7 +792,14 @@ fn nanquantiles_all(
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
     let q_len = qs.len();
-    let output_dims = if keepdim { vec![q_len, 1] } else { vec![q_len] };
+    let output_dims = if keepdim && tensor.ndim() > 0 {
+        let mut dims = Vec::with_capacity(tensor.ndim() + 1);
+        dims.push(q_len);
+        dims.extend(std::iter::repeat(1).take(tensor.ndim()));
+        dims
+    } else {
+        vec![q_len]
+    };
 
     let shape = Shape::new(output_dims);
     let mut values_data =

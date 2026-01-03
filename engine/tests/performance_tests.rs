@@ -9,6 +9,7 @@ use engine::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use ndarray::Array2;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,15 +35,27 @@ fn test_add_performance_vs_ndarray() {
     let data2 = vec![2.0f32; size * size];
     let a = create_tensor(data1.clone(), vec![size, size]);
     let b = create_tensor(data2.clone(), vec![size, size]);
+    let iterations = 200;
+
+    for _ in 0..10 {
+        black_box(arithmetic::add(&a, &b).unwrap());
+    }
 
     let start = Instant::now();
-    let _ = arithmetic::add(&a, &b).unwrap();
+    for _ in 0..iterations {
+        black_box(arithmetic::add(&a, &b).unwrap());
+    }
     let engine_time = start.elapsed();
 
     let arr1 = Array2::from_shape_vec((size, size), data1).unwrap();
     let arr2 = Array2::from_shape_vec((size, size), data2).unwrap();
+    for _ in 0..10 {
+        black_box(&arr1 + &arr2);
+    }
     let start = Instant::now();
-    let _ = &arr1 + &arr2;
+    for _ in 0..iterations {
+        black_box(&arr1 + &arr2);
+    }
     let ndarray_time = start.elapsed();
 
     assert!(engine_time.as_secs_f64() <= ndarray_time.as_secs_f64() * 10.0);
