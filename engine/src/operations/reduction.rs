@@ -731,14 +731,7 @@ fn quantiles_all(
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
     let q_len = qs.len();
-    let output_dims = if keepdim && tensor.ndim() > 0 {
-        let mut dims = Vec::with_capacity(tensor.ndim() + 1);
-        dims.push(q_len);
-        dims.extend(std::iter::repeat(1).take(tensor.ndim()));
-        dims
-    } else {
-        vec![q_len]
-    };
+    let output_dims = quantiles_output_dims(tensor.ndim(), q_len, keepdim);
 
     let shape = Shape::new(output_dims);
     let mut values_data =
@@ -792,14 +785,7 @@ fn nanquantiles_all(
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
     let q_len = qs.len();
-    let output_dims = if keepdim && tensor.ndim() > 0 {
-        let mut dims = Vec::with_capacity(tensor.ndim() + 1);
-        dims.push(q_len);
-        dims.extend(std::iter::repeat(1).take(tensor.ndim()));
-        dims
-    } else {
-        vec![q_len]
-    };
+    let output_dims = quantiles_output_dims(tensor.ndim(), q_len, keepdim);
 
     let shape = Shape::new(output_dims);
     let mut values_data =
@@ -854,6 +840,16 @@ fn nanquantiles_all(
         tensor.device(),
         tensor.requires_grad(),
     ))
+}
+
+fn quantiles_output_dims(tensor_ndim: usize, q_len: usize, keepdim: bool) -> Vec<usize> {
+    if keepdim && tensor_ndim > 0 {
+        let mut dims = vec![1; tensor_ndim + 1];
+        dims[0] = q_len;
+        dims
+    } else {
+        vec![q_len]
+    }
 }
 
 fn quantiles_along_dim(
@@ -1260,8 +1256,9 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
             let mut values: Vec<f32> = data.to_vec();
-            values.sort_by(|a, b| a.total_cmp(b));
-            let median = values[(values.len() - 1) / 2];
+            let median_index = (values.len() - 1) / 2;
+            values.select_nth_unstable_by(median_index, |a, b| a.total_cmp(b));
+            let median = values[median_index];
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?[0] = median;
@@ -1272,8 +1269,9 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
             let mut values: Vec<f64> = data.to_vec();
-            values.sort_by(|a, b| a.total_cmp(b));
-            let median = values[(values.len() - 1) / 2];
+            let median_index = (values.len() - 1) / 2;
+            values.select_nth_unstable_by(median_index, |a, b| a.total_cmp(b));
+            let median = values[median_index];
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?[0] = median;
@@ -1284,8 +1282,9 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_i32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
             let mut values: Vec<i32> = data.to_vec();
-            values.sort_unstable();
-            let median = values[(values.len() - 1) / 2];
+            let median_index = (values.len() - 1) / 2;
+            values.select_nth_unstable(median_index);
+            let median = values[median_index];
             result_data.as_i32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i32 slice")
             })?[0] = median;
@@ -1296,8 +1295,9 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_i64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
             let mut values: Vec<i64> = data.to_vec();
-            values.sort_unstable();
-            let median = values[(values.len() - 1) / 2];
+            let median_index = (values.len() - 1) / 2;
+            values.select_nth_unstable(median_index);
+            let median = values[median_index];
             result_data.as_i64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?[0] = median;
@@ -1308,12 +1308,9 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .as_bool_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
             let mut values: Vec<bool> = data.to_vec();
-            values.sort_by(|a, b| match (a, b) {
-                (true, true) | (false, false) => Ordering::Equal,
-                (false, true) => Ordering::Less,
-                (true, false) => Ordering::Greater,
-            });
-            let median = values[(values.len() - 1) / 2];
+            let median_index = (values.len() - 1) / 2;
+            values.select_nth_unstable(median_index);
+            let median = values[median_index];
             result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?[0] = median;
@@ -1392,7 +1389,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
                         entries.push((d, input[idx]));
                     }
 
-                    entries.sort_by(cmp_f32_asc);
+                    entries.select_nth_unstable_by(median_pos, cmp_f32_asc);
                     let (index, value) = entries[median_pos];
                     let base = o * inner + r;
                     values[base] = value;
@@ -1421,7 +1418,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
                         entries.push((d, input[idx]));
                     }
 
-                    entries.sort_by(cmp_f64_asc);
+                    entries.select_nth_unstable_by(median_pos, cmp_f64_asc);
                     let (index, value) = entries[median_pos];
                     let base = o * inner + r;
                     values[base] = value;
@@ -1450,7 +1447,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
                         entries.push((d, input[idx]));
                     }
 
-                    entries.sort_by(cmp_i32_asc);
+                    entries.select_nth_unstable_by(median_pos, cmp_i32_asc);
                     let (index, value) = entries[median_pos];
                     let base = o * inner + r;
                     values[base] = value;
@@ -1479,7 +1476,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
                         entries.push((d, input[idx]));
                     }
 
-                    entries.sort_by(cmp_i64_asc);
+                    entries.select_nth_unstable_by(median_pos, cmp_i64_asc);
                     let (index, value) = entries[median_pos];
                     let base = o * inner + r;
                     values[base] = value;
@@ -1508,7 +1505,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
                         entries.push((d, input[idx]));
                     }
 
-                    entries.sort_by(cmp_bool_asc);
+                    entries.select_nth_unstable_by(median_pos, cmp_bool_asc);
                     let (index, value) = entries[median_pos];
                     let base = o * inner + r;
                     values[base] = value;
