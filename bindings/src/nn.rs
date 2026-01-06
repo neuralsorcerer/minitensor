@@ -10,9 +10,9 @@ use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
 use engine::Device;
-use engine::nn::loss::{BCELoss, CrossEntropyLoss, FocalLoss, MSELoss};
 use engine::nn::{
-    DenseLayer, HuberLoss, Layer, MAELoss, ReLU, Sequential, Sigmoid, Softmax, Tanh,
+    BCELoss, CrossEntropyLoss, DenseLayer, FocalLoss, HuberLoss, Layer, LogCoshLoss, MAELoss,
+    MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
     activation::{ELU, GELU, LeakyReLU},
     conv::Conv2d,
     dropout::{Dropout, Dropout2d},
@@ -258,6 +258,38 @@ fn mse_loss_functional(
     let target_tensor = borrow_tensor(target)?;
     let reduction = reduction.unwrap_or("mean");
     let loss = MSELoss::new(reduction);
+    let result = loss
+        .forward(prediction.tensor(), target_tensor.tensor())
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "smooth_l1_loss")]
+fn smooth_l1_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let loss = SmoothL1Loss::new(reduction);
+    let result = loss
+        .forward(prediction.tensor(), target_tensor.tensor())
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "log_cosh_loss")]
+fn log_cosh_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let loss = LogCoshLoss::new(reduction);
     let result = loss
         .forward(prediction.tensor(), target_tensor.tensor())
         .map_err(_convert_error)?;
@@ -1433,6 +1465,98 @@ impl PyHuberLoss {
     }
 }
 
+/// Smooth L1 Loss function
+#[pyclass(name = "SmoothL1Loss")]
+pub struct PySmoothL1Loss {
+    inner: SmoothL1Loss,
+}
+
+#[pymethods]
+impl PySmoothL1Loss {
+    /// Create a new Smooth L1 loss
+    #[new]
+    #[pyo3(signature = (reduction=None))]
+    fn new(reduction: Option<&str>) -> Self {
+        let reduction = reduction.unwrap_or("mean");
+        Self {
+            inner: SmoothL1Loss::new(reduction),
+        }
+    }
+
+    /// Compute the Smooth L1 loss
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
+    }
+
+    /// Get the reduction mode
+    #[getter]
+    fn reduction(&self) -> &str {
+        self.inner.reduction()
+    }
+
+    /// String representation
+    fn __repr__(&self) -> String {
+        format!("SmoothL1Loss(reduction='{}')", self.inner.reduction())
+    }
+}
+
+/// Log-cosh Loss function
+#[pyclass(name = "LogCoshLoss")]
+pub struct PyLogCoshLoss {
+    inner: LogCoshLoss,
+}
+
+#[pymethods]
+impl PyLogCoshLoss {
+    /// Create a new Log-cosh loss
+    #[new]
+    #[pyo3(signature = (reduction=None))]
+    fn new(reduction: Option<&str>) -> Self {
+        let reduction = reduction.unwrap_or("mean");
+        Self {
+            inner: LogCoshLoss::new(reduction),
+        }
+    }
+
+    /// Compute the Log-cosh loss
+    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let predictions = borrow_tensor(predictions)?;
+        let targets = borrow_tensor(targets)?;
+        let result = self
+            .inner
+            .forward(predictions.tensor(), targets.tensor())
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(predictions, targets)
+    }
+
+    /// Get the reduction mode
+    #[getter]
+    fn reduction(&self) -> &str {
+        self.inner.reduction()
+    }
+
+    /// String representation
+    fn __repr__(&self) -> String {
+        format!("LogCoshLoss(reduction='{}')", self.inner.reduction())
+    }
+}
+
 /// Cross Entropy Loss function
 #[pyclass(name = "CrossEntropyLoss")]
 pub struct PyCrossEntropyLoss {
@@ -1619,6 +1743,8 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(dropout_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(dropout2d_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(mse_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(smooth_l1_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(log_cosh_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(
         binary_cross_entropy_functional,
         &nn_module
@@ -1628,6 +1754,8 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyMSELoss>()?;
     nn_module.add_class::<PyMAELoss>()?;
     nn_module.add_class::<PyHuberLoss>()?;
+    nn_module.add_class::<PySmoothL1Loss>()?;
+    nn_module.add_class::<PyLogCoshLoss>()?;
     nn_module.add_class::<PyCrossEntropyLoss>()?;
     nn_module.add_class::<PyBCELoss>()?;
     nn_module.add_class::<PyFocalLoss>()?;

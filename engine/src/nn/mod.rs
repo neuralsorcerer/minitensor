@@ -20,7 +20,9 @@ pub use activation::{ELU, GELU, LeakyReLU, ReLU, Sigmoid, Softmax, Tanh};
 pub use dense_layer::DenseLayer;
 pub use init::{InitMethod, init_bias, init_parameter};
 pub use layer::{Layer, Module};
-pub use loss::{BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, MAELoss, MSELoss};
+pub use loss::{
+    BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, LogCoshLoss, MAELoss, MSELoss, SmoothL1Loss,
+};
 pub use sequential::{Sequential, SequentialBuilder};
 
 pub use conv::*;

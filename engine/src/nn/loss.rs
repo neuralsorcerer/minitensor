@@ -7,7 +7,8 @@
 use crate::{
     error::Result,
     operations::loss::{
-        binary_cross_entropy_loss, cross_entropy_loss, focal_loss, huber_loss, mae_loss, mse_loss,
+        binary_cross_entropy_loss, cross_entropy_loss, focal_loss, huber_loss, log_cosh_loss,
+        mae_loss, mse_loss, smooth_l1_loss,
     },
     tensor::Tensor,
 };
@@ -159,6 +160,96 @@ impl HuberLoss {
     }
 }
 
+/// Smooth L1 loss layer
+#[derive(Debug, Clone)]
+pub struct SmoothL1Loss {
+    reduction: String,
+}
+
+impl SmoothL1Loss {
+    /// Create a new Smooth L1 loss with the specified reduction
+    pub fn new(reduction: impl Into<String>) -> Self {
+        Self {
+            reduction: reduction.into(),
+        }
+    }
+
+    /// Create Smooth L1 loss with mean reduction (default)
+    pub fn mean() -> Self {
+        Self::new("mean")
+    }
+
+    /// Create Smooth L1 loss with sum reduction
+    pub fn sum() -> Self {
+        Self::new("sum")
+    }
+
+    /// Create Smooth L1 loss with no reduction (element-wise)
+    pub fn none() -> Self {
+        Self::new("none")
+    }
+
+    /// Compute the Smooth L1 loss between predictions and targets
+    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        smooth_l1_loss(predictions, targets, &self.reduction)
+    }
+
+    /// Get the reduction mode
+    pub fn reduction(&self) -> &str {
+        &self.reduction
+    }
+
+    /// Set the reduction mode
+    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
+        self.reduction = reduction.into();
+    }
+}
+
+/// Log-cosh loss layer
+#[derive(Debug, Clone)]
+pub struct LogCoshLoss {
+    reduction: String,
+}
+
+impl LogCoshLoss {
+    /// Create a new Log-cosh loss with the specified reduction
+    pub fn new(reduction: impl Into<String>) -> Self {
+        Self {
+            reduction: reduction.into(),
+        }
+    }
+
+    /// Create Log-cosh loss with mean reduction (default)
+    pub fn mean() -> Self {
+        Self::new("mean")
+    }
+
+    /// Create Log-cosh loss with sum reduction
+    pub fn sum() -> Self {
+        Self::new("sum")
+    }
+
+    /// Create Log-cosh loss with no reduction (element-wise)
+    pub fn none() -> Self {
+        Self::new("none")
+    }
+
+    /// Compute the Log-cosh loss between predictions and targets
+    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        log_cosh_loss(predictions, targets, &self.reduction)
+    }
+
+    /// Get the reduction mode
+    pub fn reduction(&self) -> &str {
+        &self.reduction
+    }
+
+    /// Set the reduction mode
+    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
+        self.reduction = reduction.into();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +321,36 @@ mod tests {
     }
 
     #[test]
+    fn test_smooth_l1_loss_layer() {
+        let smooth = SmoothL1Loss::mean();
+        assert_eq!(smooth.reduction(), "mean");
+
+        let predictions = create_test_tensor_f32(vec![0.5, 2.0], vec![2], false);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+
+        let loss = smooth.forward(&predictions, &targets).unwrap();
+        let loss_data = loss.data().as_f32_slice().unwrap();
+
+        // Smooth L1 with delta=1.0: (0.5*0.5^2 + (2.0 - 0.5)) / 2 = 0.8125
+        assert!((loss_data[0] - 0.8125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_log_cosh_loss_layer() {
+        let log_cosh = LogCoshLoss::mean();
+        assert_eq!(log_cosh.reduction(), "mean");
+
+        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+
+        let loss = log_cosh.forward(&predictions, &targets).unwrap();
+        let loss_data = loss.data().as_f32_slice().unwrap();
+
+        let expected = (0.0f32.cosh().ln() + 1.0f32.cosh().ln()) / 2.0;
+        assert!((loss_data[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_loss_layer_builders() {
         let mse_mean = MSELoss::mean();
         assert_eq!(mse_mean.reduction(), "mean");
@@ -246,6 +367,12 @@ mod tests {
         let huber_mean = HuberLoss::mean(0.5);
         assert_eq!(huber_mean.delta(), 0.5);
         assert_eq!(huber_mean.reduction(), "mean");
+
+        let smooth_mean = SmoothL1Loss::mean();
+        assert_eq!(smooth_mean.reduction(), "mean");
+
+        let log_cosh_mean = LogCoshLoss::mean();
+        assert_eq!(log_cosh_mean.reduction(), "mean");
     }
 
     #[test]
@@ -263,6 +390,14 @@ mod tests {
         huber.set_reduction("sum");
         assert_eq!(huber.delta(), 2.0);
         assert_eq!(huber.reduction(), "sum");
+
+        let mut smooth = SmoothL1Loss::mean();
+        smooth.set_reduction("none");
+        assert_eq!(smooth.reduction(), "none");
+
+        let mut log_cosh = LogCoshLoss::mean();
+        log_cosh.set_reduction("sum");
+        assert_eq!(log_cosh.reduction(), "sum");
     }
 }
 

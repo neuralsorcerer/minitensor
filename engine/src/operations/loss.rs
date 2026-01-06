@@ -11,8 +11,9 @@ use crate::{
     },
     error::{MinitensorError, Result},
     operations::{
+        activation::{abs as activation_abs, exp, log_softmax, log1p},
         arithmetic::{add, mul, sub},
-        reduction::{max, sum},
+        reduction::{mean, sum},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -110,7 +111,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     let diff = sub(predictions, targets)?;
     let sign_diff = sign(&diff)?;
     let sign_for_grad = sign_diff.clone().detach();
-    let abs_diff = abs(&diff)?;
+    let abs_diff = activation_abs(&diff.detach())?;
 
     // Apply reduction
     let loss = match reduction {
@@ -181,11 +182,11 @@ pub fn cross_entropy_loss(
     // Convert class indices to one-hot encoding if needed
     let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
-    // Apply softmax to predictions for numerical stability
-    let softmax_predictions = softmax(predictions)?;
+    // Apply log-softmax to predictions for numerical stability
+    let log_predictions = log_softmax(predictions, None)?;
+    let softmax_predictions = exp(&log_predictions.detach())?;
 
     // Compute negative log likelihood summed over classes
-    let log_predictions = log(&softmax_predictions)?;
     let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
     let per_sample = sum(&nll, Some(vec![1]), false)?;
 
@@ -469,12 +470,12 @@ pub fn focal_loss(
         ));
     }
 
-    // Apply softmax to predictions
-    let softmax_predictions = softmax(predictions)?;
+    // Apply log-softmax to predictions for numerical stability
+    let log_predictions = log_softmax(predictions, None)?;
+    let softmax_predictions = exp(&log_predictions)?;
     let softmax_for_grad = softmax_predictions.clone().detach();
 
     // Compute focal loss components
-    let log_predictions = log(&softmax_predictions)?;
     let ones = Tensor::ones(
         softmax_predictions.shape().clone(),
         softmax_predictions.dtype(),
@@ -564,7 +565,7 @@ pub fn huber_loss(
     // Compute absolute differences: |predictions - targets|
     let diff = sub(predictions, targets)?;
     let diff_for_grad = diff.clone().detach();
-    let abs_diff = abs(&diff)?;
+    let abs_diff = activation_abs(&diff.detach())?;
 
     // Create delta tensor for comparison
     let delta_tensor = create_scalar_tensor(delta, predictions.dtype(), predictions.device())?;
@@ -609,6 +610,50 @@ pub fn huber_loss(
         Ok(loss_with_grad)
     } else {
         Ok(loss)
+    }
+}
+
+/// Smooth L1 loss (Huber loss with delta=1.0)
+///
+/// Computes Smooth L1 loss between predictions and targets:
+/// SmoothL1(x) = 0.5 * x² if |x| < 1, otherwise |x| - 0.5
+///
+/// # Arguments
+/// * `predictions` - Model predictions tensor
+/// * `targets` - Ground truth targets tensor
+/// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
+pub fn smooth_l1_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
+    huber_loss(predictions, targets, 1.0, reduction)
+}
+
+/// Log-cosh loss for robust regression
+///
+/// Computes log(cosh(x)) where x = predictions - targets using a numerically
+/// stable formulation: |x| + log1p(exp(-2|x|)) - log(2).
+///
+/// # Arguments
+/// * `predictions` - Model predictions tensor
+/// * `targets` - Ground truth targets tensor
+/// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
+pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
+    validate_loss_inputs(predictions, targets)?;
+
+    let diff = sub(predictions, targets)?;
+    let diff_abs = activation_abs(&diff)?;
+    let neg_two = create_scalar_tensor(-2.0, diff.dtype(), diff.device())?;
+    let exp_term = exp(&mul(&diff_abs, &neg_two)?)?;
+    let log1p_term = log1p(&exp_term)?;
+    let log2 = create_scalar_tensor(std::f64::consts::LN_2, diff.dtype(), diff.device())?;
+    let log_cosh = sub(&add(&diff_abs, &log1p_term)?, &log2)?;
+
+    match reduction {
+        "mean" => mean(&log_cosh, None, false),
+        "sum" => sum(&log_cosh, None, false),
+        "none" => Ok(log_cosh),
+        _ => Err(MinitensorError::invalid_operation(format!(
+            "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+            reduction
+        ))),
     }
 }
 
@@ -788,52 +833,6 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
             targets.shape().dims().to_vec(),
         ))
     }
-}
-
-/// Compute absolute value of tensor elements
-fn abs(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.abs();
-            }
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.abs();
-            }
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Absolute value only supported for floating point tensors",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
 }
 
 /// Compute the sign of each tensor element (-1.0, 0.0, or 1.0)
@@ -1157,63 +1156,6 @@ fn compute_huber_elementwise(
     ))
 }
 
-/// Apply softmax activation for numerical stability
-fn softmax(tensor: &Tensor) -> Result<Tensor> {
-    // Subtract the maximum value for numerical stability
-    let dim = tensor.ndim() as isize - 1;
-    let max_vals = max(tensor, Some(dim), true)?;
-    let shifted = sub(tensor, &max_vals)?;
-    let exp_tensor = exp(&shifted)?;
-    let sum_exp = sum(&exp_tensor, Some(vec![dim]), true)?;
-    divide_tensors(&exp_tensor, &sum_exp)
-}
-
-/// Compute exponential of tensor elements
-fn exp(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.exp();
-            }
-        }
-        DataType::Float64 => {
-            let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.exp();
-            }
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Exponential only supported for floating point tensors",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
 /// Compute natural logarithm of tensor elements
 fn log(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
@@ -1366,13 +1308,6 @@ fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         tensor.device(),
         tensor.requires_grad(),
     ))
-}
-
-/// Sum along a specific dimension
-/// Divide two tensors element-wise
-fn divide_tensors(numerator: &Tensor, denominator: &Tensor) -> Result<Tensor> {
-    // Use the existing division operation
-    crate::operations::arithmetic::div(numerator, denominator)
 }
 
 #[cfg(test)]
@@ -1548,6 +1483,41 @@ mod tests {
         let targets = create_test_tensor_f32(vec![1.5, 2.5], vec![2], false);
 
         let result = huber_loss(&predictions, &targets, -1.0, "mean");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_smooth_l1_loss_matches_huber() {
+        let predictions = create_test_tensor_f32(vec![0.5, 2.0], vec![2], false);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+
+        let smooth = smooth_l1_loss(&predictions, &targets, "none").unwrap();
+        let huber = huber_loss(&predictions, &targets, 1.0, "none").unwrap();
+
+        let smooth_data = smooth.data().as_f32_slice().unwrap();
+        let huber_data = huber.data().as_f32_slice().unwrap();
+        assert!((smooth_data[0] - huber_data[0]).abs() < 1e-6);
+        assert!((smooth_data[1] - huber_data[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_log_cosh_loss_mean() {
+        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+
+        let loss = log_cosh_loss(&predictions, &targets, "mean").unwrap();
+        let loss_data = loss.data().as_f32_slice().unwrap();
+
+        let expected = (0.0f32.cosh().ln() + 1.0f32.cosh().ln()) / 2.0;
+        assert!((loss_data[0] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_log_cosh_loss_invalid_reduction() {
+        let predictions = create_test_tensor_f32(vec![0.0], vec![1], false);
+        let targets = create_test_tensor_f32(vec![0.0], vec![1], false);
+
+        let result = log_cosh_loss(&predictions, &targets, "invalid");
         assert!(result.is_err());
     }
 }
