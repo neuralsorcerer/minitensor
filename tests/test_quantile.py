@@ -87,6 +87,29 @@ def test_quantile_sequence_with_dim_keepdim():
     np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
 
 
+def test_quantile_with_nan_propagates():
+    data = mt.tensor([1.0, np.nan, 2.0])
+    quant = data.quantile(0.5)
+    expected = np.quantile(data.numpy(), 0.5, method="linear")
+
+    assert quant.shape == ()
+    np.testing.assert_allclose(
+        quant.numpy(), expected, rtol=1e-6, atol=1e-6, equal_nan=True
+    )
+
+
+def test_quantile_dim_with_nan_propagates_per_slice():
+    data = mt.tensor([[1.0, np.nan, 3.0], [4.0, 5.0, 6.0]])
+    probs = [0.25, 0.75]
+    quant = data.quantile(probs, dim=1, keepdim=False)
+    expected = np.quantile(data.numpy(), probs, axis=1, method="linear")
+
+    assert quant.shape == (2, 2)
+    np.testing.assert_allclose(
+        quant.numpy(), expected, rtol=1e-6, atol=1e-6, equal_nan=True
+    )
+
+
 def test_nanquantile_matches_numpy():
     data = mt.tensor([np.nan, 1.0, 3.0, np.nan, 5.0])
     quant = data.nanquantile(0.5)
