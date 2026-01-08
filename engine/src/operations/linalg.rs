@@ -312,20 +312,24 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     output_shape.push(rhs_cols);
     let output_shape_obj = Shape::new(output_shape);
 
+    if lhs.dtype() == DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "Matrix multiplication not supported for boolean tensors",
+        ));
+    }
+
     // Create output tensor data
     let mut output_data =
         TensorData::zeros_on_device(output_shape_obj.numel(), lhs.dtype(), lhs.device());
 
-    // Perform matrix multiplication based on data type
-    match lhs.dtype() {
-        DataType::Float32 => matmul_f32(lhs, rhs, &mut output_data, &output_shape_obj)?,
-        DataType::Float64 => matmul_f64(lhs, rhs, &mut output_data, &output_shape_obj)?,
-        DataType::Int32 => matmul_i32(lhs, rhs, &mut output_data, &output_shape_obj)?,
-        DataType::Int64 => matmul_i64(lhs, rhs, &mut output_data, &output_shape_obj)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Matrix multiplication not supported for boolean tensors",
-            ));
+    if output_shape_obj.numel() != 0 && lhs_cols != 0 {
+        // Perform matrix multiplication based on data type
+        match lhs.dtype() {
+            DataType::Float32 => matmul_f32(lhs, rhs, &mut output_data, &output_shape_obj)?,
+            DataType::Float64 => matmul_f64(lhs, rhs, &mut output_data, &output_shape_obj)?,
+            DataType::Int32 => matmul_i32(lhs, rhs, &mut output_data, &output_shape_obj)?,
+            DataType::Int64 => matmul_i64(lhs, rhs, &mut output_data, &output_shape_obj)?,
+            DataType::Bool => unreachable!("bool dtype checked above"),
         }
     }
 
@@ -1727,6 +1731,23 @@ mod tests {
         )
     }
 
+    fn create_test_tensor_i32(data: Vec<i32>, shape: Vec<usize>) -> Tensor {
+        let shape_obj = Shape::new(shape);
+        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Int32);
+
+        if let Some(slice) = tensor_data.as_i32_slice_mut() {
+            slice.copy_from_slice(&data);
+        }
+
+        Tensor::new(
+            Arc::new(tensor_data),
+            shape_obj,
+            DataType::Int32,
+            Device::cpu(),
+            false,
+        )
+    }
+
     fn create_test_tensor_bool(data: Vec<bool>, shape: Vec<usize>) -> Tensor {
         let shape_obj = Shape::new(shape);
         let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Bool);
@@ -1779,6 +1800,16 @@ mod tests {
         // = [58, 64; 139, 154]
         assert_eq!(result_data, &[58.0, 64.0, 139.0, 154.0]);
         assert_eq!(result.shape().dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_matmul_i32_zero_k_dimension() {
+        let a = create_test_tensor_i32(vec![], vec![2, 0]);
+        let b = create_test_tensor_i32(vec![], vec![0, 3]);
+
+        let result = matmul(&a, &b).unwrap();
+        assert_eq!(result.shape().dims(), &[2, 3]);
+        assert_eq!(result.data().as_i32_slice().unwrap(), &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
