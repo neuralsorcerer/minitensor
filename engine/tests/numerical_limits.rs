@@ -348,5 +348,6 @@ fn test_cross_entropy_zero_prob_returns_inf() {
     );
     let loss = loss::cross_entropy(&pred, &target, "mean", 1).unwrap();
     let val = loss.data().as_f32_slice().unwrap()[0];
-    assert!(val.is_infinite() && val.is_sign_positive());
+    assert!(val.is_finite() && val.is_sign_positive());
+    assert!((val - 2000.0).abs() < 1e-3);
 }

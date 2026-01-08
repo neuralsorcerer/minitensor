@@ -2783,8 +2783,6 @@ fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
     };
     let group = dim_size * after;
 
-    let cutoff = (f32::MIN_POSITIVE * f32::EPSILON).ln();
-
     input_data
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
@@ -2796,6 +2794,13 @@ fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
                     let idx = base + k * after;
                     max_val = max_val.max(in_block[idx]);
                 }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = f32::NEG_INFINITY;
+                    }
+                    continue;
+                }
                 let mut sum = 0.0f32;
                 for k in 0..dim_size {
                     let idx = base + k * after;
@@ -2805,11 +2810,7 @@ fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
                 for k in 0..dim_size {
                     let idx = base + k * after;
                     let shifted = in_block[idx] - max_val;
-                    out_block[idx] = if shifted <= cutoff {
-                        f32::NEG_INFINITY
-                    } else {
-                        shifted - log_sum
-                    };
+                    out_block[idx] = shifted - log_sum;
                 }
             }
         });
@@ -2840,8 +2841,6 @@ fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
     };
     let group = dim_size * after;
 
-    let cutoff = (f64::MIN_POSITIVE * f64::EPSILON).ln();
-
     input_data
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
@@ -2853,6 +2852,13 @@ fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
                     let idx = base + k * after;
                     max_val = max_val.max(in_block[idx]);
                 }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = f64::NEG_INFINITY;
+                    }
+                    continue;
+                }
                 let mut sum = 0.0f64;
                 for k in 0..dim_size {
                     let idx = base + k * after;
@@ -2862,11 +2868,7 @@ fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
                 for k in 0..dim_size {
                     let idx = base + k * after;
                     let shifted = in_block[idx] - max_val;
-                    out_block[idx] = if shifted <= cutoff {
-                        f64::NEG_INFINITY
-                    } else {
-                        shifted - log_sum
-                    };
+                    out_block[idx] = shifted - log_sum;
                 }
             }
         });
@@ -3584,6 +3586,34 @@ mod tests {
         // Check that larger input values produce larger probabilities
         assert!(result_data[2] > result_data[1]);
         assert!(result_data[1] > result_data[0]);
+    }
+
+    #[test]
+    fn test_log_softmax_large_negative_values() {
+        let tensor = create_test_tensor_f32(vec![-1000.0, 0.0], vec![2], false);
+        let result = log_softmax(&tensor, None).unwrap();
+        let result_data = result.data().as_f32_slice().unwrap();
+
+        for &val in result_data {
+            assert!(val.is_finite());
+        }
+
+        assert!((result_data[0] + 1000.0).abs() < 1e-3);
+        assert!(result_data[1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_log_softmax_all_negative_infinity() {
+        let tensor =
+            create_test_tensor_f32(vec![f32::NEG_INFINITY, f32::NEG_INFINITY], vec![2], false);
+        let result = log_softmax(&tensor, None).unwrap();
+        let result_data = result.data().as_f32_slice().unwrap();
+
+        assert!(
+            result_data
+                .iter()
+                .all(|v| v.is_infinite() && v.is_sign_negative())
+        );
     }
 
     #[test]
