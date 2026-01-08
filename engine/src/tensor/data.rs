@@ -64,7 +64,9 @@ impl TensorData {
     #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
         if device.is_cpu() {
-            let size_bytes = numel * dtype.size_bytes();
+            let size_bytes = numel
+                .checked_mul(dtype.size_bytes())
+                .expect("tensor size overflow");
             let mut vec = Vec::with_capacity(size_bytes);
             unsafe {
                 vec.set_len(size_bytes);
@@ -157,7 +159,9 @@ impl TensorData {
     /// Create new tensor data with zeros on specified device
     #[inline(always)]
     pub fn zeros_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
-        let size_bytes = numel * dtype.size_bytes();
+        let size_bytes = numel
+            .checked_mul(dtype.size_bytes())
+            .expect("tensor size overflow");
 
         let buffer = if device.is_cpu() {
             // Use an uninitialized Vec and explicitly zero it. This avoids the
@@ -194,6 +198,10 @@ impl TensorData {
                 }
             }
         };
+        let actual_device = match &buffer {
+            TensorBuffer::Owned(_) => Device::cpu(),
+            TensorBuffer::Raw { device, .. } => *device,
+        };
 
         Self {
             buffer,
@@ -201,7 +209,7 @@ impl TensorData {
                 dtype,
                 numel,
                 is_contiguous: true,
-                device,
+                device: actual_device,
             },
             ref_count: AtomicUsize::new(1),
         }
@@ -210,7 +218,9 @@ impl TensorData {
     /// Create new tensor data with uninitialized contents on specified device
     #[inline(always)]
     pub fn uninitialized_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
-        let size_bytes = numel * dtype.size_bytes();
+        let size_bytes = numel
+            .checked_mul(dtype.size_bytes())
+            .expect("tensor size overflow");
 
         let buffer = if device.is_cpu() {
             // Allocate vector without initializing memory for maximum performance
@@ -236,6 +246,10 @@ impl TensorData {
                 }
             }
         };
+        let actual_device = match &buffer {
+            TensorBuffer::Owned(_) => Device::cpu(),
+            TensorBuffer::Raw { device, .. } => *device,
+        };
 
         Self {
             buffer,
@@ -243,7 +257,7 @@ impl TensorData {
                 dtype,
                 numel,
                 is_contiguous: true,
-                device,
+                device: actual_device,
             },
             ref_count: AtomicUsize::new(1),
         }
@@ -268,7 +282,9 @@ impl TensorData {
     #[inline(always)]
     pub fn from_vec<T: Copy + 'static>(data: Vec<T>, dtype: DataType, device: Device) -> Self {
         let numel = data.len();
-        let size_bytes = numel * std::mem::size_of::<T>();
+        let size_bytes = numel
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("tensor size overflow");
 
         // Convert typed data to bytes
         let buffer = if device.is_cpu() {
@@ -279,14 +295,18 @@ impl TensorData {
             if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
                 // SAFETY: We have confirmed T == bool, so this transmute is valid
                 let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
-                let bytes: Vec<u8> = bools.into_iter().map(|b| b as u8).collect();
+                let mut bytes = Vec::with_capacity(size_bytes);
+                bytes.extend(bools.into_iter().map(|b| b as u8));
                 TensorBuffer::Owned(bytes)
             } else {
                 use std::mem::{ManuallyDrop, size_of};
                 let mut data = ManuallyDrop::new(data);
                 let ptr = data.as_mut_ptr() as *mut u8;
-                let len = numel * size_of::<T>();
-                let capacity = data.capacity() * size_of::<T>();
+                let len = size_bytes;
+                let capacity = data
+                    .capacity()
+                    .checked_mul(size_of::<T>())
+                    .expect("tensor size overflow");
                 unsafe { TensorBuffer::Owned(Vec::from_raw_parts(ptr, len, capacity)) }
             }
         } else {
@@ -306,7 +326,8 @@ impl TensorData {
                     // Fallback to CPU
                     if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
                         let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
-                        let bytes: Vec<u8> = bools.into_iter().map(|b| b as u8).collect();
+                        let mut bytes = Vec::with_capacity(size_bytes);
+                        bytes.extend(bools.into_iter().map(|b| b as u8));
                         TensorBuffer::Owned(bytes)
                     } else {
                         let bytes = unsafe {
@@ -318,6 +339,10 @@ impl TensorData {
                 }
             }
         };
+        let actual_device = match &buffer {
+            TensorBuffer::Owned(_) => Device::cpu(),
+            TensorBuffer::Raw { device, .. } => *device,
+        };
 
         Self {
             buffer,
@@ -325,7 +350,7 @@ impl TensorData {
                 dtype,
                 numel,
                 is_contiguous: true,
-                device,
+                device: actual_device,
             },
             ref_count: AtomicUsize::new(1),
         }
