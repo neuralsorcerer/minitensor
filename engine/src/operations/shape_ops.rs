@@ -312,25 +312,26 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
 
     macro_rules! concat_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let mut sources: Vec<&[$ty]> = Vec::with_capacity(tensors.len());
+            let mut dim_sizes: Vec<usize> = Vec::with_capacity(tensors.len());
+            for t in tensors {
+                let src = t.data().$slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation("Tensor data access failed for concatenate")
+                })?;
+                sources.push(src);
+                dim_sizes.push(t.shape().dims()[dim]);
+            }
+            let src_strides: Vec<usize> = dim_sizes.iter().map(|&d| d * inner).collect();
+
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
             let chunk_size = output_shape_obj.dims()[dim] * inner;
             out.par_chunks_mut(chunk_size)
                 .enumerate()
                 .for_each(|(o, out_chunk)| {
                     let mut dst_offset = 0;
-                    for t in tensors {
-                        let t_dims = t.shape().dims();
-                        let src_start = o * t_dims[dim] * inner;
-                        let src_len = t_dims[dim] * inner;
-                        let src = t
-                            .data()
-                            .$slice()
-                            .ok_or_else(|| {
-                                MinitensorError::invalid_operation(
-                                    "Tensor data access failed for concatenate",
-                                )
-                            })
-                            .unwrap();
+                    for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
+                        let src_start = o * src_stride;
+                        let src_len = src_stride;
                         out_chunk[dst_offset..dst_offset + src_len]
                             .copy_from_slice(&src[src_start..src_start + src_len]);
                         dst_offset += src_len;
@@ -401,9 +402,56 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         if rep == 1 {
             continue;
         }
-        let clones: Vec<Tensor> = (0..rep).map(|_| result.clone()).collect();
-        let refs: Vec<&Tensor> = clones.iter().collect();
-        result = concatenate(&refs, dim as isize)?;
+        let dims = result.shape().dims().to_vec();
+        let dim_size = dims[dim];
+        let inner: usize = dims[dim + 1..].iter().product();
+        let mut output_shape = dims.clone();
+        output_shape[dim] = dim_size * rep;
+        let output_shape_obj = Shape::new(output_shape);
+        let output_numel = output_shape_obj.numel();
+
+        let dtype = result.dtype();
+        let device = result.device();
+        let requires_grad = result.requires_grad();
+
+        macro_rules! repeat_impl {
+            ($ty:ty, $slice:ident, $from_vec:ident) => {{
+                let src = result.data().$slice().ok_or_else(|| {
+                    MinitensorError::invalid_operation("Tensor data access failed for repeat")
+                })?;
+                let mut out = vec![<$ty>::default(); output_numel];
+                let chunk_size = dim_size * rep * inner;
+                let src_chunk_size = dim_size * inner;
+                out.par_chunks_mut(chunk_size)
+                    .enumerate()
+                    .for_each(|(o, out_chunk)| {
+                        let src_start = o * src_chunk_size;
+                        let src_chunk = &src[src_start..src_start + src_chunk_size];
+                        for r in 0..rep {
+                            let dst_start = r * src_chunk_size;
+                            out_chunk[dst_start..dst_start + src_chunk_size]
+                                .copy_from_slice(src_chunk);
+                        }
+                    });
+                TensorData::$from_vec(out, device)
+            }};
+        }
+
+        let data = match dtype {
+            DataType::Float32 => repeat_impl!(f32, as_f32_slice, from_vec_f32),
+            DataType::Float64 => repeat_impl!(f64, as_f64_slice, from_vec_f64),
+            DataType::Int32 => repeat_impl!(i32, as_i32_slice, from_vec_i32),
+            DataType::Int64 => repeat_impl!(i64, as_i64_slice, from_vec_i64),
+            DataType::Bool => repeat_impl!(bool, as_bool_slice, from_vec_bool),
+        };
+
+        result = Tensor::new(
+            Arc::new(data),
+            output_shape_obj,
+            dtype,
+            device,
+            requires_grad,
+        );
     }
 
     Ok(result)
