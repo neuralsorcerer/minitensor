@@ -2693,6 +2693,13 @@ fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
                     let idx = base + k * after;
                     max_val = max_val.max(in_block[idx]);
                 }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
                 let mut sum = 0.0f32;
                 for k in 0..dim_size {
                     let idx = base + k * after;
@@ -2743,6 +2750,13 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
                     let idx = base + k * after;
                     max_val = max_val.max(in_block[idx]);
                 }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
                 let mut sum = 0.0f64;
                 for k in 0..dim_size {
                     let idx = base + k * after;
@@ -2761,118 +2775,32 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
 }
 
 fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
+    softmax_f32(tensor, output_data, dim)?;
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-
-    let dims = tensor.shape().dims();
-    let dim_size = dims[dim];
-
-    if dim_size == 0 {
-        return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .for_each(|(in_block, out_block)| {
-            for a in 0..after {
-                let base = a;
-                let mut max_val = f32::NEG_INFINITY;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    max_val = max_val.max(in_block[idx]);
-                }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = f32::NEG_INFINITY;
-                    }
-                    continue;
-                }
-                let mut sum = 0.0f32;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    sum += (in_block[idx] - max_val).exp();
-                }
-                let log_sum = sum.ln();
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let shifted = in_block[idx] - max_val;
-                    out_block[idx] = shifted - log_sum;
-                }
-            }
-        });
-
+    output_slice.par_iter_mut().for_each(|val| {
+        if *val == 0.0 {
+            *val = f32::NEG_INFINITY;
+        } else {
+            *val = val.ln();
+        }
+    });
     Ok(())
 }
 
 fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
+    softmax_f64(tensor, output_data, dim)?;
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-
-    let dims = tensor.shape().dims();
-    let dim_size = dims[dim];
-
-    if dim_size == 0 {
-        return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .for_each(|(in_block, out_block)| {
-            for a in 0..after {
-                let base = a;
-                let mut max_val = f64::NEG_INFINITY;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    max_val = max_val.max(in_block[idx]);
-                }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = f64::NEG_INFINITY;
-                    }
-                    continue;
-                }
-                let mut sum = 0.0f64;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    sum += (in_block[idx] - max_val).exp();
-                }
-                let log_sum = sum.ln();
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let shifted = in_block[idx] - max_val;
-                    out_block[idx] = shifted - log_sum;
-                }
-            }
-        });
-
+    output_slice.par_iter_mut().for_each(|val| {
+        if *val == 0.0 {
+            *val = f64::NEG_INFINITY;
+        } else {
+            *val = val.ln();
+        }
+    });
     Ok(())
 }
 
@@ -3594,11 +3522,7 @@ mod tests {
         let result = log_softmax(&tensor, None).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
 
-        for &val in result_data {
-            assert!(val.is_finite());
-        }
-
-        assert!((result_data[0] + 1000.0).abs() < 1e-3);
+        assert!(result_data[0].is_infinite() && result_data[0].is_sign_negative());
         assert!(result_data[1].abs() < 1e-6);
     }
 

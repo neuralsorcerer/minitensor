@@ -755,54 +755,54 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
                     MinitensorError::internal_error("Failed to get i32 slice from targets")
                 })?;
                 let out = data.as_f32_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f32(idx, out, num_classes, |val| {
+                    checked_index_from_i64(i64::from(*val), num_classes)
+                })?;
             }
             (DataType::Int64, DataType::Float32) => {
                 let idx = targets.data().as_i64_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get i64 slice from targets")
                 })?;
                 let out = data.as_f32_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f32(idx, out, num_classes, |val| {
+                    checked_index_from_i64(*val, num_classes)
+                })?;
             }
             (DataType::Int32, DataType::Float64) => {
                 let idx = targets.data().as_i32_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get i32 slice from targets")
                 })?;
                 let out = data.as_f64_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f64(idx, out, num_classes, |val| {
+                    checked_index_from_i64(i64::from(*val), num_classes)
+                })?;
             }
             (DataType::Int64, DataType::Float64) => {
                 let idx = targets.data().as_i64_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get i64 slice from targets")
                 })?;
                 let out = data.as_f64_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f64(idx, out, num_classes, |val| {
+                    checked_index_from_i64(*val, num_classes)
+                })?;
             }
             (DataType::Float32, DataType::Float32) => {
                 let idx = targets.data().as_f32_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f32 slice from targets")
                 })?;
                 let out = data.as_f32_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f32(idx, out, num_classes, |val| {
+                    checked_index_from_f32(*val, num_classes)
+                })?;
             }
             (DataType::Float64, DataType::Float64) => {
                 let idx = targets.data().as_f64_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get f64 slice from targets")
                 })?;
                 let out = data.as_f64_slice_mut().unwrap();
-                for (i, &val) in idx.iter().enumerate() {
-                    out[i * num_classes + val as usize] = 1.0;
-                }
+                fill_one_hot_f64(idx, out, num_classes, |val| {
+                    checked_index_from_f64(*val, num_classes)
+                })?;
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -833,6 +833,81 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
             targets.shape().dims().to_vec(),
         ))
     }
+}
+
+fn checked_index_from_i64(value: i64, num_classes: usize) -> Result<usize> {
+    if value < 0 {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index must be non-negative",
+        ));
+    }
+    let index = value as usize;
+    if index >= num_classes {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index out of range",
+        ));
+    }
+    Ok(index)
+}
+
+fn checked_index_from_f32(value: f32, num_classes: usize) -> Result<usize> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index must be a finite integer",
+        ));
+    }
+    if value < 0.0 || value >= num_classes as f32 {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index out of range",
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn checked_index_from_f64(value: f64, num_classes: usize) -> Result<usize> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index must be a finite integer",
+        ));
+    }
+    if value < 0.0 || value >= num_classes as f64 {
+        return Err(MinitensorError::invalid_operation(
+            "Target class index out of range",
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn fill_one_hot_f32<T, F>(
+    indices: &[T],
+    out: &mut [f32],
+    num_classes: usize,
+    to_index: F,
+) -> Result<()>
+where
+    F: Fn(&T) -> Result<usize>,
+{
+    for (i, value) in indices.iter().enumerate() {
+        let class = to_index(value)?;
+        out[i * num_classes + class] = 1.0;
+    }
+    Ok(())
+}
+
+fn fill_one_hot_f64<T, F>(
+    indices: &[T],
+    out: &mut [f64],
+    num_classes: usize,
+    to_index: F,
+) -> Result<()>
+where
+    F: Fn(&T) -> Result<usize>,
+{
+    for (i, value) in indices.iter().enumerate() {
+        let class = to_index(value)?;
+        out[i * num_classes + class] = 1.0;
+    }
+    Ok(())
 }
 
 /// Compute the sign of each tensor element (-1.0, 0.0, or 1.0)
