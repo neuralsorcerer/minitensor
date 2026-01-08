@@ -683,6 +683,20 @@ impl Tensor {
         argmin(self, dim, keepdim)
     }
 
+    /// Maximum values and their indices along a dimension
+    #[inline(always)]
+    pub fn max_with_indices(&self, dim: isize, keepdim: bool) -> Result<(Self, Self)> {
+        use crate::operations::reduction::max_with_indices;
+        max_with_indices(self, dim, keepdim)
+    }
+
+    /// Minimum values and their indices along a dimension
+    #[inline(always)]
+    pub fn min_with_indices(&self, dim: isize, keepdim: bool) -> Result<(Self, Self)> {
+        use crate::operations::reduction::min_with_indices;
+        min_with_indices(self, dim, keepdim)
+    }
+
     /// Median value (optionally along a dimension)
     #[inline(always)]
     pub fn median(&self, dim: Option<isize>, keepdim: bool) -> Result<(Self, Option<Self>)> {

@@ -1324,8 +1324,12 @@ impl PyTensor {
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
         if let Some(dim) = dim {
-            let values = Py::new(py, self.max_values(Some(dim), keepdim)?)?.into_any();
-            let indices = Py::new(py, self.argmax(Some(dim), Some(keepdim))?)?.into_any();
+            let (values, indices) = self
+                .inner
+                .max_with_indices(dim, keepdim)
+                .map_err(_convert_error)?;
+            let values = Py::new(py, PyTensor::from_tensor(values))?.into_any();
+            let indices = Py::new(py, PyTensor::from_tensor(indices))?.into_any();
             let tuple = PyTuple::new(py, [values, indices])?;
             Ok(tuple.into_any().unbind())
         } else {
@@ -1342,8 +1346,12 @@ impl PyTensor {
     ) -> PyResult<Py<PyAny>> {
         let keepdim = keepdim.unwrap_or(false);
         if let Some(dim) = dim {
-            let values = Py::new(py, self.min_values(Some(dim), keepdim)?)?.into_any();
-            let indices = Py::new(py, self.argmin(Some(dim), Some(keepdim))?)?.into_any();
+            let (values, indices) = self
+                .inner
+                .min_with_indices(dim, keepdim)
+                .map_err(_convert_error)?;
+            let values = Py::new(py, PyTensor::from_tensor(values))?.into_any();
+            let indices = Py::new(py, PyTensor::from_tensor(indices))?.into_any();
             let tuple = PyTuple::new(py, [values, indices])?;
             Ok(tuple.into_any().unbind())
         } else {
