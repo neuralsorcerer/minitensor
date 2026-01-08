@@ -808,6 +808,30 @@ fn quantiles_all(
             let values = values_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
+            if q_len == 1 {
+                let mut buffer = Vec::with_capacity(data.len());
+                for &value in data {
+                    if value.is_nan() {
+                        values[0] = f32::NAN;
+                        return Ok(Tensor::new(
+                            Arc::new(values_data),
+                            shape,
+                            tensor.dtype(),
+                            tensor.device(),
+                            tensor.requires_grad(),
+                        ));
+                    }
+                    buffer.push(value);
+                }
+                values[0] = quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            }
             let mut sorted = Vec::with_capacity(data.len());
             for &value in data {
                 if value.is_nan() {
@@ -837,6 +861,30 @@ fn quantiles_all(
             let values = values_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
+            if q_len == 1 {
+                let mut buffer = Vec::with_capacity(data.len());
+                for &value in data {
+                    if value.is_nan() {
+                        values[0] = f64::NAN;
+                        return Ok(Tensor::new(
+                            Arc::new(values_data),
+                            shape,
+                            tensor.dtype(),
+                            tensor.device(),
+                            tensor.requires_grad(),
+                        ));
+                    }
+                    buffer.push(value);
+                }
+                values[0] = quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            }
             let mut sorted = Vec::with_capacity(data.len());
             for &value in data {
                 if value.is_nan() {
@@ -889,6 +937,25 @@ fn nanquantiles_all(
                 .data()
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            if q_len == 1 {
+                let mut buffer: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+                if buffer.is_empty() {
+                    return Err(MinitensorError::invalid_argument(
+                        NANQUANTILE_ALL_NAN_ERR.to_string(),
+                    ));
+                }
+                values[0] = quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            }
             let mut sorted: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
             if sorted.is_empty() {
                 return Err(MinitensorError::invalid_argument(
@@ -896,9 +963,6 @@ fn nanquantiles_all(
                 ));
             }
             sorted.sort_by(|a, b| a.total_cmp(b));
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
             for (i, &prob) in qs.iter().enumerate() {
                 values[i] = quantile_from_sorted_f32(&sorted, prob, interpolation);
             }
@@ -908,6 +972,25 @@ fn nanquantiles_all(
                 .data()
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            if q_len == 1 {
+                let mut buffer: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+                if buffer.is_empty() {
+                    return Err(MinitensorError::invalid_argument(
+                        NANQUANTILE_ALL_NAN_ERR.to_string(),
+                    ));
+                }
+                values[0] = quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            }
             let mut sorted: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
             if sorted.is_empty() {
                 return Err(MinitensorError::invalid_argument(
@@ -915,9 +998,6 @@ fn nanquantiles_all(
                 ));
             }
             sorted.sort_by(|a, b| a.total_cmp(b));
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
             for (i, &prob) in qs.iter().enumerate() {
                 values[i] = quantile_from_sorted_f64(&sorted, prob, interpolation);
             }
@@ -1001,33 +1081,61 @@ fn quantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    let mut has_nan = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let value = input[idx];
-                        if value.is_nan() {
-                            has_nan = true;
-                            break;
+            if q_len == 1 {
+                let q_value = qs[0];
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        let mut has_nan = false;
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let value = input[idx];
+                            if value.is_nan() {
+                                has_nan = true;
+                                break;
+                            }
+                            buffer.push(value);
                         }
-                        buffer.push(value);
-                    }
 
-                    if has_nan {
-                        for qi in 0..q_len {
-                            let out_idx = ((qi * outer) + o) * inner + r;
+                        let out_idx = o * inner + r;
+                        if has_nan {
                             values[out_idx] = f32::NAN;
+                            continue;
                         }
-                        continue;
-                    }
 
-                    buffer.sort_by(|a, b| a.total_cmp(b));
-                    for (qi, &prob) in qs.iter().enumerate() {
-                        let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
-                        let out_idx = ((qi * outer) + o) * inner + r;
-                        values[out_idx] = value;
+                        values[out_idx] =
+                            quantile_from_unsorted_f32(&mut buffer, q_value, interpolation);
+                    }
+                }
+            } else {
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        let mut has_nan = false;
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let value = input[idx];
+                            if value.is_nan() {
+                                has_nan = true;
+                                break;
+                            }
+                            buffer.push(value);
+                        }
+
+                        if has_nan {
+                            for qi in 0..q_len {
+                                let out_idx = ((qi * outer) + o) * inner + r;
+                                values[out_idx] = f32::NAN;
+                            }
+                            continue;
+                        }
+
+                        buffer.sort_by(|a, b| a.total_cmp(b));
+                        for (qi, &prob) in qs.iter().enumerate() {
+                            let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
+                            let out_idx = ((qi * outer) + o) * inner + r;
+                            values[out_idx] = value;
+                        }
                     }
                 }
             }
@@ -1042,33 +1150,61 @@ fn quantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    let mut has_nan = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let value = input[idx];
-                        if value.is_nan() {
-                            has_nan = true;
-                            break;
+            if q_len == 1 {
+                let q_value = qs[0];
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        let mut has_nan = false;
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let value = input[idx];
+                            if value.is_nan() {
+                                has_nan = true;
+                                break;
+                            }
+                            buffer.push(value);
                         }
-                        buffer.push(value);
-                    }
 
-                    if has_nan {
-                        for qi in 0..q_len {
-                            let out_idx = ((qi * outer) + o) * inner + r;
+                        let out_idx = o * inner + r;
+                        if has_nan {
                             values[out_idx] = f64::NAN;
+                            continue;
                         }
-                        continue;
-                    }
 
-                    buffer.sort_by(|a, b| a.total_cmp(b));
-                    for (qi, &prob) in qs.iter().enumerate() {
-                        let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
-                        let out_idx = ((qi * outer) + o) * inner + r;
-                        values[out_idx] = value;
+                        values[out_idx] =
+                            quantile_from_unsorted_f64(&mut buffer, q_value, interpolation);
+                    }
+                }
+            } else {
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        let mut has_nan = false;
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let value = input[idx];
+                            if value.is_nan() {
+                                has_nan = true;
+                                break;
+                            }
+                            buffer.push(value);
+                        }
+
+                        if has_nan {
+                            for qi in 0..q_len {
+                                let out_idx = ((qi * outer) + o) * inner + r;
+                                values[out_idx] = f64::NAN;
+                            }
+                            continue;
+                        }
+
+                        buffer.sort_by(|a, b| a.total_cmp(b));
+                        for (qi, &prob) in qs.iter().enumerate() {
+                            let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
+                            let out_idx = ((qi * outer) + o) * inner + r;
+                            values[out_idx] = value;
+                        }
                     }
                 }
             }
@@ -1142,29 +1278,55 @@ fn nanquantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let val = input[idx];
-                        if !val.is_nan() {
-                            buffer.push(val);
+            if q_len == 1 {
+                let q_value = qs[0];
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let val = input[idx];
+                            if !val.is_nan() {
+                                buffer.push(val);
+                            }
                         }
+
+                        if buffer.is_empty() {
+                            return Err(MinitensorError::invalid_argument(
+                                NANQUANTILE_ALL_NAN_ERR.to_string(),
+                            ));
+                        }
+
+                        let out_idx = o * inner + r;
+                        values[out_idx] =
+                            quantile_from_unsorted_f32(&mut buffer, q_value, interpolation);
                     }
+                }
+            } else {
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let val = input[idx];
+                            if !val.is_nan() {
+                                buffer.push(val);
+                            }
+                        }
 
-                    if buffer.is_empty() {
-                        return Err(MinitensorError::invalid_argument(
-                            NANQUANTILE_ALL_NAN_ERR.to_string(),
-                        ));
-                    }
+                        if buffer.is_empty() {
+                            return Err(MinitensorError::invalid_argument(
+                                NANQUANTILE_ALL_NAN_ERR.to_string(),
+                            ));
+                        }
 
-                    buffer.sort_by(|a, b| a.total_cmp(b));
+                        buffer.sort_by(|a, b| a.total_cmp(b));
 
-                    for (qi, &prob) in qs.iter().enumerate() {
-                        let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
-                        let out_idx = ((qi * outer) + o) * inner + r;
-                        values[out_idx] = value;
+                        for (qi, &prob) in qs.iter().enumerate() {
+                            let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
+                            let out_idx = ((qi * outer) + o) * inner + r;
+                            values[out_idx] = value;
+                        }
                     }
                 }
             }
@@ -1179,29 +1341,55 @@ fn nanquantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let val = input[idx];
-                        if !val.is_nan() {
-                            buffer.push(val);
+            if q_len == 1 {
+                let q_value = qs[0];
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let val = input[idx];
+                            if !val.is_nan() {
+                                buffer.push(val);
+                            }
                         }
+
+                        if buffer.is_empty() {
+                            return Err(MinitensorError::invalid_argument(
+                                NANQUANTILE_ALL_NAN_ERR.to_string(),
+                            ));
+                        }
+
+                        let out_idx = o * inner + r;
+                        values[out_idx] =
+                            quantile_from_unsorted_f64(&mut buffer, q_value, interpolation);
                     }
+                }
+            } else {
+                for o in 0..outer {
+                    for r in 0..inner {
+                        buffer.clear();
+                        for d in 0..dim_size {
+                            let idx = o * outer_stride + d * inner + r;
+                            let val = input[idx];
+                            if !val.is_nan() {
+                                buffer.push(val);
+                            }
+                        }
 
-                    if buffer.is_empty() {
-                        return Err(MinitensorError::invalid_argument(
-                            NANQUANTILE_ALL_NAN_ERR.to_string(),
-                        ));
-                    }
+                        if buffer.is_empty() {
+                            return Err(MinitensorError::invalid_argument(
+                                NANQUANTILE_ALL_NAN_ERR.to_string(),
+                            ));
+                        }
 
-                    buffer.sort_by(|a, b| a.total_cmp(b));
+                        buffer.sort_by(|a, b| a.total_cmp(b));
 
-                    for (qi, &prob) in qs.iter().enumerate() {
-                        let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
-                        let out_idx = ((qi * outer) + o) * inner + r;
-                        values[out_idx] = value;
+                        for (qi, &prob) in qs.iter().enumerate() {
+                            let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
+                            let out_idx = ((qi * outer) + o) * inner + r;
+                            values[out_idx] = value;
+                        }
                     }
                 }
             }
