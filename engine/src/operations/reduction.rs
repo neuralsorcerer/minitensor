@@ -1561,7 +1561,25 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .data()
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let mut values: Vec<f32> = data.to_vec();
+            let mut values = Vec::with_capacity(data.len());
+            for &value in data {
+                if value.is_nan() {
+                    result_data.as_f32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f32 slice")
+                    })?[0] = f32::NAN;
+                    return Ok((
+                        Tensor::new(
+                            Arc::new(result_data),
+                            Shape::scalar(),
+                            tensor.dtype(),
+                            tensor.device(),
+                            tensor.requires_grad(),
+                        ),
+                        None,
+                    ));
+                }
+                values.push(value);
+            }
             let median_index = (values.len() - 1) / 2;
             values.select_nth_unstable_by(median_index, |a, b| a.total_cmp(b));
             let median = values[median_index];
@@ -1574,7 +1592,25 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
                 .data()
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let mut values: Vec<f64> = data.to_vec();
+            let mut values = Vec::with_capacity(data.len());
+            for &value in data {
+                if value.is_nan() {
+                    result_data.as_f64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f64 slice")
+                    })?[0] = f64::NAN;
+                    return Ok((
+                        Tensor::new(
+                            Arc::new(result_data),
+                            Shape::scalar(),
+                            tensor.dtype(),
+                            tensor.device(),
+                            tensor.requires_grad(),
+                        ),
+                        None,
+                    ));
+                }
+                values.push(value);
+            }
             let median_index = (values.len() - 1) / 2;
             values.select_nth_unstable_by(median_index, |a, b| a.total_cmp(b));
             let median = values[median_index];
@@ -1690,14 +1726,25 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
             for o in 0..outer {
                 for r in 0..inner {
                     entries.clear();
+                    let mut has_nan = false;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
+                        let value = input[idx];
+                        if value.is_nan() {
+                            has_nan = true;
+                            break;
+                        }
+                        entries.push((d, value));
+                    }
+
+                    let base = o * inner + r;
+                    if has_nan {
+                        values[base] = f32::NAN;
+                        continue;
                     }
 
                     entries.select_nth_unstable_by(median_pos, cmp_f32_asc);
                     let (index, value) = entries[median_pos];
-                    let base = o * inner + r;
                     values[base] = value;
                     indices[base] = index as i64;
                 }
@@ -1719,14 +1766,25 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
             for o in 0..outer {
                 for r in 0..inner {
                     entries.clear();
+                    let mut has_nan = false;
                     for d in 0..dim_size {
                         let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
+                        let value = input[idx];
+                        if value.is_nan() {
+                            has_nan = true;
+                            break;
+                        }
+                        entries.push((d, value));
+                    }
+
+                    let base = o * inner + r;
+                    if has_nan {
+                        values[base] = f64::NAN;
+                        continue;
                     }
 
                     entries.select_nth_unstable_by(median_pos, cmp_f64_asc);
                     let (index, value) = entries[median_pos];
-                    let base = o * inner + r;
                     values[base] = value;
                     indices[base] = index as i64;
                 }

@@ -39,3 +39,18 @@ def test_median_empty_tensor_raises():
     x = mt.Tensor(np.empty((0, 3), dtype=np.float32))
     with pytest.raises(RuntimeError):
         x.median()
+
+
+def test_median_nan_propagates_global():
+    x = mt.Tensor([1.0, float("nan"), 2.0], dtype="float32")
+    median = x.median()
+    assert median.shape == ()
+    assert np.isnan(median.numpy())
+
+
+def test_median_nan_propagates_with_dim():
+    x = mt.Tensor([[1.0, float("nan"), 3.0], [2.0, 4.0, 6.0]], dtype="float32")
+    values, indices = x.median(dim=1)
+    assert np.isnan(values.numpy()[0])
+    assert values.numpy()[1] == pytest.approx(4.0)
+    np.testing.assert_array_equal(indices.numpy(), np.array([0, 1], dtype=np.int64))
