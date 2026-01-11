@@ -142,14 +142,11 @@ impl CosineAnnealingLR {
 
 impl LearningRateScheduler for CosineAnnealingLR {
     fn get_lr(&self, step: usize, base_lr: f64) -> f64 {
-        if step == 0 {
-            return base_lr;
-        }
         if self.t_max == 0 {
             return base_lr;
         }
 
-        let t = (step % self.t_max) as f64;
+        let t = step.min(self.t_max) as f64;
         let t_max = self.t_max as f64;
 
         // Standard cosine annealing formula

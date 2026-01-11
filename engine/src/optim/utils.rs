@@ -369,8 +369,10 @@ mod tests {
         // At step 50 of 100, we have cos(π * 50/100) = cos(π/2) = 0
         // So lr = 0 + (1-0) * (1+0)/2 = 0.5
         assert!((scheduler.get_lr(50, base_lr) - 0.5).abs() < 1e-10);
-        // At step 100, due to modulo, it's like step 0, so back to base_lr
-        assert_eq!(scheduler.get_lr(100, base_lr), 1.0);
+        // At step 100, lr should reach eta_min.
+        assert_eq!(scheduler.get_lr(100, base_lr), 0.0);
+        // After t_max, lr should stay at eta_min.
+        assert_eq!(scheduler.get_lr(150, base_lr), 0.0);
     }
 
     #[test]

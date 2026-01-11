@@ -6,8 +6,10 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::optim::optimizer::LearningRateScheduler;
     use crate::optim::{
-        Adam, AdamW, GradientClipping, GradientUtils, Optimizer, ParameterGroup, RMSprop, SGD,
+        Adam, AdamW, CosineAnnealingLR, GradientClipping, GradientUtils, Optimizer, ParameterGroup,
+        RMSprop, SGD,
     };
     use crate::{
         device::Device,
@@ -667,5 +669,32 @@ mod tests {
         rms.step(&mut [&mut tensor]).unwrap();
         let val = tensor.data().as_f32_slice().unwrap()[0];
         assert!((val - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_annealing_scheduler_bounds() {
+        let scheduler = CosineAnnealingLR::new(4, 0.01);
+        let base_lr = 0.1;
+
+        let lr_start = scheduler.get_lr(0, base_lr);
+        assert!((lr_start - base_lr).abs() < 1e-12);
+
+        let lr_mid = scheduler.get_lr(2, base_lr);
+        let expected_mid = 0.01 + (base_lr - 0.01) * 0.5;
+        assert!((lr_mid - expected_mid).abs() < 1e-12);
+
+        let lr_end = scheduler.get_lr(4, base_lr);
+        assert!((lr_end - 0.01).abs() < 1e-12);
+
+        let lr_after = scheduler.get_lr(10, base_lr);
+        assert!((lr_after - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cosine_annealing_zero_t_max() {
+        let scheduler = CosineAnnealingLR::new(0, 0.01);
+        let base_lr = 0.1;
+        assert!((scheduler.get_lr(0, base_lr) - base_lr).abs() < 1e-12);
+        assert!((scheduler.get_lr(5, base_lr) - base_lr).abs() < 1e-12);
     }
 }
