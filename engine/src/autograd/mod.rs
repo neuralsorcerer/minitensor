@@ -4184,6 +4184,17 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
 
     let grad_dims = grad_output.shape().dims();
     let target_dims = target_shape.dims();
+    if target_dims.len() > grad_dims.len() {
+        return Err(MinitensorError::BroadcastError {
+            shape1: grad_dims.to_vec(),
+            shape2: target_dims.to_vec(),
+            suggestion: Some(
+                "Ensure the target shape has no more dimensions than the gradient output."
+                    .to_string(),
+            ),
+            context: Some("reduce_gradient_for_broadcasting".to_string()),
+        });
+    }
     let extra = grad_dims.len() - target_dims.len();
 
     // Use a stack-allocated small vector and pre-allocate enough capacity to
@@ -4194,8 +4205,20 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
     for i in 0..target_dims.len() {
         let gdim = grad_dims[extra + i];
         let tdim = target_dims[i];
-        if tdim == 1 && gdim > 1 {
-            axes_to_sum.push(extra + i);
+        if tdim == 1 {
+            if gdim != 1 {
+                axes_to_sum.push(extra + i);
+            }
+        } else if gdim != tdim {
+            return Err(MinitensorError::BroadcastError {
+                shape1: grad_dims.to_vec(),
+                shape2: target_dims.to_vec(),
+                suggestion: Some(
+                    "Ensure each target dimension is 1 or matches the gradient dimension."
+                        .to_string(),
+                ),
+                context: Some("reduce_gradient_for_broadcasting".to_string()),
+            });
         }
     }
 
@@ -4203,11 +4226,10 @@ fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) 
         return Ok(grad_output.clone());
     }
 
-    let axes: Vec<isize> = axes_to_sum
-        .into_vec()
-        .into_iter()
-        .map(|d| d as isize)
-        .collect();
+    let mut axes = Vec::with_capacity(axes_to_sum.len());
+    for axis in axes_to_sum {
+        axes.push(axis as isize);
+    }
     let mut grad = reduction::sum(grad_output, Some(axes), true)?;
 
     if grad.shape() != target_shape {
@@ -4319,6 +4341,35 @@ mod tests {
         let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
         assert_eq!(reduced.shape().dims(), &[2, 3, 4]);
         assert!(reduced.allclose(&grad_output, 1e-6, 1e-6));
+    }
+
+    #[test]
+    fn test_reduce_gradient_invalid_broadcast() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![2, 1]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = Shape::new(vec![2, 2]);
+        let err = reduce_gradient_for_broadcasting(&grad_output, &target_shape)
+            .expect_err("expected invalid broadcast error");
+        assert!(matches!(err, MinitensorError::BroadcastError { .. }));
+    }
+
+    #[test]
+    fn test_reduce_gradient_zero_dim_broadcast() {
+        let grad_output = Tensor::ones(
+            Shape::new(vec![0, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let target_shape = Shape::new(vec![1, 2]);
+        let reduced = reduce_gradient_for_broadcasting(&grad_output, &target_shape).unwrap();
+        assert_eq!(reduced.shape().dims(), &[1, 2]);
+        let slice = reduced.data().as_f32_slice().unwrap();
+        assert!(slice.iter().all(|&x| x == 0.0));
     }
 
     #[test]
