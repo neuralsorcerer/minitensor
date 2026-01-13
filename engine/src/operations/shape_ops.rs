@@ -6,6 +6,7 @@
 
 use crate::{
     autograd::{RepeatInterleaveBackward, ReshapeBackward, add_to_graph},
+    device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -19,6 +20,16 @@ fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     } else {
         Ok(dim as usize)
     }
+}
+
+fn empty_tensor(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Tensor {
+    Tensor::new(
+        Arc::new(TensorData::zeros_on_device(0, dtype, device)),
+        shape,
+        dtype,
+        device,
+        requires_grad,
+    )
 }
 
 /// Reshape operation with gradient support
@@ -379,21 +390,11 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         for (dim, &rep) in repeats.iter().enumerate() {
             out_shape[dim] *= rep;
         }
-        let shape = Shape::new(out_shape);
-        let dtype = result.dtype();
-        let device = result.device();
-        let data = match dtype {
-            DataType::Float32 => TensorData::from_vec_f32(vec![], device),
-            DataType::Float64 => TensorData::from_vec_f64(vec![], device),
-            DataType::Int32 => TensorData::from_vec_i32(vec![], device),
-            DataType::Int64 => TensorData::from_vec_i64(vec![], device),
-            DataType::Bool => TensorData::from_vec_bool(vec![], device),
-        };
-        return Ok(Tensor::new(
-            Arc::new(data),
-            shape,
-            dtype,
-            device,
+
+        return Ok(empty_tensor(
+            Shape::new(out_shape),
+            result.dtype(),
+            result.device(),
             result.requires_grad(),
         ));
     }
@@ -413,6 +414,11 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         let dtype = result.dtype();
         let device = result.device();
         let requires_grad = result.requires_grad();
+
+        if output_numel == 0 {
+            result = empty_tensor(output_shape_obj, dtype, device, requires_grad);
+            continue;
+        }
 
         macro_rules! repeat_impl {
             ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -485,6 +491,10 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
     let dtype = tensor.dtype();
     let device = tensor.device();
     let requires_grad = tensor.requires_grad();
+
+    if output_shape_obj.numel() == 0 {
+        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+    }
 
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
@@ -1191,6 +1201,15 @@ mod tests {
     }
 
     #[test]
+    fn test_index_select_empty_indices() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+
+        let result = index_select(&tensor, 1, &[]).unwrap();
+        assert_eq!(result.shape().dims(), &[2, 0]);
+        assert_eq!(result.numel(), 0);
+    }
+
+    #[test]
     fn test_slice_validation() {
         let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
 
@@ -1207,6 +1226,14 @@ mod tests {
         assert_eq!(repeated.shape().dims(), &[6]);
         let data = repeated.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_repeat_zero_numel_shape() {
+        let tensor = create_test_tensor_f32(vec![], vec![0, 2], false);
+        let repeated = repeat(&tensor, &[2, 3]).unwrap();
+        assert_eq!(repeated.shape().dims(), &[0, 6]);
+        assert_eq!(repeated.numel(), 0);
     }
 
     #[test]
