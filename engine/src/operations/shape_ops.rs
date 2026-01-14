@@ -943,9 +943,7 @@ pub fn repeat_interleave(
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
     let reps = expand_repeats(repeats, dim_size)?;
-    let repeats_for_backward = reps.clone();
     let total_repeats: usize = reps.iter().sum();
-    let input_shape_vec = dims.to_vec();
 
     if let Some(expected) = output_size {
         if expected != total_repeats {
@@ -960,9 +958,9 @@ pub fn repeat_interleave(
     let requires_grad = tensor.requires_grad();
 
     let target_dim = output_size.unwrap_or(total_repeats);
-    let mut output_shape = input_shape_vec.clone();
+    let mut output_shape = dims.to_vec();
     output_shape[dim] = target_dim;
-    let output_shape_obj = Shape::new(output_shape.clone());
+    let output_shape_obj = Shape::new(output_shape);
     let output_numel = output_shape_obj.numel();
 
     let inner: usize = dims[dim + 1..].iter().product();
@@ -972,15 +970,19 @@ pub fn repeat_interleave(
         dims[..dim].iter().product()
     };
 
+    let build_grad_fn = |repeats: Vec<usize>| {
+        Arc::new(RepeatInterleaveBackward {
+            input_shape: dims.to_vec(),
+            repeats,
+            input_id: tensor.id(),
+            dim,
+        })
+    };
+
     if target_dim == 0 || output_numel == 0 || inner == 0 || outer == 0 {
         let mut result = build_empty_repeat_result(tensor, dim, target_dim)?;
         if requires_grad {
-            let grad_fn = Arc::new(RepeatInterleaveBackward {
-                input_shape: input_shape_vec.clone(),
-                repeats: repeats_for_backward.clone(),
-                input_id: tensor.id(),
-                dim,
-            });
+            let grad_fn = build_grad_fn(reps);
             result.set_grad_fn(Some(grad_fn.clone()));
             add_to_graph(&result, Some(grad_fn))?;
         }
@@ -1034,12 +1036,7 @@ pub fn repeat_interleave(
     );
 
     if requires_grad {
-        let grad_fn = Arc::new(RepeatInterleaveBackward {
-            input_shape: input_shape_vec,
-            repeats: repeats_for_backward,
-            input_id: tensor.id(),
-            dim,
-        });
+        let grad_fn = build_grad_fn(reps);
         result.set_grad_fn(Some(grad_fn.clone()));
         add_to_graph(&result, Some(grad_fn))?;
     }
