@@ -355,6 +355,67 @@ fn ensure_floating_point_dtype(dtype: DataType) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct QuantilePosition {
+    lower_idx: usize,
+    upper_idx: usize,
+    weight: f64,
+}
+
+fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<QuantilePosition> {
+    if len == 1 {
+        return vec![
+            QuantilePosition {
+                lower_idx: 0,
+                upper_idx: 0,
+                weight: 0.0,
+            };
+            qs.len()
+        ];
+    }
+
+    let max_index = (len - 1) as f64;
+    qs.iter()
+        .map(|&q| {
+            let pos = (q * max_index).clamp(0.0, max_index);
+            let lower_idx = pos.floor() as usize;
+            let upper_idx = pos.ceil() as usize;
+            let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+            QuantilePosition {
+                lower_idx,
+                upper_idx,
+                weight,
+            }
+        })
+        .collect()
+}
+
+fn quantiles_from_sorted_f32(
+    values: &[f32],
+    positions: &[QuantilePosition],
+    interpolation: QuantileInterpolation,
+    output: &mut [f32],
+) {
+    for (slot, position) in output.iter_mut().zip(positions.iter()) {
+        let lower = values[position.lower_idx] as f64;
+        let upper = values[position.upper_idx] as f64;
+        *slot = interpolation.interpolate(lower, upper, position.weight) as f32;
+    }
+}
+
+fn quantiles_from_sorted_f64(
+    values: &[f64],
+    positions: &[QuantilePosition],
+    interpolation: QuantileInterpolation,
+    output: &mut [f64],
+) {
+    for (slot, position) in output.iter_mut().zip(positions.iter()) {
+        let lower = values[position.lower_idx];
+        let upper = values[position.upper_idx];
+        *slot = interpolation.interpolate(lower, upper, position.weight);
+    }
+}
+
 fn quantile_all(
     tensor: &Tensor,
     q: f64,
@@ -832,6 +893,7 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
+            let positions = quantile_positions_for_len(data.len(), qs);
             let mut sorted = Vec::with_capacity(data.len());
             for &value in data {
                 if value.is_nan() {
@@ -849,9 +911,7 @@ fn quantiles_all(
                 sorted.push(value);
             }
             sorted.sort_by(|a, b| a.total_cmp(b));
-            for (i, &prob) in qs.iter().enumerate() {
-                values[i] = quantile_from_sorted_f32(&sorted, prob, interpolation);
-            }
+            quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
         }
         DataType::Float64 => {
             let data = tensor
@@ -885,6 +945,7 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
+            let positions = quantile_positions_for_len(data.len(), qs);
             let mut sorted = Vec::with_capacity(data.len());
             for &value in data {
                 if value.is_nan() {
@@ -902,9 +963,7 @@ fn quantiles_all(
                 sorted.push(value);
             }
             sorted.sort_by(|a, b| a.total_cmp(b));
-            for (i, &prob) in qs.iter().enumerate() {
-                values[i] = quantile_from_sorted_f64(&sorted, prob, interpolation);
-            }
+            quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
         }
         _ => unreachable!("dtype validated"),
     }
@@ -962,10 +1021,9 @@ fn nanquantiles_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
+            let positions = quantile_positions_for_len(sorted.len(), qs);
             sorted.sort_by(|a, b| a.total_cmp(b));
-            for (i, &prob) in qs.iter().enumerate() {
-                values[i] = quantile_from_sorted_f32(&sorted, prob, interpolation);
-            }
+            quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
         }
         DataType::Float64 => {
             let data = tensor
@@ -997,10 +1055,9 @@ fn nanquantiles_all(
                     NANQUANTILE_ALL_NAN_ERR.to_string(),
                 ));
             }
+            let positions = quantile_positions_for_len(sorted.len(), qs);
             sorted.sort_by(|a, b| a.total_cmp(b));
-            for (i, &prob) in qs.iter().enumerate() {
-                values[i] = quantile_from_sorted_f64(&sorted, prob, interpolation);
-            }
+            quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
         }
         _ => unreachable!("dtype validated"),
     }
@@ -1108,6 +1165,7 @@ fn quantiles_along_dim(
                     }
                 }
             } else {
+                let positions = quantile_positions_for_len(dim_size, qs);
                 for o in 0..outer {
                     for r in 0..inner {
                         buffer.clear();
@@ -1131,10 +1189,12 @@ fn quantiles_along_dim(
                         }
 
                         buffer.sort_by(|a, b| a.total_cmp(b));
-                        for (qi, &prob) in qs.iter().enumerate() {
-                            let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
+                        for (qi, position) in positions.iter().enumerate() {
                             let out_idx = ((qi * outer) + o) * inner + r;
-                            values[out_idx] = value;
+                            let lower = buffer[position.lower_idx] as f64;
+                            let upper = buffer[position.upper_idx] as f64;
+                            values[out_idx] =
+                                interpolation.interpolate(lower, upper, position.weight) as f32;
                         }
                     }
                 }
@@ -1177,6 +1237,7 @@ fn quantiles_along_dim(
                     }
                 }
             } else {
+                let positions = quantile_positions_for_len(dim_size, qs);
                 for o in 0..outer {
                     for r in 0..inner {
                         buffer.clear();
@@ -1200,10 +1261,12 @@ fn quantiles_along_dim(
                         }
 
                         buffer.sort_by(|a, b| a.total_cmp(b));
-                        for (qi, &prob) in qs.iter().enumerate() {
-                            let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
+                        for (qi, position) in positions.iter().enumerate() {
                             let out_idx = ((qi * outer) + o) * inner + r;
-                            values[out_idx] = value;
+                            let lower = buffer[position.lower_idx];
+                            let upper = buffer[position.upper_idx];
+                            values[out_idx] =
+                                interpolation.interpolate(lower, upper, position.weight);
                         }
                     }
                 }
@@ -1278,6 +1341,7 @@ fn nanquantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
+            let mut cached_positions: Option<(usize, Vec<QuantilePosition>)> = None;
             if q_len == 1 {
                 let q_value = qs[0];
                 for o in 0..outer {
@@ -1321,11 +1385,20 @@ fn nanquantiles_along_dim(
                         }
 
                         buffer.sort_by(|a, b| a.total_cmp(b));
-
-                        for (qi, &prob) in qs.iter().enumerate() {
-                            let value = quantile_from_sorted_f32(&buffer, prob, interpolation);
+                        let positions = match cached_positions {
+                            Some((len, ref positions)) if len == buffer.len() => positions,
+                            _ => {
+                                let positions = quantile_positions_for_len(buffer.len(), qs);
+                                cached_positions = Some((buffer.len(), positions));
+                                &cached_positions.as_ref().expect("positions cached").1
+                            }
+                        };
+                        for (qi, position) in positions.iter().enumerate() {
                             let out_idx = ((qi * outer) + o) * inner + r;
-                            values[out_idx] = value;
+                            let lower = buffer[position.lower_idx] as f64;
+                            let upper = buffer[position.upper_idx] as f64;
+                            values[out_idx] =
+                                interpolation.interpolate(lower, upper, position.weight) as f32;
                         }
                     }
                 }
@@ -1341,6 +1414,7 @@ fn nanquantiles_along_dim(
             })?;
 
             let mut buffer = Vec::with_capacity(dim_size);
+            let mut cached_positions: Option<(usize, Vec<QuantilePosition>)> = None;
             if q_len == 1 {
                 let q_value = qs[0];
                 for o in 0..outer {
@@ -1384,11 +1458,20 @@ fn nanquantiles_along_dim(
                         }
 
                         buffer.sort_by(|a, b| a.total_cmp(b));
-
-                        for (qi, &prob) in qs.iter().enumerate() {
-                            let value = quantile_from_sorted_f64(&buffer, prob, interpolation);
+                        let positions = match cached_positions {
+                            Some((len, ref positions)) if len == buffer.len() => positions,
+                            _ => {
+                                let positions = quantile_positions_for_len(buffer.len(), qs);
+                                cached_positions = Some((buffer.len(), positions));
+                                &cached_positions.as_ref().expect("positions cached").1
+                            }
+                        };
+                        for (qi, position) in positions.iter().enumerate() {
                             let out_idx = ((qi * outer) + o) * inner + r;
-                            values[out_idx] = value;
+                            let lower = buffer[position.lower_idx];
+                            let upper = buffer[position.upper_idx];
+                            values[out_idx] =
+                                interpolation.interpolate(lower, upper, position.weight);
                         }
                     }
                 }
@@ -1404,38 +1487,6 @@ fn nanquantiles_along_dim(
         tensor.device(),
         tensor.requires_grad(),
     ))
-}
-
-fn quantile_from_sorted_f32(values: &[f32], q: f64, interpolation: QuantileInterpolation) -> f32 {
-    if values.len() == 1 {
-        return values[0];
-    }
-
-    let max_index = (values.len() - 1) as f64;
-    let pos = (q * max_index).clamp(0.0, max_index);
-    let lower_idx = pos.floor() as usize;
-    let upper_idx = pos.ceil() as usize;
-    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
-
-    let lower = values[lower_idx] as f64;
-    let upper = values[upper_idx] as f64;
-    interpolation.interpolate(lower, upper, weight) as f32
-}
-
-fn quantile_from_sorted_f64(values: &[f64], q: f64, interpolation: QuantileInterpolation) -> f64 {
-    if values.len() == 1 {
-        return values[0];
-    }
-
-    let max_index = (values.len() - 1) as f64;
-    let pos = (q * max_index).clamp(0.0, max_index);
-    let lower_idx = pos.floor() as usize;
-    let upper_idx = pos.ceil() as usize;
-    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
-
-    let lower = values[lower_idx];
-    let upper = values[upper_idx];
-    interpolation.interpolate(lower, upper, weight)
 }
 
 fn quantile_from_unsorted_f32(
