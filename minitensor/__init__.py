@@ -8,9 +8,9 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import sys as _sys
 import types as _types
+from contextlib import contextmanager
 
 from . import _core as _C
 

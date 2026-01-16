@@ -638,7 +638,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
 
     let dim_size = tensor.shape().dims()[dim];
 
-    if start >= dim_size || end > dim_size || start >= end {
+    if start > dim_size || end > dim_size || start > end {
         return Err(MinitensorError::invalid_operation(format!(
             "Invalid slice range: start={}, end={}, dim_size={}",
             start, end, dim_size
@@ -660,17 +660,19 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
     // Compute output shape
     let mut output_shape = tensor.shape().dims().to_vec();
     output_shape[dim] = (end - start).div_ceil(step);
-    let output_shape_vec = output_shape.clone();
     let output_shape_obj = Shape::new(output_shape);
 
     let dtype = tensor.dtype();
     let device = tensor.device();
     let requires_grad = tensor.requires_grad();
 
+    if output_shape_obj.numel() == 0 {
+        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+    }
+
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
-    let _outer: usize = dims[..dim].iter().product();
-    let count = output_shape_vec[dim];
+    let count = output_shape_obj.dims()[dim];
 
     macro_rules! slice_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -1195,6 +1197,24 @@ mod tests {
         assert_eq!(result.shape().dims(), &[2, 2]);
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_slice_empty_range() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+
+        let result = slice(&tensor, 1, 1, 1, 1).unwrap();
+        assert_eq!(result.shape().dims(), &[2, 0]);
+        assert_eq!(result.numel(), 0);
+    }
+
+    #[test]
+    fn test_slice_empty_at_end() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+
+        let result = slice(&tensor, 0, 2, 2, 1).unwrap();
+        assert_eq!(result.shape().dims(), &[0, 2]);
+        assert_eq!(result.numel(), 0);
     }
 
     #[test]
