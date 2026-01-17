@@ -187,45 +187,38 @@ pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Resu
         ));
     }
 
-    let mut src: Vec<usize> = Vec::with_capacity(source.len());
-    let mut dst: Vec<usize> = Vec::with_capacity(destination.len());
+    let mut src_seen = vec![false; ndim];
+    let mut dst_seen = vec![false; ndim];
+    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(source.len());
 
-    for &s in source {
+    for (&s, &d) in source.iter().zip(destination.iter()) {
         let s = if s < 0 { s + ndim as isize } else { s };
         if s < 0 || s >= ndim as isize {
             return Err(MinitensorError::index_error(s, 0, ndim));
         }
-        src.push(s as usize);
-    }
-    for &d in destination {
+        let s = s as usize;
+        if src_seen[s] {
+            return Err(MinitensorError::invalid_operation(
+                "movedim: duplicate dimensions in source".to_string(),
+            ));
+        }
+        src_seen[s] = true;
         let d = if d < 0 { d + ndim as isize } else { d };
         if d < 0 || d >= ndim as isize {
             return Err(MinitensorError::index_error(d, 0, ndim));
         }
-        dst.push(d as usize);
-    }
-
-    // Check for duplicate dimensions
-    let mut src_sorted = src.clone();
-    src_sorted.sort_unstable();
-    src_sorted.dedup();
-    if src_sorted.len() != src.len() {
-        return Err(MinitensorError::invalid_operation(
-            "movedim: duplicate dimensions in source".to_string(),
-        ));
-    }
-    let mut dst_sorted = dst.clone();
-    dst_sorted.sort_unstable();
-    dst_sorted.dedup();
-    if dst_sorted.len() != dst.len() {
-        return Err(MinitensorError::invalid_operation(
-            "movedim: duplicate dimensions in destination".to_string(),
-        ));
+        let d = d as usize;
+        if dst_seen[d] {
+            return Err(MinitensorError::invalid_operation(
+                "movedim: duplicate dimensions in destination".to_string(),
+            ));
+        }
+        dst_seen[d] = true;
+        pairs.push((d, s));
     }
 
     // Build permutation order
-    let mut order: Vec<usize> = (0..ndim).filter(|i| !src.contains(i)).collect();
-    let mut pairs: Vec<(usize, usize)> = dst.iter().copied().zip(src.iter().copied()).collect();
+    let mut order: Vec<usize> = (0..ndim).filter(|&i| !src_seen[i]).collect();
     pairs.sort_by_key(|&(d, _)| d);
     for (d, s) in pairs {
         order.insert(d, s);
