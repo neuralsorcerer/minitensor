@@ -9,7 +9,7 @@ resolver = "2"
 authors = ["Soumyadip Sarkar"]
 license = "Apache-2.0"
 repository = "https://github.com/neuralsorcerer/minitensor"
-homepage = "https://github.com/neuralsorcerer/minitensor"
+homepage = "https://github.com/neuralsorcerer/minitensor#README"
 
 [workspace.dependencies]
 # Core dependencies

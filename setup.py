@@ -68,7 +68,7 @@ setup(
     name="minitensor",
     use_scm_version={
         "write_to": "minitensor/_version.py",
-        "fallback_version": "0.1.0",
+        "fallback_version": "0.1.3",
     },
     description="A lightweight, high-performance tensor operations library",
     long_description=long_description,
@@ -87,6 +87,7 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Programming Language :: Rust",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Software Development :: Libraries :: Python Modules",

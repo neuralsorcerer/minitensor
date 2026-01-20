@@ -578,7 +578,6 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    let outer: usize = input_dims[..dim].iter().product();
     let inner: usize = input_dims[dim + 1..].iter().product();
     let idx_dim = index_dims[dim];
 
@@ -586,6 +585,11 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
     let device = tensor.device();
     let requires_grad = tensor.requires_grad();
     let output_shape_obj = Shape::new(index_dims.to_vec());
+    let output_numel = idx_slice.len();
+
+    if output_numel == 0 {
+        return Ok(empty_tensor(output_shape_obj, dtype, device, requires_grad));
+    }
 
     macro_rules! gather_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -593,17 +597,27 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
                 MinitensorError::invalid_operation("Tensor data access failed for gather")
             })?;
             let idx = idx_slice;
-            let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            for o in 0..outer {
-                for i in 0..idx_dim {
-                    for j in 0..inner {
-                        let idx_pos = o * idx_dim * inner + i * inner + j;
-                        let gather_idx = idx[idx_pos] as usize;
-                        let src_pos = o * dim_size * inner + gather_idx * inner + j;
-                        out[idx_pos] = src[src_pos];
-                    }
-                }
+            let mut out = vec![<$ty>::default(); output_numel];
+            let chunk_size = idx_dim * inner;
+            if output_numel % chunk_size != 0 {
+                return Err(MinitensorError::internal_error(format!(
+                    "gather output length ({output_numel}) is not divisible by chunk size ({chunk_size})"
+                )));
             }
+            out.par_chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(o, out_chunk)| {
+                    let base = o * dim_size * inner;
+                    let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
+                    for i in 0..idx_dim {
+                        let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
+                        let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
+                        for (j, &gather_val) in idx_row.iter().enumerate() {
+                            let gather_idx = gather_val as usize;
+                            dst_row[j] = src[base + gather_idx * inner + j];
+                        }
+                    }
+                });
             TensorData::$from_vec(out, device)
         }};
     }
@@ -819,6 +833,22 @@ pub enum RepeatInterleaveSpec<'a> {
     Tensor(&'a Tensor),
 }
 
+fn collect_repeats_from_values<I>(len: usize, values: I) -> Result<Vec<usize>>
+where
+    I: IntoIterator<Item = i64>,
+{
+    let mut out = Vec::with_capacity(len);
+    for value in values {
+        if value < 0 {
+            return Err(MinitensorError::invalid_operation(
+                "repeat_interleave: repeats must be non-negative".to_string(),
+            ));
+        }
+        out.push(value as usize);
+    }
+    Ok(out)
+}
+
 fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<usize>> {
     if !tensor.device().is_cpu() {
         return Err(MinitensorError::invalid_operation(
@@ -840,16 +870,7 @@ fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<u
                     "repeat_interleave: repeats tensor must be contiguous".to_string(),
                 )
             })?;
-            let mut out = Vec::with_capacity(slice.len());
-            for &value in slice {
-                if value < 0 {
-                    return Err(MinitensorError::invalid_operation(
-                        "repeat_interleave: repeats must be non-negative".to_string(),
-                    ));
-                }
-                out.push(value as usize);
-            }
-            Ok(out)
+            collect_repeats_from_values(slice.len(), slice.iter().map(|&value| value as i64))
         }
         DataType::Int64 => {
             let slice = tensor.data().as_i64_slice().ok_or_else(|| {
@@ -857,16 +878,7 @@ fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<u
                     "repeat_interleave: repeats tensor must be contiguous".to_string(),
                 )
             })?;
-            let mut out = Vec::with_capacity(slice.len());
-            for &value in slice {
-                if value < 0 {
-                    return Err(MinitensorError::invalid_operation(
-                        "repeat_interleave: repeats must be non-negative".to_string(),
-                    ));
-                }
-                out.push(value as usize);
-            }
-            Ok(out)
+            collect_repeats_from_values(slice.len(), slice.iter().copied())
         }
         other => Err(MinitensorError::type_mismatch(
             "integral tensor",
