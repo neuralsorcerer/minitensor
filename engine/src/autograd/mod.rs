@@ -879,25 +879,35 @@ pub struct SumBackward {
     pub keepdim: bool,
 }
 
+fn expand_reduction_grad(
+    grad_output: &Tensor,
+    input_shape: &[usize],
+    dims: &Option<Vec<usize>>,
+    keepdim: bool,
+) -> Result<Tensor> {
+    if keepdim {
+        return Ok(grad_output.clone());
+    }
+
+    if let Some(dims) = dims {
+        let mut shape = grad_output.shape().dims().to_vec();
+        let mut sorted = dims.clone();
+        sorted.sort_unstable();
+        for &d in &sorted {
+            shape.insert(d, 1);
+        }
+        shape_ops::reshape(grad_output, Shape::new(shape))
+    } else {
+        shape_ops::reshape(grad_output, Shape::new(vec![1; input_shape.len()]))
+    }
+}
+
 impl GradientFunction for SumBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let mut grad = grad_output.clone();
-        if !self.keepdim {
-            if let Some(dims) = &self.dims {
-                let mut shape = grad.shape().dims().to_vec();
-                let mut sorted = dims.clone();
-                sorted.sort_unstable();
-                for &d in &sorted {
-                    shape.insert(d, 1);
-                }
-                grad = shape_ops::reshape(&grad, Shape::new(shape))?;
-            } else {
-                grad = shape_ops::reshape(&grad, Shape::new(vec![1; self.input_shape.len()]))?;
-            }
-        }
+        let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
 
         let ones = Tensor::ones(
             Shape::new(self.input_shape.clone()),
@@ -914,6 +924,179 @@ impl GradientFunction for SumBackward {
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
     }
+}
+
+/// Gradient function for NaN-aware sum reduction
+pub struct NanSumBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub dims: Option<Vec<usize>>,
+    pub keepdim: bool,
+    pub mask: Tensor,
+}
+
+impl GradientFunction for NanSumBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
+        let mask = self.mask.astype(grad_output.dtype())?;
+        let grad_input = arithmetic::mul(&mask, &grad)?;
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for NaN-aware mean reduction
+pub struct NanMeanBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub dims: Option<Vec<usize>>,
+    pub keepdim: bool,
+    pub mask: Tensor,
+    pub count: Tensor,
+}
+
+impl GradientFunction for NanMeanBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
+        let count =
+            expand_reduction_grad(&self.count, &self.input_shape, &self.dims, self.keepdim)?;
+        let grad = sanitize_grad_for_nanmean(&grad, &count)?;
+        let count = safe_count_for_nanmean(&count)?;
+
+        let scaled = arithmetic::div(&grad, &count)?;
+        let mask = self.mask.astype(grad_output.dtype())?;
+        let grad_input = arithmetic::mul(&mask, &scaled)?;
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+fn sanitize_grad_for_nanmean(grad: &Tensor, count: &Tensor) -> Result<Tensor> {
+    if grad.dtype() != count.dtype() {
+        return Err(MinitensorError::invalid_operation(
+            "nanmean backward expected matching gradient and count dtypes",
+        ));
+    }
+
+    let numel = grad.numel();
+    let mut new_data = TensorData::zeros_on_device(numel, grad.dtype(), grad.device());
+
+    match grad.dtype() {
+        DataType::Float32 => {
+            let grad_src = grad
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let count_src = count
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let dst = new_data
+                .as_f32_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            dst.par_iter_mut()
+                .zip(grad_src.par_iter().zip(count_src.par_iter()))
+                .for_each(|(out, (&g, &c))| {
+                    *out = if c == 0.0 { 0.0 } else { g };
+                });
+        }
+        DataType::Float64 => {
+            let grad_src = grad
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let count_src = count
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let dst = new_data
+                .as_f64_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            dst.par_iter_mut()
+                .zip(grad_src.par_iter().zip(count_src.par_iter()))
+                .for_each(|(out, (&g, &c))| {
+                    *out = if c == 0.0 { 0.0 } else { g };
+                });
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nanmean backward only supports floating point tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(new_data),
+        grad.shape().clone(),
+        grad.dtype(),
+        grad.device(),
+        false,
+    ))
+}
+
+fn safe_count_for_nanmean(count: &Tensor) -> Result<Tensor> {
+    let numel = count.numel();
+    let mut new_data = TensorData::zeros_on_device(numel, count.dtype(), count.device());
+
+    match count.dtype() {
+        DataType::Float32 => {
+            let src = count
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let dst = new_data
+                .as_f32_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            dst.par_iter_mut()
+                .zip(src.par_iter())
+                .for_each(|(out, &c)| {
+                    *out = if c == 0.0 { 1.0 } else { c };
+                });
+        }
+        DataType::Float64 => {
+            let src = count
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let dst = new_data
+                .as_f64_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            dst.par_iter_mut()
+                .zip(src.par_iter())
+                .for_each(|(out, &c)| {
+                    *out = if c == 0.0 { 1.0 } else { c };
+                });
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nanmean backward only supports floating point tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(new_data),
+        count.shape().clone(),
+        count.dtype(),
+        count.device(),
+        false,
+    ))
 }
 
 /// Gradient function for product reduction

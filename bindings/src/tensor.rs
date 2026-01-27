@@ -244,8 +244,18 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    pub fn nanmax_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.nanmax(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     pub fn min_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
         let result = self.inner.min(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn nanmin_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
+        let result = self.inner.nanmin(dim, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -1261,6 +1271,14 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nansum(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let dims = normalize_optional_axes(dim)?;
+        let result = self.inner.nansum(dims, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn logsumexp(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
@@ -1286,6 +1304,14 @@ impl PyTensor {
         let keepdim = keepdim.unwrap_or(false);
         let dims = normalize_optional_axes(dim)?;
         let result = self.inner.mean(dims, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanmean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let dims = normalize_optional_axes(dim)?;
+        let result = self.inner.nanmean(dims, keepdim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -1338,6 +1364,28 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanmax<'py>(
+        &self,
+        py: Python<'py>,
+        dim: Option<isize>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let keepdim = keepdim.unwrap_or(false);
+        if let Some(dim) = dim {
+            let (values, indices) = self
+                .inner
+                .nanmax_with_indices(dim, keepdim)
+                .map_err(_convert_error)?;
+            let values = Py::new(py, PyTensor::from_tensor(values))?.into_any();
+            let indices = Py::new(py, PyTensor::from_tensor(indices))?.into_any();
+            let tuple = PyTuple::new(py, [values, indices])?;
+            Ok(tuple.into_any().unbind())
+        } else {
+            Ok(Py::new(py, self.nanmax_values(None, keepdim)?)?.into_any())
+        }
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn min<'py>(
         &self,
         py: Python<'py>,
@@ -1356,6 +1404,28 @@ impl PyTensor {
             Ok(tuple.into_any().unbind())
         } else {
             Ok(Py::new(py, self.min_values(None, keepdim)?)?.into_any())
+        }
+    }
+
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanmin<'py>(
+        &self,
+        py: Python<'py>,
+        dim: Option<isize>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let keepdim = keepdim.unwrap_or(false);
+        if let Some(dim) = dim {
+            let (values, indices) = self
+                .inner
+                .nanmin_with_indices(dim, keepdim)
+                .map_err(_convert_error)?;
+            let values = Py::new(py, PyTensor::from_tensor(values))?.into_any();
+            let indices = Py::new(py, PyTensor::from_tensor(indices))?.into_any();
+            let tuple = PyTuple::new(py, [values, indices])?;
+            Ok(tuple.into_any().unbind())
+        } else {
+            Ok(Py::new(py, self.nanmin_values(None, keepdim)?)?.into_any())
         }
     }
 

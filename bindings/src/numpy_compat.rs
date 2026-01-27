@@ -79,12 +79,16 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 
     // Statistical functions
     m.add_function(wrap_pyfunction!(mean, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(tensor_std, m)?)?;
     m.add_function(wrap_pyfunction!(var, m)?)?;
     m.add_function(wrap_pyfunction!(prod, m)?)?;
     m.add_function(wrap_pyfunction!(sum, m)?)?;
+    m.add_function(wrap_pyfunction!(nansum, m)?)?;
     m.add_function(wrap_pyfunction!(max, m)?)?;
     m.add_function(wrap_pyfunction!(min, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmax, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmin, m)?)?;
 
     Ok(())
 }
@@ -410,6 +414,18 @@ fn mean(
     tensor.mean(axis, keepdims)
 }
 
+/// Compute NaN-aware mean along axis
+#[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn nanmean(
+    tensor: &Bound<PyAny>,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
+    tensor.nanmean(axis, keepdims)
+}
+
 /// Compute standard deviation along axis
 #[pyfunction]
 #[pyo3(signature = (tensor, axis=None, keepdims=None, ddof=None))]
@@ -472,6 +488,18 @@ fn sum(
     tensor.sum(axis, keepdims)
 }
 
+/// Compute NaN-aware sum along axis
+#[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn nansum(
+    tensor: &Bound<PyAny>,
+    axis: Option<&Bound<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
+    tensor.nansum(axis, keepdims)
+}
+
 /// Compute maximum along axis
 #[pyfunction]
 #[pyo3(signature = (tensor, axis=None, keepdims=None))]
@@ -488,4 +516,30 @@ fn min(tensor: &Bound<PyAny>, axis: Option<isize>, keepdims: Option<bool>) -> Py
     let tensor = PyTensor::from_python_value(tensor)?;
     let keepdim = keepdims.unwrap_or(false);
     tensor.min_values(axis, keepdim)
+}
+
+/// Compute NaN-aware maximum along axis
+#[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn nanmax(
+    tensor: &Bound<PyAny>,
+    axis: Option<isize>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
+    let keepdim = keepdims.unwrap_or(false);
+    tensor.nanmax_values(axis, keepdim)
+}
+
+/// Compute NaN-aware minimum along axis
+#[pyfunction]
+#[pyo3(signature = (tensor, axis=None, keepdims=None))]
+fn nanmin(
+    tensor: &Bound<PyAny>,
+    axis: Option<isize>,
+    keepdims: Option<bool>,
+) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(tensor)?;
+    let keepdim = keepdims.unwrap_or(false);
+    tensor.nanmin_values(axis, keepdim)
 }

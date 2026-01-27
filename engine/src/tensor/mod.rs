@@ -606,6 +606,13 @@ impl Tensor {
         sum(self, dim, keepdim)
     }
 
+    /// NaN-aware sum reduction
+    #[inline(always)]
+    pub fn nansum(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::nansum;
+        nansum(self, dim, keepdim)
+    }
+
     /// Log-sum-exp reduction
     #[inline(always)]
     pub fn logsumexp(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
@@ -625,6 +632,13 @@ impl Tensor {
     pub fn mean(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::mean;
         mean(self, dim, keepdim)
+    }
+
+    /// NaN-aware mean reduction
+    #[inline(always)]
+    pub fn nanmean(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::nanmean;
+        nanmean(self, dim, keepdim)
     }
 
     /// Logical all reduction
@@ -662,11 +676,25 @@ impl Tensor {
         max(self, dim, keepdim)
     }
 
+    /// NaN-aware maximum value
+    #[inline(always)]
+    pub fn nanmax(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::nanmax;
+        nanmax(self, dim, keepdim)
+    }
+
     /// Minimum value
     #[inline(always)]
     pub fn min(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::operations::reduction::min;
         min(self, dim, keepdim)
+    }
+
+    /// NaN-aware minimum value
+    #[inline(always)]
+    pub fn nanmin(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::nanmin;
+        nanmin(self, dim, keepdim)
     }
 
     /// Argument of maximum value
@@ -690,11 +718,25 @@ impl Tensor {
         max_with_indices(self, dim, keepdim)
     }
 
+    /// NaN-aware maximum values and their indices along a dimension
+    #[inline(always)]
+    pub fn nanmax_with_indices(&self, dim: isize, keepdim: bool) -> Result<(Self, Self)> {
+        use crate::operations::reduction::nanmax_with_indices;
+        nanmax_with_indices(self, dim, keepdim)
+    }
+
     /// Minimum values and their indices along a dimension
     #[inline(always)]
     pub fn min_with_indices(&self, dim: isize, keepdim: bool) -> Result<(Self, Self)> {
         use crate::operations::reduction::min_with_indices;
         min_with_indices(self, dim, keepdim)
+    }
+
+    /// NaN-aware minimum values and their indices along a dimension
+    #[inline(always)]
+    pub fn nanmin_with_indices(&self, dim: isize, keepdim: bool) -> Result<(Self, Self)> {
+        use crate::operations::reduction::nanmin_with_indices;
+        nanmin_with_indices(self, dim, keepdim)
     }
 
     /// Median value (optionally along a dimension)

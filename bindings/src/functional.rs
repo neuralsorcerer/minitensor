@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -358,6 +359,70 @@ pub fn logsumexp(
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.logsumexp(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nansum(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nansum(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanmean(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanmean(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+    let tensor = borrow_tensor(input)?;
+    let py = input.py();
+    if let Some(dim) = dim {
+        let (values, indices) = tensor
+            .tensor()
+            .nanmax_with_indices(dim, keepdim)
+            .map_err(_convert_error)?;
+        let values_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(values))?.into();
+        let indices_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(indices))?.into();
+        let tuple = PyTuple::new(py, [values_any, indices_any])?;
+        let tuple_py: Py<PyTuple> = tuple.into();
+        Ok(tuple_py.into())
+    } else {
+        let values: Py<PyTensor> = Py::new(py, tensor.nanmax_values(None, keepdim)?)?;
+        Ok(values.into())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+    let tensor = borrow_tensor(input)?;
+    let py = input.py();
+    if let Some(dim) = dim {
+        let (values, indices) = tensor
+            .tensor()
+            .nanmin_with_indices(dim, keepdim)
+            .map_err(_convert_error)?;
+        let values_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(values))?.into();
+        let indices_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(indices))?.into();
+        let tuple = PyTuple::new(py, [values_any, indices_any])?;
+        let tuple_py: Py<PyTuple> = tuple.into();
+        Ok(tuple_py.into())
+    } else {
+        let values: Py<PyTensor> = Py::new(py, tensor.nanmin_values(None, keepdim)?)?;
+        Ok(values.into())
+    }
 }
 
 #[pyfunction]
@@ -722,6 +787,10 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(log_softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(logsumexp, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nansum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(relu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardshrink, parent)?)?;
     parent.add_function(wrap_pyfunction!(sigmoid, parent)?)?;

@@ -5,7 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{CumprodBackward, CumsumBackward, ProdBackward, SumBackward, add_to_graph},
+    autograd::{
+        CumprodBackward, CumsumBackward, NanMeanBackward, NanSumBackward, ProdBackward,
+        SumBackward, add_to_graph,
+    },
     error::{MinitensorError, Result},
     operations::{
         activation, arithmetic, shape_ops,
@@ -49,6 +52,69 @@ impl QuantileInterpolation {
             }
         }
     }
+}
+
+fn normalize_reduction_dims(dims: Option<Vec<isize>>, ndim: usize) -> Result<Option<Vec<usize>>> {
+    let ndim = ndim as isize;
+    Ok(match dims {
+        Some(dims) => {
+            let mut normalized = Vec::with_capacity(dims.len());
+            for d in dims {
+                let d = if d < 0 { d + ndim } else { d };
+                if d < 0 || d >= ndim {
+                    return Err(MinitensorError::index_error(d, 0, ndim as usize));
+                }
+                normalized.push(d as usize);
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    })
+}
+
+fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
+    let numel = tensor.numel();
+    let mut mask = vec![false; numel];
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let data = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            mask.par_iter_mut()
+                .zip(data.par_iter())
+                .for_each(|(out, &v)| {
+                    *out = !v.is_nan();
+                });
+        }
+        DataType::Float64 => {
+            let data = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            mask.par_iter_mut()
+                .zip(data.par_iter())
+                .for_each(|(out, &v)| {
+                    *out = !v.is_nan();
+                });
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nan reductions are only supported for floating point tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(TensorData::from_vec_bool(mask, tensor.device())),
+        tensor.shape().clone(),
+        DataType::Bool,
+        tensor.device(),
+        false,
+    ))
 }
 
 fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
@@ -2323,6 +2389,84 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
     }
 }
 
+/// NaN-aware sum reduction along specified dimensions
+pub fn nansum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    if !tensor.dtype().is_float() {
+        return sum(tensor, dim, keepdim);
+    }
+
+    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
+    let dims_clone = dim.clone();
+    let needs_mask =
+        tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);
+    let mask = if needs_mask {
+        Some(non_nan_mask(tensor)?)
+    } else {
+        None
+    };
+
+    let result = match dim {
+        None => {
+            let result_shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+
+            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+            match tensor.dtype() {
+                DataType::Float32 => nansum_all_f32(tensor, &mut result_data)?,
+                DataType::Float64 => nansum_all_f64(tensor, &mut result_data)?,
+                _ => unreachable!("nansum only supports floating point tensors"),
+            }
+
+            Tensor::new(
+                Arc::new(result_data),
+                result_shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            )
+        }
+        Some(dims) => {
+            if dims.is_empty() {
+                tensor.clone()
+            } else {
+                let mut result = tensor.clone();
+                if keepdim {
+                    for &d in &dims {
+                        result = nansum_along_dim(&result, d, true)?;
+                    }
+                } else {
+                    for &d in dims.iter().rev() {
+                        result = nansum_along_dim(&result, d, false)?;
+                    }
+                }
+                result
+            }
+        }
+    };
+
+    if result.requires_grad() {
+        let mask = mask.ok_or_else(|| {
+            MinitensorError::internal_error("nansum expected mask for gradient computation")
+        })?;
+        let grad_fn = Arc::new(NanSumBackward {
+            input_id: tensor.id(),
+            input_shape: tensor.shape().dims().to_vec(),
+            dims: dims_clone,
+            keepdim,
+            mask,
+        });
+        let mut result_with_grad = result;
+        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result_with_grad, Some(grad_fn))?;
+        Ok(result_with_grad)
+    } else {
+        Ok(result)
+    }
+}
+
 /// Numerically stable log-sum-exp reduction along specified dimensions
 pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     match tensor.dtype() {
@@ -2737,6 +2881,106 @@ pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
     };
 
     crate::operations::arithmetic::div(&sum_tensor, &divisor)
+}
+
+/// NaN-aware mean reduction along specified dimensions
+pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    if !tensor.dtype().is_float() {
+        return mean(tensor, dim, keepdim);
+    }
+
+    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
+    let dims_clone = dim.clone();
+    let needs_mask =
+        tensor.requires_grad() || dim.as_ref().map(|dims| !dims.is_empty()).unwrap_or(false);
+    let mask = if needs_mask {
+        Some(non_nan_mask(tensor)?)
+    } else {
+        None
+    };
+
+    if let Some(dims) = &dim {
+        if dims.is_empty() {
+            return Ok(tensor.clone());
+        }
+    }
+
+    let (sum, count) = match dim {
+        None => {
+            let result_shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+            let mut sum_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+            let mut count_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+
+            match tensor.dtype() {
+                DataType::Float32 => nanmean_all_f32(tensor, &mut sum_data, &mut count_data)?,
+                DataType::Float64 => nanmean_all_f64(tensor, &mut sum_data, &mut count_data)?,
+                _ => unreachable!("nanmean only supports floating point tensors"),
+            }
+
+            (
+                Tensor::new(
+                    Arc::new(sum_data),
+                    result_shape.clone(),
+                    tensor.dtype(),
+                    tensor.device(),
+                    false,
+                ),
+                Tensor::new(
+                    Arc::new(count_data),
+                    result_shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    false,
+                ),
+            )
+        }
+        Some(dims) => {
+            let mask = mask.as_ref().ok_or_else(|| {
+                MinitensorError::internal_error("nanmean expected mask for count computation")
+            })?;
+            let mut sum = tensor.clone();
+            let mut count = mask.astype(tensor.dtype())?;
+
+            if keepdim {
+                for &d in &dims {
+                    sum = nansum_along_dim(&sum, d, true)?;
+                    count = sum_along_dim(&count, d, true)?;
+                }
+            } else {
+                for &d in dims.iter().rev() {
+                    sum = nansum_along_dim(&sum, d, false)?;
+                    count = sum_along_dim(&count, d, false)?;
+                }
+            }
+            (sum, count)
+        }
+    };
+
+    let result = nanmean_from_sum_count(&sum, &count, tensor.requires_grad())?;
+
+    if result.requires_grad() {
+        let mask = mask.ok_or_else(|| {
+            MinitensorError::internal_error("nanmean expected mask for gradient computation")
+        })?;
+        let grad_fn = Arc::new(NanMeanBackward {
+            input_id: tensor.id(),
+            input_shape: tensor.shape().dims().to_vec(),
+            dims: dims_clone,
+            keepdim,
+            mask,
+            count,
+        });
+        let mut result_with_grad = result;
+        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&result_with_grad, Some(grad_fn))?;
+        Ok(result_with_grad)
+    } else {
+        Ok(result)
+    }
 }
 
 /// Logical all reduction along specified dimension
@@ -3223,16 +3467,112 @@ pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
     }
 }
 
+/// NaN-aware maximum value along specified dimension
+pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    if !tensor.dtype().is_float() {
+        return max(tensor, dim, keepdim);
+    }
+
+    match dim {
+        None => {
+            let result_shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+
+            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+
+            match tensor.dtype() {
+                DataType::Float32 => nanmax_all_f32(tensor, &mut result_data)?,
+                DataType::Float64 => nanmax_all_f64(tensor, &mut result_data)?,
+                _ => unreachable!("nanmax only supports floating point tensors"),
+            }
+
+            Ok(Tensor::new(
+                Arc::new(result_data),
+                result_shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            ))
+        }
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            let (values, _) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
+            Ok(values)
+        }
+    }
+}
+
+/// NaN-aware minimum value along specified dimension
+pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    if !tensor.dtype().is_float() {
+        return min(tensor, dim, keepdim);
+    }
+
+    match dim {
+        None => {
+            let result_shape = if keepdim {
+                Shape::new(vec![1; tensor.ndim()])
+            } else {
+                Shape::scalar()
+            };
+
+            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+
+            match tensor.dtype() {
+                DataType::Float32 => nanmin_all_f32(tensor, &mut result_data)?,
+                DataType::Float64 => nanmin_all_f64(tensor, &mut result_data)?,
+                _ => unreachable!("nanmin only supports floating point tensors"),
+            }
+
+            Ok(Tensor::new(
+                Arc::new(result_data),
+                result_shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            ))
+        }
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            let (values, _) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
+            Ok(values)
+        }
+    }
+}
+
 /// Maximum values and their indices along specified dimension
 pub fn max_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = normalize_dim(dim, tensor.ndim())?;
     max_along_dim_with_indices(tensor, d, keepdim)
 }
 
+/// NaN-aware maximum values and their indices along specified dimension
+pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
+    if !tensor.dtype().is_float() {
+        return max_with_indices(tensor, dim, keepdim);
+    }
+
+    let d = normalize_dim(dim, tensor.ndim())?;
+    nanmax_along_dim_with_indices(tensor, d, keepdim)
+}
+
 /// Minimum values and their indices along specified dimension
 pub fn min_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = normalize_dim(dim, tensor.ndim())?;
     min_along_dim_with_indices(tensor, d, keepdim)
+}
+
+/// NaN-aware minimum values and their indices along specified dimension
+pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
+    if !tensor.dtype().is_float() {
+        return min_with_indices(tensor, dim, keepdim);
+    }
+
+    let d = normalize_dim(dim, tensor.ndim())?;
+    nanmin_along_dim_with_indices(tensor, d, keepdim)
 }
 
 /// Argument of maximum value along specified dimension
@@ -4229,6 +4569,209 @@ fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
+fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let sum: f32 = data
+        .par_iter()
+        .map(|&v| if v.is_nan() { 0.0 } else { v })
+        .sum();
+
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+    result_slice[0] = sum;
+    Ok(())
+}
+
+fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let sum: f64 = data
+        .par_iter()
+        .map(|&v| if v.is_nan() { 0.0 } else { v })
+        .sum();
+
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+    result_slice[0] = sum;
+    Ok(())
+}
+
+fn nanmean_all_f32(
+    tensor: &Tensor,
+    sum_data: &mut TensorData,
+    count_data: &mut TensorData,
+) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let (sum, count) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (0.0, 0usize)
+            } else {
+                (v, 1usize)
+            }
+        })
+        .reduce(|| (0.0, 0usize), |(s1, c1), (s2, c2)| (s1 + s2, c1 + c2));
+
+    let sum_slice = sum_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+    let count_slice = count_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+
+    sum_slice[0] = sum;
+    count_slice[0] = count as f32;
+    Ok(())
+}
+
+fn nanmean_all_f64(
+    tensor: &Tensor,
+    sum_data: &mut TensorData,
+    count_data: &mut TensorData,
+) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let (sum, count) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (0.0, 0usize)
+            } else {
+                (v, 1usize)
+            }
+        })
+        .reduce(|| (0.0, 0usize), |(s1, c1), (s2, c2)| (s1 + s2, c1 + c2));
+
+    let sum_slice = sum_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+    let count_slice = count_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+
+    sum_slice[0] = sum;
+    count_slice[0] = count as f64;
+    Ok(())
+}
+
+fn nanmean_from_sum_count(sum: &Tensor, count: &Tensor, requires_grad: bool) -> Result<Tensor> {
+    if sum.dtype() != count.dtype() || sum.shape() != count.shape() {
+        return Err(MinitensorError::invalid_operation(
+            "nanmean requires sum and count tensors with matching dtype and shape",
+        ));
+    }
+
+    let numel = sum.numel();
+    let mut result_data = TensorData::zeros_on_device(numel, sum.dtype(), sum.device());
+
+    match sum.dtype() {
+        DataType::Float32 => {
+            let sum_slice = sum
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let count_slice = count
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let out = result_data
+                .as_f32_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            out.par_iter_mut()
+                .zip(sum_slice.par_iter().zip(count_slice.par_iter()))
+                .for_each(|(dst, (&s, &c))| {
+                    *dst = if c == 0.0 { f32::NAN } else { s / c };
+                });
+        }
+        DataType::Float64 => {
+            let sum_slice = sum
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let count_slice = count
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let out = result_data
+                .as_f64_slice_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            out.par_iter_mut()
+                .zip(sum_slice.par_iter().zip(count_slice.par_iter()))
+                .for_each(|(dst, (&s, &c))| {
+                    *dst = if c == 0.0 { f64::NAN } else { s / c };
+                });
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nanmean only supports floating point tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        sum.shape().clone(),
+        sum.dtype(),
+        sum.device(),
+        requires_grad,
+    ))
+}
+
+#[inline]
+pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let input_shape = tensor.shape().dims();
+    let mut output_shape = input_shape.to_vec();
+
+    if keepdim {
+        output_shape[dim] = 1;
+    } else {
+        output_shape.remove(dim);
+    }
+
+    let output_shape_obj = Shape::new(output_shape);
+    let mut result_data =
+        TensorData::zeros_on_device(output_shape_obj.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => nansum_along_dim_f32(tensor, &mut result_data, dim)?,
+        DataType::Float64 => nansum_along_dim_f64(tensor, &mut result_data, dim)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nansum only supports floating point tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        output_shape_obj,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
 #[inline]
 pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
@@ -4348,6 +4891,90 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     Ok(())
 }
 
+fn nansum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+
+    let input_shape = tensor.shape().dims();
+
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = input_data.iter().filter(|v| !v.is_nan()).sum::<f32>();
+    } else if tensor.ndim() == 2 {
+        let cols = input_shape[1];
+        match dim {
+            0 => {
+                let sums = input_data
+                    .par_chunks_exact(cols)
+                    .fold(
+                        || vec![0f32; cols],
+                        |mut acc, row| {
+                            for (a, &v) in acc.iter_mut().zip(row) {
+                                if !v.is_nan() {
+                                    *a += v;
+                                }
+                            }
+                            acc
+                        },
+                    )
+                    .reduce(
+                        || vec![0f32; cols],
+                        |mut a, b| {
+                            for (x, y) in a.iter_mut().zip(b) {
+                                *x += y;
+                            }
+                            a
+                        },
+                    );
+                result_slice.copy_from_slice(&sums);
+            }
+            1 => {
+                result_slice
+                    .par_iter_mut()
+                    .zip(input_data.par_chunks_exact(cols))
+                    .for_each(|(out, row)| {
+                        *out = row.iter().filter(|v| !v.is_nan()).sum::<f32>();
+                    });
+            }
+            _ => {
+                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+            }
+        }
+    } else {
+        let dim_size = input_shape[dim];
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut sum_val = 0f32;
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    let value = input_data[base];
+                    if !value.is_nan() {
+                        sum_val += value;
+                    }
+                    base += inner;
+                }
+                *out = sum_val;
+            });
+    }
+
+    Ok(())
+}
+
 fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
     let input_data = tensor
         .data()
@@ -4418,6 +5045,90 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
                 let mut base = o * outer_stride + r;
                 for _ in 0..dim_size {
                     sum_val += input_data[base];
+                    base += inner;
+                }
+                *out = sum_val;
+            });
+    }
+
+    Ok(())
+}
+
+fn nansum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+    let input_data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+
+    let input_shape = tensor.shape().dims();
+
+    if tensor.ndim() == 1 {
+        if dim != 0 {
+            return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        }
+        result_slice[0] = input_data.iter().filter(|v| !v.is_nan()).sum::<f64>();
+    } else if tensor.ndim() == 2 {
+        let cols = input_shape[1];
+        match dim {
+            0 => {
+                let sums = input_data
+                    .par_chunks_exact(cols)
+                    .fold(
+                        || vec![0f64; cols],
+                        |mut acc, row| {
+                            for (a, &v) in acc.iter_mut().zip(row) {
+                                if !v.is_nan() {
+                                    *a += v;
+                                }
+                            }
+                            acc
+                        },
+                    )
+                    .reduce(
+                        || vec![0f64; cols],
+                        |mut a, b| {
+                            for (x, y) in a.iter_mut().zip(b) {
+                                *x += y;
+                            }
+                            a
+                        },
+                    );
+                result_slice.copy_from_slice(&sums);
+            }
+            1 => {
+                result_slice
+                    .par_iter_mut()
+                    .zip(input_data.par_chunks_exact(cols))
+                    .for_each(|(out, row)| {
+                        *out = row.iter().filter(|v| !v.is_nan()).sum::<f64>();
+                    });
+            }
+            _ => {
+                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+            }
+        }
+    } else {
+        let dim_size = input_shape[dim];
+        let inner = input_shape[dim + 1..].iter().product::<usize>();
+        let outer_stride = dim_size * inner;
+
+        result_slice
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, out)| {
+                let o = idx / inner;
+                let r = idx % inner;
+                let mut sum_val = 0f64;
+                let mut base = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    let value = input_data[base];
+                    if !value.is_nan() {
+                        sum_val += value;
+                    }
                     base += inner;
                 }
                 *out = sum_val;
@@ -4949,6 +5660,138 @@ fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
 
     result_slice[0] = min_val;
+    Ok(())
+}
+
+fn nanmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let (max_val, found) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (f32::NEG_INFINITY, false)
+            } else {
+                (v, true)
+            }
+        })
+        .reduce(
+            || (f32::NEG_INFINITY, false),
+            |(a_val, a_found), (b_val, b_found)| match (a_found, b_found) {
+                (true, true) => (a_val.max(b_val), true),
+                (true, false) => (a_val, true),
+                (false, true) => (b_val, true),
+                (false, false) => (f32::NEG_INFINITY, false),
+            },
+        );
+
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+
+    result_slice[0] = if found { max_val } else { f32::NAN };
+    Ok(())
+}
+
+fn nanmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let (max_val, found) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (f64::NEG_INFINITY, false)
+            } else {
+                (v, true)
+            }
+        })
+        .reduce(
+            || (f64::NEG_INFINITY, false),
+            |(a_val, a_found), (b_val, b_found)| match (a_found, b_found) {
+                (true, true) => (a_val.max(b_val), true),
+                (true, false) => (a_val, true),
+                (false, true) => (b_val, true),
+                (false, false) => (f64::NEG_INFINITY, false),
+            },
+        );
+
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+
+    result_slice[0] = if found { max_val } else { f64::NAN };
+    Ok(())
+}
+
+fn nanmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f32_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+
+    let (min_val, found) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (f32::INFINITY, false)
+            } else {
+                (v, true)
+            }
+        })
+        .reduce(
+            || (f32::INFINITY, false),
+            |(a_val, a_found), (b_val, b_found)| match (a_found, b_found) {
+                (true, true) => (a_val.min(b_val), true),
+                (true, false) => (a_val, true),
+                (false, true) => (b_val, true),
+                (false, false) => (f32::INFINITY, false),
+            },
+        );
+
+    let result_slice = result_data
+        .as_f32_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+
+    result_slice[0] = if found { min_val } else { f32::NAN };
+    Ok(())
+}
+
+fn nanmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_f64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+
+    let (min_val, found) = data
+        .par_iter()
+        .map(|&v| {
+            if v.is_nan() {
+                (f64::INFINITY, false)
+            } else {
+                (v, true)
+            }
+        })
+        .reduce(
+            || (f64::INFINITY, false),
+            |(a_val, a_found), (b_val, b_found)| match (a_found, b_found) {
+                (true, true) => (a_val.min(b_val), true),
+                (true, false) => (a_val, true),
+                (false, true) => (b_val, true),
+                (false, false) => (f64::INFINITY, false),
+            },
+        );
+
+    let result_slice = result_data
+        .as_f64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+
+    result_slice[0] = if found { min_val } else { f64::NAN };
     Ok(())
 }
 
@@ -5650,6 +6493,102 @@ fn max_along_dim_with_indices(
     ))
 }
 
+fn nanmax_along_dim_with_indices(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
+    let layout = reduction_layout(tensor, dim, keepdim)?;
+    let mut values_data =
+        TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
+    let mut indices_data = TensorData::zeros_on_device(
+        layout.output_shape.numel(),
+        DataType::Int64,
+        tensor.device(),
+    );
+
+    let indices = indices_data
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            for o in 0..layout.outer {
+                for r in 0..layout.inner {
+                    let mut max_val = f32::NAN;
+                    let mut max_idx = 0usize;
+                    for d in 0..layout.dim_size {
+                        let idx = o * layout.outer_stride + d * layout.inner + r;
+                        let val = input[idx];
+                        if !val.is_nan() && (max_val.is_nan() || val > max_val) {
+                            max_val = val;
+                            max_idx = d;
+                        }
+                    }
+                    let out_idx = o * layout.inner + r;
+                    values[out_idx] = max_val;
+                    indices[out_idx] = max_idx as i64;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            for o in 0..layout.outer {
+                for r in 0..layout.inner {
+                    let mut max_val = f64::NAN;
+                    let mut max_idx = 0usize;
+                    for d in 0..layout.dim_size {
+                        let idx = o * layout.outer_stride + d * layout.inner + r;
+                        let val = input[idx];
+                        if !val.is_nan() && (max_val.is_nan() || val > max_val) {
+                            max_val = val;
+                            max_idx = d;
+                        }
+                    }
+                    let out_idx = o * layout.inner + r;
+                    values[out_idx] = max_val;
+                    indices[out_idx] = max_idx as i64;
+                }
+            }
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nanmax only supports floating point tensors",
+            ));
+        }
+    }
+
+    Ok((
+        Tensor::new(
+            Arc::new(values_data),
+            layout.output_shape.clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        ),
+        Tensor::new(
+            Arc::new(indices_data),
+            layout.output_shape,
+            DataType::Int64,
+            tensor.device(),
+            false,
+        ),
+    ))
+}
+
 fn min_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
@@ -5798,6 +6737,102 @@ fn min_along_dim_with_indices(
                     indices[out_idx] = min_idx as i64;
                 }
             }
+        }
+    }
+
+    Ok((
+        Tensor::new(
+            Arc::new(values_data),
+            layout.output_shape.clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        ),
+        Tensor::new(
+            Arc::new(indices_data),
+            layout.output_shape,
+            DataType::Int64,
+            tensor.device(),
+            false,
+        ),
+    ))
+}
+
+fn nanmin_along_dim_with_indices(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
+    let layout = reduction_layout(tensor, dim, keepdim)?;
+    let mut values_data =
+        TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
+    let mut indices_data = TensorData::zeros_on_device(
+        layout.output_shape.numel(),
+        DataType::Int64,
+        tensor.device(),
+    );
+
+    let indices = indices_data
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            for o in 0..layout.outer {
+                for r in 0..layout.inner {
+                    let mut min_val = f32::NAN;
+                    let mut min_idx = 0usize;
+                    for d in 0..layout.dim_size {
+                        let idx = o * layout.outer_stride + d * layout.inner + r;
+                        let val = input[idx];
+                        if !val.is_nan() && (min_val.is_nan() || val < min_val) {
+                            min_val = val;
+                            min_idx = d;
+                        }
+                    }
+                    let out_idx = o * layout.inner + r;
+                    values[out_idx] = min_val;
+                    indices[out_idx] = min_idx as i64;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            for o in 0..layout.outer {
+                for r in 0..layout.inner {
+                    let mut min_val = f64::NAN;
+                    let mut min_idx = 0usize;
+                    for d in 0..layout.dim_size {
+                        let idx = o * layout.outer_stride + d * layout.inner + r;
+                        let val = input[idx];
+                        if !val.is_nan() && (min_val.is_nan() || val < min_val) {
+                            min_val = val;
+                            min_idx = d;
+                        }
+                    }
+                    let out_idx = o * layout.inner + r;
+                    values[out_idx] = min_val;
+                    indices[out_idx] = min_idx as i64;
+                }
+            }
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "nanmin only supports floating point tensors",
+            ));
         }
     }
 
