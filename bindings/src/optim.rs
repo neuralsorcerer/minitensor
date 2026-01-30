@@ -22,7 +22,7 @@ pub struct PyOptimizer {
 }
 
 enum OptimizerType {
-    SGD(SGD),
+    Sgd(SGD),
     Adam(Adam),
     AdamW(AdamW),
     RMSprop(RMSprop),
@@ -48,7 +48,7 @@ impl PyOptimizer {
                 .collect();
 
             match &mut self.inner {
-                OptimizerType::SGD(opt) => opt.step(tensor_refs.as_mut_slice()),
+                OptimizerType::Sgd(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::AdamW(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
@@ -83,7 +83,7 @@ impl PyOptimizer {
                 .collect();
 
             match &mut self.inner {
-                OptimizerType::SGD(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
+                OptimizerType::Sgd(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::AdamW(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
@@ -98,7 +98,7 @@ impl PyOptimizer {
     #[getter]
     fn lr(&self) -> f64 {
         match &self.inner {
-            OptimizerType::SGD(optimizer) => optimizer.learning_rate(),
+            OptimizerType::Sgd(optimizer) => optimizer.learning_rate(),
             OptimizerType::Adam(optimizer) => optimizer.learning_rate(),
             OptimizerType::AdamW(optimizer) => optimizer.learning_rate(),
             OptimizerType::RMSprop(optimizer) => optimizer.learning_rate(),
@@ -109,7 +109,7 @@ impl PyOptimizer {
     #[setter]
     fn set_lr(&mut self, lr: f64) {
         match &mut self.inner {
-            OptimizerType::SGD(optimizer) => optimizer.set_learning_rate(lr),
+            OptimizerType::Sgd(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::Adam(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::AdamW(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::RMSprop(optimizer) => optimizer.set_learning_rate(lr),
@@ -119,7 +119,7 @@ impl PyOptimizer {
     /// String representation
     fn __repr__(&self) -> String {
         match &self.inner {
-            OptimizerType::SGD(optimizer) => format!(
+            OptimizerType::Sgd(optimizer) => format!(
                 "SGD(lr={}, momentum={})",
                 optimizer.learning_rate(),
                 optimizer.momentum()
@@ -154,7 +154,7 @@ impl PyOptimizer {
 impl PyOptimizer {
     fn from_sgd(sgd: SGD, parameters: Vec<Py<PyAny>>) -> Self {
         Self {
-            inner: OptimizerType::SGD(sgd),
+            inner: OptimizerType::Sgd(sgd),
             parameters,
         }
     }
@@ -187,10 +187,10 @@ fn ensure_tensor_like(value: &Bound<PyAny>) -> PyResult<()> {
     }
 
     let py = value.py();
-    if let Ok(inner) = value.getattr(intern!(py, "_tensor")) {
-        if inner.extract::<PyRef<PyTensor>>().is_ok() {
-            return Ok(());
-        }
+    if let Ok(inner) = value.getattr(intern!(py, "_tensor"))
+        && inner.extract::<PyRef<PyTensor>>().is_ok()
+    {
+        return Ok(());
     }
 
     Err(PyTypeError::new_err(
@@ -245,12 +245,10 @@ fn resolve_betas(
     beta1: Option<f64>,
     beta2: Option<f64>,
 ) -> PyResult<(f64, f64)> {
-    if let Some(_) = betas {
-        if beta1.is_some() || beta2.is_some() {
-            return Err(PyTypeError::new_err(
-                "specify either betas tuple or beta1/beta2, not both",
-            ));
-        }
+    if betas.is_some() && (beta1.is_some() || beta2.is_some()) {
+        return Err(PyTypeError::new_err(
+            "specify either betas tuple or beta1/beta2, not both",
+        ));
     }
 
     let (beta1, beta2) = if let Some((b1, b2)) = betas {
@@ -322,7 +320,7 @@ impl PySGD {
     #[getter]
     fn momentum(slf: PyRef<Self>) -> PyResult<f64> {
         let optimizer = slf.as_ref();
-        if let OptimizerType::SGD(sgd) = &optimizer.inner {
+        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
             Ok(sgd.momentum())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
@@ -333,7 +331,7 @@ impl PySGD {
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
         let optimizer = slf.as_ref();
-        if let OptimizerType::SGD(sgd) = &optimizer.inner {
+        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
             Ok(sgd.weight_decay())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
@@ -344,7 +342,7 @@ impl PySGD {
     #[getter]
     fn nesterov(slf: PyRef<Self>) -> PyResult<bool> {
         let optimizer = slf.as_ref();
-        if let OptimizerType::SGD(sgd) = &optimizer.inner {
+        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
             Ok(sgd.is_nesterov())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
@@ -371,6 +369,7 @@ impl PyAdam {
             weight_decay=0.0
         )
     )]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,
@@ -471,6 +470,7 @@ impl PyAdamW {
             weight_decay=0.01
         )
     )]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,
@@ -571,6 +571,7 @@ impl PyRMSprop {
             centered=false
         )
     )]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,

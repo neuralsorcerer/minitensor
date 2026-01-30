@@ -29,6 +29,7 @@ use pyo3::types::{
 };
 use pyo3::{Py, PyRefMut};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
@@ -164,7 +165,7 @@ impl ShapeSequence {
             }
         } else if let Ok(slice) = index.cast::<PySlice>() {
             let indices = slice.indices(self.dims.len() as isize)?;
-            let mut values = Vec::with_capacity(indices.slicelength as usize);
+            let mut values = Vec::with_capacity(indices.slicelength);
             let mut current = indices.start;
             for _ in 0..indices.slicelength {
                 values.push(self.dims[current as usize]);
@@ -228,10 +229,10 @@ impl PyTensor {
             return Ok(py_tensor);
         }
 
-        if let Ok(inner_attr) = value.getattr(intern!(value.py(), "_tensor")) {
-            if let Ok(py_tensor) = inner_attr.extract::<PyTensor>() {
-                return Ok(py_tensor);
-            }
+        if let Ok(inner_attr) = value.getattr(intern!(value.py(), "_tensor"))
+            && let Ok(py_tensor) = inner_attr.extract::<PyTensor>()
+        {
+            return Ok(py_tensor);
         }
 
         let tensor =
@@ -531,7 +532,7 @@ impl PyTensor {
     pub fn roll(&self, shifts: &Bound<PyAny>, dims: Option<&Bound<PyAny>>) -> PyResult<Self> {
         let shift_vec = normalize_roll_shifts(shifts)?;
         let dims_vec = normalize_optional_axes(dims)?;
-        let dims_ref = dims_vec.as_ref().map(|d| d.as_slice());
+        let dims_ref = dims_vec.as_deref();
         let result = engine::operations::shape_ops::roll(&self.inner, &shift_vec, dims_ref)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
@@ -589,17 +590,17 @@ impl PyTensor {
             return Ok(Self::from_tensor(result));
         }
 
-        if let Ok(bound_attr) = repeats.getattr("_tensor") {
-            if let Ok(py_tensor) = bound_attr.extract::<PyRef<PyTensor>>() {
-                let result = engine::operations::shape_ops::repeat_interleave(
-                    &self.inner,
-                    RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
-                    dim,
-                    output_size,
-                )
-                .map_err(_convert_error)?;
-                return Ok(Self::from_tensor(result));
-            }
+        if let Ok(bound_attr) = repeats.getattr("_tensor")
+            && let Ok(py_tensor) = bound_attr.extract::<PyRef<PyTensor>>()
+        {
+            let result = engine::operations::shape_ops::repeat_interleave(
+                &self.inner,
+                RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
+                dim,
+                output_size,
+            )
+            .map_err(_convert_error)?;
+            return Ok(Self::from_tensor(result));
         }
 
         Err(PyTypeError::new_err(
@@ -697,12 +698,12 @@ impl PyTensor {
             } else if let Ok(string_value) = arg0.extract::<String>() {
                 match dtype::parse_dtype(&string_value) {
                     Ok(dtype) => {
-                        if let Some(existing) = dtype_spec {
-                            if existing != dtype {
-                                return Err(PyTypeError::new_err(
-                                    "dtype specified both positionally and via keyword",
-                                ));
-                            }
+                        if let Some(existing) = dtype_spec
+                            && existing != dtype
+                        {
+                            return Err(PyTypeError::new_err(
+                                "dtype specified both positionally and via keyword",
+                            ));
                         }
                         dtype_spec = Some(dtype);
                     }
@@ -730,18 +731,18 @@ impl PyTensor {
         let mut result = self.inner.clone();
         let mut mutated = false;
 
-        if let Some(dtype) = dtype_spec {
-            if result.dtype() != dtype {
-                result = result.astype(dtype).map_err(_convert_error)?;
-                mutated = true;
-            }
+        if let Some(dtype) = dtype_spec
+            && result.dtype() != dtype
+        {
+            result = result.astype(dtype).map_err(_convert_error)?;
+            mutated = true;
         }
 
-        if let Some(device) = device_spec {
-            if result.device() != device {
-                result = result.to(device).map_err(_convert_error)?;
-                mutated = true;
-            }
+        if let Some(device) = device_spec
+            && result.device() != device
+        {
+            result = result.to(device).map_err(_convert_error)?;
+            mutated = true;
         }
 
         if mutated {
@@ -1918,12 +1919,11 @@ impl PyTensor {
             return py_not_implemented(py);
         }
 
-        if let Some(mapping) = kwargs {
-            if let Some(out) = mapping.get_item("out")? {
-                if !out.is_none() {
-                    return py_not_implemented(py);
-                }
-            }
+        if let Some(mapping) = kwargs
+            && let Some(out) = mapping.get_item("out")?
+            && !out.is_none()
+        {
+            return py_not_implemented(py);
         }
 
         let mut operands: Vec<Tensor> = Vec::with_capacity(inputs.len());
@@ -2363,6 +2363,7 @@ impl PyTensor {
 
     #[staticmethod]
     #[pyo3(signature = (*shape, mean=0.0, std=1.0, lower=None, upper=None, dtype=None, device=None, requires_grad=false))]
+    #[allow(clippy::too_many_arguments)]
     fn truncated_normal(
         shape: &Bound<PyTuple>,
         mean: f64,
@@ -2688,6 +2689,7 @@ impl PyTensor {
 
     #[staticmethod]
     #[pyo3(signature = (input, mean=0.0, std=1.0, lower=None, upper=None, dtype=None, device=None, requires_grad=None))]
+    #[allow(clippy::too_many_arguments)]
     fn truncated_normal_like(
         input: &Bound<PyAny>,
         mean: f64,
@@ -2934,16 +2936,12 @@ impl PyTensor {
             return Ok(Self::from_tensor(tensor));
         }
 
-        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor")) {
-            if let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>() {
-                let tensor = prepare_new_tensor_from_existing(
-                    py_tensor.tensor(),
-                    dtype,
-                    device,
-                    requires_grad,
-                )?;
-                return Ok(Self::from_tensor(tensor));
-            }
+        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor"))
+            && let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>()
+        {
+            let tensor =
+                prepare_new_tensor_from_existing(py_tensor.tensor(), dtype, device, requires_grad)?;
+            return Ok(Self::from_tensor(tensor));
         }
 
         let tensor = convert_python_data_to_tensor(data, dtype, device, requires_grad)?;
@@ -3083,7 +3081,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let m = m.unwrap_or(n);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let requires_grad = requires_grad.unwrap_or(false);
 
         let tensor = create_eye_tensor(n, m, dtype, device, requires_grad)?;
@@ -3139,31 +3137,31 @@ impl PyTensor {
             return Ok(Self::from_tensor(tensor));
         }
 
-        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor")) {
-            if let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>() {
-                let source = py_tensor.tensor();
-                let target_dtype = match dtype {
-                    Some(name) => dtype::parse_dtype(name)?,
-                    None => source.dtype(),
-                };
-                let target_device = device
-                    .map(|d| d.device())
-                    .unwrap_or_else(|| source.device());
-                let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
-                let tensor = adapt_tensor_for_as_tensor(
-                    source,
-                    target_dtype,
-                    target_device,
-                    target_requires_grad,
-                    copy,
-                )?;
-                return Ok(Self::from_tensor(tensor));
-            }
+        if let Ok(inner_attr) = data.getattr(intern!(data.py(), "_tensor"))
+            && let Ok(py_tensor) = inner_attr.extract::<PyRef<PyTensor>>()
+        {
+            let source = py_tensor.tensor();
+            let target_dtype = match dtype {
+                Some(name) => dtype::parse_dtype(name)?,
+                None => source.dtype(),
+            };
+            let target_device = device
+                .map(|d| d.device())
+                .unwrap_or_else(|| source.device());
+            let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
+            let tensor = adapt_tensor_for_as_tensor(
+                source,
+                target_dtype,
+                target_device,
+                target_requires_grad,
+                copy,
+            )?;
+            return Ok(Self::from_tensor(tensor));
         }
 
         let target_dtype = match dtype {
             Some(name) => dtype::parse_dtype(name)?,
-            None => infer_python_value_dtype(data).unwrap_or_else(|| dtype::default_dtype()),
+            None => infer_python_value_dtype(data).unwrap_or_else(dtype::default_dtype),
         };
 
         let target_device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
@@ -3294,7 +3292,7 @@ impl PyTensor {
             .iter()
             .map(|obj| {
                 let t = PyTensor::from_python_value(&obj)?;
-                t.inner.unsqueeze(axis as isize).map_err(_convert_error)
+                t.inner.unsqueeze(axis).map_err(_convert_error)
             })
             .collect::<PyResult<_>>()?;
 
@@ -3322,7 +3320,7 @@ impl PyTensor {
     /// Split tensor into multiple sub-tensors of equal size (``chunk``)
     #[pyo3(signature = (sections, dim=0))]
     pub fn chunk(&self, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
-        if sections <= 0 {
+        if sections == 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Sections must be greater than zero",
             ));
@@ -3345,7 +3343,7 @@ impl PyTensor {
         }
 
         let chunk_size = dim_size / sections;
-        let section_vec = vec![chunk_size as usize; sections as usize];
+        let section_vec = vec![chunk_size; sections];
         self.split_with_sections(section_vec, axis as usize)
     }
 
@@ -3467,7 +3465,7 @@ fn normalize_variadic_isize_args(tuple: &Bound<PyTuple>, arg_name: &str) -> PyRe
         let first = tuple.get_item(0)?;
 
         if let Ok(nested) = first.cast::<PyTuple>() {
-            return normalize_variadic_isize_args(&nested, arg_name);
+            return normalize_variadic_isize_args(nested, arg_name);
         }
 
         if let Ok(list) = first.cast::<PyList>() {
@@ -3530,7 +3528,7 @@ fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usi
     if shape.len() == 1 {
         let first = shape.get_item(0)?;
         if let Ok(tuple) = first.cast::<PyTuple>() {
-            return parse_shape_tuple(&tuple, arg_name);
+            return parse_shape_tuple(tuple, arg_name);
         }
         if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
@@ -3561,7 +3559,7 @@ fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usi
 
 fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
     if let Ok(tuple) = obj.cast::<PyTuple>() {
-        return parse_shape_tuple(&tuple, arg_name);
+        return parse_shape_tuple(tuple, arg_name);
     }
 
     if let Ok(list) = obj.cast::<PyList>() {
@@ -3630,7 +3628,7 @@ fn normalize_optional_axes(dim: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<is
     }
 
     if let Ok(sequence) = obj.cast::<PySequence>() {
-        let length = sequence.len()? as usize;
+        let length = sequence.len()?;
         let mut axes = Vec::with_capacity(length);
         for index in 0..length {
             let item = sequence.get_item(index)?;
@@ -3661,10 +3659,9 @@ fn is_bool_axis(obj: &Bound<PyAny>) -> PyResult<bool> {
         let numpy = PyModule::import(py, "numpy")?;
         let bool_obj = numpy.getattr("bool_")?;
         Ok(bool_obj.unbind())
-    }) {
-        if obj.is_instance(&numpy_bool.bind(py))? {
-            return Ok(true);
-        }
+    }) && obj.is_instance(numpy_bool.bind(py))?
+    {
+        return Ok(true);
     }
 
     Ok(false)
@@ -3709,30 +3706,29 @@ fn convert_python_data_to_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     // First try NumPy array conversion for any supported dtype
-    if let Ok(numpy_module) = PyModule::import(data.py(), "numpy") {
-        if let Ok(ndarray_type) = numpy_module.getattr("ndarray") {
-            if data.is_instance(&ndarray_type)? {
-                let maybe_tensor = panic::catch_unwind(AssertUnwindSafe(|| {
-                    convert_numpy_to_tensor(data, requires_grad)
-                }));
+    if let Ok(numpy_module) = PyModule::import(data.py(), "numpy")
+        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
+        && data.is_instance(&ndarray_type)?
+    {
+        let maybe_tensor = panic::catch_unwind(AssertUnwindSafe(|| {
+            convert_numpy_to_tensor(data, requires_grad)
+        }));
 
-                match maybe_tensor {
-                    Ok(Ok(tensor)) => {
-                        let tensor = if tensor.dtype() != dtype {
-                            tensor.astype(dtype).map_err(_convert_error)?
-                        } else {
-                            tensor
-                        };
-                        return Ok(tensor);
-                    }
-                    Ok(Err(err)) => {
-                        return Err(err);
-                    }
-                    Err(_) => {
-                        // Fall back to the slower Python list conversion path
-                        // when the NumPy capsule isn't available.
-                    }
-                }
+        match maybe_tensor {
+            Ok(Ok(tensor)) => {
+                let tensor = if tensor.dtype() != dtype {
+                    tensor.astype(dtype).map_err(_convert_error)?
+                } else {
+                    tensor
+                };
+                return Ok(tensor);
+            }
+            Ok(Err(err)) => {
+                return Err(err);
+            }
+            Err(_) => {
+                // Fall back to the slower Python list conversion path
+                // when the NumPy capsule isn't available.
             }
         }
     }
@@ -3907,34 +3903,28 @@ fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Te
         return Ok(py_tensor.inner.clone());
     }
 
-    if let Ok(inner) = value.getattr("_tensor") {
-        if let Ok(py_tensor) = inner.extract::<PyTensor>() {
-            return Ok(py_tensor.inner.clone());
-        }
+    if let Ok(inner) = value.getattr("_tensor")
+        && let Ok(py_tensor) = inner.extract::<PyTensor>()
+    {
+        return Ok(py_tensor.inner.clone());
     }
 
-    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy") {
-        if let Ok(ndarray_type) = numpy_module.getattr("ndarray") {
-            if value.is_instance(&ndarray_type)? {
-                if let Ok(dtype_obj) = value.getattr("dtype") {
-                    let dtype_str = dtype_obj.str()?.to_str()?.to_ascii_lowercase();
-                    if let Ok(array_dtype) = dtype::parse_dtype(&dtype_str) {
-                        return convert_python_data_to_tensor(
-                            value,
-                            array_dtype,
-                            reference.device(),
-                            false,
-                        );
-                    }
-                }
+    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy")
+        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
+        && value.is_instance(&ndarray_type)?
+    {
+        if let Ok(dtype_obj) = value.getattr("dtype") {
+            let dtype_str = dtype_obj.str()?.to_str()?.to_ascii_lowercase();
+            if let Ok(array_dtype) = dtype::parse_dtype(&dtype_str) {
                 return convert_python_data_to_tensor(
                     value,
-                    reference.dtype(),
+                    array_dtype,
                     reference.device(),
                     false,
                 );
             }
         }
+        return convert_python_data_to_tensor(value, reference.dtype(), reference.device(), false);
     }
 
     if let Ok(py_tensor) = PyTensor::from_python_value(value) {
@@ -4001,17 +3991,17 @@ fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor>
         return Ok(tensor);
     }
 
-    if let Ok(inner) = value.getattr("_tensor") {
-        if let Ok(py_tensor) = inner.extract::<PyTensor>() {
-            let mut tensor = py_tensor.inner.clone();
-            if tensor.dtype() != DataType::Bool {
-                return Err(PyTypeError::new_err("mask must be a bool tensor"));
-            }
-            if tensor.device() != device {
-                tensor = tensor.to(device).map_err(_convert_error)?;
-            }
-            return Ok(tensor);
+    if let Ok(inner) = value.getattr("_tensor")
+        && let Ok(py_tensor) = inner.extract::<PyTensor>()
+    {
+        let mut tensor = py_tensor.inner.clone();
+        if tensor.dtype() != DataType::Bool {
+            return Err(PyTypeError::new_err("mask must be a bool tensor"));
         }
+        if tensor.device() != device {
+            tensor = tensor.to(device).map_err(_convert_error)?;
+        }
+        return Ok(tensor);
     }
 
     if let Ok(value_bool) = value.extract::<bool>() {
@@ -4025,14 +4015,7 @@ fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor>
         ));
     }
 
-    let mut tensor = convert_python_data_to_tensor(value, DataType::Bool, device, false)?;
-    if tensor.dtype() != DataType::Bool {
-        tensor = tensor.astype(DataType::Bool).map_err(_convert_error)?;
-    }
-    if tensor.device() != device {
-        tensor = tensor.to(device).map_err(_convert_error)?;
-    }
-    Ok(tensor)
+    convert_python_data_to_tensor(value, DataType::Bool, device, false)
 }
 
 fn promote_dtypes(a: DataType, b: DataType) -> DataType {
@@ -4056,10 +4039,10 @@ fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
         return Some(py_tensor.inner.dtype());
     }
 
-    if let Ok(inner) = value.getattr("_tensor") {
-        if let Ok(py_tensor) = inner.extract::<PyTensor>() {
-            return Some(py_tensor.inner.dtype());
-        }
+    if let Ok(inner) = value.getattr("_tensor")
+        && let Ok(py_tensor) = inner.extract::<PyTensor>()
+    {
+        return Some(py_tensor.inner.dtype());
     }
 
     if value.extract::<bool>().is_ok() {
@@ -4074,20 +4057,14 @@ fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
         return Some(dtype::default_dtype());
     }
 
-    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy") {
-        if let Ok(ndarray_type) = numpy_module.getattr("ndarray") {
-            if let Ok(true) = value.is_instance(&ndarray_type) {
-                if let Ok(dtype_obj) = value.getattr("dtype") {
-                    if let Ok(dtype_str) = dtype_obj.str() {
-                        if let Ok(dtype) =
-                            dtype::parse_dtype(&dtype_str.to_str().ok()?.to_ascii_lowercase())
-                        {
-                            return Some(dtype);
-                        }
-                    }
-                }
-            }
-        }
+    if let Ok(numpy_module) = PyModule::import(value.py(), "numpy")
+        && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
+        && let Ok(true) = value.is_instance(&ndarray_type)
+        && let Ok(dtype_obj) = value.getattr("dtype")
+        && let Ok(dtype_str) = dtype_obj.str()
+        && let Ok(dtype) = dtype::parse_dtype(&dtype_str.to_str().ok()?.to_ascii_lowercase())
+    {
+        return Some(dtype);
     }
 
     if let Ok(list) = value.cast::<PyList>() {
@@ -4553,7 +4530,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, _force_copy: bool) -> Py
         DataType::Bool => to_numpy!(tensor.data().as_bool_slice(), bool),
     };
 
-    Ok(array?)
+    array
 }
 
 fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
@@ -4828,7 +4805,7 @@ fn ensure_float_dtype(dtype: DataType, context: &str) -> PyResult<()> {
 }
 
 fn ensure_valid_fan_shape(shape: &Shape, context: &str) -> PyResult<()> {
-    if shape.dims().iter().any(|&dim| dim == 0) {
+    if shape.dims().contains(&0) {
         Err(PyValueError::new_err(format!(
             "{context} requires all shape dimensions to be at least 1",
         )))
@@ -4865,7 +4842,7 @@ fn create_uniform_tensor(
         ));
     }
 
-    if !(high > low) {
+    if high.partial_cmp(&low) != Some(Ordering::Greater) {
         return Err(PyValueError::new_err(
             "uniform requires high to be greater than low",
         ));
@@ -4876,6 +4853,7 @@ fn create_uniform_tensor(
     Ok(tensor)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_truncated_normal_tensor(
     shape: Shape,
     dtype: DataType,
@@ -4912,7 +4890,7 @@ fn create_truncated_normal_tensor(
         )));
     }
 
-    if !(upper > lower) {
+    if upper.partial_cmp(&lower) != Some(Ordering::Greater) {
         return Err(PyValueError::new_err(format!(
             "{context} requires upper bound to be greater than lower bound",
         )));

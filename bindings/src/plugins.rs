@@ -303,7 +303,7 @@ impl PyPluginRegistry {
             .collect()
     }
 
-    fn get_plugin<'py>(&self, name: &str) -> PyResult<Py<PyCustomPlugin>> {
+    fn get_plugin(&self, name: &str) -> PyResult<Py<PyCustomPlugin>> {
         Python::attach(|py| {
             if let Some(plugin) = self.plugins.get(name) {
                 Py::new(
@@ -318,7 +318,6 @@ impl PyPluginRegistry {
                             .map(|f| f.clone_ref(py)),
                     },
                 )
-                .map_err(|e| e)
             } else {
                 Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                     "Plugin '{}' not found",

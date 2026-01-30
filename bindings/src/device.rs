@@ -20,7 +20,7 @@ impl PyDevice {
     #[new]
     fn new(device_str: &str) -> PyResult<Self> {
         let device = Device::from_str(device_str)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(Self { inner: device })
     }

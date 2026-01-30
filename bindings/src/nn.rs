@@ -162,6 +162,7 @@ fn conv2d(
 
 #[pyfunction]
 #[pyo3(signature = (input, running_mean=None, running_var=None, weight=None, bias=None, training=true, momentum=0.1, eps=1e-5))]
+#[allow(clippy::too_many_arguments)]
 fn batch_norm(
     input: &Bound<PyAny>,
     running_mean: Option<&Bound<PyAny>>,
@@ -327,8 +328,8 @@ enum ModuleType {
     Tanh(Tanh),
     Softmax(Softmax),
     LeakyReLU(LeakyReLU),
-    ELU(ELU),
-    GELU(GELU),
+    Elu(ELU),
+    Gelu(GELU),
     Sequential(Sequential),
     Conv2d(Conv2d),
     BatchNorm1d(BatchNorm1d),
@@ -349,8 +350,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.forward(input_tensor.tensor()),
             ModuleType::Softmax(layer) => layer.forward(input_tensor.tensor()),
             ModuleType::LeakyReLU(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::ELU(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::GELU(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Elu(layer) => layer.forward(input_tensor.tensor()),
+            ModuleType::Gelu(layer) => layer.forward(input_tensor.tensor()),
             ModuleType::Sequential(layer) => layer.forward(input_tensor.tensor()),
             ModuleType::Conv2d(layer) => layer.forward(input_tensor.tensor()),
             ModuleType::BatchNorm1d(layer) => layer.forward(input_tensor.tensor()),
@@ -377,8 +378,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.parameters(),
             ModuleType::Softmax(layer) => layer.parameters(),
             ModuleType::LeakyReLU(layer) => layer.parameters(),
-            ModuleType::ELU(layer) => layer.parameters(),
-            ModuleType::GELU(layer) => layer.parameters(),
+            ModuleType::Elu(layer) => layer.parameters(),
+            ModuleType::Gelu(layer) => layer.parameters(),
             ModuleType::Sequential(layer) => layer.parameters(),
             ModuleType::Conv2d(layer) => layer.parameters(),
             ModuleType::BatchNorm1d(layer) => layer.parameters(),
@@ -402,8 +403,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.train(),
             ModuleType::Softmax(layer) => layer.train(),
             ModuleType::LeakyReLU(layer) => layer.train(),
-            ModuleType::ELU(layer) => layer.train(),
-            ModuleType::GELU(layer) => layer.train(),
+            ModuleType::Elu(layer) => layer.train(),
+            ModuleType::Gelu(layer) => layer.train(),
             ModuleType::Sequential(layer) => layer.train(),
             ModuleType::Conv2d(layer) => layer.train(),
             ModuleType::BatchNorm1d(layer) => layer.train(),
@@ -422,8 +423,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.eval(),
             ModuleType::Softmax(layer) => layer.eval(),
             ModuleType::LeakyReLU(layer) => layer.eval(),
-            ModuleType::ELU(layer) => layer.eval(),
-            ModuleType::GELU(layer) => layer.eval(),
+            ModuleType::Elu(layer) => layer.eval(),
+            ModuleType::Gelu(layer) => layer.eval(),
             ModuleType::Sequential(layer) => layer.eval(),
             ModuleType::Conv2d(layer) => layer.eval(),
             ModuleType::BatchNorm1d(layer) => layer.eval(),
@@ -442,8 +443,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.num_parameters(),
             ModuleType::Softmax(layer) => layer.num_parameters(),
             ModuleType::LeakyReLU(layer) => layer.num_parameters(),
-            ModuleType::ELU(layer) => layer.num_parameters(),
-            ModuleType::GELU(layer) => layer.num_parameters(),
+            ModuleType::Elu(layer) => layer.num_parameters(),
+            ModuleType::Gelu(layer) => layer.num_parameters(),
             ModuleType::Sequential(layer) => layer.num_parameters(),
             ModuleType::Conv2d(layer) => layer.num_parameters(),
             ModuleType::BatchNorm1d(layer) => layer.num_parameters(),
@@ -462,8 +463,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer,
             ModuleType::Softmax(layer) => layer,
             ModuleType::LeakyReLU(layer) => layer,
-            ModuleType::ELU(layer) => layer,
-            ModuleType::GELU(layer) => layer,
+            ModuleType::Elu(layer) => layer,
+            ModuleType::Gelu(layer) => layer,
             ModuleType::Sequential(layer) => layer,
             ModuleType::Conv2d(layer) => layer,
             ModuleType::BatchNorm1d(layer) => layer,
@@ -489,8 +490,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer,
             ModuleType::Softmax(layer) => layer,
             ModuleType::LeakyReLU(layer) => layer,
-            ModuleType::ELU(layer) => layer,
-            ModuleType::GELU(layer) => layer,
+            ModuleType::Elu(layer) => layer,
+            ModuleType::Gelu(layer) => layer,
             ModuleType::Sequential(layer) => layer,
             ModuleType::Conv2d(layer) => layer,
             ModuleType::BatchNorm1d(layer) => layer,
@@ -522,8 +523,8 @@ impl PyModule {
                     ModuleType::Tanh(layer) => layer,
                     ModuleType::Softmax(layer) => layer,
                     ModuleType::LeakyReLU(layer) => layer,
-                    ModuleType::ELU(layer) => layer,
-                    ModuleType::GELU(layer) => layer,
+                    ModuleType::Elu(layer) => layer,
+                    ModuleType::Gelu(layer) => layer,
                     ModuleType::Sequential(layer) => layer,
                     ModuleType::Conv2d(layer) => layer,
                     ModuleType::BatchNorm1d(layer) => layer,
@@ -584,8 +585,8 @@ impl PyModule {
             ModuleType::LeakyReLU(layer) => {
                 format!("LeakyReLU(negative_slope={})", layer.negative_slope())
             }
-            ModuleType::ELU(layer) => format!("ELU(alpha={})", layer.alpha()),
-            ModuleType::GELU(_) => "GELU()".to_string(),
+            ModuleType::Elu(layer) => format!("ELU(alpha={})", layer.alpha()),
+            ModuleType::Gelu(_) => "GELU()".to_string(),
             ModuleType::Sequential(_) => "Sequential(...)".to_string(),
             ModuleType::Conv2d(layer) => format!(
                 "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",
@@ -615,8 +616,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.state_dict(),
             ModuleType::Softmax(layer) => layer.state_dict(),
             ModuleType::LeakyReLU(layer) => layer.state_dict(),
-            ModuleType::ELU(layer) => layer.state_dict(),
-            ModuleType::GELU(layer) => layer.state_dict(),
+            ModuleType::Elu(layer) => layer.state_dict(),
+            ModuleType::Gelu(layer) => layer.state_dict(),
             ModuleType::Sequential(layer) => layer.state_dict(),
             ModuleType::Conv2d(layer) => layer.state_dict(),
             ModuleType::BatchNorm1d(layer) => layer.state_dict(),
@@ -671,8 +672,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.state_dict(),
             ModuleType::Softmax(layer) => layer.state_dict(),
             ModuleType::LeakyReLU(layer) => layer.state_dict(),
-            ModuleType::ELU(layer) => layer.state_dict(),
-            ModuleType::GELU(layer) => layer.state_dict(),
+            ModuleType::Elu(layer) => layer.state_dict(),
+            ModuleType::Gelu(layer) => layer.state_dict(),
             ModuleType::Sequential(layer) => layer.state_dict(),
             ModuleType::Conv2d(layer) => layer.state_dict(),
             ModuleType::BatchNorm1d(layer) => layer.state_dict(),
@@ -695,8 +696,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::Softmax(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::LeakyReLU(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::ELU(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::GELU(layer) => layer.load_state_dict(sd_ref, dev),
+            ModuleType::Elu(layer) => layer.load_state_dict(sd_ref, dev),
+            ModuleType::Gelu(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::Sequential(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::Conv2d(layer) => layer.load_state_dict(sd_ref, dev),
             ModuleType::BatchNorm1d(layer) => layer.load_state_dict(sd_ref, dev),
@@ -747,13 +748,13 @@ impl PyModule {
 
     pub fn from_elu(elu: ELU) -> Self {
         Self {
-            inner: ModuleType::ELU(elu),
+            inner: ModuleType::Elu(elu),
         }
     }
 
     pub fn from_gelu(gelu: GELU) -> Self {
         Self {
-            inner: ModuleType::GELU(gelu),
+            inner: ModuleType::Gelu(gelu),
         }
     }
 
@@ -801,8 +802,8 @@ impl PyModule {
             ModuleType::Tanh(layer) => Box::new(layer.clone()),
             ModuleType::Softmax(layer) => Box::new(layer.clone()),
             ModuleType::LeakyReLU(layer) => Box::new(layer.clone()),
-            ModuleType::ELU(layer) => Box::new(layer.clone()),
-            ModuleType::GELU(layer) => Box::new(layer.clone()),
+            ModuleType::Elu(layer) => Box::new(layer.clone()),
+            ModuleType::Gelu(layer) => Box::new(layer.clone()),
             ModuleType::Sequential(_) => panic!("Nested Sequential modules are not supported"),
             ModuleType::Conv2d(layer) => Box::new(layer.clone()),
             ModuleType::BatchNorm1d(layer) => Box::new(layer.clone()),
@@ -830,7 +831,7 @@ impl PyDenseLayer {
         dtype: Option<&str>,
     ) -> PyResult<(Self, PyModule)> {
         let bias = bias.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let dense_layer = DenseLayer::new(in_features, out_features, bias, device, dtype)
@@ -1010,7 +1011,7 @@ impl PyELU {
     #[getter]
     fn alpha(slf: PyRef<Self>) -> PyResult<f64> {
         let module = slf.as_ref();
-        if let ModuleType::ELU(layer) = &module.inner {
+        if let ModuleType::Elu(layer) = &module.inner {
             Ok(layer.alpha())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1110,6 +1111,7 @@ impl PyConv2d {
         device=None,
         dtype=None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         in_channels: usize,
         out_channels: usize,
@@ -1130,7 +1132,7 @@ impl PyConv2d {
             None => (0, 0),
         };
         let bias = bias.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let conv2d = Conv2d::new(
@@ -1208,7 +1210,7 @@ impl PyBatchNorm1d {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm1d::new(num_features, Some(eps), Some(momentum), device, dtype)
@@ -1251,7 +1253,7 @@ impl PyBatchNorm2d {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(|| Device::cpu());
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm2d::new(num_features, Some(eps), Some(momentum), device, dtype)

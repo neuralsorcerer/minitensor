@@ -306,7 +306,7 @@ pub fn index_select(
 pub fn gather(input: &Bound<PyAny>, dim: isize, index: &Bound<PyAny>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     let index_tensor = borrow_tensor(index)?;
-    tensor.gather(dim, &*index_tensor)
+    tensor.gather(dim, &index_tensor)
 }
 
 #[pyfunction(name = "where")]

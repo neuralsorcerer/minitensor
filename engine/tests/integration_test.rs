@@ -178,7 +178,7 @@ fn test_complex_computation_chain() {
     // Verify all values are in sigmoid range [0, 1]
     let result_data = final_result.data().as_f32_slice().unwrap();
     for &val in result_data {
-        assert!(val >= 0.0 && val <= 1.0);
+        assert!((0.0..=1.0).contains(&val));
     }
 
     // Clear computation graph

@@ -97,10 +97,10 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 #[pyo3(signature = (data, dtype=None, requires_grad=false))]
 fn asarray(data: &Bound<PyAny>, dtype: Option<&str>, requires_grad: bool) -> PyResult<PyTensor> {
     let mut tensor = PyTensor::from_python_value(data)?;
-    if let Some(target_dtype) = dtype {
-        if tensor.dtype() != target_dtype {
-            tensor = tensor.astype(target_dtype)?;
-        }
+    if let Some(target_dtype) = dtype
+        && tensor.dtype() != target_dtype
+    {
+        tensor = tensor.astype(target_dtype)?;
     }
 
     if tensor.requires_grad() != requires_grad {
