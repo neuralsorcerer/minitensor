@@ -3336,7 +3336,7 @@ impl PyTensor {
         }
 
         let dim_size = self.inner.shape().dims()[axis as usize];
-        if dim_size % sections != 0 {
+        if !dim_size.is_multiple_of(sections) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Tensor cannot be evenly split along the given axis",
             ));
