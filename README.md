@@ -18,8 +18,9 @@ A lightweight, high-performance tensor operations library with automatic differe
 [![Test Windows](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml?query=branch%3Amain)
 [![Test MacOS](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml?query=branch%3Amain)
 [![Lints](https://github.com/neuralsorcerer/minitensor/actions/workflows/lints.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/lints.yml?query=branch%3Amain)
+[![arXiv](https://img.shields.io/badge/arXiv-2602.00125-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2602.00125)
+[![DOI:48550/arXiv.2602.00125](https://img.shields.io/badge/DOI-10.48550/arXiv.2602.00125-blue.svg)](https://doi.org/10.48550/arXiv.2602.00125)
 [![License](https://img.shields.io/badge/License-Apache%202.0-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
-[![DOI](https://zenodo.org/badge/1049200313.svg)](https://doi.org/10.5281/zenodo.17162776)
 
 </div>
 
@@ -270,11 +271,14 @@ Minitensor is designed for performance:
 If you use minitensor in your work and wish to refer to it, please use the following BibTeX entry.
 
 ```bibtex
-@software{minitensor,
-  author = {Soumyadip Sarkar},
-  title = {MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
-  url = {https://doi.org/10.5281/zenodo.17384736},
-  year = {2025},
+@misc{sarkar2026minitensorlightweighthighperformancetensor,
+      title={MiniTensor: A Lightweight, High-Performance Tensor Operations Library}, 
+      author={Soumyadip Sarkar},
+      year={2026},
+      eprint={2602.00125},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2602.00125}, 
 }
 ```
 

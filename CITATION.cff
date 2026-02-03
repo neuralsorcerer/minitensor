@@ -1,10 +1,21 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
+title: >-
+  MiniTensor: A Lightweight, High-Performance Tensor
+  Operations Library
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
 authors:
-  - family-names: Sarkar
-    given-names: Soumyadip
-    orcid: https://orcid.org/0000-0002-2377-9147
-title: "MiniTensor: A Lightweight, High-Performance Tensor Operations Library"
-date-released: 2025-09-03
-doi: 10.5281/zenodo.17162776
-url: "https://github.com/neuralsorcerer/minitensor"
+  - given-names: Soumyadip
+    family-names: Sarkar
+    orcid: 'https://orcid.org/0000-0002-2377-9147'
+identifiers:
+  - type: doi
+    value: 10.48550/arXiv.2602.00125
+repository-code: 'https://github.com/neuralsorcerer/minitensor'
+repository: 'https://arxiv.org/abs/2602.00125'
+license: Apache-2.0
