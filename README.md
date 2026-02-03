@@ -272,13 +272,13 @@ If you use minitensor in your work and wish to refer to it, please use the follo
 
 ```bibtex
 @misc{sarkar2026minitensorlightweighthighperformancetensor,
-      title={MiniTensor: A Lightweight, High-Performance Tensor Operations Library}, 
+      title={MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
       author={Soumyadip Sarkar},
       year={2026},
       eprint={2602.00125},
       archivePrefix={arXiv},
       primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2602.00125}, 
+      url={https://arxiv.org/abs/2602.00125},
 }
 ```
 
