@@ -1797,6 +1797,54 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (mask, dim=None))]
+    pub fn masked_softmax(&self, mask: &Bound<PyAny>, dim: Option<isize>) -> PyResult<Self> {
+        let mask_tensor = tensor_from_py_value(&self.inner, mask)?;
+        let resolved_dim = match dim {
+            Some(dim) => {
+                let ndim = self.inner.ndim() as isize;
+                let dim = if dim < 0 { dim + ndim } else { dim };
+                if dim < 0 || dim >= ndim {
+                    return Err(PyIndexError::new_err(format!(
+                        "Dimension out of range (expected to be in range of [-{ndim}, {ndim}), but got {dim})"
+                    )));
+                }
+                Some(dim as usize)
+            }
+            None => None,
+        };
+
+        let result = self
+            .inner
+            .masked_softmax(&mask_tensor, resolved_dim)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    #[pyo3(signature = (mask, dim=None))]
+    pub fn masked_log_softmax(&self, mask: &Bound<PyAny>, dim: Option<isize>) -> PyResult<Self> {
+        let mask_tensor = tensor_from_py_value(&self.inner, mask)?;
+        let resolved_dim = match dim {
+            Some(dim) => {
+                let ndim = self.inner.ndim() as isize;
+                let dim = if dim < 0 { dim + ndim } else { dim };
+                if dim < 0 || dim >= ndim {
+                    return Err(PyIndexError::new_err(format!(
+                        "Dimension out of range (expected to be in range of [-{ndim}, {ndim}), but got {dim})"
+                    )));
+                }
+                Some(dim as usize)
+            }
+            None => None,
+        };
+
+        let result = self
+            .inner
+            .masked_log_softmax(&mask_tensor, resolved_dim)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(signature = (normalized_shape, weight=None, bias=None, eps=1e-5))]
     pub fn layer_norm(
         &self,

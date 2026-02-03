@@ -351,6 +351,28 @@ pub fn log_softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTenso
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, mask, dim=None))]
+pub fn masked_softmax(
+    input: &Bound<PyAny>,
+    mask: &Bound<PyAny>,
+    dim: Option<isize>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.masked_softmax(mask, dim)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, mask, dim=None))]
+pub fn masked_log_softmax(
+    input: &Bound<PyAny>,
+    mask: &Bound<PyAny>,
+    dim: Option<isize>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.masked_log_softmax(mask, dim)
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn logsumexp(
     input: &Bound<PyAny>,
@@ -786,6 +808,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(masked_fill, parent)?)?;
     parent.add_function(wrap_pyfunction!(softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(log_softmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(masked_softmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(masked_log_softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(logsumexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(nansum, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;

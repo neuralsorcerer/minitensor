@@ -52,3 +52,42 @@ def test_softmax_empty_dim_returns_empty():
     result = F.softmax(x, dim=1)
     assert result.shape == (2, 0, 3)
     assert result.numel() == 0
+
+
+def test_masked_softmax_matches_expected():
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    mask_np = np.array([[True, False], [False, True]])
+    x = mt.Tensor(x_np.tolist())
+    mask = mt.Tensor(mask_np.tolist(), dtype="bool")
+    result = F.masked_softmax(x, mask, dim=1)
+    expected = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    assert np.allclose(result.numpy(), expected)
+
+
+def test_masked_softmax_broadcasts_mask():
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    mask_np = np.array([[True], [False]])
+    x = mt.Tensor(x_np.tolist())
+    mask = mt.Tensor(mask_np.tolist(), dtype="bool")
+    result = F.masked_softmax(x, mask, dim=1)
+    expected = np.array([[0.0, 0.0], [0.26894143, 0.7310586]], dtype=np.float32)
+    assert np.allclose(result.numpy(), expected, atol=1e-6)
+
+
+def test_masked_log_softmax_all_masked_is_neg_inf():
+    x_np = np.array([1.0, 2.0], dtype=np.float32)
+    mask_np = np.array([True, True])
+    x = mt.Tensor(x_np.tolist())
+    mask = mt.Tensor(mask_np.tolist(), dtype="bool")
+    result = F.masked_log_softmax(x, mask, dim=0)
+    out = result.numpy()
+    assert np.all(np.isneginf(out))
+
+
+def test_masked_softmax_all_neg_inf_unmasked_is_zero():
+    x_np = np.array([-np.inf, -np.inf], dtype=np.float32)
+    mask_np = np.array([False, False])
+    x = mt.Tensor(x_np.tolist())
+    mask = mt.Tensor(mask_np.tolist(), dtype="bool")
+    result = F.masked_softmax(x, mask, dim=0)
+    assert np.allclose(result.numpy(), np.array([0.0, 0.0], dtype=np.float32))

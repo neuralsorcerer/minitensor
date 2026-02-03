@@ -1069,6 +1069,20 @@ impl Tensor {
         log_softmax(self, dim)
     }
 
+    /// Masked Softmax activation
+    #[inline(always)]
+    pub fn masked_softmax(&self, mask: &Tensor, dim: Option<usize>) -> Result<Self> {
+        use crate::operations::activation::masked_softmax;
+        masked_softmax(self, mask, dim)
+    }
+
+    /// Masked Log-Softmax activation
+    #[inline(always)]
+    pub fn masked_log_softmax(&self, mask: &Tensor, dim: Option<usize>) -> Result<Self> {
+        use crate::operations::activation::masked_log_softmax;
+        masked_log_softmax(self, mask, dim)
+    }
+
     /// Solve a linear system `AX = B` for `X` where `self` provides `A`.
     pub fn solve(&self, rhs: &Self) -> Result<Self> {
         use crate::operations::linalg::solve;

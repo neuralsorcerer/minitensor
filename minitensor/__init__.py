@@ -148,6 +148,8 @@ _FUNCTIONAL_FORWARDERS = (
     "logsumexp",
     "softmax",
     "log_softmax",
+    "masked_softmax",
+    "masked_log_softmax",
     "softsign",
     "rsqrt",
     "reciprocal",
@@ -371,4 +373,6 @@ __all__ = [
     "roll",
     "where",
     "masked_fill",
+    "masked_softmax",
+    "masked_log_softmax",
 ]

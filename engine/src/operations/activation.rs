@@ -9,12 +9,12 @@ use crate::{
         AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
         CosBackward, CoshBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward,
         HardshrinkBackward, LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward,
-        LogSoftmaxBackward, PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward,
-        SiluBackward, SinBackward, SinhBackward, SoftmaxBackward, SoftplusBackward,
-        SoftsignBackward, TanBackward, TanhBackward, add_to_graph,
+        LogSoftmaxBackward, MaskedLogSoftmaxBackward, PowBackward, PowBroadcast, ReluBackward,
+        SeluBackward, SigmoidBackward, SiluBackward, SinBackward, SinhBackward, SoftmaxBackward,
+        SoftplusBackward, SoftsignBackward, TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use libm::{erf, erff};
 use rayon::prelude::*;
@@ -1597,6 +1597,264 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
     }
 }
 
+/// Masked softmax activation function with gradient support.
+/// Masked positions are filled with zeros in the output.
+pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    if mask.dtype() != DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "masked_softmax mask must have bool dtype",
+        ));
+    }
+
+    if tensor.device() != mask.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", tensor.device()),
+            format!("{:?}", mask.device()),
+        ));
+    }
+
+    let broadcast_shape = mask.shape().broadcast_with(tensor.shape())?;
+    if &broadcast_shape != tensor.shape() {
+        return Err(MinitensorError::shape_mismatch(
+            mask.shape().dims().to_vec(),
+            tensor.shape().dims().to_vec(),
+        ));
+    }
+
+    if tensor.ndim() == 0 {
+        let mut output_data =
+            TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        let mask_value = mask
+            .data()
+            .as_bool_slice()
+            .ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from mask tensor")
+            })?
+            .first()
+            .copied()
+            .unwrap_or(false);
+        match tensor.dtype() {
+            DataType::Float32 => {
+                let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from output data",
+                    )
+                })?;
+                output_slice[0] = if mask_value { 0.0 } else { 1.0 };
+            }
+            DataType::Float64 => {
+                let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from output data",
+                    )
+                })?;
+                output_slice[0] = if mask_value { 0.0 } else { 1.0 };
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "masked_softmax only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let output = Tensor::new(
+            Arc::new(output_data),
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+
+        if output.requires_grad() {
+            let grad_fn = Arc::new(SoftmaxBackward {
+                input_id: tensor.id(),
+                output: output.detach(),
+                dim: 0,
+            });
+
+            let mut output_with_grad = output;
+            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output_with_grad, Some(grad_fn))?;
+            return Ok(output_with_grad);
+        }
+
+        return Ok(output);
+    }
+
+    let dim = dim.unwrap_or(tensor.ndim() - 1);
+
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => masked_softmax_f32(tensor, mask, &mut output_data, dim)?,
+        DataType::Float64 => masked_softmax_f64(tensor, mask, &mut output_data, dim)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "masked_softmax only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SoftmaxBackward {
+            input_id: tensor.id(),
+            output: output.detach(),
+            dim,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
+/// Masked log-softmax activation function with gradient support.
+/// Masked positions are filled with -inf in the output.
+pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Result<Tensor> {
+    if mask.dtype() != DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "masked_log_softmax mask must have bool dtype",
+        ));
+    }
+
+    if tensor.device() != mask.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", tensor.device()),
+            format!("{:?}", mask.device()),
+        ));
+    }
+
+    let broadcast_shape = mask.shape().broadcast_with(tensor.shape())?;
+    if &broadcast_shape != tensor.shape() {
+        return Err(MinitensorError::shape_mismatch(
+            mask.shape().dims().to_vec(),
+            tensor.shape().dims().to_vec(),
+        ));
+    }
+
+    if tensor.ndim() == 0 {
+        let mut output_data =
+            TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        let mask_value = mask
+            .data()
+            .as_bool_slice()
+            .ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from mask tensor")
+            })?
+            .first()
+            .copied()
+            .unwrap_or(false);
+        match tensor.dtype() {
+            DataType::Float32 => {
+                let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from output data",
+                    )
+                })?;
+                output_slice[0] = if mask_value { f32::NEG_INFINITY } else { 0.0 };
+            }
+            DataType::Float64 => {
+                let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from output data",
+                    )
+                })?;
+                output_slice[0] = if mask_value { f64::NEG_INFINITY } else { 0.0 };
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "masked_log_softmax only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let output = Tensor::new(
+            Arc::new(output_data),
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+
+        if output.requires_grad() {
+            let grad_fn = Arc::new(MaskedLogSoftmaxBackward {
+                input_id: tensor.id(),
+                output: output.detach(),
+                mask: mask.detach(),
+                dim: 0,
+            });
+
+            let mut output_with_grad = output;
+            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output_with_grad, Some(grad_fn))?;
+            return Ok(output_with_grad);
+        }
+
+        return Ok(output);
+    }
+
+    let dim = dim.unwrap_or(tensor.ndim() - 1);
+
+    if dim >= tensor.ndim() {
+        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => masked_log_softmax_f32(tensor, mask, &mut output_data, dim)?,
+        DataType::Float64 => masked_log_softmax_f64(tensor, mask, &mut output_data, dim)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "masked_log_softmax only supported for floating point tensors",
+            ));
+        }
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(MaskedLogSoftmaxBackward {
+            input_id: tensor.id(),
+            output: output.detach(),
+            mask: mask.detach(),
+            dim,
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
 // Helper functions for type-specific operations
 
 fn exp_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
@@ -2774,6 +3032,320 @@ fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     Ok(())
 }
 
+fn broadcast_mask_index(
+    linear_idx: usize,
+    output_dims: &[usize],
+    output_strides: &[usize],
+    mask_dims: &[usize],
+    mask_strides: &[usize],
+) -> usize {
+    if mask_dims.is_empty() {
+        return 0;
+    }
+
+    let output_ndim = output_dims.len();
+    let mask_ndim = mask_dims.len();
+    let mut mask_index = 0usize;
+
+    for i in 0..mask_ndim {
+        let output_dim_idx = output_ndim - 1 - i;
+        let mask_dim_idx = mask_ndim - 1 - i;
+        let stride = output_strides[output_dim_idx];
+        let coord = if stride == 0 {
+            0
+        } else {
+            (linear_idx / stride) % output_dims[output_dim_idx]
+        };
+        let mask_dim = mask_dims[mask_dim_idx];
+        let mask_coord = if mask_dim == 1 { 0 } else { coord };
+        mask_index += mask_coord * mask_strides[mask_dim_idx];
+    }
+
+    mask_index
+}
+
+fn masked_softmax_f32(
+    tensor: &Tensor,
+    mask: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let mask_data = mask.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from mask tensor")
+    })?;
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    let dims = tensor.shape().dims();
+    let mask_dims = mask.shape().dims();
+    let dim_size = dims[dim];
+    if dim_size == 0 {
+        return Ok(());
+    }
+
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+    let same_shape = mask_dims == dims;
+    let output_strides = if same_shape {
+        None
+    } else {
+        Some(Strides::from_shape(tensor.shape()))
+    };
+    let mask_strides = if same_shape {
+        None
+    } else {
+        Some(Strides::from_shape(mask.shape()))
+    };
+
+    input_data
+        .par_chunks(group)
+        .zip(output_slice.par_chunks_mut(group))
+        .enumerate()
+        .for_each(|(block_idx, (in_block, out_block))| {
+            let block_offset = block_idx * group;
+            for a in 0..after {
+                let base = a;
+                let mut max_val = f32::NEG_INFINITY;
+                let mut has_unmasked = false;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let linear_idx = block_offset + idx;
+                    let masked = if same_shape {
+                        mask_data[linear_idx]
+                    } else {
+                        let mask_index = broadcast_mask_index(
+                            linear_idx,
+                            dims,
+                            output_strides.as_ref().unwrap().as_slice(),
+                            mask_dims,
+                            mask_strides.as_ref().unwrap().as_slice(),
+                        );
+                        mask_data[mask_index]
+                    };
+                    if !masked {
+                        has_unmasked = true;
+                        max_val = max_val.max(in_block[idx]);
+                    }
+                }
+                if !has_unmasked {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
+                let mut sum = 0.0f32;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let linear_idx = block_offset + idx;
+                    let masked = if same_shape {
+                        mask_data[linear_idx]
+                    } else {
+                        let mask_index = broadcast_mask_index(
+                            linear_idx,
+                            dims,
+                            output_strides.as_ref().unwrap().as_slice(),
+                            mask_dims,
+                            mask_strides.as_ref().unwrap().as_slice(),
+                        );
+                        mask_data[mask_index]
+                    };
+                    if masked {
+                        out_block[idx] = 0.0;
+                    } else {
+                        let val = (in_block[idx] - max_val).exp();
+                        out_block[idx] = val;
+                        sum += val;
+                    }
+                }
+                if sum != 0.0 {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] /= sum;
+                    }
+                }
+            }
+        });
+
+    Ok(())
+}
+
+fn masked_softmax_f64(
+    tensor: &Tensor,
+    mask: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+    let mask_data = mask.data().as_bool_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get bool slice from mask tensor")
+    })?;
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    let dims = tensor.shape().dims();
+    let mask_dims = mask.shape().dims();
+    let dim_size = dims[dim];
+    if dim_size == 0 {
+        return Ok(());
+    }
+
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let group = dim_size * after;
+    let same_shape = mask_dims == dims;
+    let output_strides = if same_shape {
+        None
+    } else {
+        Some(Strides::from_shape(tensor.shape()))
+    };
+    let mask_strides = if same_shape {
+        None
+    } else {
+        Some(Strides::from_shape(mask.shape()))
+    };
+
+    input_data
+        .par_chunks(group)
+        .zip(output_slice.par_chunks_mut(group))
+        .enumerate()
+        .for_each(|(block_idx, (in_block, out_block))| {
+            let block_offset = block_idx * group;
+            for a in 0..after {
+                let base = a;
+                let mut max_val = f64::NEG_INFINITY;
+                let mut has_unmasked = false;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let linear_idx = block_offset + idx;
+                    let masked = if same_shape {
+                        mask_data[linear_idx]
+                    } else {
+                        let mask_index = broadcast_mask_index(
+                            linear_idx,
+                            dims,
+                            output_strides.as_ref().unwrap().as_slice(),
+                            mask_dims,
+                            mask_strides.as_ref().unwrap().as_slice(),
+                        );
+                        mask_data[mask_index]
+                    };
+                    if !masked {
+                        has_unmasked = true;
+                        max_val = max_val.max(in_block[idx]);
+                    }
+                }
+                if !has_unmasked {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
+                if max_val.is_infinite() && max_val.is_sign_negative() {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] = 0.0;
+                    }
+                    continue;
+                }
+                let mut sum = 0.0f64;
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    let linear_idx = block_offset + idx;
+                    let masked = if same_shape {
+                        mask_data[linear_idx]
+                    } else {
+                        let mask_index = broadcast_mask_index(
+                            linear_idx,
+                            dims,
+                            output_strides.as_ref().unwrap().as_slice(),
+                            mask_dims,
+                            mask_strides.as_ref().unwrap().as_slice(),
+                        );
+                        mask_data[mask_index]
+                    };
+                    if masked {
+                        out_block[idx] = 0.0;
+                    } else {
+                        let val = (in_block[idx] - max_val).exp();
+                        out_block[idx] = val;
+                        sum += val;
+                    }
+                }
+                if sum != 0.0 {
+                    for k in 0..dim_size {
+                        let idx = base + k * after;
+                        out_block[idx] /= sum;
+                    }
+                }
+            }
+        });
+
+    Ok(())
+}
+
+fn masked_log_softmax_f32(
+    tensor: &Tensor,
+    mask: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    masked_softmax_f32(tensor, mask, output_data, dim)?;
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+    output_slice.par_iter_mut().for_each(|val| {
+        if *val == 0.0 {
+            *val = f32::NEG_INFINITY;
+        } else {
+            *val = val.ln();
+        }
+    });
+    Ok(())
+}
+
+fn masked_log_softmax_f64(
+    tensor: &Tensor,
+    mask: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
+    masked_softmax_f64(tensor, mask, output_data, dim)?;
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+    output_slice.par_iter_mut().for_each(|val| {
+        if *val == 0.0 {
+            *val = f64::NEG_INFINITY;
+        } else {
+            *val = val.ln();
+        }
+    });
+    Ok(())
+}
+
 fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
     softmax_f32(tensor, output_data, dim)?;
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
@@ -3343,6 +3915,18 @@ mod tests {
         )
     }
 
+    fn create_test_tensor_bool(data: Vec<bool>, shape: Vec<usize>) -> Tensor {
+        let shape_obj = Shape::new(shape);
+        let tensor_data = TensorData::from_vec_bool(data, Device::cpu());
+        Tensor::new(
+            Arc::new(tensor_data),
+            shape_obj,
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        )
+    }
+
     #[test]
     fn test_exp() {
         let tensor = create_test_tensor_f32(vec![0.0, 1.0, 2.0], vec![3], false);
@@ -3514,6 +4098,51 @@ mod tests {
         // Check that larger input values produce larger probabilities
         assert!(result_data[2] > result_data[1]);
         assert!(result_data[1] > result_data[0]);
+    }
+
+    #[test]
+    fn test_masked_softmax_respects_mask() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let mask = create_test_tensor_bool(vec![true, false, false, true], vec![2, 2]);
+        let result = masked_softmax(&tensor, &mask, Some(1)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data[0], 0.0);
+        assert_eq!(data[3], 0.0);
+        assert!((data[1] - 1.0).abs() < 1e-6);
+        assert!((data[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_masked_softmax_all_masked_returns_zero() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let mask = create_test_tensor_bool(vec![true, true], vec![2]);
+        let result = masked_softmax(&tensor, &mask, Some(0)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_masked_softmax_all_negative_infinity_unmasked() {
+        let tensor =
+            create_test_tensor_f32(vec![f32::NEG_INFINITY, f32::NEG_INFINITY], vec![2], false);
+        let mask = create_test_tensor_bool(vec![false, false], vec![2]);
+        let result = masked_softmax(&tensor, &mask, Some(0)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_masked_log_softmax_broadcast_mask() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let mask = create_test_tensor_bool(vec![true, false], vec![2, 1]);
+        let result = masked_log_softmax(&tensor, &mask, Some(1)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!(data[0].is_infinite() && data[0].is_sign_negative());
+        assert!(data[1].is_infinite() && data[1].is_sign_negative());
+        let row1_prob0 = data[2].exp();
+        let row1_prob1 = data[3].exp();
+        assert!((row1_prob0 + row1_prob1 - 1.0).abs() < 1e-6);
+        assert!(data[3] > data[2]);
     }
 
     #[test]
