@@ -19,6 +19,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 [![Test MacOS](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_macos.yml?query=branch%3Amain)
 [![Lints](https://github.com/neuralsorcerer/minitensor/actions/workflows/lints.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/lints.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/License-Apache%202.0-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+[![codecov](https://codecov.io/github/neuralsorcerer/minitensor/graph/badge.svg?token=BNV0Z7SI6A)](https://codecov.io/github/neuralsorcerer/minitensor)
 [![arXiv](https://img.shields.io/badge/arXiv-2602.00125-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2602.00125)
 [![DOI:48550/arXiv.2602.00125](https://img.shields.io/badge/DOI-10.48550/arXiv.2602.00125-blue.svg)](https://doi.org/10.48550/arXiv.2602.00125)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/minitensor?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/minitensor)
