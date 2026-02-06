@@ -273,6 +273,15 @@ mod tests {
     }
 
     #[test]
+    fn test_masked_log_softmax_all_masked_returns_negative_infinity() {
+        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let mask = create_test_tensor_bool(vec![true, true], vec![2]);
+        let result = masked_log_softmax(&tensor, &mask, Some(0)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert!(data.iter().all(|v| v.is_infinite() && v.is_sign_negative()));
+    }
+
+    #[test]
     fn test_log_softmax_large_negative_values() {
         let tensor = create_test_tensor_f32(vec![-1000.0, 0.0], vec![2], false);
         let result = log_softmax(&tensor, None).unwrap();
