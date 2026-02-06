@@ -363,8 +363,6 @@ _FUNCTIONAL_FORWARDERS = (
     "asinh",
     "acosh",
     "atanh",
-    "reciprocal",
-    "sign",
     "where",
     "masked_fill",
 )
