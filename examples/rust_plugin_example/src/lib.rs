@@ -8,8 +8,8 @@ use engine::{
     Plugin, PluginInfo, VersionInfo, CustomOp, CustomOpRegistry, CustomOpBuilder,
     Result, MinitensorError,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
+use rustc_hash::FxHashMap;
 
 /// Example plugin implementation
 pub struct RustExamplePlugin {
@@ -66,7 +66,7 @@ fn create_abs_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_abs", 1)
         .forward(|inputs| inputs[0].abs())
         .backward(|grad_output, input_ids, _, _, _| {
-            let mut gradients = HashMap::new();
+            let mut gradients = FxHashMap::default();
             if let Some(&id) = input_ids.first() {
                 gradients.insert(id, grad_output.clone());
             }
@@ -104,7 +104,7 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
             x.clamp(Some(min_val), Some(max_val))
         })
         .backward(|grad_output, input_ids, _, _, _| {
-            let mut gradients = HashMap::new();
+            let mut gradients = FxHashMap::default();
             if let Some(&id) = input_ids.first() {
                 gradients.insert(id, grad_output.clone());
             }
@@ -134,7 +134,7 @@ fn create_gelu_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_gelu", 1)
         .forward(|inputs| Ok(inputs[0].clone()))
         .backward(|grad_output, input_ids, _, _, _| {
-            let mut gradients = HashMap::new();
+            let mut gradients = FxHashMap::default();
             if let Some(&id) = input_ids.first() {
                 gradients.insert(id, grad_output.clone());
             }
@@ -155,13 +155,13 @@ fn create_gelu_operation() -> Arc<dyn CustomOp> {
         .unwrap()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn create_plugin() -> *mut dyn Plugin {
     let plugin = RustExamplePlugin::new();
     Box::into_raw(Box::new(plugin))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn destroy_plugin(plugin: *mut dyn Plugin) {
     if !plugin.is_null() {
         unsafe {
@@ -170,7 +170,7 @@ pub extern "C" fn destroy_plugin(plugin: *mut dyn Plugin) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_plugin_info() -> PluginInfo {
     RustExamplePlugin::new().info().clone()
 }

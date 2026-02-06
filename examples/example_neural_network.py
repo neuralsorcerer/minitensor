@@ -90,8 +90,11 @@ def create_loss_and_optimizer():
         criterion = nn.CrossEntropyLoss()
         print(f"Created loss function: {criterion}")
 
-        # Create optimizer (would normally pass model parameters)
-        optimizer = optim.Adam([], 0.001, betas=(0.9, 0.999), epsilon=1e-8)
+        # Create optimizer with simple model parameters
+        model = nn.DenseLayer(4, 2)
+        optimizer = optim.Adam(
+            model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8
+        )
         print(f"Created optimizer: {optimizer}")
 
         return True

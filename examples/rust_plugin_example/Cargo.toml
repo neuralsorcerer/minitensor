@@ -1,6 +1,6 @@
 [package]
 name = "rust_plugin_example"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2024"
 description = "Example Rust plugin for minitensor"
 
@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 # Reference to the minitensor engine
 # In a real plugin, this would be a published crate dependency
 engine = { path = "../../engine" }
+rustc-hash = "2.1.1"
 
 [features]
 default = []

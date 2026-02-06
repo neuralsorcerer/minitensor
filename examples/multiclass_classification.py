@@ -18,7 +18,7 @@ def make_dataset(num_samples: int = 300):
     # Known weights and bias producing three classes
     true_w = mt.Tensor([[2.0, -2.0, 0.5], [0.5, 1.0, -1.0]])
     true_b = mt.Tensor([0.1, -0.3, 0.2])
-    logits = x @ true_w + true_b
+    logits = x.matmul(true_w) + true_b
     y = logits.argmax(dim=1).astype("int64")
     return x, y
 

@@ -24,7 +24,7 @@ def main() -> None:  # pragma: no cover - example script
     x = mt.randn(num_samples, 2)
     true_w = mt.Tensor([[1.5], [-2.0]])
     true_b = mt.Tensor([-0.5])
-    logits = x @ true_w + true_b
+    logits = x.matmul(true_w) + true_b
     y = (logits > 0).astype("float32")
 
     model = nn.Sequential([nn.DenseLayer(2, 1), nn.Sigmoid()])

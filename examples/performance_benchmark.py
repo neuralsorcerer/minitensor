@@ -46,7 +46,7 @@ def main():  # pragma: no cover - example script
         f"a=mt.randn({size},{size})\n"
         f"b=mt.randn({size},{size})"
     )
-    stmt_mt = "(a @ b).sum().item()"
+    stmt_mt = "a.matmul(b).sum().item()"
     mt_time = _benchmark("Minitensor", setup_mt, stmt_mt)
 
     setup_torch = (
