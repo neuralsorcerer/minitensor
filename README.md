@@ -101,13 +101,27 @@ model = nn.Sequential([
 
 # Set up training
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
+optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8)
 
 print(f"Model: {model}")
 print(f"Input shape: {x.shape}")
 ```
 
 ## Documentation
+
+MiniTensor ships a full API reference in [`docs/api_reference.md`](docs/api_reference.md),
+alongside examples and guides. For a runtime overview of what's available, use the
+introspection helpers below.
+
+```python
+import minitensor as mt
+
+print(mt.help())
+print(mt.available_submodules())
+print(mt.list_public_api()["nn"])
+print(mt.search_api("loss"))
+print(mt.describe_api("nn.CrossEntropyLoss"))
+```
 
 ### Core Components
 
@@ -158,13 +172,16 @@ bce = nn.BCELoss()                  # Binary cross entropy
 #### Optimizers
 
 ```python
-from minitensor import optim
+from minitensor import nn, optim
 
 # Optimizers
-sgd = optim.SGD(0.01, 0.9, 0.0, False)                              # SGD with momentum
-adam = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)          # Adam optimizer
-adamw = optim.AdamW(0.001, betas=(0.9, 0.999), weight_decay=0.01)   # Decoupled AdamW
-rmsprop = optim.RMSprop(0.01, 0.99, 1e-8, 0.0, 0.0)                 # RMSprop optimizer
+model = nn.DenseLayer(10, 5)
+params = model.parameters()
+
+sgd = optim.SGD(params, lr=0.01, momentum=0.9, weight_decay=0.0, nesterov=False)
+adam = optim.Adam(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.0)
+adamw = optim.AdamW(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.01)
+rmsprop = optim.RMSprop(params, lr=0.01, alpha=0.99, epsilon=1e-8, weight_decay=0.0, momentum=0.0)
 ```
 
 ## Architecture
@@ -204,7 +221,7 @@ model = nn.Sequential([
 
 # Initialize model
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(0.001, betas=(0.9, 0.999), epsilon=1e-8)
+optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8)
 ```
 
 ### Training Loop

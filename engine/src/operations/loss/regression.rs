@@ -187,15 +187,20 @@ pub fn cross_entropy_loss(
     // Apply log-softmax to predictions for numerical stability
     let log_predictions_base = log_softmax(predictions, None)?;
     let softmax_predictions = exp(&log_predictions_base.detach())?;
-    let zero_mask = comparison::eq(
-        &softmax_predictions,
-        &Tensor::zeros(
-            softmax_predictions.shape().clone(),
-            softmax_predictions.dtype(),
-            softmax_predictions.device(),
-            false,
-        ),
-    )?;
+    let eps = match softmax_predictions.dtype() {
+        DataType::Float32 => 1e-30,
+        DataType::Float64 => 1e-300,
+        _ => 0.0,
+    };
+    let eps_template = Tensor::zeros(
+        softmax_predictions.shape().clone(),
+        softmax_predictions.dtype(),
+        softmax_predictions.device(),
+        false,
+    );
+    let eps_mask = comparison::eq(&eps_template, &eps_template)?;
+    let eps_tensor = masked_fill_scalar(&eps_template, &eps_mask, eps)?;
+    let zero_mask = comparison::le(&softmax_predictions, &eps_tensor)?;
     let log_predictions =
         masked_fill_scalar(&log_predictions_base, &zero_mask, f64::NEG_INFINITY)?;
 

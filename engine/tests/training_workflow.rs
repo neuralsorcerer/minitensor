@@ -33,17 +33,17 @@ fn test_linear_regression_training() {
     let y_true = create_tensor(vec![5.0, 7.0, 9.0, 11.0], vec![4, 1], false); // y = 2x + 3
     let mut w = create_tensor(vec![0.0], vec![1, 1], true);
     let mut b = create_tensor(vec![0.0], vec![1], true);
-    let lr = 0.01f32;
+    let lr = 0.05f32;
 
-    for _ in 0..1000 {
+    for _ in 0..5000 {
         let y_pred = arithmetic::add(&linalg::matmul(&x, &w).unwrap(), &b).unwrap();
         let diff = arithmetic::sub(&y_pred, &y_true).unwrap();
         let sq = arithmetic::mul(&diff, &diff).unwrap();
         let loss = reduction::mean(&sq, None, false).unwrap();
         autograd::backward(&loss, None).unwrap();
 
-        let grad_w = w.grad().unwrap().detach();
-        let grad_b = b.grad().unwrap().detach();
+        let grad_w = autograd::get_gradient(&w).unwrap().detach();
+        let grad_b = autograd::get_gradient(&b).unwrap().detach();
         let lr_tensor = create_tensor(vec![lr], vec![1], false);
         let step_w = arithmetic::mul(&grad_w, &lr_tensor).unwrap();
         let step_b = arithmetic::mul(&grad_b, &lr_tensor).unwrap();

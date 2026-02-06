@@ -127,6 +127,175 @@ def default_dtype(dtype: str):
         set_default_dtype(previous)
 
 
+def available_submodules() -> dict[str, bool]:
+    """Return availability flags for optional MiniTensor submodules."""
+
+    return {
+        "functional": functional is not None,
+        "nn": nn is not None,
+        "optim": optim is not None,
+        "numpy_compat": numpy_compat is not None,
+        "plugins": plugins is not None,
+        "serialization": serialization is not None,
+    }
+
+
+def list_public_api() -> dict[str, list[str]]:
+    """List public API symbols by module."""
+
+    api = {
+        "top_level": sorted(__all__),
+        "functional": sorted(_iter_public_names(functional)),
+        "nn": sorted(_iter_public_names(nn)),
+        "optim": sorted(_iter_public_names(optim)),
+    }
+
+    if numpy_compat is not None:
+        api["numpy_compat"] = sorted(_iter_public_names(numpy_compat))
+    if plugins is not None:
+        api["plugins"] = sorted(_iter_public_names(plugins))
+    if serialization is not None:
+        api["serialization"] = sorted(_iter_public_names(serialization))
+
+    return api
+
+
+def api_summary() -> dict[str, object]:
+    """Return a summary of available MiniTensor APIs."""
+
+    api = list_public_api()
+    return {
+        "version": __version__,
+        "available_submodules": available_submodules(),
+        "counts": {module: len(items) for module, items in api.items()},
+    }
+
+
+def search_api(query: str, module: str | None = None) -> list[str]:
+    """Search for public API symbols matching a query string."""
+
+    if not query:
+        return []
+
+    api = list_public_api()
+    query_lower = query.lower()
+
+    if module is not None:
+        if module not in api:
+            raise ValueError(f"Unknown module: {module}")
+        return sorted(name for name in api[module] if query_lower in name.lower())
+
+    matches: list[str] = []
+    for module_name, names in api.items():
+        for name in names:
+            if query_lower in name.lower():
+                matches.append(f"{module_name}.{name}")
+    return sorted(matches)
+
+
+def describe_api(symbol: str) -> str:
+    """Return a one-line description for an API symbol."""
+
+    target = _resolve_symbol(symbol)
+    return _describe_symbol(symbol, target)
+
+
+def help() -> str:
+    """Return a formatted help string for all public MiniTensor APIs."""
+
+    sections = [
+        ("Top-level", _describe_symbols(__all__, globals())),
+        ("functional", _describe_symbols(_iter_public_names(functional), functional)),
+        ("nn", _describe_symbols(_iter_public_names(nn), nn)),
+        ("optim", _describe_symbols(_iter_public_names(optim), optim)),
+    ]
+
+    if numpy_compat is not None:
+        sections.append(
+            (
+                "numpy_compat",
+                _describe_symbols(_iter_public_names(numpy_compat), numpy_compat),
+            )
+        )
+    if plugins is not None:
+        sections.append(
+            ("plugins", _describe_symbols(_iter_public_names(plugins), plugins))
+        )
+    if serialization is not None:
+        sections.append(
+            (
+                "serialization",
+                _describe_symbols(_iter_public_names(serialization), serialization),
+            )
+        )
+
+    lines = [f"MiniTensor {__version__} API Reference"]
+    for title, items in sections:
+        lines.append("")
+        lines.append(f"[{title}]")
+        lines.extend(items)
+    output = "\n".join(lines)
+    print(output)
+    return output
+
+
+def _iter_public_names(module: object) -> list[str]:
+    if module is None:
+        return []
+    return [name for name in dir(module) if name and not name.startswith("_")]
+
+
+def _resolve_symbol(symbol: str) -> object:
+    parts = symbol.split(".")
+    if not parts:
+        raise ValueError("symbol must be a non-empty string")
+
+    root = parts[0]
+    if root == "functional":
+        obj: object = functional
+    elif root == "nn":
+        obj = nn
+    elif root == "optim":
+        obj = optim
+    elif root == "numpy_compat":
+        if numpy_compat is None:
+            raise ValueError("numpy_compat is not available in this build")
+        obj = numpy_compat
+    elif root == "plugins":
+        if plugins is None:
+            raise ValueError("plugins are not available in this build")
+        obj = plugins
+    elif root == "serialization":
+        if serialization is None:
+            raise ValueError("serialization is not available in this build")
+        obj = serialization
+    else:
+        obj = globals().get(root)
+        if obj is None:
+            raise ValueError(f"Unknown symbol root: {root}")
+
+    for part in parts[1:]:
+        try:
+            obj = getattr(obj, part)
+        except AttributeError as exc:
+            raise ValueError(f"Unknown symbol: {symbol}") from exc
+    return obj
+
+
+def _describe_symbols(names: list[str], namespace: object) -> list[str]:
+    return [_describe_symbol(name, getattr(namespace, name, None)) for name in names]
+
+
+def _describe_symbol(name: str, obj: object) -> str:
+    if obj is None:
+        return f"- {name}: <missing>"
+    doc = getattr(obj, "__doc__", "") or ""
+    summary = doc.strip().splitlines()[0].strip() if doc.strip() else ""
+    if not summary:
+        summary = f"{type(obj).__name__}"
+    return f"- {name}: {summary}"
+
+
 _FUNCTIONAL_FORWARDERS = (
     "cat",
     "stack",
@@ -313,6 +482,12 @@ __all__ = [
     "get_default_dtype",
     "set_default_dtype",
     "default_dtype",
+    "available_submodules",
+    "list_public_api",
+    "api_summary",
+    "search_api",
+    "describe_api",
+    "help",
     "get_gradient",
     "clear_autograd_graph",
     "is_autograd_graph_consumed",
