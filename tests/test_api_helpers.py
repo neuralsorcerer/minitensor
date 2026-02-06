@@ -4,7 +4,80 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
 import minitensor as mt
+
+
+class _DummyModule(types.ModuleType):
+    def __getattr__(self, name: str):
+        def _noop(*_args, **_kwargs):
+            return None
+
+        return _noop
+
+
+class _TensorMeta(type):
+    def __getattr__(cls, name: str):
+        def _noop(*_args, **_kwargs):
+            return None
+
+        return _noop
+
+
+class _DummyTensor(metaclass=_TensorMeta):
+    pass
+
+
+class _DummyDevice:
+    cpu = "cpu"
+    cuda = "cuda"
+
+
+def _load_stubbed_module(monkeypatch: pytest.MonkeyPatch):
+    module_name = "minitensor_stubbed"
+    module_path = Path(__file__).resolve().parents[1] / "minitensor" / "__init__.py"
+
+    core = types.ModuleType(f"{module_name}._core")
+    core.Tensor = _DummyTensor
+    core.Device = _DummyDevice
+    core.get_default_dtype = lambda: "float32"
+    core.set_default_dtype = lambda _dtype: None
+    core.manual_seed = lambda _seed: None
+    core.get_gradient = lambda: None
+    core.clear_autograd_graph = lambda: None
+    core.is_autograd_graph_consumed = lambda: False
+    core.mark_autograd_graph_consumed = lambda: None
+    core.functional = _DummyModule(f"{module_name}._core.functional")
+    core.nn = _DummyModule(f"{module_name}._core.nn")
+    core.optim = _DummyModule(f"{module_name}._core.optim")
+    core.numpy_compat = None
+    core.plugins = None
+    core.serialization = None
+
+    version = types.ModuleType(f"{module_name}._version")
+    version.__version__ = "0.0.0"
+    version.__version_tuple__ = (0, 0, 0)
+
+    monkeypatch.setitem(sys.modules, module_name, None)
+    monkeypatch.setitem(sys.modules, f"{module_name}._core", core)
+    monkeypatch.setitem(sys.modules, f"{module_name}._version", version)
+
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        module_path,
+        submodule_search_locations=[str(module_path.parent)],
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_available_submodules_contains_expected_keys():
@@ -55,3 +128,83 @@ def test_help_prints_and_returns(capsys):
     captured = capsys.readouterr()
     assert "MiniTensor" in output
     assert "MiniTensor" in captured.out
+
+
+def test_search_api_returns_empty_for_blank_query():
+    assert mt.search_api("") == []
+
+
+def test_iter_public_names_handles_none():
+    assert mt._iter_public_names(None) == []
+
+
+def test_resolve_symbol_errors_and_describe_api():
+    class _EmptySplit(str):
+        def split(self, _sep=None):
+            return []
+
+    with pytest.raises(ValueError, match="symbol must be a non-empty string"):
+        mt._resolve_symbol(_EmptySplit(""))
+
+    with pytest.raises(ValueError, match="Unknown symbol root"):
+        mt._resolve_symbol("does_not_exist")
+
+    with pytest.raises(ValueError, match="Unknown symbol"):
+        mt._resolve_symbol("Tensor.missing")
+
+    description = mt.describe_api("Tensor")
+    assert description.startswith("- Tensor:")
+
+
+def test_resolve_symbol_reports_missing_optional_modules(monkeypatch):
+    original_numpy_compat = mt.numpy_compat
+    original_plugins = mt.plugins
+    original_serialization = mt.serialization
+    try:
+        mt.numpy_compat = None
+        with pytest.raises(ValueError, match="numpy_compat"):
+            mt._resolve_symbol("numpy_compat")
+
+        mt.plugins = None
+        with pytest.raises(ValueError, match="plugins"):
+            mt._resolve_symbol("plugins")
+
+        mt.serialization = None
+        with pytest.raises(ValueError, match="serialization"):
+            mt._resolve_symbol("serialization")
+    finally:
+        mt.numpy_compat = original_numpy_compat
+        mt.plugins = original_plugins
+        mt.serialization = original_serialization
+
+
+def test_resolve_symbol_handles_core_modules():
+    assert mt._resolve_symbol("functional") is mt.functional
+    assert mt._resolve_symbol("nn") is mt.nn
+    assert mt._resolve_symbol("optim") is mt.optim
+
+
+def test_resolve_symbol_accepts_available_optional_modules():
+    original_numpy_compat = mt.numpy_compat
+    original_plugins = mt.plugins
+    original_serialization = mt.serialization
+    dummy_numpy = object()
+    dummy_plugins = object()
+    dummy_serialization = object()
+    try:
+        mt.numpy_compat = dummy_numpy
+        mt.plugins = dummy_plugins
+        mt.serialization = dummy_serialization
+        assert mt._resolve_symbol("numpy_compat") is dummy_numpy
+        assert mt._resolve_symbol("plugins") is dummy_plugins
+        assert mt._resolve_symbol("serialization") is dummy_serialization
+    finally:
+        mt.numpy_compat = original_numpy_compat
+        mt.plugins = original_plugins
+        mt.serialization = original_serialization
+
+
+def test_stubbed_import_sets_cross_none(monkeypatch):
+    stubbed = _load_stubbed_module(monkeypatch)
+    assert stubbed.numpy_compat is None
+    assert stubbed.cross is None
