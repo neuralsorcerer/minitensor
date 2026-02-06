@@ -13,7 +13,9 @@ use crate::{
     operations::{
         activation::{abs as activation_abs, exp, log_softmax, log1p},
         arithmetic::{add, mul, sub},
+        comparison,
         reduction::{mean, sum},
+        selection::masked_fill_scalar,
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -183,8 +185,19 @@ pub fn cross_entropy_loss(
     let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
     // Apply log-softmax to predictions for numerical stability
-    let log_predictions = log_softmax(predictions, None)?;
-    let softmax_predictions = exp(&log_predictions.detach())?;
+    let log_predictions_base = log_softmax(predictions, None)?;
+    let softmax_predictions = exp(&log_predictions_base.detach())?;
+    let zero_mask = comparison::eq(
+        &softmax_predictions,
+        &Tensor::zeros(
+            softmax_predictions.shape().clone(),
+            softmax_predictions.dtype(),
+            softmax_predictions.device(),
+            false,
+        ),
+    )?;
+    let log_predictions =
+        masked_fill_scalar(&log_predictions_base, &zero_mask, f64::NEG_INFINITY)?;
 
     // Compute negative log likelihood summed over classes
     let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
