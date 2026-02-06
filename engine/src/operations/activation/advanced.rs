@@ -287,7 +287,8 @@ mod tests {
         let result = log_softmax(&tensor, None).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
 
-        assert!(result_data[0].is_infinite() && result_data[0].is_sign_negative());
+        assert!(result_data[0].is_finite());
+        assert!((result_data[0] + 1000.0).abs() < 1e-3);
         assert!(result_data[1].abs() < 1e-6);
     }
 

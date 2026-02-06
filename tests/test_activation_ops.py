@@ -61,10 +61,15 @@ def test_softsign_matches_numpy_and_grad():
 
 
 def test_log_softmax_stability_large_range():
-    t = mt.Tensor([[1000.0, -1000.0, 0.0]])
+    x = np.array([[1000.0, -1000.0, 0.0]], dtype=np.float32)
+    t = mt.Tensor(x)
     log_sm = t.log_softmax(dim=1)
-    sm_log = t.softmax(dim=1).log()
-    np.testing.assert_allclose(log_sm.numpy(), sm_log.numpy(), atol=1e-6)
+    shifted = x - x.max(axis=1, keepdims=True)
+    logsumexp = np.log(np.exp(shifted).sum(axis=1, keepdims=True)) + x.max(
+        axis=1, keepdims=True
+    )
+    expected = x - logsumexp
+    np.testing.assert_allclose(log_sm.numpy(), expected, atol=1e-6)
     np.testing.assert_allclose(
         np.exp(log_sm.numpy()).sum(axis=1), np.array([1.0]), atol=1e-6
     )

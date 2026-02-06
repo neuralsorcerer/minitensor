@@ -97,7 +97,7 @@ def test_cross_entropy_no_reduction_shape_and_values():
     assert np.allclose(loss.numpy(), expected)
 
 
-def test_cross_entropy_zero_probabilities_returns_inf():
+def test_cross_entropy_extreme_logits_remain_finite():
     x_np = np.array([[1000.0, -1000.0]], dtype=np.float32)
     target_np = np.array([[0.0, 1.0]], dtype=np.float32)
     x = mt.Tensor(x_np.tolist())
