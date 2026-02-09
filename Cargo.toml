@@ -41,7 +41,7 @@ num_cpus = "1.16"
 libc = "0.2"
 
 # Random number generation
-rand = "0.9"
+rand = "0.10"
 rand_distr = "0.5"
 statrs = "0.18"
 
