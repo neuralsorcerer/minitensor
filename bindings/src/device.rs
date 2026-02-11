@@ -8,7 +8,7 @@ use engine::Device;
 use pyo3::prelude::*;
 
 /// Python wrapper for Device
-#[pyclass(name = "Device")]
+#[pyclass(name = "Device", from_py_object)]
 #[derive(Clone)]
 pub struct PyDevice {
     inner: Device,

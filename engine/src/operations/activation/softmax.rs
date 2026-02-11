@@ -120,9 +120,7 @@ fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |val: f32| {
-        1.0 / (1.0 + (-val).exp())
-    });
+    unary_apply(input_data, output_slice, stable_sigmoid_f32);
     Ok(())
 }
 
@@ -134,10 +132,30 @@ fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |val: f64| {
-        1.0 / (1.0 + (-val).exp())
-    });
+    unary_apply(input_data, output_slice, stable_sigmoid_f64);
     Ok(())
+}
+
+#[inline]
+fn stable_sigmoid_f32(val: f32) -> f32 {
+    if val >= 0.0 {
+        let exp_neg = (-val).exp();
+        1.0 / (1.0 + exp_neg)
+    } else {
+        let exp_pos = val.exp();
+        exp_pos / (1.0 + exp_pos)
+    }
+}
+
+#[inline]
+fn stable_sigmoid_f64(val: f64) -> f64 {
+    if val >= 0.0 {
+        let exp_neg = (-val).exp();
+        1.0 / (1.0 + exp_neg)
+    } else {
+        let exp_pos = val.exp();
+        exp_pos / (1.0 + exp_pos)
+    }
 }
 
 fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {

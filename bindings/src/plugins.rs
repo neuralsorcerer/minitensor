@@ -17,7 +17,7 @@ use pyo3::types::PyList;
 use std::collections::HashMap;
 
 /// Python wrapper for VersionInfo
-#[pyclass(name = "VersionInfo")]
+#[pyclass(name = "VersionInfo", from_py_object)]
 #[derive(Clone)]
 pub struct PyVersionInfo {
     inner: VersionInfo,
@@ -76,7 +76,7 @@ impl PyVersionInfo {
 }
 
 /// Python wrapper for PluginInfo
-#[pyclass(name = "PluginInfo")]
+#[pyclass(name = "PluginInfo", from_py_object)]
 #[derive(Clone)]
 pub struct PyPluginInfo {
     inner: PluginInfo,
@@ -137,7 +137,7 @@ impl PyPluginInfo {
 }
 
 /// Python interface for creating custom plugins
-#[pyclass(name = "CustomPlugin")]
+#[pyclass(name = "CustomPlugin", from_py_object)]
 pub struct PyCustomPlugin {
     info: PluginInfo,
     initialize_fn: Option<Py<PyAny>>,
