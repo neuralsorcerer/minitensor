@@ -529,7 +529,7 @@ impl GradientFunction for SiluBackward {
                     .zip(input_slice.iter())
                     .zip(grad_out_slice.iter())
                 {
-                    let sigmoid = 1.0f32 / (1.0f32 + (-x).exp());
+                    let sigmoid = stable_sigmoid_f32(x);
                     let grad_val = sigmoid * (1.0f32 + x * (1.0f32 - sigmoid));
                     *grad_slot = gout * grad_val;
                 }
@@ -569,7 +569,7 @@ impl GradientFunction for SiluBackward {
                     .zip(input_slice.iter())
                     .zip(grad_out_slice.iter())
                 {
-                    let sigmoid = 1.0f64 / (1.0f64 + (-x).exp());
+                    let sigmoid = stable_sigmoid_f64(x);
                     let grad_val = sigmoid * (1.0f64 + x * (1.0f64 - sigmoid));
                     *grad_slot = gout * grad_val;
                 }
@@ -595,6 +595,28 @@ impl GradientFunction for SiluBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
+    }
+}
+
+#[inline]
+fn stable_sigmoid_f32(x: f32) -> f32 {
+    if x >= 0.0 {
+        let exp_neg = (-x).exp();
+        1.0 / (1.0 + exp_neg)
+    } else {
+        let exp_pos = x.exp();
+        exp_pos / (1.0 + exp_pos)
+    }
+}
+
+#[inline]
+fn stable_sigmoid_f64(x: f64) -> f64 {
+    if x >= 0.0 {
+        let exp_neg = (-x).exp();
+        1.0 / (1.0 + exp_neg)
+    } else {
+        let exp_pos = x.exp();
+        exp_pos / (1.0 + exp_pos)
     }
 }
 

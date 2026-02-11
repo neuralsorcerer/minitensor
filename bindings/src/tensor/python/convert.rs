@@ -149,7 +149,7 @@ where
 }
 
 fn py_not_implemented(py: Python) -> PyResult<Py<PyAny>> {
-    unsafe { Ok(Py::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented())) }
+    unsafe { Ok(pyo3::Bound::<pyo3::PyAny>::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented()).unbind()) }
 }
 
 fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
@@ -204,13 +204,7 @@ fn ensure_backward_gradient_compatible(reference: &Tensor, gradient: &mut Tensor
 }
 
 fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {
-    if let Ok(py_tensor) = value.extract::<PyTensor>() {
-        return Ok(py_tensor.inner.clone());
-    }
-
-    if let Ok(inner) = value.getattr("_tensor")
-        && let Ok(py_tensor) = inner.extract::<PyTensor>()
-    {
+    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         return Ok(py_tensor.inner.clone());
     }
 
@@ -247,13 +241,6 @@ fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Te
             tensor = tensor.astype(target_dtype).map_err(_convert_error)?;
         }
 
-        if target_dtype != reference.dtype() {
-            return Ok(tensor);
-        }
-
-        if tensor.dtype() != reference.dtype() {
-            tensor = tensor.astype(reference.dtype()).map_err(_convert_error)?;
-        }
         return Ok(tensor);
     }
 
@@ -285,20 +272,7 @@ fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Te
 }
 
 fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor> {
-    if let Ok(py_tensor) = value.extract::<PyTensor>() {
-        let mut tensor = py_tensor.inner.clone();
-        if tensor.dtype() != DataType::Bool {
-            return Err(PyTypeError::new_err("mask must be a bool tensor"));
-        }
-        if tensor.device() != device {
-            tensor = tensor.to(device).map_err(_convert_error)?;
-        }
-        return Ok(tensor);
-    }
-
-    if let Ok(inner) = value.getattr("_tensor")
-        && let Ok(py_tensor) = inner.extract::<PyTensor>()
-    {
+    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         let mut tensor = py_tensor.inner.clone();
         if tensor.dtype() != DataType::Bool {
             return Err(PyTypeError::new_err("mask must be a bool tensor"));
@@ -340,13 +314,7 @@ fn promote_dtypes(a: DataType, b: DataType) -> DataType {
 }
 
 fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
-    if let Ok(py_tensor) = value.extract::<PyTensor>() {
-        return Some(py_tensor.inner.dtype());
-    }
-
-    if let Ok(inner) = value.getattr("_tensor")
-        && let Ok(py_tensor) = inner.extract::<PyTensor>()
-    {
+    if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         return Some(py_tensor.inner.dtype());
     }
 

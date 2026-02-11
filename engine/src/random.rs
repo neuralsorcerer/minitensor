@@ -15,7 +15,7 @@
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 /// Global RNG used across the engine for deterministic sampling.
 static GLOBAL_RNG: Lazy<Mutex<StdRng>> = Lazy::new(|| {
@@ -48,7 +48,7 @@ pub fn manual_seed(seed: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     #[test]
     fn test_manual_seed_reproducible() {

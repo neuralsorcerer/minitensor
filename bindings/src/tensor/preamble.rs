@@ -40,6 +40,22 @@ fn register_leaf_tensor(tensor: &Tensor) {
     }
 }
 
+fn extract_wrapped_pytensor(value: &Bound<PyAny>) -> Option<PyTensor> {
+    if let Ok(py_tensor) = value.extract::<PyTensor>() {
+        return Some(py_tensor);
+    }
+
+    let attr_name = intern!(value.py(), "_tensor");
+    if value.hasattr(attr_name).ok()?
+        && let Ok(inner_attr) = value.getattr(attr_name)
+        && let Ok(py_tensor) = inner_attr.extract::<PyTensor>()
+    {
+        return Some(py_tensor);
+    }
+
+    None
+}
+
 fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option<f64>> {
     match value {
         None => Ok(None),
@@ -123,7 +139,7 @@ fn parse_quantile_arg(q: &Bound<PyAny>) -> PyResult<QuantileArg> {
     }
 }
 
-#[pyclass(name = "Shape", module = "minitensor._core")]
+#[pyclass(name = "Shape", module = "minitensor._core", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ShapeSequence {
     dims: Vec<usize>,
@@ -201,7 +217,7 @@ impl ShapeSequence {
 }
 
 /// Python wrapper for Tensor
-#[pyclass(name = "Tensor", module = "minitensor._core")]
+#[pyclass(name = "Tensor", module = "minitensor._core", from_py_object)]
 #[derive(Clone)]
 pub struct PyTensor {
     inner: Tensor,
@@ -225,13 +241,7 @@ impl PyTensor {
     }
 
     pub fn from_python_value(value: &Bound<PyAny>) -> PyResult<Self> {
-        if let Ok(py_tensor) = value.extract::<PyTensor>() {
-            return Ok(py_tensor);
-        }
-
-        if let Ok(inner_attr) = value.getattr(intern!(value.py(), "_tensor"))
-            && let Ok(py_tensor) = inner_attr.extract::<PyTensor>()
-        {
+        if let Some(py_tensor) = extract_wrapped_pytensor(value) {
             return Ok(py_tensor);
         }
 

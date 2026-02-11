@@ -269,3 +269,19 @@ def test_silu_forward_and_grad():
     out.sum().backward()
     expected_grad = sigmoid * (1.0 + data * (1.0 - sigmoid))
     np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-6)
+
+
+def test_silu_extreme_values_and_grad_stability():
+    values = np.array([-1000.0, 0.0, 1000.0], dtype=np.float32)
+    tensor = mt.Tensor(values, requires_grad=True)
+
+    out = tensor.silu()
+    expected = values / (1.0 + np.exp(-np.clip(values, -80.0, 80.0)))
+    np.testing.assert_allclose(out.numpy(), expected, atol=1e-6, rtol=1e-6)
+
+    out.sum().backward()
+    grads = tensor.grad.numpy()
+    assert np.isfinite(grads).all()
+    np.testing.assert_allclose(
+        grads, np.array([0.0, 0.5, 1.0], dtype=np.float32), atol=1e-4
+    )

@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 
 /// Python wrapper for ModelVersion
-#[pyclass(name = "ModelVersion")]
+#[pyclass(name = "ModelVersion", from_py_object)]
 #[derive(Clone)]
 pub struct PyModelVersion {
     inner: ModelVersion,
@@ -82,7 +82,7 @@ impl PyModelVersion {
 }
 
 /// Python wrapper for ModelMetadata
-#[pyclass(name = "ModelMetadata")]
+#[pyclass(name = "ModelMetadata", from_py_object)]
 #[derive(Clone)]
 pub struct PyModelMetadata {
     inner: ModelMetadata,
@@ -177,7 +177,7 @@ impl PyModelMetadata {
 }
 
 /// Python wrapper for SerializationFormat
-#[pyclass(name = "SerializationFormat")]
+#[pyclass(name = "SerializationFormat", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PySerializationFormat {
     inner: SerializationFormat,
@@ -282,7 +282,7 @@ impl PyModelSerializer {
 }
 
 /// Python wrapper for SerializedModel
-#[pyclass(name = "SerializedModel")]
+#[pyclass(name = "SerializedModel", from_py_object)]
 #[derive(Clone)]
 pub struct PySerializedModel {
     inner: SerializedModel,
@@ -338,7 +338,7 @@ impl PySerializedModel {
 }
 
 /// Python wrapper for StateDict
-#[pyclass(name = "StateDict")]
+#[pyclass(name = "StateDict", from_py_object)]
 #[derive(Clone)]
 pub struct PyStateDict {
     pub(crate) inner: StateDict,
@@ -389,7 +389,7 @@ impl PyStateDict {
 }
 
 /// Python wrapper for DeploymentModel
-#[pyclass(name = "DeploymentModel")]
+#[pyclass(name = "DeploymentModel", from_py_object)]
 #[derive(Clone)]
 pub struct PyDeploymentModel {
     inner: DeploymentModel,

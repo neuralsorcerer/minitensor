@@ -185,7 +185,7 @@ fn create_random_tensor(
     match dtype {
         DataType::Float32 => {
             if let Some(slice) = tensor_data.as_f32_slice_mut() {
-                use rand::Rng;
+                use rand::RngExt;
                 random::with_rng(|rng| {
                     if normal {
                         use rand_distr::{Distribution, Normal};
@@ -203,7 +203,7 @@ fn create_random_tensor(
         }
         DataType::Float64 => {
             if let Some(slice) = tensor_data.as_f64_slice_mut() {
-                use rand::Rng;
+                use rand::RngExt;
                 random::with_rng(|rng| {
                     if normal {
                         use rand_distr::{Distribution, Normal};
@@ -221,7 +221,7 @@ fn create_random_tensor(
         }
         DataType::Int32 => {
             if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                use rand::Rng;
+                use rand::RngExt;
                 random::with_rng(|rng| {
                     if normal {
                         use rand_distr::{Distribution, Normal};
@@ -239,7 +239,7 @@ fn create_random_tensor(
         }
         DataType::Int64 => {
             if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                use rand::Rng;
+                use rand::RngExt;
                 random::with_rng(|rng| {
                     if normal {
                         use rand_distr::{Distribution, Normal};
@@ -257,7 +257,7 @@ fn create_random_tensor(
         }
         DataType::Bool => {
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                use rand::Rng;
+                use rand::RngExt;
                 random::with_rng(|rng| {
                     for val in slice.iter_mut() {
                         *val = rng.random::<bool>();
@@ -515,7 +515,7 @@ fn create_randint_tensor(
             }
             let mut values = vec![0i32; shape.numel()];
             random::with_rng(|rng| {
-                use rand::Rng;
+                use rand::RngExt;
                 for value in &mut values {
                     *value = rng.random_range(low_i32..high_i32);
                 }
@@ -528,7 +528,7 @@ fn create_randint_tensor(
             }
             let mut values = vec![0i64; shape.numel()];
             random::with_rng(|rng| {
-                use rand::Rng;
+                use rand::RngExt;
                 for value in &mut values {
                     *value = rng.random_range(low..high);
                 }

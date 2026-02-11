@@ -186,6 +186,25 @@ fn test_sigmoid_extreme_inputs() {
 }
 
 #[test]
+fn test_sigmoid_inf_and_nan_inputs() {
+    let tensor = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(
+            vec![f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+            Device::cpu(),
+        )),
+        Shape::new(vec![3]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let result = activation::sigmoid(&tensor).unwrap();
+    let vals = result.data().as_f32_slice().unwrap();
+    assert_eq!(vals[0], 1.0);
+    assert_eq!(vals[1], 0.0);
+    assert!(vals[2].is_nan());
+}
+
+#[test]
 fn test_tanh_extreme_inputs() {
     let tensor = Tensor::new(
         Arc::new(TensorData::from_vec_f32(
