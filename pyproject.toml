@@ -8,7 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "minitensor"
-version = "0.1.4"
+version = "0.1.5"
 description = "A lightweight, high-performance tensor operations library."
 readme = "README.md"
 license = "Apache-2.0"

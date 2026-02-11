@@ -49,7 +49,7 @@ statrs = "0.18"
 libm = "0.2"
 
 # Python bindings
-pyo3 = { version = "0.27", features = ["extension-module", "auto-initialize", "multiple-pymethods"] }
+pyo3 = { version = "0.28", features = ["extension-module", "auto-initialize", "multiple-pymethods"] }
 numpy = "0.28"
 
 [workspace.metadata.maturin]
