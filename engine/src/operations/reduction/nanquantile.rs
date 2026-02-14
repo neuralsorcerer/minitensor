@@ -118,10 +118,11 @@ fn nanquantiles_along_dim(
                             };
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                let lower = buffer[position.lower_idx] as f64;
-                                let upper = buffer[position.upper_idx] as f64;
-                                values[out_idx] =
-                                    interpolation.interpolate(lower, upper, position.weight) as f32;
+                                values[out_idx] = quantile_from_sorted_position_f32(
+                                    &buffer,
+                                    position,
+                                    interpolation,
+                                );
                             }
                         }
                     }
@@ -195,10 +196,11 @@ fn nanquantiles_along_dim(
                             };
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                let lower = buffer[position.lower_idx];
-                                let upper = buffer[position.upper_idx];
-                                values[out_idx] =
-                                    interpolation.interpolate(lower, upper, position.weight);
+                                values[out_idx] = quantile_from_sorted_position_f64(
+                                    &buffer,
+                                    position,
+                                    interpolation,
+                                );
                             }
                         }
                     }
@@ -226,11 +228,10 @@ fn quantile_from_unsorted_f32(
         return values[0];
     }
 
-    let max_index = (values.len() - 1) as f64;
-    let pos = (q * max_index).clamp(0.0, max_index);
-    let lower_idx = pos.floor() as usize;
-    let upper_idx = pos.ceil() as usize;
-    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+    let position = quantile_position_for_len_q(values.len(), q);
+    let lower_idx = position.lower_idx;
+    let upper_idx = position.upper_idx;
+    let weight = position.weight;
 
     if lower_idx == upper_idx {
         return select_quantile_at_f32(values, lower_idx);
@@ -240,7 +241,7 @@ fn quantile_from_unsorted_f32(
         QuantileInterpolation::Lower => select_quantile_at_f32(values, lower_idx) as f64,
         QuantileInterpolation::Higher => select_quantile_at_f32(values, upper_idx) as f64,
         QuantileInterpolation::Nearest => {
-            let idx = if weight <= 0.5 { lower_idx } else { upper_idx };
+            let idx = position.nearest_idx;
             select_quantile_at_f32(values, idx) as f64
         }
         QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
@@ -261,11 +262,10 @@ fn quantile_from_unsorted_f64(
         return values[0];
     }
 
-    let max_index = (values.len() - 1) as f64;
-    let pos = (q * max_index).clamp(0.0, max_index);
-    let lower_idx = pos.floor() as usize;
-    let upper_idx = pos.ceil() as usize;
-    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+    let position = quantile_position_for_len_q(values.len(), q);
+    let lower_idx = position.lower_idx;
+    let upper_idx = position.upper_idx;
+    let weight = position.weight;
 
     if lower_idx == upper_idx {
         return select_quantile_at_f64(values, lower_idx);
@@ -275,7 +275,7 @@ fn quantile_from_unsorted_f64(
         QuantileInterpolation::Lower => select_quantile_at_f64(values, lower_idx),
         QuantileInterpolation::Higher => select_quantile_at_f64(values, upper_idx),
         QuantileInterpolation::Nearest => {
-            let idx = if weight <= 0.5 { lower_idx } else { upper_idx };
+            let idx = position.nearest_idx;
             select_quantile_at_f64(values, idx)
         }
         QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {

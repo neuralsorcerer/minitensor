@@ -657,10 +657,8 @@ fn quantiles_along_dim(
                             buffer.sort_by(|a, b| a.total_cmp(b));
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                let lower = buffer[position.lower_idx] as f64;
-                                let upper = buffer[position.upper_idx] as f64;
                                 values[out_idx] =
-                                    interpolation.interpolate(lower, upper, position.weight) as f32;
+                                    quantile_from_sorted_position_f32(&buffer, position, interpolation);
                             }
                         }
                     }
@@ -733,10 +731,8 @@ fn quantiles_along_dim(
                             buffer.sort_by(|a, b| a.total_cmp(b));
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                let lower = buffer[position.lower_idx];
-                                let upper = buffer[position.upper_idx];
                                 values[out_idx] =
-                                    interpolation.interpolate(lower, upper, position.weight);
+                                    quantile_from_sorted_position_f64(&buffer, position, interpolation);
                             }
                         }
                     }

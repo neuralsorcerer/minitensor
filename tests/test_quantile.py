@@ -154,3 +154,94 @@ def test_nanquantile_all_nan_raises():
     data = mt.tensor([np.nan, np.nan])
     with pytest.raises(ValueError):
         data.nanquantile(0.5)
+
+
+def test_quantile_sequence_interpolation_modes_match_numpy():
+    data = mt.tensor([[3.0, 7.0, 1.0, 9.0], [4.0, 2.0, 8.0, 6.0]])
+    probs = [0.25, 0.5, 0.75]
+
+    for interpolation in ["lower", "higher", "nearest", "linear", "midpoint"]:
+        quant = data.quantile(probs, dim=1, interpolation=interpolation)
+        expected = np.quantile(data.numpy(), probs, axis=1, method=interpolation)
+
+        np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanquantile_sequence_interpolation_modes_match_numpy():
+    data = mt.tensor([[3.0, np.nan, 1.0, 9.0], [4.0, 2.0, np.nan, 6.0]])
+    probs = [0.25, 0.5, 0.75]
+
+    for interpolation in ["lower", "higher", "nearest", "linear", "midpoint"]:
+        quant = data.nanquantile(probs, dim=1, interpolation=interpolation)
+        expected = np.nanquantile(data.numpy(), probs, axis=1, method=interpolation)
+
+        np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_quantile_nearest_tie_breaks_to_even_index():
+    data = mt.tensor([1.0, 3.0, 9.0])
+
+    quant = data.quantile(0.25, interpolation="nearest")
+    expected = np.quantile(data.numpy(), 0.25, method="nearest")
+
+    np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanquantile_nearest_tie_breaks_to_even_index():
+    data = mt.tensor([1.0, np.nan, 3.0, 9.0])
+
+    quant = data.nanquantile(0.75, interpolation="nearest")
+    expected = np.nanquantile(data.numpy(), 0.75, method="nearest")
+
+    np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_quantile_nearest_tie_break_even_with_two_values():
+    data = mt.tensor([10.0, 20.0])
+
+    quant = data.quantile(0.5, interpolation="nearest")
+    expected = np.quantile(data.numpy(), 0.5, method="nearest")
+
+    np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanquantile_nearest_tie_break_even_with_filtered_values():
+    data = mt.tensor([10.0, np.nan, 20.0, 30.0, 40.0])
+
+    quant = data.nanquantile(0.5, interpolation="nearest")
+    expected = np.nanquantile(data.numpy(), 0.5, method="nearest")
+
+    np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_quantile_nearest_endpoint_probabilities_match_numpy():
+    data = mt.tensor([4.0, 1.0, 9.0, 2.0, 7.0])
+
+    for q in (0.0, 1.0):
+        quant = data.quantile(q, interpolation="nearest")
+        expected = np.quantile(data.numpy(), q, method="nearest")
+
+        np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanquantile_nearest_endpoint_probabilities_match_numpy():
+    data = mt.tensor([4.0, np.nan, 1.0, 9.0, np.nan, 2.0, 7.0])
+
+    for q in (0.0, 1.0):
+        quant = data.nanquantile(q, interpolation="nearest")
+        expected = np.nanquantile(data.numpy(), q, method="nearest")
+
+        np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nearest_quantile_singleton_is_stable_across_probabilities():
+    data = mt.tensor([42.0])
+
+    for q in (0.0, 0.25, 0.5, 0.75, 1.0):
+        quant = data.quantile(q, interpolation="nearest")
+        nanquant = data.nanquantile(q, interpolation="nearest")
+
+        np.testing.assert_allclose(quant.numpy(), np.array(42.0), rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            nanquant.numpy(), np.array(42.0), rtol=1e-6, atol=1e-6
+        )

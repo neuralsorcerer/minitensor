@@ -44,7 +44,10 @@ impl QuantileInterpolation {
             QuantileInterpolation::Higher => upper,
             QuantileInterpolation::Midpoint => 0.5 * (lower + upper),
             QuantileInterpolation::Nearest => {
-                if weight <= 0.5 {
+                // Index-aware callers should route through `nearest_index_with_tie_even`
+                // for NumPy-compatible tie-to-even behavior. This fallback remains
+                // deterministic for non-indexed interpolation use-cases.
+                if weight < 0.5 {
                     lower
                 } else {
                     upper
@@ -629,35 +632,42 @@ fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) -> Result<()
 struct QuantilePosition {
     lower_idx: usize,
     upper_idx: usize,
+    nearest_idx: usize,
     weight: f64,
 }
 
 fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<QuantilePosition> {
-    if len == 1 {
-        return vec![
-            QuantilePosition {
-                lower_idx: 0,
-                upper_idx: 0,
-                weight: 0.0,
-            };
-            qs.len()
-        ];
+    let mut positions = Vec::with_capacity(qs.len());
+    for &q in qs {
+        positions.push(quantile_position_for_len_q(len, q));
+    }
+    positions
+}
+
+#[inline(always)]
+fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePosition {
+    if len <= 1 {
+        return QuantilePosition {
+            lower_idx: 0,
+            upper_idx: 0,
+            nearest_idx: 0,
+            weight: 0.0,
+        };
     }
 
     let max_index = (len - 1) as f64;
-    qs.iter()
-        .map(|&q| {
-            let pos = (q * max_index).clamp(0.0, max_index);
-            let lower_idx = pos.floor() as usize;
-            let upper_idx = pos.ceil() as usize;
-            let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
-            QuantilePosition {
-                lower_idx,
-                upper_idx,
-                weight,
-            }
-        })
-        .collect()
+    let pos = (q * max_index).clamp(0.0, max_index);
+    let lower_idx = pos.floor() as usize;
+    let upper_idx = pos.ceil() as usize;
+    let weight = (pos - lower_idx as f64).clamp(0.0, 1.0);
+    let nearest_idx = nearest_index_with_tie_even(lower_idx, upper_idx, weight);
+
+    QuantilePosition {
+        lower_idx,
+        upper_idx,
+        nearest_idx,
+        weight,
+    }
 }
 
 fn quantiles_from_sorted_f32(
@@ -667,9 +677,7 @@ fn quantiles_from_sorted_f32(
     output: &mut [f32],
 ) {
     for (slot, position) in output.iter_mut().zip(positions.iter()) {
-        let lower = values[position.lower_idx] as f64;
-        let upper = values[position.upper_idx] as f64;
-        *slot = interpolation.interpolate(lower, upper, position.weight) as f32;
+        *slot = quantile_from_sorted_position_f32(values, position, interpolation);
     }
 }
 
@@ -680,9 +688,61 @@ fn quantiles_from_sorted_f64(
     output: &mut [f64],
 ) {
     for (slot, position) in output.iter_mut().zip(positions.iter()) {
-        let lower = values[position.lower_idx];
-        let upper = values[position.upper_idx];
-        *slot = interpolation.interpolate(lower, upper, position.weight);
+        *slot = quantile_from_sorted_position_f64(values, position, interpolation);
+    }
+}
+
+#[inline(always)]
+fn nearest_index_with_tie_even(lower_idx: usize, upper_idx: usize, weight: f64) -> usize {
+    debug_assert!((0.0..=1.0).contains(&weight));
+
+    if upper_idx <= lower_idx {
+        debug_assert_eq!(upper_idx, lower_idx, "nearest_index_with_tie_even requires upper_idx >= lower_idx");
+        return lower_idx;
+    }
+
+    debug_assert_eq!(upper_idx, lower_idx + 1);
+
+    if weight < 0.5 {
+        lower_idx
+    } else if weight > 0.5 {
+        upper_idx
+    } else {
+        lower_idx + (lower_idx & 1)
+    }
+}
+
+fn quantile_from_sorted_position_f32(
+    values: &[f32],
+    position: &QuantilePosition,
+    interpolation: QuantileInterpolation,
+) -> f32 {
+    match interpolation {
+        QuantileInterpolation::Lower => values[position.lower_idx],
+        QuantileInterpolation::Higher => values[position.upper_idx],
+        QuantileInterpolation::Nearest => values[position.nearest_idx],
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let lower = values[position.lower_idx] as f64;
+            let upper = values[position.upper_idx] as f64;
+            interpolation.interpolate(lower, upper, position.weight) as f32
+        }
+    }
+}
+
+fn quantile_from_sorted_position_f64(
+    values: &[f64],
+    position: &QuantilePosition,
+    interpolation: QuantileInterpolation,
+) -> f64 {
+    match interpolation {
+        QuantileInterpolation::Lower => values[position.lower_idx],
+        QuantileInterpolation::Higher => values[position.upper_idx],
+        QuantileInterpolation::Nearest => values[position.nearest_idx],
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let lower = values[position.lower_idx];
+            let upper = values[position.upper_idx];
+            interpolation.interpolate(lower, upper, position.weight)
+        }
     }
 }
 
