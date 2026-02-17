@@ -174,21 +174,37 @@ def api_summary() -> dict[str, object]:
 def search_api(query: str, module: str | None = None) -> list[str]:
     """Search for public API symbols matching a query string."""
 
-    if not query:
+    if not isinstance(query, str):
+        raise TypeError("query must be a string")
+
+    query_normalized = query.strip()
+    if not query_normalized:
         return []
 
     api = list_public_api()
-    query_lower = query.lower()
+    query_folded = query_normalized.casefold()
 
     if module is not None:
-        if module not in api:
-            raise ValueError(f"Unknown module: {module}")
-        return sorted(name for name in api[module] if query_lower in name.lower())
+        if not isinstance(module, str):
+            raise TypeError("module must be a string or None")
+
+        module_normalized = module.strip()
+        module_names = api.get(module_normalized)
+        if module_names is None:
+            module_folded = module_normalized.casefold()
+            resolved_module = next(
+                (name for name in api if name.casefold() == module_folded), None
+            )
+            if resolved_module is None:
+                raise ValueError(f"Unknown module: {module}")
+            module_names = api[resolved_module]
+
+        return sorted(name for name in module_names if query_folded in name.casefold())
 
     matches: list[str] = []
     for module_name, names in api.items():
         for name in names:
-            if query_lower in name.lower():
+            if query_folded in name.casefold():
                 matches.append(f"{module_name}.{name}")
     return sorted(matches)
 

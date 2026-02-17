@@ -123,6 +123,11 @@ def test_search_api_rejects_unknown_module():
         raise AssertionError("Expected ValueError for unknown module")
 
 
+def test_search_api_rejects_whitespace_module():
+    with pytest.raises(ValueError, match="Unknown module"):
+        mt.search_api("tensor", module="   ")
+
+
 def test_help_prints_and_returns(capsys):
     output = mt.help()
     captured = capsys.readouterr()
@@ -132,6 +137,20 @@ def test_help_prints_and_returns(capsys):
 
 def test_search_api_returns_empty_for_blank_query():
     assert mt.search_api("") == []
+    assert mt.search_api("   ") == []
+
+
+def test_search_api_normalizes_module_name_and_query():
+    top_level_hits = mt.search_api("  tensor  ", module=" TOP_LEVEL ")
+    assert "Tensor" in top_level_hits
+
+
+def test_search_api_rejects_non_string_inputs():
+    with pytest.raises(TypeError, match="query must be a string"):
+        mt.search_api(None)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="module must be a string or None"):
+        mt.search_api("tensor", module=1)  # type: ignore[arg-type]
 
 
 def test_iter_public_names_handles_none():
