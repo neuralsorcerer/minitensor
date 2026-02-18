@@ -794,8 +794,8 @@ impl PyModule {
         }
     }
 
-    pub fn to_layer(&self) -> Box<dyn Layer> {
-        match &self.inner {
+    pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
+        let layer: Box<dyn Layer> = match &self.inner {
             ModuleType::DenseLayer(layer) => Box::new(layer.clone()),
             ModuleType::ReLU(layer) => Box::new(layer.clone()),
             ModuleType::Sigmoid(layer) => Box::new(layer.clone()),
@@ -804,13 +804,19 @@ impl PyModule {
             ModuleType::LeakyReLU(layer) => Box::new(layer.clone()),
             ModuleType::Elu(layer) => Box::new(layer.clone()),
             ModuleType::Gelu(layer) => Box::new(layer.clone()),
-            ModuleType::Sequential(_) => panic!("Nested Sequential modules are not supported"),
+            ModuleType::Sequential(_) => {
+                return Err(PyTypeError::new_err(
+                    "Nested Sequential modules are not supported",
+                ));
+            }
             ModuleType::Conv2d(layer) => Box::new(layer.clone()),
             ModuleType::BatchNorm1d(layer) => Box::new(layer.clone()),
             ModuleType::BatchNorm2d(layer) => Box::new(layer.clone()),
             ModuleType::Dropout(layer) => Box::new(layer.clone()),
             ModuleType::Dropout2d(layer) => Box::new(layer.clone()),
-        }
+        };
+
+        Ok(layer)
     }
 }
 

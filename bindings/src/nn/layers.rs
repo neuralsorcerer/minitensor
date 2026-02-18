@@ -393,20 +393,31 @@ impl PySequential {
     #[new]
     #[pyo3(signature = (layers=None))]
     fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<(Self, PyModule)> {
-        let mut sequential = Sequential::new();
-        if let Some(layers) = layers {
+        let sequential = if let Some(layers) = layers {
+            let mut layer_objects = Vec::with_capacity(layers.len());
             for layer in layers {
-                sequential.add_layer(layer.to_layer());
+                layer_objects.push(layer.to_layer()?);
             }
-        }
+            Sequential::from_layers(layer_objects)
+        } else {
+            Sequential::new()
+        };
+
         Ok((Self, PyModule::from_sequential(sequential)))
     }
 
     /// Add a layer to the sequential container
     fn add_module(mut slf: PyRefMut<Self>, _name: &str, module: PyRef<PyModule>) -> PyResult<()> {
-        let base = slf.as_mut();
-        if let ModuleType::Sequential(seq) = &mut base.inner {
-            seq.add_layer(module.to_layer());
+        if !matches!(slf.as_ref().inner, ModuleType::Sequential(_)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ));
+        }
+
+        let layer = module.to_layer()?;
+
+        if let ModuleType::Sequential(seq) = &mut slf.as_mut().inner {
+            seq.add_layer(layer);
             Ok(())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
