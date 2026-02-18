@@ -262,10 +262,22 @@ def _iter_public_names(module: object) -> list[str]:
 
 
 def _resolve_symbol(symbol: str) -> object:
-    parts = symbol.split(".")
-    if not parts:
+    if not isinstance(symbol, str):
+        raise TypeError("symbol must be a string")
+
+    normalized_symbol = symbol.strip()
+    if not normalized_symbol:
         raise ValueError("symbol must be a non-empty string")
 
+    if (
+        normalized_symbol.startswith(".")
+        or normalized_symbol.endswith(".")
+        or ".." in normalized_symbol
+        or any(ch.isspace() for ch in normalized_symbol)
+    ):
+        raise ValueError(f"Invalid symbol path: {symbol}")
+
+    parts = normalized_symbol.split(".")
     root = parts[0]
     if root == "functional":
         obj: object = functional

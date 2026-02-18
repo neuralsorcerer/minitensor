@@ -157,19 +157,39 @@ def test_iter_public_names_handles_none():
     assert mt._iter_public_names(None) == []
 
 
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "Tensor..shape",
+        ".Tensor",
+        "Tensor.",
+        "Tensor .shape",
+        "Tensor\t.shape",
+        "Tensor\n.shape",
+    ],
+)
+def test_resolve_symbol_invalid_paths(symbol):
+    with pytest.raises(ValueError, match="Invalid symbol path"):
+        mt._resolve_symbol(symbol)
+
+
 def test_resolve_symbol_errors_and_describe_api():
-    class _EmptySplit(str):
-        def split(self, _sep=None):
-            return []
+    with pytest.raises(ValueError, match="symbol must be a non-empty string"):
+        mt._resolve_symbol("")
 
     with pytest.raises(ValueError, match="symbol must be a non-empty string"):
-        mt._resolve_symbol(_EmptySplit(""))
+        mt._resolve_symbol("   ")
+
+    with pytest.raises(TypeError, match="symbol must be a string"):
+        mt._resolve_symbol(None)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="Unknown symbol root"):
         mt._resolve_symbol("does_not_exist")
 
     with pytest.raises(ValueError, match="Unknown symbol"):
         mt._resolve_symbol("Tensor.missing")
+
+    assert mt._resolve_symbol(" Tensor ") is mt.Tensor
 
     description = mt.describe_api("Tensor")
     assert description.startswith("- Tensor:")
