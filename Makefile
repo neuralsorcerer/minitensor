@@ -26,9 +26,9 @@ check-deps:
 	@python -c "import maturin" 2>/dev/null || { echo "Maturin is required. Install with: pip install maturin[patchelf]" >&2; exit 1; }
 
 # Install development dependencies
-dev-install: check-deps
-	pip install -e ".[dev]"
-	cargo install cargo-audit || true
+dev-install:
+	@command -v python >/dev/null 2>&1 || { echo "Python is required but not installed. Aborting." >&2; exit 1; }
+	python -m pip install -e ".[dev]"
 
 # Install in development mode
 install: check-deps
@@ -47,11 +47,11 @@ test: test-rust test-python
 
 # Run Rust tests
 test-rust:
-	cargo test --manifest-path engine/Cargo.toml
-	cargo test --manifest-path bindings/Cargo.toml
+	RUSTFLAGS="$(RUSTFLAGS) -D warnings" cargo test --manifest-path engine/Cargo.toml
+	RUSTFLAGS="$(RUSTFLAGS) -D warnings" cargo test --manifest-path bindings/Cargo.toml
 
 # Run Python tests
-test-python: install
+test-python: dev-install
 	python -m pytest tests/ -v
 
 # Run linting
