@@ -243,6 +243,17 @@ def test_resolve_symbol_accepts_available_optional_modules():
         mt.serialization = original_serialization
 
 
+def test_search_api_normalizes_core_module_names():
+    hits = mt.search_api("relu", module=" FuNcTiOnAl ")
+    assert "relu" in hits
+
+
+def test_stubbed_search_api_rejects_missing_optional_module(monkeypatch):
+    stubbed = _load_stubbed_module(monkeypatch)
+    with pytest.raises(ValueError, match="Unknown module"):
+        stubbed.search_api("cross", module="numpy_compat")
+
+
 def test_stubbed_import_sets_cross_none(monkeypatch):
     stubbed = _load_stubbed_module(monkeypatch)
     assert stubbed.numpy_compat is None

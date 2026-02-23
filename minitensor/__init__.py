@@ -181,32 +181,49 @@ def search_api(query: str, module: str | None = None) -> list[str]:
     if not query_normalized:
         return []
 
-    api = list_public_api()
     query_folded = query_normalized.casefold()
 
     if module is not None:
         if not isinstance(module, str):
             raise TypeError("module must be a string or None")
 
-        module_normalized = module.strip()
-        module_names = api.get(module_normalized)
-        if module_names is None:
-            module_folded = module_normalized.casefold()
-            resolved_module = next(
-                (name for name in api if name.casefold() == module_folded), None
-            )
-            if resolved_module is None:
-                raise ValueError(f"Unknown module: {module}")
-            module_names = api[resolved_module]
+        module_names = _module_public_names(module)
 
         return sorted(name for name in module_names if query_folded in name.casefold())
 
+    api = list_public_api()
     matches: list[str] = []
     for module_name, names in api.items():
         for name in names:
             if query_folded in name.casefold():
                 matches.append(f"{module_name}.{name}")
     return sorted(matches)
+
+
+def _module_public_names(module: str) -> list[str]:
+    module_normalized = module.strip()
+    if not module_normalized:
+        raise ValueError(f"Unknown module: {module}")
+
+    module_folded = module_normalized.casefold()
+
+    if module_folded == "top_level":
+        return sorted(__all__)
+    if module_folded == "functional":
+        return sorted(_iter_public_names(functional))
+    if module_folded == "nn":
+        return sorted(_iter_public_names(nn))
+    if module_folded == "optim":
+        return sorted(_iter_public_names(optim))
+
+    if module_folded == "numpy_compat" and numpy_compat is not None:
+        return sorted(_iter_public_names(numpy_compat))
+    if module_folded == "plugins" and plugins is not None:
+        return sorted(_iter_public_names(plugins))
+    if module_folded == "serialization" and serialization is not None:
+        return sorted(_iter_public_names(serialization))
+
+    raise ValueError(f"Unknown module: {module}")
 
 
 def describe_api(symbol: str) -> str:
