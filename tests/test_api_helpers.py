@@ -248,6 +248,38 @@ def test_search_api_normalizes_core_module_names():
     assert "relu" in hits
 
 
+def test_module_public_names_covers_optional_and_optim_branches():
+    def _public_module(name: str):
+        module = types.ModuleType(name)
+        module.alpha = object()
+        module.beta = object()
+        return module
+
+    original_nn = mt.nn
+    original_optim = mt.optim
+    original_numpy_compat = mt.numpy_compat
+    original_plugins = mt.plugins
+    original_serialization = mt.serialization
+    try:
+        mt.nn = _public_module("nn")
+        mt.optim = _public_module("optim")
+        mt.numpy_compat = _public_module("numpy_compat")
+        mt.plugins = _public_module("plugins")
+        mt.serialization = _public_module("serialization")
+
+        assert mt._module_public_names("nn") == ["alpha", "beta"]
+        assert mt._module_public_names("optim") == ["alpha", "beta"]
+        assert mt._module_public_names("numpy_compat") == ["alpha", "beta"]
+        assert mt._module_public_names("plugins") == ["alpha", "beta"]
+        assert mt._module_public_names("serialization") == ["alpha", "beta"]
+    finally:
+        mt.nn = original_nn
+        mt.optim = original_optim
+        mt.numpy_compat = original_numpy_compat
+        mt.plugins = original_plugins
+        mt.serialization = original_serialization
+
+
 def test_stubbed_search_api_rejects_missing_optional_module(monkeypatch):
     stubbed = _load_stubbed_module(monkeypatch)
     with pytest.raises(ValueError, match="Unknown module"):
