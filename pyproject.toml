@@ -76,7 +76,7 @@ module-name = "minitensor._core"
 features = ["pyo3/extension-module"]
 # Build configuration
 compatibility = "linux"
-strip = true
+strip = false
 # Skip audit for faster builds in development
 skip-auditwheel = false
 
