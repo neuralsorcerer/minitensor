@@ -290,3 +290,24 @@ def test_stubbed_import_sets_cross_none(monkeypatch):
     stubbed = _load_stubbed_module(monkeypatch)
     assert stubbed.numpy_compat is None
     assert stubbed.cross is None
+
+
+def test_help_skips_modules_with_none_namespace(monkeypatch):
+    original_plugins = mt.plugins
+    try:
+        mt.plugins = None
+        output = mt.help()
+        assert "[plugins]" not in output
+    finally:
+        mt.plugins = original_plugins
+
+
+def test_api_module_helper_edge_cases():
+    assert mt._api_module_names(include_optional=False) == (
+        "top_level",
+        "functional",
+        "nn",
+        "optim",
+    )
+    assert mt._api_module_namespace("top_level") is None
+    assert mt._api_module_title("unknown_module") == "unknown_module"

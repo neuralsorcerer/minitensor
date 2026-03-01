@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys as _sys
 import types as _types
 from contextlib import contextmanager
+from typing import NamedTuple
 
 from . import _core as _C
 
@@ -131,33 +132,18 @@ def available_submodules() -> dict[str, bool]:
     """Return availability flags for optional MiniTensor submodules."""
 
     return {
-        "functional": functional is not None,
-        "nn": nn is not None,
-        "optim": optim is not None,
-        "numpy_compat": numpy_compat is not None,
-        "plugins": plugins is not None,
-        "serialization": serialization is not None,
+        module_name: _api_module_namespace(module_name) is not None
+        for module_name in _NON_TOP_LEVEL_API_MODULES
     }
 
 
 def list_public_api() -> dict[str, list[str]]:
     """List public API symbols by module."""
 
-    api = {
-        "top_level": sorted(__all__),
-        "functional": sorted(_iter_public_names(functional)),
-        "nn": sorted(_iter_public_names(nn)),
-        "optim": sorted(_iter_public_names(optim)),
+    return {
+        module_name: _module_public_names(module_name)
+        for module_name in _api_module_names(include_optional=True)
     }
-
-    if numpy_compat is not None:
-        api["numpy_compat"] = sorted(_iter_public_names(numpy_compat))
-    if plugins is not None:
-        api["plugins"] = sorted(_iter_public_names(plugins))
-    if serialization is not None:
-        api["serialization"] = sorted(_iter_public_names(serialization))
-
-    return api
 
 
 def api_summary() -> dict[str, object]:
@@ -206,22 +192,12 @@ def _module_public_names(module: str) -> list[str]:
         raise ValueError(f"Unknown module: {module}")
 
     module_folded = module_normalized.casefold()
-
     if module_folded == "top_level":
         return sorted(__all__)
-    if module_folded == "functional":
-        return sorted(_iter_public_names(functional))
-    if module_folded == "nn":
-        return sorted(_iter_public_names(nn))
-    if module_folded == "optim":
-        return sorted(_iter_public_names(optim))
 
-    if module_folded == "numpy_compat" and numpy_compat is not None:
-        return sorted(_iter_public_names(numpy_compat))
-    if module_folded == "plugins" and plugins is not None:
-        return sorted(_iter_public_names(plugins))
-    if module_folded == "serialization" and serialization is not None:
-        return sorted(_iter_public_names(serialization))
+    module_namespace = _api_module_namespace(module_folded)
+    if module_namespace is not None:
+        return sorted(_iter_public_names(module_namespace))
 
     raise ValueError(f"Unknown module: {module}")
 
@@ -236,29 +212,19 @@ def describe_api(symbol: str) -> str:
 def help() -> str:
     """Return a formatted help string for all public MiniTensor APIs."""
 
-    sections = [
-        ("Top-level", _describe_symbols(__all__, globals())),
-        ("functional", _describe_symbols(_iter_public_names(functional), functional)),
-        ("nn", _describe_symbols(_iter_public_names(nn), nn)),
-        ("optim", _describe_symbols(_iter_public_names(optim), optim)),
-    ]
+    sections = [(_api_module_title("top_level"), _describe_symbols(__all__, globals()))]
+    for module_name in _api_module_names(include_optional=True):
+        if module_name == "top_level":
+            continue
 
-    if numpy_compat is not None:
+        module_namespace = _api_module_namespace(module_name)
+
         sections.append(
             (
-                "numpy_compat",
-                _describe_symbols(_iter_public_names(numpy_compat), numpy_compat),
-            )
-        )
-    if plugins is not None:
-        sections.append(
-            ("plugins", _describe_symbols(_iter_public_names(plugins), plugins))
-        )
-    if serialization is not None:
-        sections.append(
-            (
-                "serialization",
-                _describe_symbols(_iter_public_names(serialization), serialization),
+                _api_module_title(module_name),
+                _describe_symbols(
+                    _iter_public_names(module_namespace), module_namespace
+                ),
             )
         )
 
@@ -278,6 +244,80 @@ def _iter_public_names(module: object) -> list[str]:
     return [name for name in dir(module) if name and not name.startswith("_")]
 
 
+class _ApiModuleSpec(NamedTuple):
+    attr: str | None
+    optional_error: str | None
+    title: str
+
+
+_API_MODULE_SPECS: dict[str, _ApiModuleSpec] = {
+    "top_level": _ApiModuleSpec(attr=None, optional_error=None, title="Top-level"),
+    "functional": _ApiModuleSpec(
+        attr="functional", optional_error=None, title="functional"
+    ),
+    "nn": _ApiModuleSpec(attr="nn", optional_error=None, title="nn"),
+    "optim": _ApiModuleSpec(attr="optim", optional_error=None, title="optim"),
+    "numpy_compat": _ApiModuleSpec(
+        attr="numpy_compat",
+        optional_error="numpy_compat is not available in this build",
+        title="numpy_compat",
+    ),
+    "plugins": _ApiModuleSpec(
+        attr="plugins",
+        optional_error="plugins are not available in this build",
+        title="plugins",
+    ),
+    "serialization": _ApiModuleSpec(
+        attr="serialization",
+        optional_error="serialization is not available in this build",
+        title="serialization",
+    ),
+}
+_CORE_API_MODULES = ("top_level", "functional", "nn", "optim")
+_OPTIONAL_API_MODULES = ("numpy_compat", "plugins", "serialization")
+_NON_TOP_LEVEL_API_MODULES = tuple(
+    module_name
+    for module_name in _CORE_API_MODULES + _OPTIONAL_API_MODULES
+    if module_name != "top_level"
+)
+
+
+def _api_module_names(*, include_optional: bool) -> tuple[str, ...]:
+    if not include_optional:
+        return _CORE_API_MODULES
+
+    return _CORE_API_MODULES + tuple(
+        module_name
+        for module_name in _OPTIONAL_API_MODULES
+        if _api_module_namespace(module_name) is not None
+    )
+
+
+def _api_module_namespace(module_name: str) -> object | None:
+    spec = _API_MODULE_SPECS.get(module_name)
+    if spec is None:
+        return None
+
+    attr_name = spec.attr
+    if attr_name is None:
+        return None
+    return globals().get(attr_name)
+
+
+def _api_module_unavailable_error(module_name: str) -> str | None:
+    spec = _API_MODULE_SPECS.get(module_name)
+    if spec is None:
+        return None
+    return spec.optional_error
+
+
+def _api_module_title(module_name: str) -> str:
+    spec = _API_MODULE_SPECS.get(module_name)
+    if spec is None:
+        return module_name
+    return spec.title
+
+
 def _resolve_symbol(symbol: str) -> object:
     if not isinstance(symbol, str):
         raise TypeError("symbol must be a string")
@@ -295,35 +335,28 @@ def _resolve_symbol(symbol: str) -> object:
         raise ValueError(f"Invalid symbol path: {symbol}")
 
     parts = normalized_symbol.split(".")
-    root = parts[0]
-    if root == "functional":
-        obj: object = functional
-    elif root == "nn":
-        obj = nn
-    elif root == "optim":
-        obj = optim
-    elif root == "numpy_compat":
-        if numpy_compat is None:
-            raise ValueError("numpy_compat is not available in this build")
-        obj = numpy_compat
-    elif root == "plugins":
-        if plugins is None:
-            raise ValueError("plugins are not available in this build")
-        obj = plugins
-    elif root == "serialization":
-        if serialization is None:
-            raise ValueError("serialization is not available in this build")
-        obj = serialization
-    else:
-        obj = globals().get(root)
-        if obj is None:
-            raise ValueError(f"Unknown symbol root: {root}")
+    obj = _resolve_symbol_root(parts[0])
 
     for part in parts[1:]:
         try:
             obj = getattr(obj, part)
         except AttributeError as exc:
             raise ValueError(f"Unknown symbol: {symbol}") from exc
+    return obj
+
+
+def _resolve_symbol_root(root: str) -> object:
+    module_namespace = _api_module_namespace(root)
+    if module_namespace is not None:
+        return module_namespace
+
+    unavailable_message = _api_module_unavailable_error(root)
+    if unavailable_message is not None:
+        raise ValueError(unavailable_message)
+
+    obj = globals().get(root)
+    if obj is None:
+        raise ValueError(f"Unknown symbol root: {root}")
     return obj
 
 
