@@ -350,21 +350,11 @@ impl MinitensorError {
 
     /// Create a new index error with suggestion
     pub fn index_error(index: isize, dim: usize, size: usize) -> Self {
-        let suggestion = if index < 0 {
-            format!(
-                "Use positive indices (0 to {}) or negative indices (-{} to -1)",
-                size - 1,
-                size
-            )
-        } else {
-            format!("Index must be in range [0, {})", size)
-        };
-
         Self::IndexError {
             index,
             dim,
             size,
-            suggestion: Some(suggestion),
+            suggestion: Some(Self::generate_index_suggestion(index, size)),
             context: None,
         }
     }
@@ -376,21 +366,11 @@ impl MinitensorError {
         size: usize,
         context: impl Into<String>,
     ) -> Self {
-        let suggestion = if index < 0 {
-            format!(
-                "Use positive indices (0 to {}) or negative indices (-{} to -1)",
-                size - 1,
-                size
-            )
-        } else {
-            format!("Index must be in range [0, {})", size)
-        };
-
         Self::IndexError {
             index,
             dim,
             size,
-            suggestion: Some(suggestion),
+            suggestion: Some(Self::generate_index_suggestion(index, size)),
             context: Some(context.into()),
         }
     }
@@ -552,6 +532,24 @@ impl MinitensorError {
         }
     }
 
+    /// Generate helpful suggestion for indexing errors
+    fn generate_index_suggestion(index: isize, size: usize) -> String {
+        if index < 0 {
+            if size == 0 {
+                "Cannot index into an empty dimension; ensure the tensor has elements before indexing"
+                    .to_string()
+            } else {
+                format!(
+                    "Use positive indices (0 to {}) or negative indices (-{} to -1)",
+                    size - 1,
+                    size
+                )
+            }
+        } else {
+            format!("Index must be in range [0, {})", size)
+        }
+    }
+
     /// Generate helpful suggestion for shape mismatches
     fn generate_shape_suggestion(expected: &[usize], actual: &[usize]) -> String {
         if expected.len() != actual.len() {
@@ -643,5 +641,270 @@ impl MinitensorError {
         }
 
         message
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MinitensorError;
+
+    #[test]
+    fn test_shape_and_dimension_suggestion_branches() {
+        let rank = MinitensorError::shape_mismatch(vec![2, 3], vec![6]);
+        assert!(
+            rank.suggestion()
+                .unwrap()
+                .contains("Expected 2 dimensions but got 1")
+        );
+
+        let dims = MinitensorError::shape_mismatch(vec![2, 3], vec![2, 4]);
+        assert!(
+            dims.suggestion()
+                .unwrap()
+                .contains("dim 1: expected 3, got 4")
+        );
+
+        let add_dims = MinitensorError::dimension_error("expand", Some(4), Some(2));
+        assert!(add_dims.suggestion().unwrap().contains(".unsqueeze()"));
+
+        let remove_dims = MinitensorError::dimension_error("reduce", Some(2), Some(4));
+        assert!(remove_dims.suggestion().unwrap().contains(".squeeze()"));
+
+        let equal_dims = MinitensorError::dimension_error("same-rank", Some(3), Some(3));
+        assert!(equal_dims.suggestion().unwrap().contains(".squeeze()"));
+
+        let fallback = MinitensorError::dimension_error("unknown", None, None);
+        assert!(
+            fallback
+                .suggestion()
+                .unwrap()
+                .contains("Check tensor dimensions")
+        );
+    }
+
+    #[test]
+    fn test_builder_specific_suggestions_and_context() {
+        let dtype = MinitensorError::type_mismatch_with_context("f32", "i64", "cast input");
+        assert_eq!(dtype.context(), Some("cast input"));
+        assert!(dtype.suggestion().unwrap().contains(".to_dtype(f32)"));
+
+        let device = MinitensorError::device_mismatch_with_context("cpu", "cuda", "device copy");
+        assert_eq!(device.context(), Some("device copy"));
+        assert!(device.suggestion().unwrap().contains(".to(cpu)"));
+
+        let neg_index = MinitensorError::index_error(-1, 0, 5);
+        assert!(neg_index.suggestion().unwrap().contains("negative indices"));
+
+        let empty_neg_index = MinitensorError::index_error(-1, 0, 0);
+        assert!(
+            empty_neg_index
+                .suggestion()
+                .unwrap()
+                .contains("empty dimension")
+        );
+
+        let pos_index = MinitensorError::index_error_with_context(7, 1, 4, "slice op");
+        assert_eq!(pos_index.context(), Some("slice op"));
+        assert!(pos_index.suggestion().unwrap().contains("range [0, 4)"));
+
+        let zero_len_pos_index = MinitensorError::index_error(0, 0, 0);
+        assert_eq!(
+            zero_len_pos_index.suggestion(),
+            Some("Index must be in range [0, 0)")
+        );
+
+        let empty_neg_index_with_ctx = MinitensorError::index_error_with_context(-1, 0, 0, "take");
+        assert_eq!(empty_neg_index_with_ctx.context(), Some("take"));
+        assert!(
+            empty_neg_index_with_ctx
+                .suggestion()
+                .unwrap()
+                .contains("empty dimension")
+        );
+
+        let broadcast = MinitensorError::broadcast_error(vec![2, 3], vec![4, 5]);
+        assert!(
+            broadcast
+                .suggestion()
+                .unwrap()
+                .contains("cannot be broadcast together")
+        );
+
+        let gradient = MinitensorError::gradient_error("missing graph node");
+        assert!(
+            gradient
+                .suggestion()
+                .unwrap()
+                .contains("requires_grad=True")
+        );
+    }
+
+    #[test]
+    fn test_detailed_message_formatting_with_and_without_optional_fields() {
+        let with_all = MinitensorError::gradient_error_with_suggestion(
+            "missing grad",
+            "set requires_grad",
+            Some("backward pass".to_string()),
+        );
+        let rendered = with_all.detailed_message();
+        assert!(rendered.contains("Gradient computation error: missing grad"));
+        assert!(rendered.contains("💡 Suggestion: set requires_grad"));
+        assert!(rendered.contains("📍 Context: backward pass"));
+
+        let base_only = MinitensorError::invalid_argument("bad argument").detailed_message();
+        assert_eq!(base_only, "Invalid argument: bad argument");
+
+        let suggestion_only =
+            MinitensorError::invalid_argument_with_suggestion("arg", "fix").detailed_message();
+        assert!(suggestion_only.contains("Invalid argument: arg"));
+        assert!(suggestion_only.contains("💡 Suggestion: fix"));
+        assert!(!suggestion_only.contains("📍 Context:"));
+
+        let context_only = MinitensorError::ShapeError {
+            expected: vec![1],
+            actual: vec![2],
+            suggestion: None,
+            context: Some("shape op".into()),
+        }
+        .detailed_message();
+        assert!(context_only.contains("Shape mismatch: expected [1], got [2]"));
+        assert!(!context_only.contains("💡 Suggestion:"));
+        assert!(context_only.contains("📍 Context: shape op"));
+    }
+
+    #[test]
+    fn test_all_constructor_helpers_and_accessor_match_arms() {
+        let constructed = vec![
+            MinitensorError::shape_mismatch_with_context(vec![1, 2], vec![2, 1], "matmul"),
+            MinitensorError::shape_error("bad shape"),
+            MinitensorError::type_mismatch("f32", "i32"),
+            MinitensorError::device_mismatch("cpu", "cuda"),
+            MinitensorError::memory_error("oom"),
+            MinitensorError::memory_error_with_suggestion("oom", "free cache"),
+            MinitensorError::invalid_operation("bad op"),
+            MinitensorError::invalid_operation_with_suggestion("bad op", "use add"),
+            MinitensorError::backend_error("cuda", "driver"),
+            MinitensorError::backend_error_with_suggestion("cuda", "driver", "reinstall"),
+            MinitensorError::internal_error("panic"),
+            MinitensorError::not_implemented("todo"),
+            MinitensorError::not_implemented_with_suggestion("todo", "track issue"),
+            MinitensorError::invalid_argument("arg"),
+            MinitensorError::invalid_argument_with_suggestion("arg", "fix input"),
+            MinitensorError::computation_graph_error("cycle"),
+            MinitensorError::serialization_error("io"),
+            MinitensorError::plugin_error("missing"),
+            MinitensorError::plugin_error_with_suggestion("missing", "install plugin"),
+            MinitensorError::version_mismatch("abi"),
+            MinitensorError::version_mismatch_with_suggestion("abi", "upgrade"),
+        ];
+
+        for err in constructed {
+            let _ = err.to_string();
+            let _ = err.detailed_message();
+        }
+
+        // Explicit per-variant values ensure every accessor match arm is hit in one place,
+        // without duplicative assertions across many tests.
+        let accessor_arms = [
+            MinitensorError::ShapeError {
+                expected: vec![1],
+                actual: vec![2],
+                suggestion: None,
+                context: Some("ctx".into()),
+            },
+            MinitensorError::TypeError {
+                expected: "f32".into(),
+                actual: "i32".into(),
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::DeviceError {
+                expected: "cpu".into(),
+                actual: "cuda".into(),
+                suggestion: None,
+                context: None,
+            },
+            MinitensorError::GradientError {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: Some("c".into()),
+            },
+            MinitensorError::MemoryError {
+                message: "m".into(),
+                suggestion: None,
+                context: None,
+            },
+            MinitensorError::InvalidOperation {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: Some("c".into()),
+            },
+            MinitensorError::BackendError {
+                backend: "b".into(),
+                message: "m".into(),
+                suggestion: None,
+                context: None,
+            },
+            MinitensorError::IndexError {
+                index: -1,
+                dim: 0,
+                size: 4,
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::InternalError {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::NotImplemented {
+                message: "m".into(),
+                suggestion: None,
+                context: Some("c".into()),
+            },
+            MinitensorError::InvalidArgument {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::BroadcastError {
+                shape1: vec![1],
+                shape2: vec![1],
+                suggestion: None,
+                context: Some("c".into()),
+            },
+            MinitensorError::DimensionError {
+                message: "m".into(),
+                expected_dims: Some(1),
+                actual_dims: Some(2),
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::ComputationGraphError {
+                message: "m".into(),
+                suggestion: None,
+                context: Some("c".into()),
+            },
+            MinitensorError::SerializationError {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: None,
+            },
+            MinitensorError::PluginError {
+                message: "m".into(),
+                suggestion: None,
+                context: None,
+            },
+            MinitensorError::VersionMismatch {
+                message: "m".into(),
+                suggestion: Some("s".into()),
+                context: Some("c".into()),
+            },
+        ];
+
+        for err in accessor_arms {
+            let _ = err.suggestion();
+            let _ = err.context();
+        }
     }
 }
