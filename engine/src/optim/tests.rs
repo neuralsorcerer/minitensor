@@ -697,4 +697,199 @@ mod tests {
         assert!((scheduler.get_lr(0, base_lr) - base_lr).abs() < 1e-12);
         assert!((scheduler.get_lr(5, base_lr) - base_lr).abs() < 1e-12);
     }
+
+    #[test]
+    fn test_gradient_utils_with_missing_gradients() {
+        let mut with_grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let without_grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        with_grad.set_grad(Some(grad));
+
+        let params = [&with_grad, &without_grad];
+        assert!(GradientUtils::has_gradients(&params));
+        assert_eq!(GradientUtils::count_parameters_with_gradients(&params), 1);
+
+        let norm = GradientUtils::compute_grad_norm(&params).unwrap();
+        assert!((norm - (2.0f64).sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_gradient_utils_when_all_gradients_absent() {
+        let t1 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let t2 = Tensor::ones(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+        let params = [&t1, &t2];
+
+        assert!(!GradientUtils::has_gradients(&params));
+        assert_eq!(GradientUtils::count_parameters_with_gradients(&params), 0);
+        assert_eq!(GradientUtils::compute_grad_norm(&params).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_clip_grad_value_no_gradient_is_noop() {
+        let mut t = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        GradientUtils::clip_grad_value(&mut [&mut t], -1.0, 1.0).unwrap();
+        assert!(t.grad().is_none());
+    }
+
+    #[test]
+    fn test_scheduler_utils_variants_and_edge_steps() {
+        let warmup = crate::optim::SchedulerUtils::linear_warmup(4);
+        assert!((warmup.get_lr(0, 0.2) - 0.0).abs() < 1e-12);
+        assert!((warmup.get_lr(2, 0.2) - 0.1).abs() < 1e-12);
+        assert!((warmup.get_lr(4, 0.2) - 0.2).abs() < 1e-12);
+
+        let warmup_zero = crate::optim::SchedulerUtils::linear_warmup(0);
+        assert!((warmup_zero.get_lr(0, 0.2) - 0.2).abs() < 1e-12);
+
+        let poly = crate::optim::SchedulerUtils::polynomial_decay(5, 0.01, 2.0);
+        let lr_step_0 = poly.get_lr(0, 0.11);
+        let lr_step_3 = poly.get_lr(3, 0.11);
+        let lr_after_decay = poly.get_lr(5, 0.11);
+        assert!((lr_step_0 - 0.11).abs() < 1e-12);
+        assert!(lr_step_3 < lr_step_0);
+        assert!((lr_after_decay - 0.01).abs() < 1e-12);
+
+        let multi = crate::optim::SchedulerUtils::multi_step(vec![6, 2, 4], 0.5);
+        assert!((multi.get_lr(1, 0.2) - 0.2).abs() < 1e-12);
+        assert!((multi.get_lr(2, 0.2) - 0.1).abs() < 1e-12);
+        assert!((multi.get_lr(4, 0.2) - 0.05).abs() < 1e-12);
+        assert!((multi.get_lr(6, 0.2) - 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compute_grad_norm_float64_values() {
+        let mut t = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), true);
+        let mut g = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), false);
+        let data = g.data_mut().as_f64_slice_mut().unwrap();
+        data[0] = 3.0;
+        data[1] = 4.0;
+        t.set_grad(Some(g));
+
+        let norm = GradientUtils::compute_grad_norm(&[&t]).unwrap();
+        assert!((norm - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compute_grad_norm_ignores_non_float_gradient_dtype() {
+        let mut t = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        let mut int_grad = Tensor::ones(Shape::new(vec![3]), DataType::Int32, Device::cpu(), false);
+        int_grad
+            .data_mut()
+            .as_i32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 7);
+        t.set_grad(Some(int_grad));
+
+        let norm = GradientUtils::compute_grad_norm(&[&t]).unwrap();
+        assert_eq!(norm, 0.0);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_returns_original_norm_without_clipping() {
+        let mut t = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let mut g = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        let grad = g.data_mut().as_f32_slice_mut().unwrap();
+        grad[0] = 0.3;
+        grad[1] = 0.4;
+        t.set_grad(Some(g));
+
+        let norm = GradientUtils::clip_grad_norm(&mut [&mut t], 1.0).unwrap();
+        assert!((norm - 0.5).abs() < 1e-6);
+
+        let grad_after = t.grad().unwrap().data().as_f32_slice().unwrap();
+        assert!((grad_after[0] - 0.3).abs() < 1e-6);
+        assert!((grad_after[1] - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_scales_float64_gradient() {
+        let mut t = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), true);
+        let mut g = Tensor::ones(Shape::new(vec![2]), DataType::Float64, Device::cpu(), false);
+        g.data_mut().as_f64_slice_mut().unwrap().iter_mut().for_each(|v| *v = 3.0);
+        t.set_grad(Some(g));
+
+        let norm_before = GradientUtils::compute_grad_norm(&[&t]).unwrap();
+        assert!((norm_before - (18.0f64).sqrt()).abs() < 1e-12);
+
+        let returned_norm = GradientUtils::clip_grad_norm(&mut [&mut t], 1.0).unwrap();
+        assert!((returned_norm - norm_before).abs() < 1e-12);
+
+        let norm_after = GradientUtils::compute_grad_norm(&[&t]).unwrap();
+        assert!(norm_after <= 1.0001);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_ignores_non_float_gradient_dtype() {
+        let mut t = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let mut int_grad = Tensor::ones(Shape::new(vec![2]), DataType::Int64, Device::cpu(), false);
+        int_grad
+            .data_mut()
+            .as_i64_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 10);
+        t.set_grad(Some(int_grad));
+
+        let norm = GradientUtils::clip_grad_norm(&mut [&mut t], 0.5).unwrap();
+        assert_eq!(norm, 0.0);
+
+        let grad_after = t.grad().unwrap().data().as_i64_slice().unwrap();
+        assert_eq!(grad_after, &[10, 10]);
+    }
+
+
+    #[test]
+    fn test_compute_grad_norm_accumulates_across_f32_and_f64_params() {
+        let mut t1 = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let mut g1 = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        let g1s = g1.data_mut().as_f32_slice_mut().unwrap();
+        g1s[0] = 1.0;
+        g1s[1] = 2.0;
+        t1.set_grad(Some(g1));
+
+        let mut t2 = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), true);
+        let mut g2 = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), false);
+        let g2s = g2.data_mut().as_f64_slice_mut().unwrap();
+        g2s[0] = 2.0;
+        g2s[1] = 1.0;
+        t2.set_grad(Some(g2));
+
+        let norm = GradientUtils::compute_grad_norm(&[&t1, &t2]).unwrap();
+        assert!((norm - 10.0_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_returns_zero_when_no_gradients_exist() {
+        let mut t1 = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut t2 = Tensor::ones(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+
+        let returned = GradientUtils::clip_grad_norm(&mut [&mut t1, &mut t2], 0.1).unwrap();
+        assert_eq!(returned, 0.0);
+        assert!(t1.grad().is_none());
+        assert!(t2.grad().is_none());
+    }
+
+    #[test]
+    fn test_scheduler_utils_polynomial_decay_with_zero_decay_steps() {
+        let scheduler = crate::optim::SchedulerUtils::polynomial_decay(0, 0.05, 2.0);
+        assert!((scheduler.get_lr(0, 0.2) - 0.05).abs() < 1e-12);
+        assert!((scheduler.get_lr(10, 0.2) - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_scheduler_utils_multi_step_with_duplicate_milestones() {
+        let scheduler = crate::optim::SchedulerUtils::multi_step(vec![2, 2, 4], 0.5);
+        assert!((scheduler.get_lr(1, 0.2) - 0.2).abs() < 1e-12);
+        assert!((scheduler.get_lr(2, 0.2) - 0.05).abs() < 1e-12);
+        assert!((scheduler.get_lr(4, 0.2) - 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_scheduler_utils_linear_warmup_single_step_transition() {
+        let scheduler = crate::optim::SchedulerUtils::linear_warmup(1);
+        assert!((scheduler.get_lr(0, 0.3) - 0.0).abs() < 1e-12);
+        assert!((scheduler.get_lr(1, 0.3) - 0.3).abs() < 1e-12);
+        assert!((scheduler.get_lr(2, 0.3) - 0.3).abs() < 1e-12);
+    }
 }
