@@ -466,3 +466,156 @@ impl TensorDebugger {
         issues
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{DataType, data::TensorData};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_tensor_info_from_tensor_and_formatting() {
+        let tensor = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let info = TensorInfo::from_tensor(&tensor);
+
+        assert_eq!(info.shape.dims(), &[2, 2]);
+        assert_eq!(info.dtype, "Float32");
+        assert_eq!(info.device, Device::cpu());
+        assert_eq!(info.numel, 4);
+        assert!(!info.requires_grad);
+        assert!(info.is_leaf);
+        assert_eq!(info.stride, vec![2, 1]);
+
+        let summary = info.summary();
+        assert!(summary.contains("Tensor(shape=[2, 2], dtype=Float32"));
+        assert!(summary.contains("requires_grad=false"));
+
+        let detailed = info.detailed();
+        assert!(detailed.contains("Tensor Information:"));
+        assert!(detailed.contains("├─ Shape: [2, 2]"));
+        assert!(detailed.contains("├─ Stride: [2, 1]"));
+    }
+
+    #[test]
+    fn test_memory_tracker_allocate_deallocate_and_reports() {
+        let mut tracker = MemoryTracker::new();
+        tracker.allocate("a".to_string(), 1024);
+        tracker.allocate("b".to_string(), 2048);
+        tracker.deallocate("missing");
+        tracker.deallocate("a");
+
+        assert_eq!(tracker.current_usage(), 2048);
+        assert_eq!(tracker.peak_usage(), 3072);
+        assert!(tracker.current_usage_mb() > 0.0);
+        assert!(tracker.peak_usage_mb() >= tracker.current_usage_mb());
+
+        let summary = tracker.summary();
+        assert!(summary.contains("Current:"));
+        assert!(summary.contains("Peak:"));
+        assert!(summary.contains("Active Allocations: 1"));
+
+        let detailed = tracker.detailed_allocations();
+        assert!(detailed.contains("Active Allocations:"));
+        assert!(detailed.contains("b:"));
+        assert!(!detailed.contains("a:"));
+    }
+
+    #[test]
+    fn test_graph_visualizer_text_and_dot() {
+        let mut visualizer = GraphVisualizer::default();
+        visualizer.add_node(GraphNode {
+            id: "x".into(),
+            operation: "input".into(),
+            shape: vec![2, 2],
+            dtype: "Float32".into(),
+            requires_grad: true,
+        });
+        visualizer.add_node(GraphNode {
+            id: "y".into(),
+            operation: "relu".into(),
+            shape: vec![2, 2],
+            dtype: "Float32".into(),
+            requires_grad: false,
+        });
+        visualizer.add_edge(GraphEdge {
+            from: "x".into(),
+            to: "y".into(),
+            label: Some("input".into()),
+        });
+        visualizer.add_edge(GraphEdge {
+            from: "y".into(),
+            to: "z".into(),
+            label: None,
+        });
+
+        let text = visualizer.to_text();
+        assert!(text.contains("Node x: input"));
+        assert!(text.contains("x -> y input"));
+        assert!(text.contains("y -> z"));
+
+        let dot = visualizer.to_dot();
+        assert!(dot.contains("digraph ComputationGraph"));
+        assert!(dot.contains("fillcolor=lightblue"));
+        assert!(dot.contains("fillcolor=lightgray"));
+        assert!(dot.contains("\"x\" -> \"y\" [label=\"input\"]"));
+    }
+
+    #[test]
+    fn test_operation_profiler_averages_and_report() {
+        let mut profiler = OperationProfiler::default();
+        profiler.record_timing("matmul".into(), 5.0);
+        profiler.record_timing("matmul".into(), 15.0);
+        profiler.record_memory("matmul".into(), 1024);
+        profiler.record_memory("matmul".into(), 3072);
+
+        assert_eq!(profiler.average_timing("missing"), None);
+        assert_eq!(profiler.average_memory("missing"), None);
+        assert_eq!(profiler.average_timing("matmul"), Some(10.0));
+        assert_eq!(profiler.average_memory("matmul"), Some(2048.0));
+
+        let report = profiler.report();
+        assert!(report.contains("Performance Report:"));
+        assert!(report.contains("Timing Statistics:"));
+        assert!(report.contains("Memory Statistics:"));
+        assert!(report.contains("matmul"));
+    }
+
+    #[test]
+    fn test_tensor_debugger_compare_inspect_and_health_check_branches() {
+        let t1 = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        let t2 = Tensor::ones(Shape::new(vec![3]), DataType::Float64, Device::cpu(), true);
+
+        let compare = TensorDebugger::compare(&t1, &t2);
+        assert!(compare.contains("❌ Shape:"));
+        assert!(compare.contains("❌ DType:"));
+        assert!(compare.contains("❌ Requires Grad:"));
+        assert!(compare.contains("✅ Device:"));
+
+        let inspect = TensorDebugger::inspect(&t1);
+        assert!(inspect.contains("Tensor Information:"));
+
+        let healthy = TensorDebugger::health_check(&t1);
+        assert_eq!(healthy, vec!["✅ No issues detected".to_string()]);
+
+        let problematic = Tensor::new(
+            Arc::new(TensorData::from_vec(
+                vec![f32::NAN, f32::INFINITY, 2_000_000.0],
+                DataType::Float32,
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let issues = TensorDebugger::health_check(&problematic);
+        assert!(issues.iter().any(|x| x.contains("NaN values")));
+        assert!(issues.iter().any(|x| x.contains("infinite values")));
+        assert!(issues.iter().any(|x| x.contains("very large values")));
+    }
+}
