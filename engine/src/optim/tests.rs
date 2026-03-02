@@ -700,8 +700,10 @@ mod tests {
 
     #[test]
     fn test_gradient_utils_with_missing_gradients() {
-        let mut with_grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
-        let without_grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let mut with_grad =
+            Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let without_grad =
+            Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
         let grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
         with_grad.set_grad(Some(grad));
 
@@ -806,7 +808,11 @@ mod tests {
     fn test_clip_grad_norm_scales_float64_gradient() {
         let mut t = Tensor::zeros(Shape::new(vec![2]), DataType::Float64, Device::cpu(), true);
         let mut g = Tensor::ones(Shape::new(vec![2]), DataType::Float64, Device::cpu(), false);
-        g.data_mut().as_f64_slice_mut().unwrap().iter_mut().for_each(|v| *v = 3.0);
+        g.data_mut()
+            .as_f64_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 3.0);
         t.set_grad(Some(g));
 
         let norm_before = GradientUtils::compute_grad_norm(&[&t]).unwrap();
@@ -837,7 +843,6 @@ mod tests {
         let grad_after = t.grad().unwrap().data().as_i64_slice().unwrap();
         assert_eq!(grad_after, &[10, 10]);
     }
-
 
     #[test]
     fn test_compute_grad_norm_accumulates_across_f32_and_f64_params() {
