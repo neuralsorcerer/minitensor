@@ -424,6 +424,7 @@ mod tests {
         let v1 = VersionInfo::new(1, 2, 3);
         let v2 = VersionInfo::parse("1.2.3").unwrap();
         assert_eq!(v1, v2);
+        assert_eq!(v1.to_string(), "1.2.3");
 
         let v3 = VersionInfo::new(1, 2, 4);
         assert!(v3.is_compatible_with(&v1));
@@ -432,6 +433,14 @@ mod tests {
         let v4 = VersionInfo::new(2, 0, 0);
         assert!(!v4.is_compatible_with(&v1));
         assert!(!v1.is_compatible_with(&v4));
+    }
+
+    #[test]
+    fn test_version_parse_errors() {
+        assert!(VersionInfo::parse("1.2").is_err());
+        assert!(VersionInfo::parse("x.2.3").is_err());
+        assert!(VersionInfo::parse("1.y.3").is_err());
+        assert!(VersionInfo::parse("1.2.z").is_err());
     }
 
     #[test]
@@ -467,5 +476,203 @@ mod tests {
         let result = manager.register_plugin(Arc::new(plugin));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("version"));
+    }
+
+    #[test]
+    fn test_plugin_manager_duplicate_and_missing_plugin_errors() {
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry);
+
+        let plugin = Arc::new(TestPlugin::new());
+        manager.register_plugin(plugin.clone()).unwrap();
+
+        let duplicate_result = manager.register_plugin(plugin);
+        assert!(duplicate_result.is_err());
+        assert!(
+            duplicate_result
+                .unwrap_err()
+                .to_string()
+                .contains("already loaded")
+        );
+
+        let missing_info = manager.get_plugin_info("missing_plugin");
+        assert!(missing_info.is_err());
+
+        let missing_unload = manager.unload_plugin("missing_plugin");
+        assert!(missing_unload.is_err());
+    }
+
+    #[test]
+    fn test_plugin_manager_max_version_compatibility() {
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry);
+
+        let current_version = VersionInfo::current().unwrap();
+        let mut plugin = TestPlugin::new();
+
+        plugin.info.max_minitensor_version = Some(VersionInfo::new(
+            current_version.major,
+            current_version.minor,
+            current_version.patch.saturating_sub(1),
+        ));
+
+        let result = manager.register_plugin(Arc::new(plugin));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires minitensor <=")
+        );
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_plugin_name(prefix: &str) -> String {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}_{id}")
+    }
+
+    struct ConfigurablePlugin {
+        info: PluginInfo,
+        op_name: String,
+        fail_initialize: bool,
+        fail_cleanup: bool,
+    }
+
+    impl ConfigurablePlugin {
+        fn with_name(name: String) -> Self {
+            Self {
+                op_name: format!("{name}_op"),
+                info: PluginInfo {
+                    name,
+                    version: VersionInfo::new(1, 0, 0),
+                    description: "Configurable plugin".to_string(),
+                    author: "Test Author".to_string(),
+                    min_minitensor_version: VersionInfo::new(0, 1, 0),
+                    max_minitensor_version: None,
+                },
+                fail_initialize: false,
+                fail_cleanup: false,
+            }
+        }
+    }
+
+    impl Plugin for ConfigurablePlugin {
+        fn info(&self) -> &PluginInfo {
+            &self.info
+        }
+
+        fn initialize(&self, _registry: &CustomOpRegistry) -> Result<()> {
+            if self.fail_initialize {
+                return Err(MinitensorError::plugin_error("init failed"));
+            }
+            Ok(())
+        }
+
+        fn cleanup(&self, _registry: &CustomOpRegistry) -> Result<()> {
+            if self.fail_cleanup {
+                return Err(MinitensorError::plugin_error("cleanup failed"));
+            }
+            Ok(())
+        }
+
+        fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
+            vec![
+                CustomOpBuilder::new(&self.op_name, 1)
+                    .forward(|inputs| Ok(inputs[0].clone()))
+                    .build()
+                    .unwrap(),
+            ]
+        }
+    }
+
+    #[test]
+    fn test_version_current_matches_package_version() {
+        let current = VersionInfo::current().unwrap();
+        let parsed = VersionInfo::parse(VERSION).unwrap();
+        assert_eq!(current, parsed);
+    }
+
+    #[test]
+    fn test_register_plugin_initialize_failure_does_not_load_plugin() {
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry);
+
+        let mut plugin = ConfigurablePlugin::with_name(unique_plugin_name("init_fail"));
+        plugin.fail_initialize = true;
+
+        let name = plugin.info.name.clone();
+        let op_name = plugin.op_name.clone();
+
+        let result = manager.register_plugin(Arc::new(plugin));
+        assert!(result.is_err());
+        assert!(!manager.is_plugin_loaded(&name).unwrap());
+        assert!(manager.plugin_registry.get(&op_name).is_err());
+    }
+
+    #[test]
+    fn test_unload_plugin_cleanup_failure_propagates() {
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry);
+
+        let mut plugin = ConfigurablePlugin::with_name(unique_plugin_name("cleanup_fail"));
+        plugin.fail_cleanup = true;
+
+        let name = plugin.info.name.clone();
+        let op_name = plugin.op_name.clone();
+
+        manager.register_plugin(Arc::new(plugin)).unwrap();
+        assert!(manager.plugin_registry.get(&op_name).is_ok());
+
+        let unload_result = manager.unload_plugin(&name);
+        assert!(unload_result.is_err());
+        assert!(!manager.is_plugin_loaded(&name).unwrap());
+        assert!(manager.plugin_registry.get(&op_name).is_ok());
+
+        manager.plugin_registry.unregister(&op_name).unwrap();
+    }
+
+    #[test]
+    fn test_register_plugin_custom_op_registration_failure_does_not_load_plugin() {
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry.clone());
+
+        let colliding_name = unique_plugin_name("collision");
+        let colliding_op_name = format!("{colliding_name}_op");
+
+        registry
+            .register(
+                CustomOpBuilder::new(&colliding_op_name, 1)
+                    .forward(|inputs| Ok(inputs[0].clone()))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let plugin = ConfigurablePlugin::with_name(colliding_name.clone());
+
+        let result = manager.register_plugin(Arc::new(plugin));
+        assert!(result.is_err());
+        assert!(!manager.is_plugin_loaded(&colliding_name).unwrap());
+
+        registry.unregister(&colliding_op_name).unwrap();
+    }
+
+    #[test]
+    fn test_global_plugin_functions_register_query_and_unload() {
+        let name = unique_plugin_name("global_plugin");
+        let plugin = Arc::new(ConfigurablePlugin::with_name(name.clone()));
+
+        register_plugin(plugin).unwrap();
+        assert!(is_plugin_loaded(&name).unwrap());
+
+        let info = get_plugin_info(&name).unwrap();
+        assert_eq!(info.name, name);
+
+        unload_plugin(&name).unwrap();
+        assert!(!is_plugin_loaded(&name).unwrap());
     }
 }
