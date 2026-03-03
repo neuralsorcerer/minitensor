@@ -673,65 +673,6 @@ pub fn can_use_simd_fast_path(lhs_shape: &Shape, rhs_shape: &Shape, output_shape
         && lhs_shape.numel() >= 16 // Only use SIMD for reasonably sized arrays
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_simd_capabilities_detection() {
-        let caps = simd_capabilities();
-        // Just ensure it doesn't panic and returns something reasonable
-        println!("SIMD capabilities: {:?}", caps);
-    }
-
-    #[test]
-    fn test_simd_add_f32() {
-        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
-        let mut result = vec![0.0; 8];
-
-        simd_add_f32(&a, &b, &mut result).unwrap();
-
-        for i in 0..8 {
-            assert_eq!(result[i], 9.0);
-        }
-    }
-
-    #[test]
-    fn test_simd_mul_f32() {
-        let a = vec![2.0, 3.0, 4.0, 5.0];
-        let b = vec![3.0, 4.0, 5.0, 6.0];
-        let mut result = vec![0.0; 4];
-
-        simd_mul_f32(&a, &b, &mut result).unwrap();
-
-        assert_eq!(result, vec![6.0, 12.0, 20.0, 30.0]);
-    }
-
-    #[test]
-    fn test_simd_div_f32() {
-        let a = vec![12.0, 15.0, 20.0, 24.0];
-        let b = vec![3.0, 5.0, 4.0, 6.0];
-        let mut result = vec![0.0; 4];
-
-        simd_div_f32(&a, &b, &mut result).unwrap();
-
-        assert_eq!(result, vec![4.0, 3.0, 5.0, 4.0]);
-    }
-
-    #[test]
-    fn test_simd_div_by_zero() {
-        let a = vec![1.0, 2.0];
-        let b = vec![0.0, 2.0];
-        let mut result = vec![0.0; 2];
-
-        simd_div_f32(&a, &b, &mut result).unwrap();
-
-        assert_eq!(result[0], f32::INFINITY);
-        assert_eq!(result[1], 1.0);
-    }
-}
-
 /// SIMD-optimized element-wise addition for f64 arrays
 pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
@@ -872,4 +813,157 @@ fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<(
         output[i] = lhs[i] * rhs[i];
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simd_capabilities_detection() {
+        let caps = simd_capabilities();
+        // Just ensure it doesn't panic and returns something reasonable
+        println!("SIMD capabilities: {:?}", caps);
+    }
+
+    #[test]
+    fn test_simd_add_f32() {
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+        let mut result = vec![0.0; 8];
+
+        simd_add_f32(&a, &b, &mut result).unwrap();
+
+        for i in 0..8 {
+            assert_eq!(result[i], 9.0);
+        }
+    }
+
+    #[test]
+    fn test_simd_mul_f32() {
+        let a = vec![2.0, 3.0, 4.0, 5.0];
+        let b = vec![3.0, 4.0, 5.0, 6.0];
+        let mut result = vec![0.0; 4];
+
+        simd_mul_f32(&a, &b, &mut result).unwrap();
+
+        assert_eq!(result, vec![6.0, 12.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn test_simd_div_f32() {
+        let a = vec![12.0, 15.0, 20.0, 24.0];
+        let b = vec![3.0, 5.0, 4.0, 6.0];
+        let mut result = vec![0.0; 4];
+
+        simd_div_f32(&a, &b, &mut result).unwrap();
+
+        assert_eq!(result, vec![4.0, 3.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn test_simd_div_by_zero() {
+        let a = vec![1.0, 2.0];
+        let b = vec![0.0, 2.0];
+        let mut result = vec![0.0; 2];
+
+        simd_div_f32(&a, &b, &mut result).unwrap();
+
+        assert_eq!(result[0], f32::INFINITY);
+        assert_eq!(result[1], 1.0);
+    }
+
+    #[test]
+    fn test_simd_f32_length_mismatch_errors() {
+        let a = [1.0_f32, 2.0, 3.0];
+        let b = [4.0_f32, 5.0];
+        let mut out = [0.0_f32; 3];
+
+        let err = simd_add_f32(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_sub_f32(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_mul_f32(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_div_f32(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+    }
+
+    #[test]
+    fn test_simd_f64_all_ops_with_remainder_and_division_by_zero() {
+        let a = vec![10.0_f64, -9.0, 8.0, -7.0, 6.0];
+        let b = vec![2.0_f64, -3.0, 4.0, -7.0, 0.0];
+        let mut out = vec![0.0_f64; a.len()];
+
+        simd_add_f64(&a, &b, &mut out).unwrap();
+        assert_eq!(out, vec![12.0, -12.0, 12.0, -14.0, 6.0]);
+
+        simd_sub_f64(&a, &b, &mut out).unwrap();
+        assert_eq!(out, vec![8.0, -6.0, 4.0, 0.0, 6.0]);
+
+        simd_mul_f64(&a, &b, &mut out).unwrap();
+        assert_eq!(out, vec![20.0, 27.0, 32.0, 49.0, 0.0]);
+
+        simd_div_f64(&a, &b, &mut out).unwrap();
+        assert_eq!(out[..4], [5.0, 3.0, 2.0, 1.0]);
+        assert_eq!(out[4], f64::INFINITY);
+    }
+
+    #[test]
+    fn test_simd_f64_length_mismatch_errors() {
+        let a = [1.0_f64, 2.0, 3.0];
+        let b = [4.0_f64, 5.0];
+        let mut out = [0.0_f64; 3];
+
+        let err = simd_add_f64(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_sub_f64(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_mul_f64(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+
+        let err = simd_div_f64(&a, &b, &mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Array lengths must match for SIMD operations")
+        );
+    }
+
+    #[test]
+    fn test_can_use_simd_fast_path_shape_conditions() {
+        let same = Shape::new(vec![2, 8]);
+        let different = Shape::new(vec![4, 4]);
+        let too_small = Shape::new(vec![2, 4]);
+
+        assert!(can_use_simd_fast_path(&same, &same, &same));
+        assert!(!can_use_simd_fast_path(&same, &different, &same));
+        assert!(!can_use_simd_fast_path(&same, &same, &different));
+        assert!(!can_use_simd_fast_path(&too_small, &too_small, &too_small));
+    }
 }
