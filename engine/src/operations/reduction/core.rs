@@ -926,3 +926,151 @@ fn nanquantile_all(
         tensor.requires_grad(),
     ))
 }
+
+#[cfg(test)]
+mod core_tests {
+    use super::*;
+    use crate::Device;
+
+    #[test]
+    fn test_quantile_interpolation_modes() {
+        let lower = 1.0;
+        let upper = 3.0;
+        let weight = 0.25;
+
+        assert_eq!(
+            QuantileInterpolation::Linear.interpolate(lower, upper, weight),
+            1.5
+        );
+        assert_eq!(
+            QuantileInterpolation::Lower.interpolate(lower, upper, weight),
+            lower
+        );
+        assert_eq!(
+            QuantileInterpolation::Higher.interpolate(lower, upper, weight),
+            upper
+        );
+        assert_eq!(
+            QuantileInterpolation::Midpoint.interpolate(lower, upper, weight),
+            2.0
+        );
+        assert_eq!(
+            QuantileInterpolation::Nearest.interpolate(lower, upper, 0.49),
+            lower
+        );
+        assert_eq!(
+            QuantileInterpolation::Nearest.interpolate(lower, upper, 0.5),
+            upper
+        );
+    }
+
+    #[test]
+    fn test_normalize_reduction_dims_sorts_dedups_and_supports_negative_dims() {
+        let dims = Some(vec![2, -1, 0, 2, -3]);
+        let normalized = normalize_reduction_dims(dims, 3).unwrap();
+        assert_eq!(normalized, Some(vec![0, 2]));
+        assert_eq!(normalize_reduction_dims(None, 3).unwrap(), None);
+    }
+
+    #[test]
+    fn test_normalize_reduction_dims_rejects_out_of_range() {
+        assert!(normalize_reduction_dims(Some(vec![3]), 3).is_err());
+        assert!(normalize_reduction_dims(Some(vec![-4]), 3).is_err());
+    }
+
+    #[test]
+    fn test_non_nan_mask_for_float_tensors_and_invalid_dtype() {
+        let f32_tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, f32::NAN, -2.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let mask = non_nan_mask(&f32_tensor).unwrap();
+        assert_eq!(mask.dtype(), DataType::Bool);
+        assert_eq!(mask.data().as_bool_slice().unwrap(), &[true, false, true],);
+
+        let f64_tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_f64(
+                vec![f64::NAN, 4.0, 0.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let f64_mask = non_nan_mask(&f64_tensor).unwrap();
+        assert_eq!(f64_mask.data().as_bool_slice().unwrap(), &[false, true, true],);
+
+        let bool_tensor = Tensor::new(
+            Arc::new(TensorData::from_vec_bool(vec![true, false], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        assert!(non_nan_mask(&bool_tensor).is_err());
+    }
+
+    #[test]
+    fn test_comparator_tie_breaking_and_nan_ordering() {
+        let mut f32_desc = vec![(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
+        f32_desc.sort_by(cmp_f32_desc);
+        assert!(f32_desc[0].1.is_nan());
+        assert_eq!(f32_desc[0].0, 2);
+        assert_eq!(f32_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+
+        let mut f32_asc = vec![(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
+        f32_asc.sort_by(cmp_f32_asc);
+        assert!(f32_asc[2].1.is_nan());
+        assert_eq!(f32_asc[2].0, 2);
+        assert_eq!(f32_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+
+        let mut f64_desc = vec![(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
+        f64_desc.sort_by(cmp_f64_desc);
+        assert!(f64_desc[0].1.is_nan());
+        assert_eq!(f64_desc[0].0, 2);
+        assert_eq!(f64_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+
+        let mut f64_asc = vec![(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
+        f64_asc.sort_by(cmp_f64_asc);
+        assert!(f64_asc[2].1.is_nan());
+        assert_eq!(f64_asc[2].0, 2);
+        assert_eq!(f64_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+
+        let mut i32_desc = vec![(1, 7_i32), (0, 7_i32), (2, 1_i32)];
+        i32_desc.sort_by(cmp_i32_desc);
+        assert_eq!(i32_desc, vec![(0, 7), (1, 7), (2, 1)]);
+
+        let mut i32_asc = vec![(1, 7_i32), (0, 7_i32), (2, 1_i32)];
+        i32_asc.sort_by(cmp_i32_asc);
+        assert_eq!(i32_asc, vec![(2, 1), (0, 7), (1, 7)]);
+
+        let mut i64_desc = vec![(1, 7_i64), (0, 7_i64), (2, 1_i64)];
+        i64_desc.sort_by(cmp_i64_desc);
+        assert_eq!(i64_desc, vec![(0, 7), (1, 7), (2, 1)]);
+
+        let mut i64_asc = vec![(1, 7_i64), (0, 7_i64), (2, 1_i64)];
+        i64_asc.sort_by(cmp_i64_asc);
+        assert_eq!(i64_asc, vec![(2, 1), (0, 7), (1, 7)]);
+
+        let mut bool_desc = vec![(1, true), (0, true), (2, false)];
+        bool_desc.sort_by(cmp_bool_desc);
+        assert_eq!(bool_desc, vec![(0, true), (1, true), (2, false)]);
+
+        let mut bool_asc = vec![(1, true), (0, true), (2, false)];
+        bool_asc.sort_by(cmp_bool_asc);
+        assert_eq!(bool_asc, vec![(2, false), (0, true), (1, true)]);
+    }
+
+    #[test]
+    fn test_ensure_non_empty_guard() {
+        assert!(ensure_non_empty(0).is_err());
+        assert!(ensure_non_empty(1).is_ok());
+    }
+}
