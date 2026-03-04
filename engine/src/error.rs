@@ -907,4 +907,29 @@ mod tests {
             let _ = err.context();
         }
     }
+
+    #[test]
+    fn test_type_and_dimension_contextual_paths() {
+        let ty = MinitensorError::type_mismatch_with_context("f16", "i8", "cast kernel");
+        assert_eq!(ty.context(), Some("cast kernel"));
+        assert!(
+            ty.suggestion()
+                .unwrap()
+                .contains("Use .to_dtype(f16) to convert")
+        );
+
+        let grow_rank = MinitensorError::dimension_error("rank too small", Some(4), Some(2));
+        assert!(grow_rank.suggestion().unwrap().contains(".unsqueeze()"));
+
+        let shrink_rank = MinitensorError::dimension_error("rank too large", Some(2), Some(4));
+        assert!(shrink_rank.suggestion().unwrap().contains(".squeeze()"));
+
+        let unknown_rank = MinitensorError::dimension_error("unknown", None, Some(4));
+        assert!(
+            unknown_rank
+                .suggestion()
+                .unwrap()
+                .contains("Check tensor dimensions")
+        );
+    }
 }
