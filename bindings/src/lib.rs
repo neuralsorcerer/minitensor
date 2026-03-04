@@ -114,3 +114,78 @@ fn manual_seed(seed: u64) -> PyResult<()> {
     engine::manual_seed(seed);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::tensor::Shape;
+    use engine::{DataType, Device, Tensor};
+
+    #[test]
+    fn core_module_registers_expected_symbols() {
+        Python::attach(|py| -> PyResult<()> {
+            let module = PyModule::new(py, "_core_test")?;
+            _core(py, &module)?;
+
+            assert!(module.getattr("__version__").is_ok());
+            assert!(module.getattr("Tensor").is_ok());
+            assert!(module.getattr("Shape").is_ok());
+            assert!(module.getattr("Device").is_ok());
+            assert!(module.getattr("functional").is_ok());
+            assert!(module.getattr("debug").is_ok());
+            assert!(module.getattr("numpy_compat").is_ok());
+            assert!(module.getattr("plugins").is_ok());
+            assert!(module.getattr("nn").is_ok());
+            assert!(module.getattr("optim").is_ok());
+
+            for function in [
+                "get_gradient",
+                "clear_autograd_graph",
+                "is_autograd_graph_consumed",
+                "mark_autograd_graph_consumed",
+                "get_default_dtype",
+                "set_default_dtype",
+                "manual_seed",
+            ] {
+                assert!(module.getattr(function).is_ok(), "missing {function}");
+            }
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn autograd_graph_helpers_round_trip() {
+        clear_autograd_graph().unwrap();
+        assert!(!is_autograd_graph_consumed().unwrap());
+        mark_autograd_graph_consumed().unwrap();
+        assert!(is_autograd_graph_consumed().unwrap());
+        clear_autograd_graph().unwrap();
+        assert!(!is_autograd_graph_consumed().unwrap());
+    }
+
+    #[test]
+    fn get_gradient_returns_none_when_no_gradient_available() {
+        let tensor = Tensor::zeros(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let py_tensor = PyTensor::from_tensor(tensor);
+
+        assert!(get_gradient(&py_tensor).unwrap().is_none());
+    }
+
+    #[test]
+    fn dtype_helpers_and_manual_seed_pyfunctions_work() {
+        set_default_dtype("float32").unwrap();
+        assert_eq!(get_default_dtype().unwrap(), "float32");
+
+        set_default_dtype("float64").unwrap();
+        assert_eq!(get_default_dtype().unwrap(), "float64");
+
+        manual_seed(12345).unwrap();
+    }
+}

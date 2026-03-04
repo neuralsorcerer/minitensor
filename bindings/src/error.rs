@@ -74,3 +74,191 @@ pub fn _convert_error_detailed(err: MinitensorError) -> PyErr {
     // Custom exception classes can be added later if needed
     _convert_error(err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_errors() -> Vec<(MinitensorError, &'static str)> {
+        vec![
+            (
+                MinitensorError::ShapeError {
+                    expected: vec![2, 2],
+                    actual: vec![3, 1],
+                    suggestion: None,
+                    context: None,
+                },
+                "ValueError",
+            ),
+            (
+                MinitensorError::TypeError {
+                    expected: "float32".to_string(),
+                    actual: "int32".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "TypeError",
+            ),
+            (
+                MinitensorError::DeviceError {
+                    expected: "cpu".to_string(),
+                    actual: "cuda:0".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::GradientError {
+                    message: "bad grad".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::MemoryError {
+                    message: "oom".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "MemoryError",
+            ),
+            (
+                MinitensorError::InvalidOperation {
+                    message: "invalid".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "ValueError",
+            ),
+            (
+                MinitensorError::BackendError {
+                    backend: "cpu".to_string(),
+                    message: "backend failed".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::IndexError {
+                    index: -1,
+                    dim: 0,
+                    size: 2,
+                    suggestion: None,
+                    context: None,
+                },
+                "IndexError",
+            ),
+            (
+                MinitensorError::InternalError {
+                    message: "internal".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::NotImplemented {
+                    message: "nyi".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "NotImplementedError",
+            ),
+            (
+                MinitensorError::InvalidArgument {
+                    message: "bad arg".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "ValueError",
+            ),
+            (
+                MinitensorError::BroadcastError {
+                    shape1: vec![2, 3],
+                    shape2: vec![4],
+                    suggestion: None,
+                    context: None,
+                },
+                "ValueError",
+            ),
+            (
+                MinitensorError::DimensionError {
+                    message: "bad dim".to_string(),
+                    expected_dims: Some(2),
+                    actual_dims: Some(3),
+                    suggestion: None,
+                    context: None,
+                },
+                "ValueError",
+            ),
+            (
+                MinitensorError::ComputationGraphError {
+                    message: "graph".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::SerializationError {
+                    message: "io".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "OSError",
+            ),
+            (
+                MinitensorError::PluginError {
+                    message: "plugin".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+            (
+                MinitensorError::VersionMismatch {
+                    message: "version".to_string(),
+                    suggestion: None,
+                    context: None,
+                },
+                "RuntimeError",
+            ),
+        ]
+    }
+
+    #[test]
+    fn convert_error_maps_all_variants_to_expected_python_types() {
+        for (err, expected_name) in sample_errors() {
+            Python::attach(|py| {
+                let py_err = _convert_error(err.clone());
+                let type_name = py_err
+                    .get_type(py)
+                    .name()
+                    .expect("python exception type should have a name");
+                assert_eq!(type_name, expected_name);
+                assert!(!py_err.to_string().is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn convert_error_detailed_delegates_to_standard_converter() {
+        let err = MinitensorError::InvalidArgument {
+            message: "delegation".to_string(),
+            suggestion: None,
+            context: None,
+        };
+
+        Python::attach(|py| {
+            let standard = _convert_error(err.clone());
+            let detailed = _convert_error_detailed(err.clone());
+            let standard_name = standard.get_type(py).name().unwrap().to_string();
+            let detailed_name = detailed.get_type(py).name().unwrap().to_string();
+            assert_eq!(standard_name, detailed_name);
+            assert_eq!(standard.to_string(), detailed.to_string());
+        });
+    }
+}
