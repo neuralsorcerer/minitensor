@@ -13,8 +13,7 @@ use smallvec::SmallVec;
 pub struct GradientUtils;
 
 impl GradientUtils {
-    /// Compute the L2 norm of gradients across all parameters
-    pub fn compute_grad_norm(parameters: &[&Tensor]) -> Result<f64> {
+    fn compute_grad_norm_value(parameters: &[&Tensor]) -> f64 {
         let total_sq_norm: f64 = parameters
             .par_iter()
             .map(|param| {
@@ -41,7 +40,12 @@ impl GradientUtils {
                 }
             })
             .sum();
-        Ok(total_sq_norm.sqrt())
+        total_sq_norm.sqrt()
+    }
+
+    /// Compute the L2 norm of gradients across all parameters
+    pub fn compute_grad_norm(parameters: &[&Tensor]) -> Result<f64> {
+        Ok(Self::compute_grad_norm_value(parameters))
     }
 
     /// Apply gradient clipping by norm to a set of parameters
@@ -50,7 +54,7 @@ impl GradientUtils {
         for p in parameters.iter() {
             refs.push(&**p);
         }
-        let total_norm = Self::compute_grad_norm(&refs)?;
+        let total_norm = Self::compute_grad_norm_value(&refs);
         drop(refs);
         if total_norm > max_norm {
             let clip_coef = max_norm / (total_norm + 1e-6);
@@ -660,5 +664,34 @@ mod tests {
 
         let empty = CompositeScheduler::new();
         assert_eq!(empty.get_lr(10, base_lr), base_lr);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_zero_max_norm_zeros_float_grads() {
+        let mut p = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+        let mut grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        grad.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .copy_from_slice(&[3.0, 4.0]);
+        p.set_grad(Some(grad));
+
+        let mut params = vec![&mut p];
+        let norm = GradientUtils::clip_grad_norm(&mut params, 0.0).unwrap();
+        assert!((norm - 5.0).abs() < 1e-10);
+
+        let scaled = params[0].grad().unwrap().data().as_f32_slice().unwrap();
+        assert!(scaled[0].abs() < 1e-6);
+        assert!(scaled[1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_composite_scheduler_step_before_first_scheduler_keeps_base_lr() {
+        let scheduler = CompositeScheduler::new()
+            .add_scheduler(Box::new(LinearWarmupScheduler::new(3)), 5)
+            .add_scheduler(Box::new(MultiStepScheduler::new(vec![1], 0.1)), 10);
+
+        assert_eq!(scheduler.get_lr(0, 0.3), 0.3);
+        assert_eq!(scheduler.get_lr(4, 0.3), 0.3);
     }
 }
