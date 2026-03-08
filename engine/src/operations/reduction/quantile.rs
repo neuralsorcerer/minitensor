@@ -302,21 +302,19 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
+
+            let Some(mut buffer) = copy_or_none_if_nan(data) else {
+                values.fill(f32::NAN);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            };
+
             if q_len == 1 {
-                let mut buffer = Vec::with_capacity(data.len());
-                for &value in data {
-                    if value.is_nan() {
-                        values[0] = f32::NAN;
-                        return Ok(Tensor::new(
-                            Arc::new(values_data),
-                            shape,
-                            tensor.dtype(),
-                            tensor.device(),
-                            tensor.requires_grad(),
-                        ));
-                    }
-                    buffer.push(value);
-                }
                 values[0] = quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
@@ -326,25 +324,10 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
-            let positions = quantile_positions_for_len(data.len(), qs);
-            let mut sorted = Vec::with_capacity(data.len());
-            for &value in data {
-                if value.is_nan() {
-                    for out in values.iter_mut() {
-                        *out = f32::NAN;
-                    }
-                    return Ok(Tensor::new(
-                        Arc::new(values_data),
-                        shape,
-                        tensor.dtype(),
-                        tensor.device(),
-                        tensor.requires_grad(),
-                    ));
-                }
-                sorted.push(value);
-            }
-            sorted.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
+
+            let positions = quantile_positions_for_len(buffer.len(), qs);
+            buffer.sort_by(|a, b| a.total_cmp(b));
+            quantiles_from_sorted_f32(&buffer, &positions, interpolation, values);
         }
         DataType::Float64 => {
             let data = tensor
@@ -364,21 +347,19 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
+
+            let Some(mut buffer) = copy_or_none_if_nan(data) else {
+                values.fill(f64::NAN);
+                return Ok(Tensor::new(
+                    Arc::new(values_data),
+                    shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ));
+            };
+
             if q_len == 1 {
-                let mut buffer = Vec::with_capacity(data.len());
-                for &value in data {
-                    if value.is_nan() {
-                        values[0] = f64::NAN;
-                        return Ok(Tensor::new(
-                            Arc::new(values_data),
-                            shape,
-                            tensor.dtype(),
-                            tensor.device(),
-                            tensor.requires_grad(),
-                        ));
-                    }
-                    buffer.push(value);
-                }
                 values[0] = quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
@@ -388,25 +369,10 @@ fn quantiles_all(
                     tensor.requires_grad(),
                 ));
             }
-            let positions = quantile_positions_for_len(data.len(), qs);
-            let mut sorted = Vec::with_capacity(data.len());
-            for &value in data {
-                if value.is_nan() {
-                    for out in values.iter_mut() {
-                        *out = f64::NAN;
-                    }
-                    return Ok(Tensor::new(
-                        Arc::new(values_data),
-                        shape,
-                        tensor.dtype(),
-                        tensor.device(),
-                        tensor.requires_grad(),
-                    ));
-                }
-                sorted.push(value);
-            }
-            sorted.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
+
+            let positions = quantile_positions_for_len(buffer.len(), qs);
+            buffer.sort_by(|a, b| a.total_cmp(b));
+            quantiles_from_sorted_f64(&buffer, &positions, interpolation, values);
         }
         _ => unreachable!("dtype validated"),
     }
@@ -418,6 +384,17 @@ fn quantiles_all(
         tensor.device(),
         tensor.requires_grad(),
     ))
+}
+
+fn copy_or_none_if_nan<T: num_traits::Float>(data: &[T]) -> Option<Vec<T>> {
+    let mut out = Vec::with_capacity(data.len());
+    for &value in data {
+        if value.is_nan() {
+            return None;
+        }
+        out.push(value);
+    }
+    Some(out)
 }
 
 fn nanquantiles_all(

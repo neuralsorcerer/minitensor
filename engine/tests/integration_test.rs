@@ -243,6 +243,31 @@ fn test_quantiles_keepdim_no_dim_layout() {
 }
 
 #[test]
+fn test_quantiles_all_nan_propagates_single_q() {
+    let tensor = create_test_tensor_f32(vec![1.0, f32::NAN, 3.0, 5.0], vec![4], false);
+
+    let quantile =
+        reduction::quantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear).unwrap();
+
+    let values = quantile.data().as_f32_slice().unwrap();
+    assert!(values[0].is_nan());
+}
+
+#[test]
+fn test_quantiles_all_nan_propagates_multiple_qs() {
+    let tensor = create_test_tensor_f32(vec![1.0, f32::NAN, 3.0, 5.0], vec![4], false);
+    let qs = [0.25, 0.75];
+
+    let quantiles =
+        reduction::quantiles(&tensor, &qs, None, false, QuantileInterpolation::Linear).unwrap();
+
+    let values = quantiles.data().as_f32_slice().unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values[0].is_nan());
+    assert!(values[1].is_nan());
+}
+
+#[test]
 fn test_nanquantiles_dim_sequence_layout() {
     let tensor = create_test_tensor_f32(
         vec![1.0, f32::NAN, 5.0, 2.0, 4.0, f32::NAN],
