@@ -48,6 +48,81 @@ pub struct MemoryLayout {
 }
 
 impl TensorData {
+    #[inline(always)]
+    fn validate_from_vec_type<T: 'static>(dtype: DataType) {
+        let type_id = std::any::TypeId::of::<T>();
+        let matches = match dtype {
+            DataType::Float32 => type_id == std::any::TypeId::of::<f32>(),
+            DataType::Float64 => type_id == std::any::TypeId::of::<f64>(),
+            DataType::Int32 => type_id == std::any::TypeId::of::<i32>(),
+            DataType::Int64 => type_id == std::any::TypeId::of::<i64>(),
+            DataType::Bool => type_id == std::any::TypeId::of::<bool>(),
+        };
+
+        assert!(matches, "dtype/type mismatch in TensorData::from_vec");
+    }
+
+    #[inline(always)]
+    fn owned_buffer_with_len(size_bytes: usize) -> Vec<u8> {
+        let mut vec = Vec::with_capacity(size_bytes);
+        unsafe {
+            vec.set_len(size_bytes);
+        }
+        vec
+    }
+
+    #[inline(always)]
+    fn owned_zeroed_buffer(size_bytes: usize) -> Vec<u8> {
+        let mut vec = Self::owned_buffer_with_len(size_bytes);
+        unsafe {
+            std::ptr::write_bytes(vec.as_mut_ptr(), 0, size_bytes);
+        }
+        vec
+    }
+
+    #[inline(always)]
+    fn owned_buffer_for_dtype(size_bytes: usize, dtype: DataType) -> Vec<u8> {
+        // Bool has strict valid bit-pattern requirements (0 or 1). Creating
+        // `&mut [bool]` over arbitrary uninitialized bytes is UB, so we keep
+        // bool storage initialized even for "uninitialized" constructors.
+        if dtype == DataType::Bool {
+            Self::owned_zeroed_buffer(size_bytes)
+        } else {
+            Self::owned_buffer_with_len(size_bytes)
+        }
+    }
+
+    #[inline(always)]
+    fn fill_with_ones(&mut self) {
+        match self.layout.dtype {
+            DataType::Float32 => {
+                if let Some(slice) = self.as_f32_slice_mut() {
+                    Self::fill_slice(slice, 1.0);
+                }
+            }
+            DataType::Float64 => {
+                if let Some(slice) = self.as_f64_slice_mut() {
+                    Self::fill_slice(slice, 1.0);
+                }
+            }
+            DataType::Int32 => {
+                if let Some(slice) = self.as_i32_slice_mut() {
+                    Self::fill_slice(slice, 1);
+                }
+            }
+            DataType::Int64 => {
+                if let Some(slice) = self.as_i64_slice_mut() {
+                    Self::fill_slice(slice, 1);
+                }
+            }
+            DataType::Bool => {
+                if let Some(slice) = self.as_bool_slice_mut() {
+                    Self::fill_slice(slice, true);
+                }
+            }
+        }
+    }
+
     /// Create new tensor data with zeros on CPU
     #[inline(always)]
     pub fn zeros(numel: usize, dtype: DataType) -> Self {
@@ -67,12 +142,8 @@ impl TensorData {
             let size_bytes = numel
                 .checked_mul(dtype.size_bytes())
                 .expect("tensor size overflow");
-            let mut vec = Vec::with_capacity(size_bytes);
-            unsafe {
-                vec.set_len(size_bytes);
-            }
             let mut data = Self {
-                buffer: TensorBuffer::Owned(vec),
+                buffer: TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype)),
                 layout: MemoryLayout {
                     dtype,
                     numel,
@@ -81,68 +152,14 @@ impl TensorData {
                 },
                 ref_count: AtomicUsize::new(1),
             };
-
-            // Fill with ones in parallel for large buffers
-            match dtype {
-                DataType::Float32 => {
-                    if let Some(slice) = data.as_f32_slice_mut() {
-                        Self::fill_slice(slice, 1.0);
-                    }
-                }
-                DataType::Float64 => {
-                    if let Some(slice) = data.as_f64_slice_mut() {
-                        Self::fill_slice(slice, 1.0);
-                    }
-                }
-                DataType::Int32 => {
-                    if let Some(slice) = data.as_i32_slice_mut() {
-                        Self::fill_slice(slice, 1);
-                    }
-                }
-                DataType::Int64 => {
-                    if let Some(slice) = data.as_i64_slice_mut() {
-                        Self::fill_slice(slice, 1);
-                    }
-                }
-                DataType::Bool => {
-                    if let Some(slice) = data.as_bool_slice_mut() {
-                        Self::fill_slice(slice, true);
-                    }
-                }
-            }
+            data.fill_with_ones();
 
             data
         } else {
             // For non-CPU devices, fall back to zero initialization
             // and attempt to fill if the allocation falls back to CPU.
             let mut data = Self::zeros_on_device(numel, dtype, device);
-            match dtype {
-                DataType::Float32 => {
-                    if let Some(slice) = data.as_f32_slice_mut() {
-                        slice.fill(1.0);
-                    }
-                }
-                DataType::Float64 => {
-                    if let Some(slice) = data.as_f64_slice_mut() {
-                        slice.fill(1.0);
-                    }
-                }
-                DataType::Int32 => {
-                    if let Some(slice) = data.as_i32_slice_mut() {
-                        slice.fill(1);
-                    }
-                }
-                DataType::Int64 => {
-                    if let Some(slice) = data.as_i64_slice_mut() {
-                        slice.fill(1);
-                    }
-                }
-                DataType::Bool => {
-                    if let Some(slice) = data.as_bool_slice_mut() {
-                        slice.fill(true);
-                    }
-                }
-            }
+            data.fill_with_ones();
             data
         }
     }
@@ -167,12 +184,7 @@ impl TensorData {
             // Use an uninitialized Vec and explicitly zero it. This avoids the
             // double-initialization that `vec![0u8; size_bytes]` may perform on
             // some platforms and lets the optimizer emit a single `memset`.
-            let mut vec = Vec::with_capacity(size_bytes);
-            unsafe {
-                vec.set_len(size_bytes);
-                std::ptr::write_bytes(vec.as_mut_ptr(), 0, size_bytes);
-            }
-            TensorBuffer::Owned(vec)
+            TensorBuffer::Owned(Self::owned_zeroed_buffer(size_bytes))
         } else {
             // Use custom allocator for GPU
             match global_allocate(size_bytes, device) {
@@ -189,12 +201,7 @@ impl TensorData {
                 }
                 Err(_) => {
                     // Fallback to CPU if GPU allocation fails
-                    let mut vec = Vec::with_capacity(size_bytes);
-                    unsafe {
-                        vec.set_len(size_bytes);
-                        std::ptr::write_bytes(vec.as_mut_ptr(), 0, size_bytes);
-                    }
-                    TensorBuffer::Owned(vec)
+                    TensorBuffer::Owned(Self::owned_zeroed_buffer(size_bytes))
                 }
             }
         };
@@ -223,12 +230,8 @@ impl TensorData {
             .expect("tensor size overflow");
 
         let buffer = if device.is_cpu() {
-            // Allocate vector without initializing memory for maximum performance
-            let mut vec = Vec::with_capacity(size_bytes);
-            unsafe {
-                vec.set_len(size_bytes);
-            }
-            TensorBuffer::Owned(vec)
+            // Allocate vector without initializing memory for maximum performance (bool remains zero-initialized for validity)
+            TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype))
         } else {
             match global_allocate(size_bytes, device) {
                 Ok(ptr) => TensorBuffer::Raw {
@@ -238,11 +241,7 @@ impl TensorData {
                 },
                 Err(_) => {
                     // Fallback to CPU allocation if GPU allocation fails
-                    let mut vec = Vec::with_capacity(size_bytes);
-                    unsafe {
-                        vec.set_len(size_bytes);
-                    }
-                    TensorBuffer::Owned(vec)
+                    TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype))
                 }
             }
         };
@@ -285,6 +284,12 @@ impl TensorData {
         let size_bytes = numel
             .checked_mul(std::mem::size_of::<T>())
             .expect("tensor size overflow");
+        assert_eq!(
+            std::mem::size_of::<T>(),
+            dtype.size_bytes(),
+            "dtype size mismatch in TensorData::from_vec"
+        );
+        Self::validate_from_vec_type::<T>(dtype);
 
         // Convert typed data to bytes
         let buffer = if device.is_cpu() {
@@ -890,6 +895,24 @@ mod tests {
 
         let data_bool = TensorData::from_vec_bool(vec![true, false, true], Device::cpu());
         assert_eq!(data_bool.as_bool_slice().unwrap(), &[true, false, true]);
+    }
+
+    #[test]
+    fn test_uninitialized_bool_cpu_is_valid_false_initialized() {
+        let data = TensorData::uninitialized_on_device(4, DataType::Bool, Device::cpu());
+        assert_eq!(data.as_bool_slice().unwrap(), &[false; 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "dtype size mismatch in TensorData::from_vec")]
+    fn test_from_vec_dtype_size_mismatch_panics() {
+        let _ = TensorData::from_vec(vec![1_i64, 2_i64], DataType::Int32, Device::cpu());
+    }
+
+    #[test]
+    #[should_panic(expected = "dtype/type mismatch in TensorData::from_vec")]
+    fn test_from_vec_dtype_type_mismatch_panics() {
+        let _ = TensorData::from_vec(vec![2_u8, 0_u8], DataType::Bool, Device::cpu());
     }
 
     #[test]
