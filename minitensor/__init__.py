@@ -121,6 +121,10 @@ def default_dtype(dtype: str):
     """
 
     previous = get_default_dtype()
+    if isinstance(dtype, str) and dtype == previous:
+        yield
+        return
+
     try:
         set_default_dtype(dtype)
         yield
