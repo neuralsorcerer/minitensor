@@ -18,6 +18,35 @@ use std::sync::Arc;
 ///
 /// This utility is used by both `Dropout` and `Dropout2d` to create
 /// Bernoulli masks that keep activations with probability `1-p`.
+fn generate_dropout_mask_data<T>(
+    numel: usize,
+    keep_prob: f64,
+    zero: T,
+    one: T,
+    scale: impl FnOnce(f64) -> T,
+) -> Result<Vec<T>>
+where
+    T: Copy,
+{
+    if keep_prob >= 1.0 {
+        return Ok(vec![one; numel]);
+    }
+    if keep_prob <= 0.0 {
+        return Ok(vec![zero; numel]);
+    }
+
+    let bernoulli =
+        Bernoulli::new(keep_prob).map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
+    let scale = scale(keep_prob);
+    let mut data = vec![zero; numel];
+    random::with_rng(|rng| {
+        for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
+            *v = if b { scale } else { zero };
+        }
+    });
+    Ok(data)
+}
+
 fn generate_dropout_mask(
     p: f64,
     shape: &Shape,
@@ -29,25 +58,12 @@ fn generate_dropout_mask(
 
     match dtype {
         DataType::Float32 => {
-            let mut data = Vec::with_capacity(numel);
-            unsafe {
-                data.set_len(numel);
-            }
-            if keep_prob >= 1.0 {
-                data.fill(1.0);
-            } else if keep_prob > 0.0 {
-                let scale = 1.0f32 / keep_prob as f32;
-                let bernoulli = Bernoulli::new(keep_prob)
-                    .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
-                random::with_rng(|rng| {
-                    for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
-                        *v = if b { scale } else { 0.0 };
-                    }
-                });
-            } else {
-                data.fill(0.0);
-            }
-            let td = TensorData::from_vec_f32(data, device);
+            let td = TensorData::from_vec_f32(
+                generate_dropout_mask_data(numel, keep_prob, 0.0f32, 1.0f32, |kp| {
+                    1.0f32 / kp as f32
+                })?,
+                device,
+            );
             Ok(Tensor::new(
                 Arc::new(td),
                 shape.clone(),
@@ -57,25 +73,10 @@ fn generate_dropout_mask(
             ))
         }
         DataType::Float64 => {
-            let mut data = Vec::with_capacity(numel);
-            unsafe {
-                data.set_len(numel);
-            }
-            if keep_prob >= 1.0 {
-                data.fill(1.0);
-            } else if keep_prob > 0.0 {
-                let scale = 1.0 / keep_prob;
-                let bernoulli = Bernoulli::new(keep_prob)
-                    .map_err(|e| MinitensorError::invalid_argument(e.to_string()))?;
-                random::with_rng(|rng| {
-                    for (v, b) in data.iter_mut().zip(bernoulli.sample_iter(rng)) {
-                        *v = if b { scale } else { 0.0 };
-                    }
-                });
-            } else {
-                data.fill(0.0);
-            }
-            let td = TensorData::from_vec_f64(data, device);
+            let td = TensorData::from_vec_f64(
+                generate_dropout_mask_data(numel, keep_prob, 0.0f64, 1.0f64, |kp| 1.0 / kp)?,
+                device,
+            );
             Ok(Tensor::new(
                 Arc::new(td),
                 shape.clone(),
