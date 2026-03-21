@@ -149,7 +149,7 @@ def test_search_api_rejects_non_string_inputs():
     with pytest.raises(TypeError, match="query must be a string"):
         mt.search_api(None)  # type: ignore[arg-type]
 
-    with pytest.raises(TypeError, match="module must be a string or None"):
+    with pytest.raises(TypeError, match="module must be a string"):
         mt.search_api("tensor", module=1)  # type: ignore[arg-type]
 
 
@@ -311,3 +311,8 @@ def test_api_module_helper_edge_cases():
     )
     assert mt._api_module_namespace("top_level") is None
     assert mt._api_module_title("unknown_module") == "unknown_module"
+
+
+def test_module_public_names_rejects_non_string_input():
+    with pytest.raises(TypeError, match="module must be a string"):
+        mt._module_public_names(None)  # type: ignore[arg-type]

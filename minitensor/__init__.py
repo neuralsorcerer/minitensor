@@ -174,12 +174,8 @@ def search_api(query: str, module: str | None = None) -> list[str]:
     query_folded = query_normalized.casefold()
 
     if module is not None:
-        if not isinstance(module, str):
-            raise TypeError("module must be a string or None")
-
         module_names = _module_public_names(module)
-
-        return sorted(name for name in module_names if query_folded in name.casefold())
+        return [name for name in module_names if query_folded in name.casefold()]
 
     api = list_public_api()
     matches: list[str] = []
@@ -191,6 +187,9 @@ def search_api(query: str, module: str | None = None) -> list[str]:
 
 
 def _module_public_names(module: str) -> list[str]:
+    if not isinstance(module, str):
+        raise TypeError("module must be a string")
+
     module_normalized = module.strip()
     if not module_normalized:
         raise ValueError(f"Unknown module: {module}")
