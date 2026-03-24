@@ -104,6 +104,19 @@ serialization = getattr(_C, "serialization", None)
 if serialization is not None:
     _sys.modules[__name__ + ".serialization"] = serialization
 
+_OPTIONAL_TOP_LEVEL_EXPORTS = (
+    "execute_custom_op_py",
+    "is_custom_op_registered_py",
+    "list_custom_ops_py",
+    "register_example_custom_ops",
+    "unregister_custom_op_py",
+)
+
+for _name in _OPTIONAL_TOP_LEVEL_EXPORTS:
+    _member = getattr(_C, _name, None)
+    if _member is not None:
+        globals()[_name] = _member
+
 
 @contextmanager
 def default_dtype(dtype: str):
@@ -513,7 +526,7 @@ for _name in (
 _sys.modules[_tensor_module.__name__] = _tensor_module
 
 
-__all__ = [
+_BASE_EXPORTS = (
     "Tensor",
     "tensor",
     "Device",
@@ -560,6 +573,7 @@ __all__ = [
     "as_tensor",
     "get_default_dtype",
     "set_default_dtype",
+    "manual_seed",
     "default_dtype",
     "available_submodules",
     "list_public_api",
@@ -578,55 +592,16 @@ __all__ = [
     "cross",
     "plugins",
     "serialization",
-    "execute_custom_op_py",
-    "is_custom_op_registered_py",
-    "list_custom_ops_py",
-    "register_example_custom_ops",
-    "unregister_custom_op_py",
     "dot",
     "bmm",
-    "cat",
-    "stack",
-    "split",
-    "chunk",
-    "index_select",
-    "gather",
-    "narrow",
-    "topk",
-    "sort",
-    "argsort",
-    "median",
-    "quantile",
-    "nanquantile",
-    "logsumexp",
-    "softmax",
-    "log_softmax",
-    "softsign",
-    "rsqrt",
-    "reshape",
-    "view",
-    "triu",
-    "tril",
-    "diagonal",
-    "trace",
-    "solve",
-    "flatten",
-    "ravel",
-    "transpose",
-    "permute",
-    "movedim",
-    "moveaxis",
-    "swapaxes",
-    "swapdims",
-    "squeeze",
-    "unsqueeze",
-    "expand",
-    "repeat",
-    "repeat_interleave",
-    "flip",
-    "roll",
-    "where",
-    "masked_fill",
-    "masked_softmax",
-    "masked_log_softmax",
+)
+
+__all__ = [
+    name
+    for name in (
+        *_BASE_EXPORTS,
+        *_OPTIONAL_TOP_LEVEL_EXPORTS,
+        *_FUNCTIONAL_FORWARDERS,
+    )
+    if name in globals()
 ]

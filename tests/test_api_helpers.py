@@ -98,6 +98,39 @@ def test_list_public_api_has_top_level_tensor():
     assert "Tensor" in api["top_level"]
 
 
+def test_top_level_public_api_matches_exported_globals():
+    expected_names = {
+        name
+        for name in (
+            *mt._FUNCTIONAL_FORWARDERS,
+            "Tensor",
+            "manual_seed",
+            "default_dtype",
+            "available_submodules",
+            "list_public_api",
+            "api_summary",
+            "search_api",
+            "describe_api",
+            "help",
+        )
+    }
+    top_level_names = set(mt.list_public_api()["top_level"])
+    missing = expected_names - top_level_names
+    assert not missing
+
+
+def test_all_only_contains_existing_attributes():
+    missing = [name for name in mt.__all__ if not hasattr(mt, name)]
+    assert missing == []
+
+
+def test_custom_op_helpers_are_exported_when_available():
+    for name in mt._OPTIONAL_TOP_LEVEL_EXPORTS:
+        assert hasattr(mt, name)
+        assert name in mt.__all__
+        assert name in mt.list_public_api()["top_level"]
+
+
 def test_api_summary_counts_match_list_public_api():
     api = mt.list_public_api()
     summary = mt.api_summary()
@@ -290,6 +323,14 @@ def test_stubbed_import_sets_cross_none(monkeypatch):
     stubbed = _load_stubbed_module(monkeypatch)
     assert stubbed.numpy_compat is None
     assert stubbed.cross is None
+
+
+def test_stubbed_import_omits_missing_custom_op_helpers(monkeypatch):
+    stubbed = _load_stubbed_module(monkeypatch)
+    for name in stubbed._OPTIONAL_TOP_LEVEL_EXPORTS:
+        assert not hasattr(stubbed, name)
+        assert name not in stubbed.__all__
+        assert name not in stubbed.list_public_api()["top_level"]
 
 
 def test_help_skips_modules_with_none_namespace(monkeypatch):
