@@ -82,6 +82,14 @@ fn integer_like_dtype_for_context(context: DataType) -> DataType {
     }
 }
 
+fn float_like_dtype_for_context(context: DataType) -> DataType {
+    match context {
+        DataType::Float32 => DataType::Float32,
+        DataType::Float64 => DataType::Float64,
+        _ => default_float_dtype(),
+    }
+}
+
 fn numpy_scalar_dtype(value: &Bound<'_, PyAny>) -> PyResult<Option<DataType>> {
     let is_numpy_type = match value.get_type().module() {
         Ok(module) => match module.to_str() {
@@ -121,11 +129,7 @@ pub fn resolve_scalar_dtype(value: &Bound<'_, PyAny>, context: DataType) -> PyRe
     }
 
     if value.is_instance_of::<PyFloat>() {
-        return Ok(if context == DataType::Float64 {
-            DataType::Float64
-        } else {
-            default_float_dtype()
-        });
+        return Ok(float_like_dtype_for_context(context));
     }
 
     if value.is_instance_of::<PyInt>() {
@@ -149,11 +153,7 @@ pub fn resolve_scalar_dtype(value: &Bound<'_, PyAny>, context: DataType) -> PyRe
     if value.hasattr(float_name)? {
         let float_attr = value.getattr(float_name)?;
         if float_attr.is_callable() {
-            return Ok(if context == DataType::Float64 {
-                DataType::Float64
-            } else {
-                default_float_dtype()
-            });
+            return Ok(float_like_dtype_for_context(context));
         }
     }
 
@@ -490,6 +490,7 @@ def make_bad_module_name_scalar():
     #[test]
     fn resolve_scalar_dtype_numpy_module_without_dtype_falls_back() {
         Python::attach(|py| -> PyResult<()> {
+            set_default_dtype("float64")?;
             let helpers = module_from_code(
                 py,
                 r#"class PretendNumpyNoDtype:
@@ -502,6 +503,7 @@ def make_bad_module_name_scalar():
             let value = helpers.getattr("PretendNumpyNoDtype")?.call0()?;
             let resolved = resolve_scalar_dtype(&value, DataType::Float32)?;
             assert_eq!(resolved, DataType::Float32);
+            set_default_dtype("float32")?;
             Ok(())
         })
         .unwrap();
