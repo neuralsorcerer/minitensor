@@ -47,8 +47,7 @@ test: test-rust test-python
 
 # Run Rust tests
 test-rust:
-	RUSTFLAGS="$(RUSTFLAGS) -D warnings" cargo test --manifest-path engine/Cargo.toml
-	RUSTFLAGS="$(RUSTFLAGS) -D warnings" cargo test --manifest-path bindings/Cargo.toml
+	RUSTFLAGS="$(RUSTFLAGS) -D warnings" cargo test --workspace --all-targets
 
 # Run Python tests
 test-python: dev-install
@@ -57,9 +56,9 @@ test-python: dev-install
 # Run linting
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --all-targets --all-features -- -D warnings
-	python -m black --check minitensor/ examples/ *.py
-	python -m isort --check-only minitensor/ examples/ *.py
+	cargo clippy --workspace --all-targets -- -D warnings
+	python -m black --check .
+	python -m isort --check-only .
 
 # Format code
 format:

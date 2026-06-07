@@ -8,7 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "minitensor"
-version = "0.1.5"
+version = "0.1.6"
 description = "A lightweight, high-performance tensor operations library."
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,7 +43,7 @@ dev = [
     "pytest",
     "pytest-benchmark",
     "pytest-cov",
-    "black",
+    "black[jupyter]",
     "mypy",
     "pre-commit",
     "numpy",
@@ -76,6 +76,8 @@ module-name = "minitensor._core"
 features = ["pyo3/extension-module"]
 # Build configuration
 compatibility = "linux"
+# Editable pip installs should match release performance unless explicitly overridden.
+editable-profile = "release"
 strip = false
 # Skip audit for faster builds in development
 skip-auditwheel = false

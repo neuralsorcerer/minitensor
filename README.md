@@ -39,48 +39,48 @@ A lightweight, high-performance tensor operations library with automatic differe
 
 ### Installation
 
+MiniTensor can be installed either from PyPI or from source. Source installs
+compile the Rust extension, so they require Python 3.10+, Rust/Cargo, and
+maturin. The full, platform-aware instructions live in the
+[installation guide](docs/installation.md).
+
 **From PyPI:**
 
 ```bash
 pip install minitensor
 ```
 
-**From Source:**
+**From source with the installer (recommended for contributors):**
 
 ```bash
 # Clone the repository
 git clone https://github.com/neuralsorcerer/minitensor.git
 cd minitensor
 
-# Quick install with make (Linux/macOS)
-make install
-
-# Or manually with maturin
-python -m pip install maturin[patchelf]
-maturin develop --release
-
-# Optional: editable install with pip (debug build by default)
-python -m pip install -e .
-```
-
-> _Note:_ `python -m pip install -e .` builds a debug version by default; pass `--config-settings=--release` for a release build.
-
-**Using the install script (Linux/macOS/Windows):**
-
-```bash
 bash install.sh
 ```
 
-Common options:
+The installer creates `.venv` by default, installs maturin (with `patchelf` on
+Linux), installs Rust with rustup if needed, builds a release extension, and
+verifies the import.
+
+**Manual source install:**
 
 ```bash
-bash install.sh --no-venv          # Use current Python env (no virtualenv)
-bash install.sh --venv .myvenv     # Create/use a specific venv directory
-bash install.sh --debug            # Debug build (default is --release)
-bash install.sh --python /usr/bin/python3.12   # Use a specific Python interpreter
+python -m pip install 'maturin[patchelf]'  # Linux; use `maturin` on macOS/Windows
+maturin develop --release
 ```
 
-The script ensures Python 3.10+, sets up a virtual environment by default, installs Rust (via rustup if needed), installs maturin (with patchelf on Linux), builds MiniTensor, and verifies the installation.
+For contributor tooling and editable builds, use the `dev` extra:
+
+```bash
+python -m pip install -e '.[dev]'
+pre-commit install
+```
+
+> _Note:_ Editable pip installs use the release profile configured in
+> `pyproject.toml`; use `maturin develop --debug` when you intentionally need
+> a debug build.
 
 ### Basic Usage
 
@@ -306,27 +306,32 @@ Epoch 100 | Loss: 0.0102 | w: 2.996 | b: 0.501
 ## Development & Testing
 
 The Python package is a thin wrapper around the compiled Rust engine, so native
-and Python changes should be validated in a deterministic order.
+and Python changes should be validated in a deterministic order. See the
+[installation guide](docs/installation.md#contributor-setup) for full setup and
+troubleshooting details.
 
 ```bash
-# 1) One-time contributor setup (installs dev tooling + editable extension)
-python -m pip install -e '.[dev]' --config-settings=--release
+# 1) One-time contributor setup (installs dev tooling + editable release extension)
+python -m pip install -e '.[dev]'
+pre-commit install
 
 # 2) Rebuild the extension after changes under engine/ or bindings/
-python -m pip install -e . --config-settings=--release
+python -m pip install -e .
 
 # 3) Run Rust unit/integration tests
-cargo test
+cargo test --workspace --all-targets
 
-# 4) Run Python tests
-pytest -q
+# 4) Run Python tests with warnings treated as errors by project config
+python -m pytest
 
-# 5) Run formatting/lint/type hooks
+# 5) Run formatting/lint hooks
 pre-commit run --all-files
 ```
 
 Notes:
-- Use `python -m pip` so installs target the same interpreter used for `pytest`.
+- Use `python -m pip` so installs target the same interpreter used for `python -m pytest`.
+- The `dev` extra installs `black[jupyter]`, matching the pre-commit Black hook and
+  avoiding missing-Jupyter warnings when checking notebooks.
 - Step 2 is only required when Rust or PyO3 bindings changed; pure-Python/docs edits
   can skip it.
 - Keep Step 1 as one-time setup unless dev dependencies change.
@@ -334,7 +339,7 @@ Notes:
 ### Code Style
 
 - **Rust**: Follow `rustfmt` and `clippy` recommendations
-- **Python**: Use `black` and `isort` for formatting
+- **Python**: Use `black[jupyter]` and `isort` for formatting Python files and notebooks
 
 ## Performance
 
