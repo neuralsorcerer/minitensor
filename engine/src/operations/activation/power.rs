@@ -108,6 +108,68 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     Ok(output)
 }
 
+
+/// Replace NaN and infinity values in floating point tensors.
+///
+/// Exact tensors cannot contain NaN or infinity, so they are returned unchanged.
+pub fn nan_to_num(
+    tensor: &Tensor,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+) -> Result<Tensor> {
+    match tensor.dtype() {
+        DataType::Float32 | DataType::Float64 => {}
+        DataType::Int32 | DataType::Int64 | DataType::Bool => return Ok(tensor.clone()),
+    }
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    let mut finite_mask = tensor.requires_grad().then(|| Vec::with_capacity(tensor.numel()));
+
+    match tensor.dtype() {
+        DataType::Float32 => nan_to_num_f32(
+            tensor,
+            &mut output_data,
+            nan,
+            posinf,
+            neginf,
+            finite_mask.as_mut(),
+        )?,
+        DataType::Float64 => nan_to_num_f64(
+            tensor,
+            &mut output_data,
+            nan,
+            posinf,
+            neginf,
+            finite_mask.as_mut(),
+        )?,
+        DataType::Int32 | DataType::Int64 | DataType::Bool => unreachable!(),
+    }
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(NanToNumBackward {
+            input_id: tensor.id(),
+            finite_mask: finite_mask.unwrap_or_default(),
+        });
+
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        Ok(output_with_grad)
+    } else {
+        Ok(output)
+    }
+}
+
 /// Round tensor values
 pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
     let mut output_data =
@@ -435,6 +497,164 @@ fn clip_i64(
         v
     });
     Ok(())
+}
+
+
+fn nan_to_num_f32(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+    finite_mask: Option<&mut Vec<bool>>,
+) -> Result<()> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
+    })?;
+
+    replace_non_finite(
+        input_data,
+        output_slice,
+        nan as f32,
+        posinf.map_or(f32::MAX, |v| v as f32),
+        neginf.map_or(f32::MIN, |v| v as f32),
+        finite_mask,
+    );
+    Ok(())
+}
+
+fn nan_to_num_f64(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+    finite_mask: Option<&mut Vec<bool>>,
+) -> Result<()> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
+    })?;
+
+    replace_non_finite(
+        input_data,
+        output_slice,
+        nan,
+        posinf.unwrap_or(f64::MAX),
+        neginf.unwrap_or(f64::MIN),
+        finite_mask,
+    );
+    Ok(())
+}
+
+fn replace_non_finite<T>(
+    input: &[T],
+    output: &mut [T],
+    nan: T,
+    posinf: T,
+    neginf: T,
+    finite_mask: Option<&mut Vec<bool>>,
+) where
+    T: Copy + PartialEq + Send + Sync,
+    T: FloatClassify,
+{
+    match finite_mask {
+        Some(mask) => {
+            mask.resize(input.len(), false);
+            if input.len() < PAR_THRESHOLD {
+                for ((&val, out), is_finite) in input
+                    .iter()
+                    .zip(output.iter_mut())
+                    .zip(mask.iter_mut())
+                {
+                    *is_finite = val.is_finite_value();
+                    *out = classify_nan_to_num(val, nan, posinf, neginf);
+                }
+            } else {
+                input
+                    .par_iter()
+                    .zip(output.par_iter_mut())
+                    .zip(mask.par_iter_mut())
+                    .for_each(|((val, out), is_finite)| {
+                        *is_finite = val.is_finite_value();
+                        *out = classify_nan_to_num(*val, nan, posinf, neginf);
+                    });
+            }
+        }
+        None => unary_apply(input, output, |val| classify_nan_to_num(val, nan, posinf, neginf)),
+    }
+}
+
+#[inline(always)]
+fn classify_nan_to_num<T>(val: T, nan: T, posinf: T, neginf: T) -> T
+where
+    T: Copy + PartialEq + FloatClassify,
+{
+    if val.is_nan_value() {
+        nan
+    } else if val.is_positive_infinity() {
+        posinf
+    } else if val.is_negative_infinity() {
+        neginf
+    } else {
+        val
+    }
+}
+
+trait FloatClassify {
+    fn is_nan_value(self) -> bool;
+    fn is_finite_value(self) -> bool;
+    fn is_positive_infinity(self) -> bool;
+    fn is_negative_infinity(self) -> bool;
+}
+
+impl FloatClassify for f32 {
+    #[inline(always)]
+    fn is_nan_value(self) -> bool {
+        self.is_nan()
+    }
+
+    #[inline(always)]
+    fn is_finite_value(self) -> bool {
+        self.is_finite()
+    }
+
+    #[inline(always)]
+    fn is_positive_infinity(self) -> bool {
+        self == f32::INFINITY
+    }
+
+    #[inline(always)]
+    fn is_negative_infinity(self) -> bool {
+        self == f32::NEG_INFINITY
+    }
+}
+
+impl FloatClassify for f64 {
+    #[inline(always)]
+    fn is_nan_value(self) -> bool {
+        self.is_nan()
+    }
+
+    #[inline(always)]
+    fn is_finite_value(self) -> bool {
+        self.is_finite()
+    }
+
+    #[inline(always)]
+    fn is_positive_infinity(self) -> bool {
+        self == f64::INFINITY
+    }
+
+    #[inline(always)]
+    fn is_negative_infinity(self) -> bool {
+        self == f64::NEG_INFINITY
+    }
 }
 
 fn round_f32(tensor: &Tensor, output_data: &mut TensorData, decimals: i32) -> Result<()> {

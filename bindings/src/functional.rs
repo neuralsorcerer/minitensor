@@ -448,6 +448,18 @@ pub fn nanmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, nan=0.0, posinf=None, neginf=None))]
+pub fn nan_to_num(
+    input: &Bound<PyAny>,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nan_to_num(nan, posinf, neginf)
+}
+
+#[pyfunction]
 pub fn relu(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.relu()
@@ -815,6 +827,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nan_to_num, parent)?)?;
     parent.add_function(wrap_pyfunction!(relu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardshrink, parent)?)?;
     parent.add_function(wrap_pyfunction!(sigmoid, parent)?)?;

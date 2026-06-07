@@ -113,6 +113,20 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (nan=0.0, posinf=None, neginf=None))]
+    pub fn nan_to_num(
+        &self,
+        nan: f64,
+        posinf: Option<f64>,
+        neginf: Option<f64>,
+    ) -> PyResult<Self> {
+        let result = self
+            .inner
+            .nan_to_num(nan, posinf, neginf)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     fn isnan(&self) -> PyResult<Self> {
         let result = self.inner.isnan().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

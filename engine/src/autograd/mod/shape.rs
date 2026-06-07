@@ -431,6 +431,99 @@ impl GradientFunction for HardshrinkBackward {
     }
 }
 
+/// Gradient function for nan_to_num.
+pub struct NanToNumBackward {
+    pub input_id: TensorId,
+    pub finite_mask: Vec<bool>,
+}
+
+impl GradientFunction for NanToNumBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        if self.finite_mask.len() != grad_output.numel() {
+            return Err(MinitensorError::gradient_error(
+                "nan_to_num backward mask length does not match gradient size",
+            ));
+        }
+
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let mut grad_data = TensorData::zeros_on_device(
+            grad_output.numel(),
+            grad_output.dtype(),
+            grad_output.device(),
+        );
+
+        match grad_output.dtype() {
+            DataType::Float32 => {
+                let grad = grad_output.data().as_f32_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
+                })?;
+                let out = grad_data.as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f32 slice from grad_data",
+                    )
+                })?;
+                apply_finite_mask(grad, out, &self.finite_mask);
+            }
+            DataType::Float64 => {
+                let grad = grad_output.data().as_f64_slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
+                })?;
+                let out = grad_data.as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "Failed to get mutable f64 slice from grad_data",
+                    )
+                })?;
+                apply_finite_mask(grad, out, &self.finite_mask);
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "nan_to_num backward only supported for floating point tensors",
+                ));
+            }
+        }
+
+        let grad_input = Tensor::new(
+            Arc::new(grad_data),
+            grad_output.shape().clone(),
+            grad_output.dtype(),
+            grad_output.device(),
+            false,
+        );
+        gradients.insert(self.input_id, grad_input);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+#[inline(always)]
+fn apply_finite_mask<T>(grad: &[T], output: &mut [T], finite_mask: &[bool])
+where
+    T: Copy + Default + Send + Sync,
+{
+    debug_assert_eq!(grad.len(), output.len());
+    debug_assert_eq!(grad.len(), finite_mask.len());
+
+    let len = grad.len();
+    if len < PAR_THRESHOLD {
+        for i in 0..len {
+            output[i] = if finite_mask[i] { grad[i] } else { T::default() };
+        }
+    } else {
+        grad.par_iter()
+            .zip(output.par_iter_mut())
+            .zip(finite_mask.par_iter())
+            .for_each(|((g, out), is_finite)| {
+                *out = if *is_finite { *g } else { T::default() };
+            });
+    }
+}
+
 /// Gradient function for ReLU
 pub struct ReluBackward {
     pub input_id: TensorId,

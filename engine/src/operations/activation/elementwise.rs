@@ -9,7 +9,7 @@ use crate::{
         AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
         CosBackward, CoshBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward,
         HardshrinkBackward, LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward,
-        LogSoftmaxBackward, MaskedLogSoftmaxBackward, PowBackward, PowBroadcast, ReluBackward,
+        LogSoftmaxBackward, MaskedLogSoftmaxBackward, NanToNumBackward, PowBackward, PowBroadcast, ReluBackward,
         SeluBackward, SigmoidBackward, SiluBackward, SinBackward, SinhBackward, SoftmaxBackward,
         SoftplusBackward, SoftsignBackward, TanBackward, TanhBackward, add_to_graph,
     },

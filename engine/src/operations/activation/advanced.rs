@@ -55,6 +55,44 @@ mod tests {
     }
 
     #[test]
+    fn test_nan_to_num_custom_replacements() {
+        let tensor = create_test_tensor_f32(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 4.0],
+            vec![4],
+            false,
+        );
+        let result = nan_to_num(&tensor, -1.0, Some(9.0), Some(-9.0)).unwrap();
+        let data = result.data().as_f32_slice().unwrap();
+        assert_eq!(data, &[-1.0, 9.0, -9.0, 4.0]);
+    }
+
+    #[test]
+    fn test_nan_to_num_backward_masks_replaced_entries() {
+        let tensor = create_test_tensor_f32(
+            vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -2.0, 3.0],
+            vec![5],
+            true,
+        );
+        let result = nan_to_num(&tensor, 0.0, Some(10.0), Some(-10.0)).unwrap();
+        let summed = crate::operations::reduction::sum(&result, None, false).unwrap();
+        let grads = autograd::backward(&summed, None).unwrap();
+        let grad = grads.get(&tensor.id()).unwrap();
+        assert_eq!(
+            grad.data().as_f32_slice().unwrap(),
+            &[0.0, 0.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn test_nan_to_num_integer_is_unchanged() {
+        let shape = Shape::new(vec![3]);
+        let data = TensorData::from_vec_i32(vec![1, -2, 3], Device::cpu());
+        let tensor = Tensor::new(Arc::new(data), shape, DataType::Int32, Device::cpu(), false);
+        let result = nan_to_num(&tensor, 99.0, None, None).unwrap();
+        assert_eq!(result.data().as_i32_slice().unwrap(), &[1, -2, 3]);
+    }
+
+    #[test]
     fn test_exp() {
         let tensor = create_test_tensor_f32(vec![0.0, 1.0, 2.0], vec![3], false);
         let result = exp(&tensor).unwrap();

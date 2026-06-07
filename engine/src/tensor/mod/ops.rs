@@ -71,6 +71,19 @@ impl Tensor {
         self.clip(None, Some(max_val))
     }
 
+    /// Replace NaN with `nan`, positive infinity with `posinf` or dtype max,
+    /// and negative infinity with `neginf` or dtype min.
+    #[inline(always)]
+    pub fn nan_to_num(
+        &self,
+        nan: f64,
+        posinf: Option<f64>,
+        neginf: Option<f64>,
+    ) -> Result<Self> {
+        use crate::operations::activation::nan_to_num;
+        nan_to_num(self, nan, posinf, neginf)
+    }
+
     /// Round tensor values to a specific number of decimal places.
     #[inline(always)]
     pub fn round(&self, decimals: i32) -> Result<Self> {

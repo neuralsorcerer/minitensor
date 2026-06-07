@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Soumyadip Sarkar.
+# Copyright (c) Soumyadip Sarkar.
 # All rights reserved.
 #
 # This source code is licensed under the Apache-style license found in the
@@ -408,6 +408,7 @@ _FUNCTIONAL_FORWARDERS = (
     "nanmean",
     "nanmax",
     "nanmin",
+    "nan_to_num",
     "logsumexp",
     "softmax",
     "log_softmax",
