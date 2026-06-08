@@ -180,13 +180,47 @@ Each of the following names is accessible from:
 
 ```
 cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
-median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, logsumexp,
-softmax, log_softmax, masked_softmax, masked_log_softmax, softsign, rsqrt,
+median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, nan_to_num,
+logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, softsign, rsqrt,
 reciprocal, sign, reshape, view, triu, tril, diagonal, trace, solve, flatten,
 ravel, transpose, permute, movedim, moveaxis, swapaxes, swapdims, squeeze,
 unsqueeze, expand, repeat, repeat_interleave, flip, roll, clip, clamp,
 clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin, acos, atan,
-sinh, cosh, asinh, acosh, atanh, where, masked_fill
+sinh, cosh, asinh, acosh, atanh, where, one_hot, masked_fill
+```
+
+### One-hot encoding
+
+`one_hot(input, num_classes=None, dtype="float32")` converts integer or boolean
+labels to a one-hot tensor whose final dimension is the class dimension. The
+helper is available as both `minitensor.one_hot(...)` and
+`minitensor.functional.one_hot(...)`.
+
+Supported label inputs:
+
+- `Tensor` values with `int32`, `int64`, or `bool` dtype.
+- Python integer scalars and nested Python integer/bool sequences.
+- NumPy integer/bool arrays through the existing Python-to-tensor conversion
+  path.
+
+Behavior and validation:
+
+- If `num_classes` is omitted, MiniTensor infers it as `max(label) + 1`; empty
+  inputs therefore require an explicit `num_classes`.
+- `num_classes` must be non-negative when provided, and every label must be in
+  `[0, num_classes)`.
+- Negative labels and floating-point label tensors/scalars are rejected.
+- `dtype` controls the encoded output dtype and accepts the standard MiniTensor
+  dtype strings: `float32`, `float64`, `int32`, `int64`, and `bool`.
+
+Example:
+
+```python
+import minitensor as mt
+
+labels = mt.Tensor([[0, 2], [1, 2]], dtype="int64")
+encoded = mt.one_hot(labels, dtype="int32")
+assert encoded.shape_vec() == [2, 2, 3]
 ```
 
 ### Tensor-centric math helpers

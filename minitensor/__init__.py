@@ -459,6 +459,7 @@ _FUNCTIONAL_FORWARDERS = (
     "acosh",
     "atanh",
     "where",
+    "one_hot",
     "masked_fill",
 )
 

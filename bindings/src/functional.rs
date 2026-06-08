@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -6,11 +6,14 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
+use engine::tensor::{Shape, TensorData};
+use engine::{DataType, Device, Tensor};
 use pyo3::Py;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PyTuple};
+use std::sync::Arc;
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
@@ -50,6 +53,91 @@ fn parse_normalized_shape(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
     Err(PyTypeError::new_err(
         "normalized_shape must be an int or sequence of ints",
     ))
+}
+
+fn one_hot_input_to_tensor(input: &Bound<PyAny>) -> PyResult<Tensor> {
+    if let Ok(tensor) = borrow_tensor(input) {
+        return Ok(tensor.tensor().clone());
+    }
+
+    let input_dtype = PyTensor::infer_python_dtype(input).unwrap_or(DataType::Int64);
+    Ok(PyTensor::from_python_value_with_dtype(input, input_dtype)?
+        .tensor()
+        .clone())
+}
+
+fn one_hot_labels(tensor: &Tensor) -> PyResult<Vec<i64>> {
+    if !tensor.device().is_cpu() {
+        return Err(PyValueError::new_err(
+            "one_hot currently requires input labels on the CPU",
+        ));
+    }
+
+    match tensor.dtype() {
+        DataType::Int64 => tensor
+            .data()
+            .as_i64_slice()
+            .map(|slice| slice.to_vec())
+            .ok_or_else(|| PyValueError::new_err("one_hot could not read int64 labels")),
+        DataType::Int32 => tensor
+            .data()
+            .as_i32_slice()
+            .map(|slice| slice.iter().map(|&value| i64::from(value)).collect())
+            .ok_or_else(|| PyValueError::new_err("one_hot could not read int32 labels")),
+        DataType::Bool => tensor
+            .data()
+            .as_bool_slice()
+            .map(|slice| slice.iter().map(|&value| i64::from(value)).collect())
+            .ok_or_else(|| PyValueError::new_err("one_hot could not read bool labels")),
+        dtype => Err(PyTypeError::new_err(format!(
+            "one_hot input must have an integer or bool dtype, got {dtype:?}",
+        ))),
+    }
+}
+
+fn fill_one_hot<T: Copy>(
+    data: &mut [T],
+    labels: &[i64],
+    num_classes: usize,
+    one: T,
+) -> PyResult<()> {
+    for (row, &class_id) in labels.iter().enumerate() {
+        if class_id as usize >= num_classes {
+            return Err(PyValueError::new_err(format!(
+                "class value {class_id} is outside the valid range [0, {num_classes})",
+            )));
+        }
+        data[row * num_classes + class_id as usize] = one;
+    }
+    Ok(())
+}
+
+fn make_one_hot_data(
+    labels: &[i64],
+    num_classes: usize,
+    dtype: DataType,
+    device: Device,
+) -> PyResult<Arc<TensorData>> {
+    let output_len = labels
+        .len()
+        .checked_mul(num_classes)
+        .ok_or_else(|| PyValueError::new_err("one_hot output size overflow"))?;
+
+    macro_rules! build_data {
+        ($ty:ty, $zero:expr, $one:expr, $ctor:ident) => {{
+            let mut data = vec![$zero; output_len];
+            fill_one_hot::<$ty>(&mut data, labels, num_classes, $one)?;
+            Ok(Arc::new(TensorData::$ctor(data, device)))
+        }};
+    }
+
+    match dtype {
+        DataType::Float32 => build_data!(f32, 0.0_f32, 1.0_f32, from_vec_f32),
+        DataType::Float64 => build_data!(f64, 0.0_f64, 1.0_f64, from_vec_f64),
+        DataType::Int32 => build_data!(i32, 0_i32, 1_i32, from_vec_i32),
+        DataType::Int64 => build_data!(i64, 0_i64, 1_i64, from_vec_i64),
+        DataType::Bool => build_data!(bool, false, true, from_vec_bool),
+    }
 }
 
 fn to_pylist<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
@@ -323,6 +411,54 @@ pub fn where_function(
             tensor.where_method(condition, other)
         }
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, num_classes=None, dtype="float32"))]
+pub fn one_hot(
+    input: &Bound<PyAny>,
+    num_classes: Option<isize>,
+    dtype: &str,
+) -> PyResult<PyTensor> {
+    let input_tensor = one_hot_input_to_tensor(input)?;
+    let labels = one_hot_labels(&input_tensor)?;
+
+    let inferred_classes = labels.iter().try_fold(None::<i64>, |max_label, &label| {
+        if label < 0 {
+            Err(PyValueError::new_err(format!(
+                "one_hot class values must be non-negative, got {label}",
+            )))
+        } else {
+            Ok(Some(max_label.map_or(label, |current| current.max(label))))
+        }
+    })?;
+
+    let classes = match num_classes {
+        Some(value) if value < 0 => {
+            return Err(PyValueError::new_err(
+                "num_classes must be non-negative when provided",
+            ));
+        }
+        Some(value) => value as usize,
+        None => inferred_classes
+            .map(|max_label| (max_label as usize) + 1)
+            .ok_or_else(|| {
+                PyValueError::new_err("num_classes must be provided when one_hot input is empty")
+            })?,
+    };
+
+    let output_dtype = crate::dtype::parse_dtype(dtype)?;
+    let mut output_shape = input_tensor.shape().dims().to_vec();
+    output_shape.push(classes);
+    let data = make_one_hot_data(&labels, classes, output_dtype, input_tensor.device())?;
+    let output = Tensor::new(
+        data,
+        Shape::new(output_shape),
+        output_dtype,
+        input_tensor.device(),
+        false,
+    );
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
@@ -817,6 +953,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(where_function, parent)?)?;
+    parent.add_function(wrap_pyfunction!(one_hot, parent)?)?;
     parent.add_function(wrap_pyfunction!(masked_fill, parent)?)?;
     parent.add_function(wrap_pyfunction!(softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(log_softmax, parent)?)?;

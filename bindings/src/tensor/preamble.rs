@@ -241,13 +241,20 @@ impl PyTensor {
     }
 
     pub fn from_python_value(value: &Bound<PyAny>) -> PyResult<Self> {
+        Self::from_python_value_with_dtype(value, dtype::default_dtype())
+    }
+
+    pub fn from_python_value_with_dtype(value: &Bound<PyAny>, dtype: DataType) -> PyResult<Self> {
         if let Some(py_tensor) = extract_wrapped_pytensor(value) {
             return Ok(py_tensor);
         }
 
-        let tensor =
-            convert_python_data_to_tensor(value, dtype::default_dtype(), Device::cpu(), false)?;
+        let tensor = convert_python_data_to_tensor(value, dtype, Device::cpu(), false)?;
         Ok(Self::from_tensor(tensor))
+    }
+
+    pub fn infer_python_dtype(value: &Bound<PyAny>) -> Option<DataType> {
+        infer_python_value_dtype(value)
     }
 
     pub fn max_values(&self, dim: Option<isize>, keepdim: bool) -> PyResult<Self> {
