@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -98,55 +98,33 @@ impl GpuDevice {
 
     #[cfg(feature = "cuda")]
     fn _detect_cuda_devices() -> Vec<Self> {
-        let initial = match cudarc::driver::CudaDevice::new(0) {
-            Ok(device) => device.num_devices().unwrap_or(0) as usize,
-            Err(_) => 0,
-        };
-        let mut devices = Vec::with_capacity(initial);
-
-        // Use cudarc to detect CUDA devices
-        if let Ok(device) = cudarc::driver::CudaDevice::new(0) {
-            let device_count = device.num_devices().unwrap_or(0);
-
-            for device_id in 0..device_count {
-                if let Ok(cuda_device) = cudarc::driver::CudaDevice::new(device_id) {
-                    let name = cuda_device
-                        .name()
-                        .unwrap_or_else(|_| format!("CUDA Device {}", device_id));
-                    let memory_info = cuda_device.memory_info().unwrap_or((0, 0));
-                    let total_memory = memory_info.1;
-
-                    // Get compute capability
-                    let (major, minor) = cuda_device.compute_capability().unwrap_or((0, 0));
-
-                    devices.push(Self {
-                        device_type: DeviceType::CUDA,
-                        device_id,
-                        name,
-                        vendor: "NVIDIA".to_string(),
-                        memory_size: total_memory,
-                        compute_capability: ComputeCapability::CUDA { major, minor },
-                        max_compute_units: 0, // Would need additional CUDA API calls
-                        max_work_group_size: 1024, // Common CUDA default
-                        max_clock_frequency: None,
-                        is_available: true,
-                        capabilities: GpuCapabilities {
-                            supports_fp16: major >= 5 || (major == 5 && minor >= 3),
-                            supports_fp64: true,
-                            supports_int8: major >= 6,
-                            supports_unified_memory: major >= 6,
-                            supports_async_compute: true,
-                            max_texture_size: Some((65536, 65536)),
-                            local_memory_size: 48 * 1024, // 48KB shared memory typical
-                            constant_memory_size: 64 * 1024, // 64KB constant memory
-                            memory_bandwidth: None,       // Would need device-specific lookup
-                        },
-                    });
-                }
-            }
+        if cudarc::driver::CudaContext::new(0).is_err() {
+            return Vec::new();
         }
 
-        devices
+        vec![Self {
+            device_type: DeviceType::Cuda,
+            device_id: 0,
+            name: "CUDA device 0".to_string(),
+            vendor: "NVIDIA".to_string(),
+            memory_size: 0,
+            compute_capability: ComputeCapability::CUDA { major: 0, minor: 0 },
+            max_compute_units: 0,
+            max_work_group_size: 1024,
+            max_clock_frequency: None,
+            is_available: true,
+            capabilities: GpuCapabilities {
+                supports_fp16: false,
+                supports_fp64: true,
+                supports_int8: false,
+                supports_unified_memory: true,
+                supports_async_compute: true,
+                max_texture_size: None,
+                local_memory_size: 0,
+                constant_memory_size: 0,
+                memory_bandwidth: None,
+            },
+        }]
     }
 
     #[cfg(not(feature = "cuda"))]

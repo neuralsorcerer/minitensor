@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -14,6 +14,12 @@ pub mod allocator;
 pub mod manager;
 pub mod pool;
 
+#[cfg(feature = "cuda")]
+pub use allocator::CudaAllocator;
+#[cfg(feature = "metal")]
+pub use allocator::MetalAllocator;
+#[cfg(feature = "opencl")]
+pub use allocator::OpenCLAllocator;
 pub use allocator::{Allocator, CpuAllocator};
 pub use manager::{UnifiedMemoryManager, global_allocate, global_deallocate, init_memory_manager};
 pub use pool::{MemoryPool, PoolStats, PooledAllocator};

@@ -1,10 +1,16 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
 use crate::{device::Device, error::Result};
+#[cfg(feature = "cuda")]
+use cudarc::driver::{CudaContext, DevicePtr, UnifiedSlice};
+#[cfg(feature = "cuda")]
+use rustc_hash::FxHashMap;
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
 
 /// Trait for memory allocators
 pub trait Allocator: Send + Sync {
@@ -27,6 +33,8 @@ pub struct CpuAllocator {
 #[cfg(feature = "cuda")]
 pub struct CudaAllocator {
     device: Device,
+    context: Option<Arc<CudaContext>>,
+    allocations: FxHashMap<usize, UnifiedSlice<u8>>,
 }
 
 /// Metal memory allocator
@@ -61,24 +69,59 @@ impl Default for CpuAllocator {
 impl CudaAllocator {
     /// Create a new CUDA allocator
     pub fn new(device_id: Option<usize>) -> Self {
+        let device = Device::cuda(device_id);
+        let context = CudaContext::new(device.id()).ok();
         Self {
-            device: Device::cuda(device_id),
+            device,
+            context,
+            allocations: FxHashMap::default(),
         }
     }
 }
 
 #[cfg(feature = "cuda")]
 impl Allocator for CudaAllocator {
-    fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
-        Err(crate::error::MinitensorError::backend_error(
-            "CUDA allocator not yet implemented",
-        ))
+    fn allocate(&mut self, size: usize) -> Result<*mut u8> {
+        if size == 0 {
+            return Ok(std::ptr::null_mut());
+        }
+        let context = self.context.as_ref().ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("CUDA device {} is not available", self.device.id()),
+            )
+        })?;
+        let slice = unsafe { context.alloc_unified::<u8>(size, true) }.map_err(|e| {
+            crate::error::MinitensorError::memory_error(format!(
+                "CUDA unified-memory allocation failed: {e}"
+            ))
+        })?;
+        let stream = context.default_stream();
+        let (raw, sync) = DevicePtr::device_ptr(&slice, &stream);
+        let ptr = raw as usize as *mut u8;
+        drop(sync);
+        drop(stream);
+        self.allocations.insert(ptr as usize, slice);
+        Ok(ptr)
     }
 
-    fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
-        Err(crate::error::MinitensorError::backend_error(
-            "CUDA deallocator not yet implemented",
-        ))
+    fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
+        if ptr.is_null() {
+            return Ok(());
+        }
+        let allocation_len = self
+            .allocations
+            .get(&(ptr as usize))
+            .ok_or_else(|| crate::error::MinitensorError::memory_error("Unknown CUDA pointer"))?
+            .len();
+        if size != 0 && size != allocation_len {
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "CUDA deallocation size mismatch: got {} bytes for allocation of {} bytes",
+                size, allocation_len
+            )));
+        }
+        self.allocations.remove(&(ptr as usize));
+        Ok(())
     }
 
     fn device(&self) -> Device {
@@ -100,12 +143,14 @@ impl MetalAllocator {
 impl Allocator for MetalAllocator {
     fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
         Err(crate::error::MinitensorError::backend_error(
+            "Metal",
             "Metal allocator not yet implemented",
         ))
     }
 
     fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
         Err(crate::error::MinitensorError::backend_error(
+            "Metal",
             "Metal deallocator not yet implemented",
         ))
     }
@@ -129,12 +174,14 @@ impl OpenCLAllocator {
 impl Allocator for OpenCLAllocator {
     fn allocate(&mut self, size: usize) -> Result<*mut u8> {
         Err(crate::error::MinitensorError::backend_error(
+            "OpenCL",
             "OpenCL allocator not yet implemented",
         ))
     }
 
     fn deallocate(&mut self, _ptr: *mut u8, _size: usize) -> Result<()> {
         Err(crate::error::MinitensorError::backend_error(
+            "OpenCL",
             "OpenCL deallocator not yet implemented",
         ))
     }
