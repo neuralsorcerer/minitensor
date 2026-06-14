@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -8,8 +8,11 @@ pub mod stream;
 
 use super::Backend;
 use crate::{device::Device, error::Result};
-use cudarc::driver::{CudaDevice, CudaSlice, DevicePtr};
-use cudarc::nvrtc::Ptx;
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaSlice, DevicePtr, LaunchConfig, PushKernelArg, UnifiedSlice,
+    ValidAsZeroBits,
+};
+use cudarc::nvrtc::compile_ptx;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -19,17 +22,17 @@ pub use stream::{CudaExecutionContext, CudaStreamPool, PooledCudaStream};
 /// CUDA backend for GPU tensor operations
 pub struct CudaBackend {
     device: Device,
-    cuda_device: Arc<CudaDevice>,
+    cuda_device: Arc<CudaContext>,
     execution_context: Arc<Mutex<CudaExecutionContext>>,
-    kernels: Arc<RwLock<FxHashMap<String, cudarc::driver::CudaFunction>>>,
-    allocations: Mutex<FxHashMap<usize, CudaSlice<u8>>>,
-    pool: Mutex<FxHashMap<usize, Vec<CudaSlice<u8>>>>,
+    kernels: Arc<RwLock<FxHashMap<String, CudaFunction>>>,
+    allocations: Mutex<FxHashMap<usize, UnifiedSlice<u8>>>,
+    pool: Mutex<FxHashMap<usize, Vec<UnifiedSlice<u8>>>>,
 }
 
 impl CudaBackend {
     /// Get the CUDA device
     #[inline(always)]
-    pub fn cuda_device(&self) -> &Arc<CudaDevice> {
+    pub fn cuda_device(&self) -> &Arc<CudaContext> {
         &self.cuda_device
     }
 
@@ -41,82 +44,109 @@ impl CudaBackend {
 
     /// Load and compile a CUDA kernel
     #[inline(always)]
-    pub fn load_kernel(&self, name: &str, ptx_src: &str) -> Result<()> {
-        let ptx = Ptx::from_src(ptx_src);
-        self.cuda_device.load_ptx(ptx, name, &[name]).map_err(|e| {
+    pub fn load_kernel(&self, name: &str, cuda_src: &str) -> Result<()> {
+        let ptx = compile_ptx(cuda_src).map_err(|e| {
             crate::error::MinitensorError::backend_error(
                 "CUDA",
-                format!("Failed to load CUDA kernel: {}", e),
+                format!("Failed to compile CUDA kernel '{name}': {e}"),
+            )
+        })?;
+        let module = self.cuda_device.load_module(ptx).map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to load CUDA module for kernel '{name}': {e}"),
+            )
+        })?;
+        let function = module.load_function(name).map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to load CUDA function '{name}': {e}"),
             )
         })?;
 
-        let function = self.cuda_device.get_func(name, name).map_err(|e| {
-            crate::error::MinitensorError::backend_error(
-                "CUDA",
-                format!("Failed to get CUDA function: {}", e),
-            )
-        })?;
-
-        let mut kernels = self.kernels.write();
-        kernels.insert(name.to_string(), function);
+        self.kernels.write().insert(name.to_string(), function);
         Ok(())
     }
 
     /// Get a loaded kernel
     #[inline(always)]
-    pub fn get_kernel(&self, name: &str) -> Option<cudarc::driver::CudaFunction> {
+    pub fn get_kernel(&self, name: &str) -> Option<CudaFunction> {
         let kernels = self.kernels.read();
         kernels.get(name).cloned()
+    }
+
+    #[inline(always)]
+    fn unified_ptr(slice: &UnifiedSlice<u8>, stream: &cudarc::driver::CudaStream) -> *mut u8 {
+        let (raw, sync) = DevicePtr::device_ptr(slice, stream);
+        let ptr = raw as usize as *mut u8;
+        drop(sync);
+        ptr
     }
 
     /// Allocate device memory
     #[inline(always)]
     pub fn allocate_slice<T>(&self, len: usize) -> Result<CudaSlice<T>>
     where
-        T: cudarc::driver::DeviceRepr,
+        T: cudarc::driver::DeviceRepr + ValidAsZeroBits,
     {
-        self.cuda_device.alloc_zeros::<T>(len).map_err(|e| {
-            crate::error::MinitensorError::memory_error(format!("CUDA allocation failed: {}", e))
-        })
+        self.cuda_device
+            .default_stream()
+            .alloc_zeros::<T>(len)
+            .map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!(
+                    "CUDA allocation failed: {}",
+                    e
+                ))
+            })
     }
 
     /// Copy data from host to device
     #[inline(always)]
     pub fn copy_to_device<T>(&self, data: &[T]) -> Result<CudaSlice<T>>
     where
-        T: cudarc::driver::DeviceRepr + Clone,
+        T: cudarc::driver::DeviceRepr + Clone + ValidAsZeroBits,
     {
         if data.is_empty() {
-            return self.cuda_device.alloc_zeros::<T>(0).map_err(|e| {
+            return self
+                .cuda_device
+                .default_stream()
+                .alloc_zeros::<T>(0)
+                .map_err(|e| {
+                    crate::error::MinitensorError::memory_error(format!(
+                        "CUDA allocation failed: {}",
+                        e
+                    ))
+                });
+        }
+        self.cuda_device
+            .default_stream()
+            .clone_htod(data)
+            .map_err(|e| {
                 crate::error::MinitensorError::memory_error(format!(
-                    "CUDA allocation failed: {}",
+                    "Host to device copy failed: {}",
                     e
                 ))
-            });
-        }
-        self.cuda_device.htod_copy(data).map_err(|e| {
-            crate::error::MinitensorError::memory_error(format!(
-                "Host to device copy failed: {}",
-                e
-            ))
-        })
+            })
     }
 
     /// Copy data from device to host
     #[inline(always)]
     pub fn copy_from_device<T>(&self, device_data: &CudaSlice<T>) -> Result<Vec<T>>
     where
-        T: cudarc::driver::DeviceRepr + Clone,
+        T: cudarc::driver::DeviceRepr + Clone + ValidAsZeroBits,
     {
         if device_data.len() == 0 {
             return Ok(Vec::new());
         }
-        self.cuda_device.dtoh_sync_copy(device_data).map_err(|e| {
-            crate::error::MinitensorError::memory_error(format!(
-                "Device to host copy failed: {}",
-                e
-            ))
-        })
+        self.cuda_device
+            .default_stream()
+            .clone_dtoh(device_data)
+            .map_err(|e| {
+                crate::error::MinitensorError::memory_error(format!(
+                    "Device to host copy failed: {}",
+                    e
+                ))
+            })
     }
 
     /// Synchronize the device
@@ -139,20 +169,19 @@ impl Backend for CudaBackend {
 
     #[inline(always)]
     fn is_available() -> bool {
-        CudaDevice::new(0).is_ok()
+        CudaContext::new(0).is_ok()
     }
 
     #[inline(always)]
     fn initialize() -> Result<Self> {
         let device_id = 0; // Default to device 0, could be configurable
-        let cuda_device = CudaDevice::new(device_id).map_err(|e| {
+        let cuda_device = CudaContext::new(device_id).map_err(|e| {
             crate::error::MinitensorError::backend_error(
                 "CUDA",
                 format!("Failed to initialize CUDA device: {}", e),
             )
         })?;
 
-        let cuda_device = Arc::new(cuda_device);
         let execution_context = Arc::new(Mutex::new(CudaExecutionContext::new(
             cuda_device.clone(),
             8,
@@ -180,7 +209,7 @@ impl Backend for CudaBackend {
                 s
             } else {
                 drop(pool);
-                self.cuda_device.alloc::<u8>(size_bytes).map_err(|e| {
+                unsafe { self.cuda_device.alloc_unified::<u8>(size_bytes, true) }.map_err(|e| {
                     crate::error::MinitensorError::memory_error(format!(
                         "CUDA allocation failed: {}",
                         e
@@ -189,23 +218,35 @@ impl Backend for CudaBackend {
             }
         };
 
-        let ptr = slice.device_ptr() as *mut u8;
+        let stream = self.cuda_device.default_stream();
+        let ptr = Self::unified_ptr(&slice, &stream);
         let mut allocs = self.allocations.lock();
         allocs.insert(ptr as usize, slice);
         Ok(ptr)
     }
 
     #[inline(always)]
-    fn deallocate(&self, ptr: *mut u8, _size_bytes: usize) -> Result<()> {
+    fn deallocate(&self, ptr: *mut u8, size_bytes: usize) -> Result<()> {
         if ptr.is_null() {
             return Ok(());
         }
 
         let mut allocs = self.allocations.lock();
-        if let Some(slice) = allocs.remove(&(ptr as usize)) {
-            let mut pool = self.pool.lock();
-            pool.entry(slice.len()).or_default().push(slice);
+        let allocation_len = allocs
+            .get(&(ptr as usize))
+            .ok_or_else(|| crate::error::MinitensorError::memory_error("Unknown CUDA pointer"))?
+            .len();
+        if size_bytes != 0 && size_bytes != allocation_len {
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "CUDA deallocation size mismatch: got {} bytes for allocation of {} bytes",
+                size_bytes, allocation_len
+            )));
         }
+        let slice = allocs
+            .remove(&(ptr as usize))
+            .expect("allocation checked above");
+        let mut pool = self.pool.lock();
+        pool.entry(slice.len()).or_default().push(slice);
 
         Ok(())
     }
@@ -221,20 +262,24 @@ impl Backend for CudaBackend {
             ));
         }
 
-        // Create a temporary CudaSlice from the raw pointer
-        // This is unsafe and simplified - in practice, we'd need better memory management
-        unsafe {
-            let device_ptr = DevicePtr::from_raw(dst as *mut cudarc::driver::sys::CUdeviceptr);
-            self.cuda_device
-                .htod_copy_into(src, &device_ptr)
-                .map_err(|e| {
-                    crate::error::MinitensorError::memory_error(format!(
-                        "Host to device copy failed: {}",
-                        e
-                    ))
-                })?;
+        let mut allocs = self.allocations.lock();
+        let slice = allocs.get_mut(&(dst as usize)).ok_or_else(|| {
+            crate::error::MinitensorError::memory_error("Unknown CUDA destination pointer")
+        })?;
+        if src.len() > slice.len() {
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "Host copy of {} bytes exceeds CUDA allocation of {} bytes",
+                src.len(),
+                slice.len()
+            )));
         }
-
+        let dst_slice = slice.as_mut_slice().map_err(|e| {
+            crate::error::MinitensorError::memory_error(format!(
+                "CUDA unified-memory host access failed: {}",
+                e
+            ))
+        })?;
+        dst_slice[..src.len()].copy_from_slice(src);
         Ok(())
     }
 
@@ -249,20 +294,24 @@ impl Backend for CudaBackend {
             ));
         }
 
-        // Create a temporary CudaSlice from the raw pointer
-        // This is unsafe and simplified - in practice, we'd need better memory management
-        unsafe {
-            let device_ptr = DevicePtr::from_raw(src as *mut cudarc::driver::sys::CUdeviceptr);
-            self.cuda_device
-                .dtoh_copy_into(&device_ptr, dst)
-                .map_err(|e| {
-                    crate::error::MinitensorError::memory_error(format!(
-                        "Device to host copy failed: {}",
-                        e
-                    ))
-                })?;
+        let allocs = self.allocations.lock();
+        let slice = allocs.get(&(src as usize)).ok_or_else(|| {
+            crate::error::MinitensorError::memory_error("Unknown CUDA source pointer")
+        })?;
+        if dst.len() > slice.len() {
+            return Err(crate::error::MinitensorError::memory_error(format!(
+                "Device copy of {} bytes exceeds CUDA allocation of {} bytes",
+                dst.len(),
+                slice.len()
+            )));
         }
-
+        let src_slice = slice.as_slice().map_err(|e| {
+            crate::error::MinitensorError::memory_error(format!(
+                "CUDA unified-memory host access failed: {}",
+                e
+            ))
+        })?;
+        dst.copy_from_slice(&src_slice[..dst.len()]);
         Ok(())
     }
 }
@@ -343,17 +392,15 @@ extern "C" __global__ void sigmoid_kernel(float* input, float* output, int n) {
 "#;
 }
 
-/// CUDA operations for tensor computations
+/// CUDA operations for tensor computations.
 pub struct CudaOps {
     backend: Arc<CudaBackend>,
 }
 
 impl CudaOps {
-    /// Create new CUDA operations instance
+    /// Create new CUDA operations instance and compile the built-in kernels.
     pub fn new(backend: Arc<CudaBackend>) -> Result<Self> {
         let ops = Self { backend };
-
-        // Load basic kernels
         ops.backend.load_kernel("add_kernel", kernels::ADD_KERNEL)?;
         ops.backend.load_kernel("mul_kernel", kernels::MUL_KERNEL)?;
         ops.backend
@@ -362,11 +409,36 @@ impl CudaOps {
             .load_kernel("relu_kernel", kernels::RELU_KERNEL)?;
         ops.backend
             .load_kernel("sigmoid_kernel", kernels::SIGMOID_KERNEL)?;
-
         Ok(ops)
     }
 
-    /// Element-wise addition on GPU
+    #[inline(always)]
+    fn element_count_i32(n: usize, op: &str) -> Result<i32> {
+        i32::try_from(n).map_err(|_| {
+            crate::error::MinitensorError::invalid_argument(format!(
+                "{op} supports at most {} elements on CUDA, got {n}",
+                i32::MAX
+            ))
+        })
+    }
+
+    #[inline(always)]
+    fn launch_1d(
+        &self,
+        kernel_name: &str,
+        n: usize,
+    ) -> Result<(cudarc::driver::CudaFunction, LaunchConfig, i32)> {
+        let n_i32 = Self::element_count_i32(n, kernel_name)?;
+        let kernel = self.backend.get_kernel(kernel_name).ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("CUDA kernel '{kernel_name}' has not been loaded"),
+            )
+        })?;
+        Ok((kernel, LaunchConfig::for_num_elems(n as u32), n_i32))
+    }
+
+    /// Element-wise addition on CUDA-resident slices.
     #[inline(always)]
     pub fn add(
         &self,
@@ -380,39 +452,31 @@ impl CudaOps {
                 "Tensor dimensions must match for addition",
             ));
         }
-
-        let kernel = self.backend.get_kernel("add_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("CUDA", "Add kernel not found")
-        })?;
-
-        let block_size = 256;
-        let grid_size = (n + block_size - 1) / block_size;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size as u32, 1, 1),
-                    (block_size as u32, 1, 1),
-                    0,
-                    &[
-                        a.device_ptr() as *const std::ffi::c_void,
-                        b.device_ptr() as *const std::ffi::c_void,
-                        c.device_ptr() as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(
-                        "CUDA",
-                        format!("Kernel launch failed: {}", e),
-                    )
-                })?;
+        if n == 0 {
+            return Ok(());
         }
 
+        let (kernel, config, n_i32) = self.launch_1d("add_kernel", n)?;
+        let stream = self.backend.cuda_device.default_stream();
+        unsafe {
+            stream
+                .launch_builder(&kernel)
+                .arg(a)
+                .arg(b)
+                .arg(c)
+                .arg(&n_i32)
+                .launch(config)
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("add kernel launch failed: {e}"),
+            )
+        })?;
         Ok(())
     }
 
-    /// Element-wise multiplication on GPU
+    /// Element-wise multiplication on CUDA-resident slices.
     #[inline(always)]
     pub fn mul(
         &self,
@@ -426,39 +490,31 @@ impl CudaOps {
                 "Tensor dimensions must match for multiplication",
             ));
         }
-
-        let kernel = self.backend.get_kernel("mul_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("CUDA", "Mul kernel not found")
-        })?;
-
-        let block_size = 256;
-        let grid_size = (n + block_size - 1) / block_size;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size as u32, 1, 1),
-                    (block_size as u32, 1, 1),
-                    0,
-                    &[
-                        a.device_ptr() as *const std::ffi::c_void,
-                        b.device_ptr() as *const std::ffi::c_void,
-                        c.device_ptr() as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(
-                        "CUDA",
-                        format!("Kernel launch failed: {}", e),
-                    )
-                })?;
+        if n == 0 {
+            return Ok(());
         }
 
+        let (kernel, config, n_i32) = self.launch_1d("mul_kernel", n)?;
+        let stream = self.backend.cuda_device.default_stream();
+        unsafe {
+            stream
+                .launch_builder(&kernel)
+                .arg(a)
+                .arg(b)
+                .arg(c)
+                .arg(&n_i32)
+                .launch(config)
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("mul kernel launch failed: {e}"),
+            )
+        })?;
         Ok(())
     }
 
-    /// Matrix multiplication on GPU
+    /// Matrix multiplication on CUDA-resident slices.
     #[inline(always)]
     pub fn matmul(
         &self,
@@ -469,48 +525,71 @@ impl CudaOps {
         n: usize,
         k: usize,
     ) -> Result<()> {
-        if a.len() != m * k || b.len() != k * n || c.len() != m * n {
+        let a_len = m.checked_mul(k).ok_or_else(|| {
+            crate::error::MinitensorError::invalid_argument(format!(
+                "matmul dimensions overflow for lhs length: {m} * {k}"
+            ))
+        })?;
+        let b_len = k.checked_mul(n).ok_or_else(|| {
+            crate::error::MinitensorError::invalid_argument(format!(
+                "matmul dimensions overflow for rhs length: {k} * {n}"
+            ))
+        })?;
+        let c_len = m.checked_mul(n).ok_or_else(|| {
+            crate::error::MinitensorError::invalid_argument(format!(
+                "matmul dimensions overflow for output length: {m} * {n}"
+            ))
+        })?;
+        if a.len() != a_len || b.len() != b_len || c.len() != c_len {
             return Err(crate::error::MinitensorError::shape_error(
                 "Invalid matrix dimensions for multiplication",
             ));
         }
-
-        let kernel = self.backend.get_kernel("matmul_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("CUDA", "Matmul kernel not found")
-        })?;
-
-        let block_size_x = 16;
-        let block_size_y = 16;
-        let grid_size_x = (n + block_size_x - 1) / block_size_x;
-        let grid_size_y = (m + block_size_y - 1) / block_size_y;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size_x as u32, grid_size_y as u32, 1),
-                    (block_size_x as u32, block_size_y as u32, 1),
-                    0,
-                    &[
-                        a.device_ptr() as *const std::ffi::c_void,
-                        b.device_ptr() as *const std::ffi::c_void,
-                        c.device_ptr() as *const std::ffi::c_void,
-                        &(m as i32) as *const i32 as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                        &(k as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(
-                        "CUDA",
-                        format!("Kernel launch failed: {}", e),
-                    )
-                })?;
+        if m == 0 || n == 0 {
+            return Ok(());
         }
 
+        let m_i32 = Self::element_count_i32(m, "matmul rows")?;
+        let n_i32 = Self::element_count_i32(n, "matmul columns")?;
+        let k_i32 = Self::element_count_i32(k, "matmul inner dimension")?;
+        let kernel = self.backend.get_kernel("matmul_kernel").ok_or_else(|| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                "CUDA kernel 'matmul_kernel' has not been loaded",
+            )
+        })?;
+        let block = (16_u32, 16_u32, 1_u32);
+        let config = LaunchConfig {
+            grid_dim: (
+                (n as u32).div_ceil(block.0),
+                (m as u32).div_ceil(block.1),
+                1,
+            ),
+            block_dim: block,
+            shared_mem_bytes: 0,
+        };
+        let stream = self.backend.cuda_device.default_stream();
+        unsafe {
+            stream
+                .launch_builder(&kernel)
+                .arg(a)
+                .arg(b)
+                .arg(c)
+                .arg(&m_i32)
+                .arg(&n_i32)
+                .arg(&k_i32)
+                .launch(config)
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("matmul kernel launch failed: {e}"),
+            )
+        })?;
         Ok(())
     }
 
-    /// ReLU activation on GPU
+    /// ReLU activation on CUDA-resident slices.
     #[inline(always)]
     pub fn relu(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
         let n = input.len();
@@ -519,38 +598,30 @@ impl CudaOps {
                 "Input and output tensors must have the same size",
             ));
         }
-
-        let kernel = self.backend.get_kernel("relu_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("CUDA", "ReLU kernel not found")
-        })?;
-
-        let block_size = 256;
-        let grid_size = (n + block_size - 1) / block_size;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size as u32, 1, 1),
-                    (block_size as u32, 1, 1),
-                    0,
-                    &[
-                        input.device_ptr() as *const std::ffi::c_void,
-                        output.device_ptr() as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(
-                        "CUDA",
-                        format!("Kernel launch failed: {}", e),
-                    )
-                })?;
+        if n == 0 {
+            return Ok(());
         }
 
+        let (kernel, config, n_i32) = self.launch_1d("relu_kernel", n)?;
+        let stream = self.backend.cuda_device.default_stream();
+        unsafe {
+            stream
+                .launch_builder(&kernel)
+                .arg(input)
+                .arg(output)
+                .arg(&n_i32)
+                .launch(config)
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("relu kernel launch failed: {e}"),
+            )
+        })?;
         Ok(())
     }
 
-    /// Sigmoid activation on GPU
+    /// Sigmoid activation on CUDA-resident slices.
     #[inline(always)]
     pub fn sigmoid(&self, input: &CudaSlice<f32>, output: &mut CudaSlice<f32>) -> Result<()> {
         let n = input.len();
@@ -559,34 +630,26 @@ impl CudaOps {
                 "Input and output tensors must have the same size",
             ));
         }
-
-        let kernel = self.backend.get_kernel("sigmoid_kernel").ok_or_else(|| {
-            crate::error::MinitensorError::backend_error("CUDA", "Sigmoid kernel not found")
-        })?;
-
-        let block_size = 256;
-        let grid_size = (n + block_size - 1) / block_size;
-
-        unsafe {
-            kernel
-                .launch(
-                    (grid_size as u32, 1, 1),
-                    (block_size as u32, 1, 1),
-                    0,
-                    &[
-                        input.device_ptr() as *const std::ffi::c_void,
-                        output.device_ptr() as *const std::ffi::c_void,
-                        &(n as i32) as *const i32 as *const std::ffi::c_void,
-                    ],
-                )
-                .map_err(|e| {
-                    crate::error::MinitensorError::backend_error(
-                        "CUDA",
-                        format!("Kernel launch failed: {}", e),
-                    )
-                })?;
+        if n == 0 {
+            return Ok(());
         }
 
+        let (kernel, config, n_i32) = self.launch_1d("sigmoid_kernel", n)?;
+        let stream = self.backend.cuda_device.default_stream();
+        unsafe {
+            stream
+                .launch_builder(&kernel)
+                .arg(input)
+                .arg(output)
+                .arg(&n_i32)
+                .launch(config)
+        }
+        .map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("sigmoid kernel launch failed: {e}"),
+            )
+        })?;
         Ok(())
     }
 }

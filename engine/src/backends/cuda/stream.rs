@@ -1,60 +1,74 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
 use crate::error::Result;
-use cudarc::driver::{CudaDevice, CudaStream};
+use cudarc::driver::{CudaContext, CudaStream};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// CUDA stream pool for managing async execution
 pub struct CudaStreamPool {
-    device: Arc<CudaDevice>,
-    available_streams: Arc<Mutex<Vec<CudaStream>>>,
+    device: Arc<CudaContext>,
+    available_streams: Arc<Mutex<Vec<Arc<CudaStream>>>>,
+    stream_count: Arc<Mutex<usize>>,
     max_streams: usize,
 }
 
 impl CudaStreamPool {
     /// Create a new CUDA stream pool
     #[inline(always)]
-    pub fn new(device: Arc<CudaDevice>, max_streams: usize) -> Self {
+    pub fn new(device: Arc<CudaContext>, max_streams: usize) -> Self {
         Self {
             device,
             available_streams: Arc::new(Mutex::new(Vec::new())),
+            stream_count: Arc::new(Mutex::new(0)),
             max_streams,
         }
     }
 
     /// Get a stream from the pool or create a new one
     #[inline(always)]
-    pub fn get_stream(&self) -> Result<CudaStream> {
-        let mut streams = self.available_streams.lock();
-
-        if let Some(stream) = streams.pop() {
-            Ok(stream)
-        } else {
-            // Create a new stream if we haven't reached the limit
-            self.device.fork_default_stream().map_err(|e| {
-                crate::error::MinitensorError::backend_error(
-                    "CUDA",
-                    format!("Failed to create CUDA stream: {}", e),
-                )
-            })
+    pub fn get_stream(&self) -> Result<Arc<CudaStream>> {
+        if let Some(stream) = self.available_streams.lock().pop() {
+            return Ok(stream);
         }
+
+        let mut stream_count = self.stream_count.lock();
+        if *stream_count >= self.max_streams {
+            return Err(crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!(
+                    "CUDA stream pool exhausted (max streams: {})",
+                    self.max_streams
+                ),
+            ));
+        }
+
+        let stream = self.device.new_stream().map_err(|e| {
+            crate::error::MinitensorError::backend_error(
+                "CUDA",
+                format!("Failed to create CUDA stream: {}", e),
+            )
+        })?;
+        *stream_count += 1;
+        Ok(stream)
     }
 
     /// Return a stream to the pool
     #[inline(always)]
-    pub fn return_stream(&self, stream: CudaStream) {
+    pub fn return_stream(&self, stream: Arc<CudaStream>) {
         let mut streams = self.available_streams.lock();
 
-        // Only keep streams if we haven't exceeded the max
         if streams.len() < self.max_streams {
             streams.push(stream);
+        } else {
+            drop(streams);
+            let mut stream_count = self.stream_count.lock();
+            *stream_count = stream_count.saturating_sub(1);
         }
-        // Otherwise, let the stream drop and be destroyed
     }
 
     /// Get the number of available streams in the pool
@@ -83,7 +97,7 @@ impl CudaStreamPool {
 
 /// RAII wrapper for CUDA streams that automatically returns to pool
 pub struct PooledCudaStream {
-    stream: Option<CudaStream>,
+    stream: Option<Arc<CudaStream>>,
     pool: Arc<CudaStreamPool>,
 }
 
@@ -100,13 +114,13 @@ impl PooledCudaStream {
 
     /// Get the underlying CUDA stream
     #[inline(always)]
-    pub fn stream(&self) -> &CudaStream {
+    pub fn stream(&self) -> &Arc<CudaStream> {
         self.stream.as_ref().unwrap()
     }
 
     /// Take the stream out of the wrapper (prevents automatic return to pool)
     #[inline(always)]
-    pub fn take(mut self) -> CudaStream {
+    pub fn take(mut self) -> Arc<CudaStream> {
         self.stream.take().unwrap()
     }
 }
@@ -128,7 +142,7 @@ pub struct CudaExecutionContext {
 impl CudaExecutionContext {
     /// Create a new execution context
     #[inline(always)]
-    pub fn new(device: Arc<CudaDevice>, max_streams: usize) -> Self {
+    pub fn new(device: Arc<CudaContext>, max_streams: usize) -> Self {
         let stream_pool = Arc::new(CudaStreamPool::new(device, max_streams));
 
         Self {
@@ -177,12 +191,11 @@ impl CudaExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cudarc::driver::CudaDevice;
+    use cudarc::driver::CudaContext;
 
     #[test]
     fn test_stream_pool() {
-        if let Ok(device) = CudaDevice::new(0) {
-            let device = Arc::new(device);
+        if let Ok(device) = CudaContext::new(0) {
             let pool = CudaStreamPool::new(device, 4);
 
             // Test getting and returning streams
@@ -198,8 +211,7 @@ mod tests {
 
     #[test]
     fn test_pooled_stream() {
-        if let Ok(device) = CudaDevice::new(0) {
-            let device = Arc::new(device);
+        if let Ok(device) = CudaContext::new(0) {
             let pool = Arc::new(CudaStreamPool::new(device, 4));
 
             {
@@ -213,8 +225,7 @@ mod tests {
 
     #[test]
     fn test_execution_context() {
-        if let Ok(device) = CudaDevice::new(0) {
-            let device = Arc::new(device);
+        if let Ok(device) = CudaContext::new(0) {
             let mut context = CudaExecutionContext::new(device, 4);
 
             // Test getting a stream

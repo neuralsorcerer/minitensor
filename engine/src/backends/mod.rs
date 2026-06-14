@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -51,7 +51,7 @@ pub fn get_backend(device: Device) -> Result<Box<dyn Backend>> {
     match device.device_type() {
         crate::device::DeviceType::Cpu => Ok(Box::new(cpu::CpuBackend::initialize()?)),
         #[cfg(feature = "cuda")]
-        crate::device::DeviceType::CUDA => Ok(Box::new(cuda::CudaBackend::initialize()?)),
+        crate::device::DeviceType::Cuda => Ok(Box::new(cuda::CudaBackend::initialize()?)),
         #[cfg(feature = "metal")]
         crate::device::DeviceType::Metal => Ok(Box::new(metal::MetalBackend::initialize()?)),
         #[cfg(feature = "opencl")]
