@@ -115,9 +115,12 @@ Input shape: Shape([32, 784])
 
 ## Documentation
 
-MiniTensor ships a full API reference in [`docs/api_reference.md`](docs/api_reference.md),
-alongside examples and guides. For a runtime overview of what's available, use the
-introspection helpers below.
+MiniTensor ships documentation in [`docs/`](docs), starting with the
+[documentation index](docs/index.md). Key guides include the
+[installation guide](docs/installation.md), [API reference](docs/api_reference.md),
+[development guide](docs/development.md), [custom operations guide](docs/custom_operations.md),
+[plugin system guide](docs/plugin_system.md), and [performance guide](docs/performance.md).
+For a runtime overview of what's available, use the introspection helpers below.
 
 ```python
 import minitensor as mt
@@ -307,6 +310,7 @@ Epoch 100 | Loss: 0.0102 | w: 2.996 | b: 0.501
 
 The Python package is a thin wrapper around the compiled Rust engine, so native
 and Python changes should be validated in a deterministic order. See the
+[development guide](docs/development.md) and
 [installation guide](docs/installation.md#contributor-setup) for full setup and
 troubleshooting details.
 

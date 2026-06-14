@@ -24,6 +24,7 @@ of convenience aliases.
 | `numpy_compat` | NumPy-style helpers (if built). |
 | `plugins` | Plugin registry and utilities (if built). |
 | `serialization` | Model serialization utilities (if built). |
+| `minitensor.tensor` | Compatibility module containing tensor constructors and dtype helpers. |
 
 ### Versioning
 
@@ -49,6 +50,15 @@ of convenience aliases.
 | `search_api(query, module=None)` | Search available symbols by name. |
 | `describe_api(symbol)` | Return a one-line description for a symbol. |
 | `help()` | Render a formatted MiniTensor API reference. |
+
+### Compatibility tensor module
+
+`minitensor.tensor` is a lightweight compatibility module populated by the
+Python package. It exposes `Tensor`, the top-level tensor creation helpers,
+`get_default_dtype()`, `set_default_dtype()`, `manual_seed()`, and the
+`default_dtype(...)` context manager. Prefer top-level imports in new examples,
+but keep this module in mind when maintaining older code that imports from
+`minitensor.tensor`.
 
 ### Custom operations (Python API)
 
@@ -352,7 +362,15 @@ All optimizer classes share a common interface:
 - `get_plugin_info(name)`
 - `is_plugin_loaded(name)`
 
-## 11) Custom operations
+## 11) Debug utilities (`minitensor._core.debug`)
+
+The compiled extension registers a debug submodule for backend diagnostics. The
+high-level Python package does not re-export it as `minitensor.debug`; access it
+through the core extension when needed by advanced diagnostics or tests. Debug
+APIs are intended for development and troubleshooting rather than stable
+end-user workflows.
+
+## 12) Custom operations
 
 MiniTensor supports custom ops in both Rust and Python. Refer to
 `docs/custom_operations.md` for:
@@ -361,14 +379,23 @@ MiniTensor supports custom ops in both Rust and Python. Refer to
 - Python registration and execution (`execute_custom_op_py`, etc.).
 - Example custom ops (Swish, GELU, power).
 
-## 12) Notes on devices & backends
+## 13) Notes on devices & backends
 
 The core engine supports CPU execution and can be compiled with CUDA, Metal, or
 OpenCL backends where applicable. Device selection flows through the `Device`
 API and tensor creation functions.
 
-## 13) Where to go next
+## 14) Documentation maintenance
 
+When public functionality changes, update this reference together with the
+focused guide for that area. The runtime helpers `list_public_api()`,
+`search_api(...)`, `describe_api(...)`, and `help()` are useful for auditing the
+compiled API after rebuilding the extension.
+
+## 15) Where to go next
+
+- `docs/index.md` — documentation map and maintenance checklist.
+- `docs/development.md` — contributor setup, validation, and PR workflow.
 - `docs/custom_operations.md` — custom ops and autograd integration.
 - `docs/plugin_system.md` — plugin registry and compatibility handling.
 - `docs/performance.md` — performance tuning and profiling.
