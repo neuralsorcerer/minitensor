@@ -36,9 +36,9 @@ pub struct PyTanh;
 impl PyTanh {
     /// Create a new Tanh layer
     #[new]
-    fn new() -> (Self, PyModule) {
+    fn new() -> PyClassInitializer<Self> {
         let tanh = Tanh::new();
-        (Self, PyModule::from_tanh(tanh))
+        PyClassInitializer::from(PyModule::from_tanh(tanh)).add_subclass(Self)
     }
 }
 
