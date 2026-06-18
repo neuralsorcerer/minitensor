@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -27,6 +27,7 @@ use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat,
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::PyClassInitializer;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
@@ -835,7 +836,7 @@ impl PyDenseLayer {
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
-    ) -> PyResult<(Self, PyModule)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let bias = bias.unwrap_or(true);
         let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
@@ -843,7 +844,7 @@ impl PyDenseLayer {
         let dense_layer = DenseLayer::new(in_features, out_features, bias, device, dtype)
             .map_err(_convert_error)?;
 
-        Ok((Self, PyModule::from_dense_layer(dense_layer)))
+        Ok(PyClassInitializer::from(PyModule::from_dense_layer(dense_layer)).add_subclass(Self))
     }
 
     /// Get input features count
