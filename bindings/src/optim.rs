@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -9,6 +9,7 @@ use crate::tensor::PyTensor;
 use engine::optim::{Adam, AdamW, Optimizer, RMSprop, SGD};
 use engine::{autograd, tensor::Tensor};
 use pyo3::Py;
+use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -287,7 +288,7 @@ impl PySGD {
         momentum: Option<f64>,
         weight_decay: Option<f64>,
         nesterov: Option<bool>,
-    ) -> PyResult<(Self, PyOptimizer)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
@@ -313,7 +314,7 @@ impl PySGD {
 
         let sgd = SGD::new(lr, Some(momentum), Some(weight_decay)).with_nesterov(nesterov);
 
-        Ok((Self, PyOptimizer::from_sgd(sgd, params)))
+        Ok(PyClassInitializer::from(PyOptimizer::from_sgd(sgd, params)).add_subclass(Self))
     }
 
     /// Get momentum parameter
@@ -379,7 +380,7 @@ impl PyAdam {
         beta2: Option<f64>,
         epsilon: f64,
         weight_decay: f64,
-    ) -> PyResult<(Self, PyOptimizer)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
@@ -403,7 +404,7 @@ impl PyAdam {
             Some(weight_decay),
         );
 
-        Ok((Self, PyOptimizer::from_adam(adam, params)))
+        Ok(PyClassInitializer::from(PyOptimizer::from_adam(adam, params)).add_subclass(Self))
     }
 
     /// Get beta1 parameter
@@ -480,7 +481,7 @@ impl PyAdamW {
         beta2: Option<f64>,
         epsilon: f64,
         weight_decay: f64,
-    ) -> PyResult<(Self, PyOptimizer)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
@@ -504,7 +505,7 @@ impl PyAdamW {
             Some(weight_decay),
         );
 
-        Ok((Self, PyOptimizer::from_adamw(adamw, params)))
+        Ok(PyClassInitializer::from(PyOptimizer::from_adamw(adamw, params)).add_subclass(Self))
     }
 
     /// Get beta1 parameter
@@ -581,7 +582,7 @@ impl PyRMSprop {
         weight_decay: f64,
         momentum: f64,
         centered: bool,
-    ) -> PyResult<(Self, PyOptimizer)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
@@ -613,7 +614,7 @@ impl PyRMSprop {
         )
         .with_centered(centered);
 
-        Ok((Self, PyOptimizer::from_rmsprop(rmsprop, params)))
+        Ok(PyClassInitializer::from(PyOptimizer::from_rmsprop(rmsprop, params)).add_subclass(Self))
     }
 
     /// Get alpha parameter

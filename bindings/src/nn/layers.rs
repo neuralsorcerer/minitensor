@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -8,9 +8,9 @@
 impl PyReLU {
     /// Create a new ReLU layer
     #[new]
-    fn new() -> (Self, PyModule) {
+    fn new() -> PyClassInitializer<Self> {
         let relu = ReLU::new();
-        (Self, PyModule::from_relu(relu))
+        PyClassInitializer::from(PyModule::from_relu(relu)).add_subclass(Self)
     }
 }
 
@@ -22,9 +22,9 @@ pub struct PySigmoid;
 impl PySigmoid {
     /// Create a new Sigmoid layer
     #[new]
-    fn new() -> (Self, PyModule) {
+    fn new() -> PyClassInitializer<Self> {
         let sigmoid = Sigmoid::new();
-        (Self, PyModule::from_sigmoid(sigmoid))
+        PyClassInitializer::from(PyModule::from_sigmoid(sigmoid)).add_subclass(Self)
     }
 }
 
@@ -36,9 +36,9 @@ pub struct PyTanh;
 impl PyTanh {
     /// Create a new Tanh layer
     #[new]
-    fn new() -> (Self, PyModule) {
+    fn new() -> PyClassInitializer<Self> {
         let tanh = Tanh::new();
-        (Self, PyModule::from_tanh(tanh))
+        PyClassInitializer::from(PyModule::from_tanh(tanh)).add_subclass(Self)
     }
 }
 
@@ -51,9 +51,9 @@ impl PySoftmax {
     /// Create a new Softmax layer
     #[new]
     #[pyo3(signature = (dim=None))]
-    fn new(dim: Option<usize>) -> (Self, PyModule) {
+    fn new(dim: Option<usize>) -> PyClassInitializer<Self> {
         let softmax = Softmax::new(dim);
-        (Self, PyModule::from_softmax(softmax))
+        PyClassInitializer::from(PyModule::from_softmax(softmax)).add_subclass(Self)
     }
 
     /// Get the dimension along which softmax is computed
@@ -79,10 +79,10 @@ impl PyLeakyReLU {
     /// Create a new LeakyReLU layer
     #[new]
     #[pyo3(signature = (negative_slope=None))]
-    fn new(negative_slope: Option<f64>) -> (Self, PyModule) {
+    fn new(negative_slope: Option<f64>) -> PyClassInitializer<Self> {
         let negative_slope = negative_slope.unwrap_or(0.01);
         let leaky_relu = LeakyReLU::new(Some(negative_slope));
-        (Self, PyModule::from_leaky_relu(leaky_relu))
+        PyClassInitializer::from(PyModule::from_leaky_relu(leaky_relu)).add_subclass(Self)
     }
 
     /// Get the negative slope parameter
@@ -108,10 +108,10 @@ impl PyELU {
     /// Create a new ELU layer
     #[new]
     #[pyo3(signature = (alpha=None))]
-    fn new(alpha: Option<f64>) -> (Self, PyModule) {
+    fn new(alpha: Option<f64>) -> PyClassInitializer<Self> {
         let alpha = alpha.unwrap_or(1.0);
         let elu = ELU::new(Some(alpha));
-        (Self, PyModule::from_elu(elu))
+        PyClassInitializer::from(PyModule::from_elu(elu)).add_subclass(Self)
     }
 
     /// Get the alpha parameter
@@ -136,9 +136,9 @@ pub struct PyGELU;
 impl PyGELU {
     /// Create a new GELU layer
     #[new]
-    fn new() -> (Self, PyModule) {
+    fn new() -> PyClassInitializer<Self> {
         let gelu = GELU::new();
-        (Self, PyModule::from_gelu(gelu))
+        PyClassInitializer::from(PyModule::from_gelu(gelu)).add_subclass(Self)
     }
 }
 
@@ -151,10 +151,10 @@ impl PyDropout {
     /// Create a new Dropout layer
     #[new]
     #[pyo3(signature = (p=None))]
-    fn new(p: Option<f64>) -> PyResult<(Self, PyModule)> {
+    fn new(p: Option<f64>) -> PyResult<PyClassInitializer<Self>> {
         let p = p.unwrap_or(0.5);
         let dropout = Dropout::new(Some(p)).map_err(_convert_error)?;
-        Ok((Self, PyModule::from_dropout(dropout)))
+        Ok(PyClassInitializer::from(PyModule::from_dropout(dropout)).add_subclass(Self))
     }
 
     /// Get the dropout probability
@@ -180,10 +180,10 @@ impl PyDropout2d {
     /// Create a new Dropout2d layer
     #[new]
     #[pyo3(signature = (p=None))]
-    fn new(p: Option<f64>) -> PyResult<(Self, PyModule)> {
+    fn new(p: Option<f64>) -> PyResult<PyClassInitializer<Self>> {
         let p = p.unwrap_or(0.5);
         let dropout = Dropout2d::new(Some(p)).map_err(_convert_error)?;
-        Ok((Self, PyModule::from_dropout2d(dropout)))
+        Ok(PyClassInitializer::from(PyModule::from_dropout2d(dropout)).add_subclass(Self))
     }
 
     /// Get the dropout probability
@@ -228,7 +228,7 @@ impl PyConv2d {
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
-    ) -> PyResult<(Self, PyModule)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let kernel_size = parse_tuple2(kernel_size)?;
         let stride = match stride {
             Some(s) => parse_tuple2(s)?,
@@ -254,7 +254,7 @@ impl PyConv2d {
         )
         .map_err(_convert_error)?;
 
-        Ok((Self, PyModule::from_conv2d(conv2d)))
+        Ok(PyClassInitializer::from(PyModule::from_conv2d(conv2d)).add_subclass(Self))
     }
 
     /// Get input channels count
@@ -313,7 +313,7 @@ impl PyBatchNorm1d {
         affine: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
-    ) -> PyResult<(Self, PyModule)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
@@ -323,7 +323,7 @@ impl PyBatchNorm1d {
         let batch_norm = BatchNorm1d::new(num_features, Some(eps), Some(momentum), device, dtype)
             .map_err(_convert_error)?;
 
-        Ok((Self, PyModule::from_batch_norm1d(batch_norm)))
+        Ok(PyClassInitializer::from(PyModule::from_batch_norm1d(batch_norm)).add_subclass(Self))
     }
 
     /// Get number of features
@@ -356,7 +356,7 @@ impl PyBatchNorm2d {
         affine: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
-    ) -> PyResult<(Self, PyModule)> {
+    ) -> PyResult<PyClassInitializer<Self>> {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
@@ -366,7 +366,7 @@ impl PyBatchNorm2d {
         let batch_norm = BatchNorm2d::new(num_features, Some(eps), Some(momentum), device, dtype)
             .map_err(_convert_error)?;
 
-        Ok((Self, PyModule::from_batch_norm2d(batch_norm)))
+        Ok(PyClassInitializer::from(PyModule::from_batch_norm2d(batch_norm)).add_subclass(Self))
     }
 
     /// Get number of features
@@ -392,7 +392,7 @@ impl PySequential {
     /// Create a new Sequential container
     #[new]
     #[pyo3(signature = (layers=None))]
-    fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<(Self, PyModule)> {
+    fn new(layers: Option<Vec<PyRef<PyModule>>>) -> PyResult<PyClassInitializer<Self>> {
         let sequential = if let Some(layers) = layers {
             let mut layer_objects = Vec::with_capacity(layers.len());
             for layer in layers {
@@ -403,7 +403,7 @@ impl PySequential {
             Sequential::new()
         };
 
-        Ok((Self, PyModule::from_sequential(sequential)))
+        Ok(PyClassInitializer::from(PyModule::from_sequential(sequential)).add_subclass(Self))
     }
 
     /// Add a layer to the sequential container
