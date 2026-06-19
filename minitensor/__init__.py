@@ -414,7 +414,17 @@ _FUNCTIONAL_FORWARDERS = (
     "log_softmax",
     "masked_softmax",
     "masked_log_softmax",
+    "relu",
+    "hardshrink",
+    "sigmoid",
+    "softplus",
+    "gelu",
+    "elu",
+    "selu",
+    "silu",
     "softsign",
+    "tanh",
+    "layer_norm",
     "rsqrt",
     "reciprocal",
     "sign",
@@ -458,13 +468,38 @@ _FUNCTIONAL_FORWARDERS = (
     "asinh",
     "acosh",
     "atanh",
+    "log1p",
+    "expm1",
+    "logaddexp",
     "where",
     "one_hot",
     "masked_fill",
 )
 
-for _name in _FUNCTIONAL_FORWARDERS:
-    globals()[_name] = getattr(functional, _name)
+
+def _bind_functional_forwarders(names: tuple[str, ...]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for name in names:
+        if name in seen:
+            duplicates.add(name)
+        else:
+            seen.add(name)
+
+    if duplicates:
+        raise RuntimeError(
+            "Duplicate functional forwarders: " + ", ".join(sorted(duplicates))
+        )
+
+    missing = [name for name in names if not hasattr(functional, name)]
+    if missing:
+        raise RuntimeError("Missing functional forwarders: " + ", ".join(missing))
+
+    for name in names:
+        globals()[name] = getattr(functional, name)
+
+
+_bind_functional_forwarders(_FUNCTIONAL_FORWARDERS)
 
 for _name in dir(nn):
     if _name.startswith("_") or not _name:

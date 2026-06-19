@@ -1,3 +1,9 @@
+# Copyright (c) Soumyadip Sarkar.
+# All rights reserved.
+#
+# This source code is licensed under the Apache-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """K-means clustering on the Iris dataset."""
 
 from __future__ import annotations

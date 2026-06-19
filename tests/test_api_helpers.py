@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Soumyadip Sarkar.
+# Copyright (c) Soumyadip Sarkar.
 # All rights reserved.
 #
 # This source code is licensed under the Apache-style license found in the
@@ -117,6 +117,44 @@ def test_top_level_public_api_matches_exported_globals():
     top_level_names = set(mt.list_public_api()["top_level"])
     missing = expected_names - top_level_names
     assert not missing
+
+
+def test_all_functional_forwarders_are_bound_to_functional_module():
+    for name in mt._FUNCTIONAL_FORWARDERS:
+        assert getattr(mt, name) is getattr(mt.functional, name)
+
+
+def test_functional_forwarder_binding_rejects_duplicates_and_missing_names():
+    with pytest.raises(RuntimeError, match="Duplicate functional forwarders: relu"):
+        mt._bind_functional_forwarders(("relu", "relu"))
+
+    with pytest.raises(RuntimeError, match="Missing functional forwarders: missing"):
+        mt._bind_functional_forwarders(("missing",))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "relu",
+        "hardshrink",
+        "sigmoid",
+        "softplus",
+        "gelu",
+        "elu",
+        "selu",
+        "silu",
+        "tanh",
+        "log1p",
+        "expm1",
+        "logaddexp",
+        "layer_norm",
+    ],
+)
+def test_common_math_and_activation_helpers_are_top_level_exports(name):
+    assert hasattr(mt, name)
+    assert name in mt.__all__
+    assert name in mt.list_public_api()["top_level"]
+    assert mt.describe_api(name).startswith(f"- {name}:")
 
 
 def test_all_only_contains_existing_attributes():
