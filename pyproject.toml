@@ -1,8 +1,6 @@
 [build-system]
 requires = [
-    "maturin>=1.0,<2.0",
-    "setuptools>=45",
-    "setuptools_scm[toml]>=6.2",
+    "maturin>=1.14,<2.0",
 ]
 build-backend = "maturin"
 
@@ -35,29 +33,33 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
+    "numpy>=2.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-benchmark",
-    "pytest-cov",
-    "black[jupyter]",
-    "mypy",
-    "pre-commit",
-    "numpy",
+    "pytest>=9.1",
+    "pytest-benchmark>=5.2",
+    "pytest-cov>=7.1",
+    "black[jupyter]>=26.5",
+    "mypy>=2.1",
+    "pre-commit>=4.6",
+    "numpy>=2.2",
 ]
 docs = [
-    "sphinx",
-    "sphinx-rtd-theme",
-    "myst-parser",
+    "sphinx>=8.1",
+    "sphinx-rtd-theme>=3.1",
+    "myst-parser>=4.0",
 ]
 examples = [
-    "matplotlib",
-    "jupyter",
-    "notebook",
-    "scikit-learn",
+    "matplotlib>=3.10",
+    "jupyter>=1.1",
+    "notebook>=7.6",
+    "scikit-learn>=1.7",
+]
+publish = [
+    "build>=1.5",
+    "twine>=6.2",
 ]
 
 [project.urls]
@@ -73,19 +75,12 @@ python-source = "."
 # Module name (should match the Rust crate name in bindings/Cargo.toml)
 module-name = "minitensor._core"
 # Features to enable
-features = ["pyo3/extension-module"]
-# Build configuration
-compatibility = "linux"
+features = ["extension-module"]
 # Editable pip installs should match release performance unless explicitly overridden.
 editable-profile = "release"
 strip = false
 # Skip audit for faster builds in development
 skip-auditwheel = false
-
-[tool.setuptools_scm]
-write_to = "minitensor/_version.py"
-version_scheme = "release-branch-semver"
-local_scheme = "no-local-version"
 
 [tool.black]
 line-length = 88
