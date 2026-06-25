@@ -50,6 +50,39 @@ of convenience aliases.
 | `search_api(query, module=None)` | Search available symbols by name. |
 | `describe_api(symbol)` | Return a one-line description for a symbol. |
 | `help()` | Render a formatted MiniTensor API reference. |
+| `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
+| `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
+
+### Shape compatibility helpers
+
+`broadcast_shapes(*shapes)` computes the shape that would result from
+NumPy/PyTorch-style broadcasting without creating input tensors. Each argument
+may be a non-negative integer-like scalar dimension (including objects with
+`__index__`, such as NumPy integer scalars) or an iterable shape such as a
+Python tuple/list or `tensor.shape`. Scalar tensor shapes are represented by an
+empty iterable, for example `broadcast_shapes((), (2, 3)) == (2, 3)`.
+
+Validation and edge cases:
+
+- Boolean dimensions are rejected even though Python `bool` is integer-like.
+- Negative dimensions raise `ValueError`; non-integer dimensions raise
+  `TypeError`.
+- Zero-sized dimensions follow NumPy broadcasting rules: they can broadcast
+  with missing dimensions or `1`, but not with another non-one positive size.
+- Incompatible shapes raise `ValueError`. Use `can_broadcast(*shapes)` when a
+  boolean compatibility check is preferable to exception handling.
+
+Example:
+
+```python
+import minitensor as mt
+
+shape = mt.broadcast_shapes((5, 1, 4), (1, 3, 1), (3, 4))
+assert shape == (5, 3, 4)
+assert mt.broadcast_shapes(mt.zeros(2, 1, 4).shape, (3, 4)) == (2, 3, 4)
+assert mt.can_broadcast((1, 3), (2, 3))
+assert not mt.can_broadcast((2, 3), (4, 3))
+```
 
 ### Compatibility tensor module
 
