@@ -180,6 +180,7 @@ mod tests {
 
     #[test]
     fn dtype_helpers_and_manual_seed_pyfunctions_work() {
+        let _guard = dtype::default_dtype_test_guard();
         set_default_dtype("float32").unwrap();
         assert_eq!(get_default_dtype().unwrap(), "float32");
 

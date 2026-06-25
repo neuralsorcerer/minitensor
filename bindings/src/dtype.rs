@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -13,6 +13,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyInt};
 
 static DEFAULT_DTYPE: Lazy<RwLock<DataType>> = Lazy::new(|| RwLock::new(DataType::Float32));
+
+#[cfg(test)]
+static DEFAULT_DTYPE_TEST_LOCK: Lazy<parking_lot::Mutex<()>> =
+    Lazy::new(|| parking_lot::Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn default_dtype_test_guard() -> parking_lot::MutexGuard<'static, ()> {
+    DEFAULT_DTYPE_TEST_LOCK.lock()
+}
 
 fn dtype_from_str(name: &str) -> Option<DataType> {
     match name.to_ascii_lowercase().as_str() {
@@ -331,6 +340,7 @@ def make_bad_module_name_scalar():
 
     #[test]
     fn parse_and_resolve_dtype_arg_cover_success_and_error_paths() {
+        let _guard = default_dtype_test_guard();
         assert_eq!(parse_dtype("f32").unwrap(), DataType::Float32);
         assert_eq!(parse_dtype("FLOAT64").unwrap(), DataType::Float64);
         assert!(parse_dtype("bad_dtype").is_err());
@@ -342,6 +352,7 @@ def make_bad_module_name_scalar():
 
     #[test]
     fn default_dtype_round_trip_and_python_string() {
+        let _guard = default_dtype_test_guard();
         set_default_dtype("float32").unwrap();
         assert_eq!(default_dtype(), DataType::Float32);
         assert_eq!(default_float_dtype(), DataType::Float32);
@@ -489,6 +500,7 @@ def make_bad_module_name_scalar():
 
     #[test]
     fn resolve_scalar_dtype_numpy_module_without_dtype_falls_back() {
+        let _guard = default_dtype_test_guard();
         Python::attach(|py| -> PyResult<()> {
             set_default_dtype("float64")?;
             let helpers = module_from_code(

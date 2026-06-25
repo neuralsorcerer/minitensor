@@ -382,16 +382,17 @@ fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, axis: Option<i32>) -> PyResult<PyTe
 
 /// Check if arrays are approximately equal
 #[pyfunction]
-#[pyo3(signature = (a, b, rtol=None, atol=None))]
+#[pyo3(signature = (a, b, rtol=None, atol=None, equal_nan=false))]
 fn allclose(
     a: &Bound<PyAny>,
     b: &Bound<PyAny>,
     rtol: Option<f64>,
     atol: Option<f64>,
+    equal_nan: bool,
 ) -> PyResult<bool> {
     let a_tensor = PyTensor::from_python_value(a)?;
     let b_tensor = PyTensor::from_python_value(b)?;
-    a_tensor.allclose(&b_tensor, rtol, atol)
+    a_tensor.allclose(&b_tensor, rtol, atol, equal_nan)
 }
 
 /// Check if arrays are exactly equal

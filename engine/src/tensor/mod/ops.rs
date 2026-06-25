@@ -1,8 +1,38 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
+
+#[inline(always)]
+fn allclose_f32(a: f32, b: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if equal_nan && a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    let diff = (a - b).abs();
+    diff <= atol + rtol * b.abs()
+}
+
+#[inline(always)]
+fn allclose_f64(a: f64, b: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if equal_nan && a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    let diff = (a - b).abs();
+    diff <= atol + rtol * b.abs()
+}
 
 impl Tensor {
     /// Solve a linear system `AX = B` for `X` where `self` provides `A`.
@@ -625,12 +655,26 @@ impl Tensor {
     /// Check if tensors are approximately equal
     #[inline(always)]
     pub fn allclose(&self, other: &Tensor, rtol: f64, atol: f64) -> bool {
+        self.allclose_with_equal_nan(other, rtol, atol, false)
+    }
+
+    /// Check if tensors are approximately equal, optionally treating NaNs at
+    /// matching positions as equal.
+    #[inline(always)]
+    pub fn allclose_with_equal_nan(
+        &self,
+        other: &Tensor,
+        rtol: f64,
+        atol: f64,
+        equal_nan: bool,
+    ) -> bool {
         if self.shape != other.shape || self.dtype != other.dtype {
             return false;
         }
 
         // Fast path: byte-for-byte equality check for contiguous CPU tensors
-        if self.device.is_cpu()
+        if (equal_nan || !self.dtype.is_float())
+            && self.device.is_cpu()
             && other.device.is_cpu()
             && self.is_contiguous()
             && other.is_contiguous()
@@ -652,15 +696,12 @@ impl Tensor {
                         self_data
                             .par_iter()
                             .zip(other_data.par_iter())
-                            .all(|(&a, &b)| {
-                                let diff = (a - b).abs();
-                                diff <= atol as f32 + rtol as f32 * b.abs()
-                            })
+                            .all(|(&a, &b)| allclose_f32(a, b, rtol as f32, atol as f32, equal_nan))
                     } else {
-                        self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
-                            let diff = (a - b).abs();
-                            diff <= atol as f32 + rtol as f32 * b.abs()
-                        })
+                        self_data
+                            .iter()
+                            .zip(other_data.iter())
+                            .all(|(&a, &b)| allclose_f32(a, b, rtol as f32, atol as f32, equal_nan))
                     }
                 } else {
                     false
@@ -674,15 +715,12 @@ impl Tensor {
                         self_data
                             .par_iter()
                             .zip(other_data.par_iter())
-                            .all(|(&a, &b)| {
-                                let diff = (a - b).abs();
-                                diff <= atol + rtol * b.abs()
-                            })
+                            .all(|(&a, &b)| allclose_f64(a, b, rtol, atol, equal_nan))
                     } else {
-                        self_data.iter().zip(other_data.iter()).all(|(&a, &b)| {
-                            let diff = (a - b).abs();
-                            diff <= atol + rtol * b.abs()
-                        })
+                        self_data
+                            .iter()
+                            .zip(other_data.iter())
+                            .all(|(&a, &b)| allclose_f64(a, b, rtol, atol, equal_nan))
                     }
                 } else {
                     false

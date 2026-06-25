@@ -74,14 +74,22 @@ impl PyTensor {
     }
 
     pub fn array_equal(&self, other: &PyTensor) -> PyResult<bool> {
-        Ok(self.inner.array_equal(&other.inner))
+        if self.inner.shape() != other.inner.shape() {
+            return Ok(false);
+        }
+        let (lhs, rhs, _) =
+            coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+                .map_err(_convert_error)?;
+        Ok(lhs.array_equal(&rhs))
     }
 
+    #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
     pub fn allclose(
         &self,
         other: &PyTensor,
         rtol: Option<f64>,
         atol: Option<f64>,
+        equal_nan: bool,
     ) -> PyResult<bool> {
         let rtol = rtol.unwrap_or(1e-5);
         let atol = atol.unwrap_or(1e-8);
@@ -90,7 +98,9 @@ impl PyTensor {
                 "rtol and atol must be non-negative, finite values",
             ));
         }
-        Ok(self.inner.allclose(&other.inner, rtol, atol))
+        let (lhs, rhs, _) =
+            coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+                .map_err(_convert_error)?;
+        Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
     }
-
 }
