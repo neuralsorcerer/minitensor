@@ -920,6 +920,27 @@ pub fn bmm(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
     tensor.bmm(other)
 }
 
+#[pyfunction]
+pub fn array_equal(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<bool> {
+    let lhs = PyTensor::from_python_value(input)?;
+    let rhs = PyTensor::from_python_value(other)?;
+    lhs.array_equal(&rhs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, other, rtol=None, atol=None, equal_nan=false))]
+pub fn allclose(
+    input: &Bound<PyAny>,
+    other: &Bound<PyAny>,
+    rtol: Option<f64>,
+    atol: Option<f64>,
+    equal_nan: bool,
+) -> PyResult<bool> {
+    let lhs = PyTensor::from_python_value(input)?;
+    let rhs = PyTensor::from_python_value(other)?;
+    lhs.allclose(&rhs, rtol, atol, equal_nan)
+}
+
 pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     parent.add_function(wrap_pyfunction!(flatten, parent)?)?;
     parent.add_function(wrap_pyfunction!(ravel, parent)?)?;
@@ -1006,5 +1027,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
     parent.add_function(wrap_pyfunction!(dot, parent)?)?;
     parent.add_function(wrap_pyfunction!(bmm, parent)?)?;
+    parent.add_function(wrap_pyfunction!(array_equal, parent)?)?;
+    parent.add_function(wrap_pyfunction!(allclose, parent)?)?;
     Ok(())
 }

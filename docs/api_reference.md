@@ -150,11 +150,13 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 - `diagonal`, `trace`
 - `triu`, `tril`
 
-### Reductions & statistics
+### Reductions, statistics, and equality
 
 - `sum`, `mean`, `median`, `quantile`, `nanquantile`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
 - `logsumexp`
+- `array_equal(other)`
+- `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
 ### Elementwise math & activation
 
@@ -196,7 +198,38 @@ reciprocal, sign, reshape, view, triu, tril, diagonal, trace, solve, flatten,
 ravel, transpose, permute, movedim, moveaxis, swapaxes, swapdims, squeeze,
 unsqueeze, expand, repeat, repeat_interleave, flip, roll, clip, clamp,
 clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin, acos, atan,
-sinh, cosh, asinh, acosh, atanh, where, one_hot, masked_fill
+sinh, cosh, asinh, acosh, atanh, array_equal, allclose, where, one_hot, masked_fill
+```
+
+### Equality helpers
+
+`array_equal(input, other)` and `allclose(input, other, rtol=1e-5,
+atol=1e-8, equal_nan=False)` are available as both top-level helpers and
+functional helpers. Both accept MiniTensor tensors and tensor-like Python inputs
+(such as Python scalars/sequences and NumPy arrays) through the normal
+Python-to-tensor conversion path.
+
+Behavior and validation:
+
+- `array_equal` requires equal shapes, promotes compatible numeric dtypes, and
+  returns a Python `bool` indicating exact element equality after promotion.
+- `allclose` promotes compatible numeric dtypes and applies
+  `abs(a - b) <= atol + rtol * abs(b)` for finite unequal floating-point values.
+- Exact equality is accepted before tolerance checks, so signed zeros and
+  matching infinities compare as close. Opposite infinities and finite/non-finite
+  mismatches compare as not close.
+- NaNs compare as not close unless `equal_nan=True`, in which case paired NaNs
+  at the same positions are accepted.
+- `rtol` and `atol` must be finite, non-negative numbers.
+
+Example:
+
+```python
+import minitensor as mt
+
+assert mt.array_equal([1, 2], mt.tensor([1.0, 2.0], dtype="float32"))
+assert mt.allclose([0.0, float("inf")], [-0.0, float("inf")])
+assert mt.allclose([float("nan")], [float("nan")], equal_nan=True)
 ```
 
 ### One-hot encoding
@@ -316,7 +349,7 @@ All optimizer classes share a common interface:
 ### Math & comparisons
 
 - `dot`, `matmul`, `cross`, `where`
-- `allclose`, `array_equal`
+- `allclose(a, b, rtol=None, atol=None, equal_nan=False)`, `array_equal(a, b)`
 
 ### Statistics
 

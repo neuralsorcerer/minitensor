@@ -471,6 +471,8 @@ _FUNCTIONAL_FORWARDERS = (
     "log1p",
     "expm1",
     "logaddexp",
+    "array_equal",
+    "allclose",
     "where",
     "one_hot",
     "masked_fill",
