@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -363,73 +363,113 @@ pub fn argsort(
     Ok(indices)
 }
 
-/// Standard deviation along specified dimension
-pub fn std(tensor: &Tensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
+/// Standard deviation along specified dimensions
+pub fn std(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
     let variance = var(tensor, dim, keepdim, unbiased)?;
     crate::operations::activation::sqrt(&variance)
 }
 
-/// Variance along specified dimension
-pub fn var(tensor: &Tensor, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
+/// Variance along specified dimensions
+pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",
         ));
     }
 
-    // Compute mean
-    let mean_tensor = mean(tensor, dim.clone().map(|d| vec![d]), keepdim)?;
+    let dims = match dim {
+        Some(dims) => {
+            let ndim = tensor.ndim() as isize;
+            let mut normalized = Vec::with_capacity(dims.len());
+            for d in dims {
+                let d = if d < 0 { d + ndim } else { d };
+                if d < 0 || d >= ndim {
+                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+                }
+                normalized.push(d as usize);
+            }
+            normalized.sort_unstable();
+            normalized.dedup();
+            Some(normalized)
+        }
+        None => None,
+    };
 
-    // Compute (x - mean)^2
+    if matches!(dims, Some(ref dims) if dims.is_empty()) {
+        return Ok(tensor.clone());
+    }
+
+    let reduction_dims: Vec<usize> = dims
+        .clone()
+        .unwrap_or_else(|| (0..tensor.ndim()).collect());
+    let reduction_dims_isize: Vec<isize> = reduction_dims.iter().map(|&d| d as isize).collect();
+
+    // Keep reduced axes while computing deviations so broadcasting is unambiguous for
+    // both single-axis and multi-axis reductions.
+    let mean_tensor = mean(tensor, Some(reduction_dims_isize.clone()), true)?;
     let diff = crate::operations::arithmetic::sub(tensor, &mean_tensor)?;
     let squared_diff = crate::operations::arithmetic::mul(&diff, &diff)?;
+    let mut variance = mean(&squared_diff, Some(reduction_dims_isize), true)?;
 
-    // Compute mean of squared differences
-    let variance = mean(&squared_diff, dim.map(|d| vec![d]), keepdim)?;
+    let sample_count = reduction_dims
+        .iter()
+        .map(|&axis| tensor.shape().dims()[axis])
+        .product::<usize>();
 
-    if !unbiased {
-        return Ok(variance);
-    }
-
-    let sample_count = match dim {
-        None => tensor.numel() as f64,
-        Some(d) => {
-            let axis = normalize_dim(d, tensor.ndim())?;
-            tensor.shape().dims()[axis] as f64
+    if unbiased {
+        if sample_count <= 1 {
+            let nan_count = variance.numel();
+            let nan_data = match variance.dtype() {
+                DataType::Float32 => TensorData::from_vec_f32(vec![f32::NAN; nan_count], variance.device()),
+                DataType::Float64 => TensorData::from_vec_f64(vec![f64::NAN; nan_count], variance.device()),
+                _ => unreachable!("variance is only defined for floating point tensors"),
+            };
+            variance = Tensor::new(
+                Arc::new(nan_data),
+                variance.shape().clone(),
+                variance.dtype(),
+                variance.device(),
+                variance.requires_grad(),
+            );
+        } else {
+            let correction = sample_count as f64 / (sample_count - 1) as f64;
+            let correction_tensor = match variance.dtype() {
+                DataType::Float32 => Tensor::new(
+                    Arc::new(TensorData::from_vec_f32(vec![correction as f32], variance.device())),
+                    Shape::scalar(),
+                    DataType::Float32,
+                    variance.device(),
+                    false,
+                ),
+                DataType::Float64 => Tensor::new(
+                    Arc::new(TensorData::from_vec_f64(vec![correction], variance.device())),
+                    Shape::scalar(),
+                    DataType::Float64,
+                    variance.device(),
+                    false,
+                ),
+                _ => unreachable!("variance is only defined for floating point tensors"),
+            };
+            variance = crate::operations::arithmetic::mul(&variance, &correction_tensor)?;
         }
-    };
+    }
 
-    if sample_count == 0.0 {
+    if keepdim {
         return Ok(variance);
     }
 
-    let correction = sample_count / (sample_count - 1.0);
-
-    let correction_tensor = match variance.dtype() {
-        DataType::Float32 => Tensor::new(
-            Arc::new(TensorData::from_vec_f32(
-                vec![correction as f32],
-                variance.device(),
-            )),
-            Shape::scalar(),
-            DataType::Float32,
-            variance.device(),
-            false,
-        ),
-        DataType::Float64 => Tensor::new(
-            Arc::new(TensorData::from_vec_f64(
-                vec![correction],
-                variance.device(),
-            )),
-            Shape::scalar(),
-            DataType::Float64,
-            variance.device(),
-            false,
-        ),
-        _ => unreachable!("variance is only defined for floating point tensors"),
+    let mut new_dims = Vec::with_capacity(variance.ndim().saturating_sub(reduction_dims.len()));
+    for (idx, &size) in variance.shape().dims().iter().enumerate() {
+        if reduction_dims.binary_search(&idx).is_err() {
+            new_dims.push(size);
+        }
+    }
+    let target_shape = if new_dims.is_empty() {
+        Shape::scalar()
+    } else {
+        Shape::new(new_dims)
     };
-
-    crate::operations::arithmetic::mul(&variance, &correction_tensor)
+    shape_ops::reshape(&variance, target_shape)
 }
 
 // Helper functions for type-specific operations

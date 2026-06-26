@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -369,14 +369,14 @@ impl Tensor {
 
     /// Standard deviation
     #[inline(always)]
-    pub fn std(&self, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Self> {
+    pub fn std(&self, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Self> {
         use crate::operations::reduction::std;
         std(self, dim, keepdim, unbiased)
     }
 
     /// Variance
     #[inline(always)]
-    pub fn var(&self, dim: Option<isize>, keepdim: bool, unbiased: bool) -> Result<Self> {
+    pub fn var(&self, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Self> {
         use crate::operations::reduction::var;
         var(self, dim, keepdim, unbiased)
     }

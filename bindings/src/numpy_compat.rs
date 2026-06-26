@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -443,7 +443,16 @@ fn tensor_std(
         ));
     }
     let tensor = PyTensor::from_python_value(tensor)?;
-    tensor.std(axis, keepdims, Some(ddof == 1))
+    Ok(PyTensor::from_tensor(
+        tensor
+            .tensor()
+            .std(
+                axis.map(|axis| vec![axis]),
+                keepdims.unwrap_or(false),
+                ddof == 1,
+            )
+            .map_err(_convert_error)?,
+    ))
 }
 
 /// Compute variance along axis
@@ -462,7 +471,16 @@ fn var(
         ));
     }
     let tensor = PyTensor::from_python_value(tensor)?;
-    tensor.var(axis, keepdims, Some(ddof == 1))
+    Ok(PyTensor::from_tensor(
+        tensor
+            .tensor()
+            .var(
+                axis.map(|axis| vec![axis]),
+                keepdims.unwrap_or(false),
+                ddof == 1,
+            )
+            .map_err(_convert_error)?,
+    ))
 }
 
 /// Compute product along axis

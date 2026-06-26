@@ -186,10 +186,35 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 ### Reductions, statistics, and equality
 
 - `sum`, `mean`, `median`, `quantile`, `nanquantile`
+- `std(dim=None, unbiased=True, keepdim=False)`
+- `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
 - `logsumexp`
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
+
+`std` and `var` accept the same dimension forms as multi-axis reductions such
+as `sum` and `mean`: `None` reduces all axes, an integer reduces one axis, and
+a sequence such as a tuple/list reduces multiple axes. Negative axes are
+normalized, duplicate axes are treated as a single axis, and invalid axes raise
+`IndexError`. `keepdim=True` preserves reduced axes with length one; otherwise
+those axes are removed after the reduction. `unbiased=True` applies the sample
+variance correction (`N / (N - 1)`) over the total number of reduced elements,
+and reductions with one or fewer samples return `NaN` rather than emitting a
+Python warning.
+
+Example:
+
+```python
+import minitensor as mt
+
+x = mt.arange(24, dtype="float32").reshape(2, 3, 4)
+channel_var = x.var(dim=(1, 2), unbiased=False, keepdim=True)
+row_std = x.std(dim=-1, unbiased=False)
+
+assert channel_var.shape == (2, 1, 1)
+assert row_std.shape == (2, 3)
+```
 
 ### Elementwise math & activation
 
@@ -388,6 +413,13 @@ All optimizer classes share a common interface:
 
 - `mean`, `nanmean`, `std`, `var`, `prod`, `sum`, `nansum`
 - `max`, `min`, `nanmax`, `nanmin`
+
+`numpy_compat.std(tensor, axis=None, keepdims=None, ddof=None)` and
+`numpy_compat.var(tensor, axis=None, keepdims=None, ddof=None)` accept a single
+integer axis or `None`; `ddof=0` maps to population statistics and `ddof=1` maps
+to unbiased sample statistics. Values outside `0` and `1` are rejected because
+the current tensor engine exposes a boolean unbiased flag rather than arbitrary
+correction values.
 
 ## 9) Serialization (`minitensor.serialization`)
 

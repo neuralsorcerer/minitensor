@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -324,15 +324,16 @@ impl PyTensor {
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn std(
         &self,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         unbiased: Option<bool>,
         keepdim: Option<bool>,
     ) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let unbiased = unbiased.unwrap_or(true);
+        let dims = normalize_optional_axes(dim)?;
         let result = self
             .inner
-            .std(dim, keepdim, unbiased)
+            .std(dims, keepdim, unbiased)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -340,17 +341,17 @@ impl PyTensor {
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn var(
         &self,
-        dim: Option<isize>,
+        dim: Option<&Bound<PyAny>>,
         unbiased: Option<bool>,
         keepdim: Option<bool>,
     ) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
         let unbiased = unbiased.unwrap_or(true);
+        let dims = normalize_optional_axes(dim)?;
         let result = self
             .inner
-            .var(dim, keepdim, unbiased)
+            .var(dims, keepdim, unbiased)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
-
 }
