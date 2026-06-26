@@ -159,7 +159,7 @@ Conversion helpers:
 - `tensor.tolist()` → Python list
 - `tensor.astype(dtype)` → dtype conversion
 
-## 4) Tensor instance methods (non-exhaustive but observable in tests)
+## 4) Tensor instance methods
 
 The following instance methods are exercised by the test suite and are available
 on `Tensor` objects (many also have functional/top-level equivalents):
@@ -492,9 +492,9 @@ compiled API after rebuilding the extension.
 
 ## 15) Where to go next
 
-- `docs/index.md` — documentation map and maintenance checklist.
-- `docs/development.md` — contributor setup, validation, and PR workflow.
-- `docs/custom_operations.md` — custom ops and autograd integration.
-- `docs/plugin_system.md` — plugin registry and compatibility handling.
-- `docs/performance.md` — performance tuning and profiling.
+- [`docs/index.md`](./index.md) — documentation map and maintenance checklist.
+- [`docs/development.md`](./development.md) — contributor setup, validation, and PR workflow.
+- [`docs/custom_operations.md`](./custom_operations.md) — custom ops and autograd integration.
+- [`docs/plugin_system.md`](./plugin_system.md`) — plugin registry and compatibility handling.
+- [`docs/performance.md`](./performance.md) — performance tuning and profiling.
 - `examples/` and `examples/notebooks/` — end-to-end usage patterns.
