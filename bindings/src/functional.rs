@@ -510,6 +510,136 @@ pub fn masked_log_softmax(
 
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn sum(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.sum(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn prod(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.prod(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn mean(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.mean(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn all(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.all(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.any(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn max(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+    let tensor = borrow_tensor(input)?;
+    let py = input.py();
+    if let Some(dim) = dim {
+        let (values, indices) = tensor
+            .tensor()
+            .max_with_indices(dim, keepdim)
+            .map_err(_convert_error)?;
+        let values_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(values))?.into();
+        let indices_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(indices))?.into();
+        let tuple = PyTuple::new(py, [values_any, indices_any])?;
+        let tuple_py: Py<PyTuple> = tuple.into();
+        Ok(tuple_py.into())
+    } else {
+        let values: Py<PyTensor> = Py::new(py, tensor.max_values(None, keepdim)?)?;
+        Ok(values.into())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn min(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
+    let tensor = borrow_tensor(input)?;
+    let py = input.py();
+    if let Some(dim) = dim {
+        let (values, indices) = tensor
+            .tensor()
+            .min_with_indices(dim, keepdim)
+            .map_err(_convert_error)?;
+        let values_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(values))?.into();
+        let indices_any: Py<PyAny> = Py::new(py, PyTensor::from_tensor(indices))?.into();
+        let tuple = PyTuple::new(py, [values_any, indices_any])?;
+        let tuple_py: Py<PyTuple> = tuple.into();
+        Ok(tuple_py.into())
+    } else {
+        let values: Py<PyTensor> = Py::new(py, tensor.min_values(None, keepdim)?)?;
+        Ok(values.into())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn argmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.argmax(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn argmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.argmin(dim, Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim))]
+pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.cumsum(dim)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim))]
+pub fn cumprod(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.cumprod(dim)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
+#[pyo3(name = "std")]
+pub fn std_fn(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    unbiased: bool,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.std(dim, Some(unbiased), Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
+pub fn var(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    unbiased: bool,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.var(dim, Some(unbiased), Some(keepdim))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn logsumexp(
     input: &Bound<PyAny>,
     dim: Option<&Bound<PyAny>>,
@@ -980,6 +1110,19 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(log_softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(masked_softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(masked_log_softmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(prod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(mean, parent)?)?;
+    parent.add_function(wrap_pyfunction!(all, parent)?)?;
+    parent.add_function(wrap_pyfunction!(any, parent)?)?;
+    parent.add_function(wrap_pyfunction!(max, parent)?)?;
+    parent.add_function(wrap_pyfunction!(min, parent)?)?;
+    parent.add_function(wrap_pyfunction!(argmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(argmin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cumsum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cumprod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(std_fn, parent)?)?;
+    parent.add_function(wrap_pyfunction!(var, parent)?)?;
     parent.add_function(wrap_pyfunction!(logsumexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(nansum, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;

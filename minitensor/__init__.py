@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import builtins as _builtins
 import operator as _operator
 import sys as _sys
 import types as _types
@@ -193,7 +194,7 @@ def broadcast_shapes(*shapes: object) -> tuple[int, ...]:
         for index, shape in enumerate(shapes)
     ]
     result_reversed: list[int] = []
-    max_rank = max(len(shape) for shape in normalized_shapes)
+    max_rank = _builtins.max(len(shape) for shape in normalized_shapes)
 
     for axis_from_end in range(max_rank):
         resolved = 1
@@ -426,7 +427,7 @@ def _resolve_symbol(symbol: str) -> object:
         normalized_symbol.startswith(".")
         or normalized_symbol.endswith(".")
         or ".." in normalized_symbol
-        or any(ch.isspace() for ch in normalized_symbol)
+        or _builtins.any(ch.isspace() for ch in normalized_symbol)
     ):
         raise ValueError(f"Invalid symbol path: {symbol}")
 
@@ -494,6 +495,19 @@ _FUNCTIONAL_FORWARDERS = (
     "log_softmax",
     "masked_softmax",
     "masked_log_softmax",
+    "sum",
+    "prod",
+    "mean",
+    "all",
+    "any",
+    "max",
+    "min",
+    "argmax",
+    "argmin",
+    "cumsum",
+    "cumprod",
+    "std",
+    "var",
     "relu",
     "hardshrink",
     "sigmoid",

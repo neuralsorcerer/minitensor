@@ -42,3 +42,16 @@ def test_var_rejects_duplicate_and_invalid_dims_like_other_reductions():
 
     with pytest.raises(IndexError):
         tensor.var(dim=2)
+
+
+def test_functional_std_var_preserve_unbiased_and_keepdim_semantics():
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, 6.0, 8.0]], dtype=np.float32)
+    x = mt.Tensor(x_np.tolist())
+
+    np.testing.assert_allclose(
+        mt.functional.var(x, dim=1, unbiased=False, keepdim=True).numpy(),
+        np.var(x_np, axis=1, keepdims=True),
+    )
+    np.testing.assert_allclose(
+        mt.std(x, dim=0, unbiased=True).numpy(), np.std(x_np, axis=0, ddof=1)
+    )

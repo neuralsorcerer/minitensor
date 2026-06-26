@@ -7,6 +7,7 @@
 import numpy as np
 import pytest
 
+from minitensor import functional as F
 from minitensor.tensor import Tensor
 
 
@@ -36,3 +37,11 @@ def test_cumulative_invalid_axis():
         t.cumsum(2)
     with pytest.raises(IndexError):
         t.cumprod(2)
+
+
+def test_functional_cumulative_reductions_support_negative_dims():
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    x = Tensor(x_np.tolist())
+
+    np.testing.assert_allclose(F.cumsum(x, dim=-1).numpy(), np.cumsum(x_np, axis=-1))
+    np.testing.assert_allclose(F.cumprod(x, dim=0).numpy(), np.cumprod(x_np, axis=0))

@@ -642,3 +642,22 @@ def test_split_negative_axis():
     np_parts = np.split(t.numpy(), 2, axis=-1)
     for p, n in zip(parts, np_parts):
         np.testing.assert_allclose(p.numpy(), n)
+
+
+def test_functional_basic_reductions_match_tensor_methods_and_numpy():
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    x = mt.Tensor(x_np.tolist())
+
+    np.testing.assert_allclose(mt.functional.sum(x).numpy(), x.sum().numpy())
+    np.testing.assert_allclose(mt.sum(x, dim=1).numpy(), x_np.sum(axis=1))
+    np.testing.assert_allclose(mt.functional.prod(x, dim=0).numpy(), x_np.prod(axis=0))
+    np.testing.assert_allclose(
+        mt.mean(x, dim=1, keepdim=True).numpy(), x_np.mean(axis=1, keepdims=True)
+    )
+
+
+def test_functional_boolean_reductions_are_exported_and_correct():
+    mask = mt.Tensor([[True, True, False], [True, True, True]], dtype="bool")
+
+    assert mt.functional.all(mask, dim=1).numpy().tolist() == [False, True]
+    assert mt.any(mask, dim=0).numpy().tolist() == [True, True, True]
