@@ -49,7 +49,6 @@ html_static_path = ["_static"]
 html_theme = "furo"
 html_title = f"{project} documentation"
 html_short_title = project
-html_logo = "_static/img/minitensor-small.png"
 html_favicon = "_static/img/minitensor-small.png"
 html_css_files = ["custom.css"]
 html_show_sourcelink = True
@@ -57,8 +56,8 @@ html_show_sphinx = False
 html_last_updated_fmt = "%Y-%m-%d"
 html_baseurl = os.environ.get("SPHINX_HTML_BASEURL", "")
 html_theme_options = {
-    "light_logo": "img/minitensor-small.png",
-    "dark_logo": "img/minitensor-dark-small.png",
+    "light_logo": "img/minitensor-dark-small.png",
+    "dark_logo": "img/minitensor-small.png",
     "source_repository": "https://github.com/neuralsorcerer/minitensor/",
     "source_branch": os.environ.get("GITHUB_REF_NAME", "main"),
     "source_directory": "docs/",
