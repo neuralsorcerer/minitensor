@@ -225,6 +225,7 @@ assert row_std.shape == (2, 3)
 - `sin`, `cos`, `tan`
 - `asin`, `acos`, `atan`
 - `sinh`, `cosh`, `asinh`, `acosh`, `atanh`
+- `maximum`, `minimum`
 - `softplus`, `gelu`, `elu`, `selu`, `silu`
 - `hardshrink`
 
@@ -251,12 +252,48 @@ Each of the following names is accessible from:
 ```
 cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
 median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, nan_to_num,
-logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, softsign, rsqrt,
-reciprocal, sign, reshape, view, triu, tril, diagonal, trace, solve, flatten,
-ravel, transpose, permute, movedim, moveaxis, swapaxes, swapdims, squeeze,
-unsqueeze, expand, repeat, repeat_interleave, flip, roll, clip, clamp,
+logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, softsign,
+rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal, trace, solve,
+flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes, swapdims,
+squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll, clip, clamp,
 clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin, acos, atan,
-sinh, cosh, asinh, acosh, atanh, array_equal, allclose, where, one_hot, masked_fill
+sinh, cosh, asinh, acosh, atanh, maximum, minimum, array_equal, allclose,
+where, one_hot, masked_fill
+```
+
+### Elementwise extrema
+
+`maximum(input, other)` and `minimum(input, other)` are available as both
+top-level helpers (`minitensor.maximum`, `minitensor.minimum`) and functional
+helpers (`minitensor.functional.maximum`, `minitensor.functional.minimum`).
+They mirror the corresponding `Tensor.maximum(other)` and
+`Tensor.minimum(other)` methods.
+
+Behavior and validation:
+
+- Inputs follow the same Python-to-tensor conversion, dtype-promotion, device,
+  and broadcasting rules as tensor binary operations.
+- Python scalars, Python sequences, NumPy arrays, and MiniTensor tensors are
+  accepted for `other`; `input` should be a MiniTensor tensor or tensor wrapper,
+  matching the rest of the tensor-centric functional binary helpers.
+- Boolean inputs use logical OR for `maximum` and logical AND for `minimum`,
+  matching NumPy boolean extrema behavior.
+- Floating-point NaNs are propagated when either operand at an element is NaN.
+- Incompatible shapes raise the normal MiniTensor shape/broadcasting error.
+
+Example:
+
+```python
+import minitensor as mt
+
+x = mt.Tensor([[1.0, -2.0, 3.0], [4.0, 0.5, -6.0]])
+y = mt.Tensor([[0.0, 2.0, 2.5]])
+
+assert mt.maximum(x, y).shape == (2, 3)
+assert mt.functional.minimum(x, -1.0).tolist() == [
+    [-1.0, -2.0, -1.0],
+    [-1.0, -1.0, -6.0],
+]
 ```
 
 ### Equality helpers

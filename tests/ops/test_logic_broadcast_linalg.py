@@ -77,6 +77,57 @@ def test_eq_with_scalar():
     np.testing.assert_array_equal(res, expected)
 
 
+def test_functional_minimum_maximum_broadcast_and_scalars():
+    a = mt.Tensor([[1.0, -2.0, 3.0], [4.0, 0.5, -6.0]])
+    b = mt.Tensor([[0.0, 2.0, 2.5]])
+
+    max_result = mt.maximum(a, b)
+    min_result = mt.functional.minimum(a, -1.0)
+    int_result = mt.maximum(mt.Tensor([1, 4], dtype="int32"), 3)
+
+    np.testing.assert_allclose(max_result.numpy(), np.maximum(a.numpy(), b.numpy()))
+    np.testing.assert_allclose(min_result.numpy(), np.minimum(a.numpy(), -1.0))
+    np.testing.assert_array_equal(
+        int_result.numpy(), np.maximum(np.array([1, 4], dtype=np.int32), 3)
+    )
+
+
+def test_functional_minimum_maximum_bool_and_nan_edges():
+    bool_a = mt.Tensor([True, False, True], dtype="bool")
+    bool_b = mt.Tensor([False, False, True], dtype="bool")
+
+    np.testing.assert_array_equal(
+        mt.maximum(bool_a, bool_b).numpy(),
+        np.maximum(bool_a.numpy(), bool_b.numpy()),
+    )
+    np.testing.assert_array_equal(
+        mt.functional.minimum(bool_a, bool_b).numpy(),
+        np.minimum(bool_a.numpy(), bool_b.numpy()),
+    )
+
+    left_nan = mt.Tensor([float("nan"), 1.0])
+    right_nan = mt.Tensor([0.0, float("nan")])
+
+    max_result = mt.maximum(left_nan, right_nan).numpy()
+    min_result = mt.functional.minimum(left_nan, right_nan).numpy()
+
+    assert np.isnan(max_result[0])
+    assert np.isnan(max_result[1])
+    assert np.isnan(min_result[0])
+    assert np.isnan(min_result[1])
+
+
+def test_functional_minimum_maximum_reject_incompatible_shapes():
+    a = mt.Tensor([1.0, 2.0, 3.0])
+    b = mt.Tensor([1.0, 2.0])
+
+    with pytest.raises(ValueError):
+        mt.maximum(a, b)
+
+    with pytest.raises(ValueError):
+        mt.functional.minimum(a, b)
+
+
 def test_lt_with_list():
     a = mt.Tensor([1, 2, 3])
     res = a < [2, 2, 4]

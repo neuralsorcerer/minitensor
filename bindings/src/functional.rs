@@ -880,6 +880,18 @@ pub fn logaddexp(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTenso
 }
 
 #[pyfunction]
+pub fn maximum(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.maximum(other)
+}
+
+#[pyfunction]
+pub fn minimum(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.minimum(other)
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, diagonal=0))]
 pub fn triu(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
@@ -1154,6 +1166,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(atanh, parent)?)?;
     parent.add_function(wrap_pyfunction!(rsqrt, parent)?)?;
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
+    parent.add_function(wrap_pyfunction!(maximum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(minimum, parent)?)?;
     parent.add_function(wrap_pyfunction!(triu, parent)?)?;
     parent.add_function(wrap_pyfunction!(tril, parent)?)?;
     parent.add_function(wrap_pyfunction!(diagonal, parent)?)?;

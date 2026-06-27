@@ -565,6 +565,8 @@ _FUNCTIONAL_FORWARDERS = (
     "log1p",
     "expm1",
     "logaddexp",
+    "maximum",
+    "minimum",
     "array_equal",
     "allclose",
     "where",

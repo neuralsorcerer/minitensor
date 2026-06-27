@@ -343,6 +343,8 @@ def test_functional_forwarder_binding_rejects_duplicates_and_missing_names():
         "log1p",
         "expm1",
         "logaddexp",
+        "maximum",
+        "minimum",
         "layer_norm",
     ],
 )
