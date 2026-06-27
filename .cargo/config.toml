@@ -1,0 +1,18 @@
+[registries.crates-io]
+# Use the sparse HTTP registry instead of the git index. This reduces the
+# amount of registry data CI needs to fetch and avoids git-index HTTP/2
+# failures while resolving Cargo metadata for maturin builds.
+protocol = "sparse"
+
+[net]
+# Cargo's default retry count is intentionally low; CI runners occasionally see
+# transient registry/network failures while fetching crates, so retry more often
+# before failing a build.
+retry = 10
+
+[http]
+# Some CI environments intermittently fail with curl HTTP/2 framing errors when
+# multiplexing registry requests. Disabling multiplexing keeps requests serial
+# over each connection and makes dependency resolution more robust.
+multiplexing = false
+timeout = 60
