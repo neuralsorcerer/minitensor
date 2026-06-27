@@ -57,13 +57,11 @@ html_show_sphinx = False
 html_last_updated_fmt = "%Y-%m-%d"
 html_baseurl = os.environ.get("SPHINX_HTML_BASEURL", "")
 html_theme_options = {
-    "analytics_anonymize_ip": True,
-    "collapse_navigation": False,
-    "logo_only": False,
-    "navigation_depth": 4,
-    "prev_next_buttons_location": "bottom",
-    "sticky_navigation": True,
-    "style_external_links": True,
+    "light_logo": "img/minitensor-small.png",
+    "dark_logo": "img/minitensor-dark-small.png",
+    "source_repository": "https://github.com/neuralsorcerer/minitensor/",
+    "source_branch": os.environ.get("GITHUB_REF_NAME", "main"),
+    "source_directory": "docs/",
 }
 html_context = {
     "display_github": True,
