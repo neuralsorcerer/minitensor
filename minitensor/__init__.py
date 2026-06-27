@@ -573,7 +573,7 @@ _FUNCTIONAL_FORWARDERS = (
 )
 
 
-def _bind_functional_forwarders(names: tuple[str, ...]) -> None:
+def _find_duplicate_names(names: tuple[str, ...]) -> list[str]:
     seen: set[str] = set()
     duplicates: set[str] = set()
     for name in names:
@@ -582,10 +582,17 @@ def _bind_functional_forwarders(names: tuple[str, ...]) -> None:
         else:
             seen.add(name)
 
+    return sorted(duplicates)
+
+
+def _ensure_unique_names(names: tuple[str, ...], label: str) -> None:
+    duplicates = _find_duplicate_names(names)
     if duplicates:
-        raise RuntimeError(
-            "Duplicate functional forwarders: " + ", ".join(sorted(duplicates))
-        )
+        raise RuntimeError(f"Duplicate {label}: " + ", ".join(duplicates))
+
+
+def _bind_functional_forwarders(names: tuple[str, ...]) -> None:
+    _ensure_unique_names(names, "functional forwarders")
 
     missing = [name for name in names if not hasattr(functional, name)]
     if missing:
@@ -607,8 +614,7 @@ for _name in dir(nn):
 dot = getattr(functional, "dot")
 bmm = getattr(functional, "bmm")
 
-_tensor_module = _types.ModuleType(__name__ + ".tensor")
-for _name in (
+_TENSOR_EXPORTS = (
     "Tensor",
     "tensor",
     "zeros",
@@ -653,61 +659,22 @@ for _name in (
     "set_default_dtype",
     "manual_seed",
     "default_dtype",
-):
+)
+_ensure_unique_names(_TENSOR_EXPORTS, "tensor exports")
+
+_tensor_module = _types.ModuleType(__name__ + ".tensor")
+for _name in _TENSOR_EXPORTS:
     setattr(_tensor_module, _name, globals()[_name])
 
 _sys.modules[_tensor_module.__name__] = _tensor_module
 
 
 _BASE_EXPORTS = (
-    "Tensor",
-    "tensor",
+    *_TENSOR_EXPORTS,
     "Device",
     "device",
     "cpu",
     "cuda",
-    "zeros",
-    "ones",
-    "empty",
-    "rand",
-    "randn",
-    "rand_like",
-    "randn_like",
-    "truncated_normal",
-    "truncated_normal_like",
-    "uniform",
-    "uniform_like",
-    "xavier_uniform",
-    "xavier_uniform_like",
-    "xavier_normal",
-    "xavier_normal_like",
-    "he_uniform",
-    "he_uniform_like",
-    "he_normal",
-    "he_normal_like",
-    "lecun_uniform",
-    "lecun_uniform_like",
-    "lecun_normal",
-    "lecun_normal_like",
-    "randint",
-    "randint_like",
-    "randperm",
-    "eye",
-    "full",
-    "full_like",
-    "empty_like",
-    "zeros_like",
-    "ones_like",
-    "linspace",
-    "logspace",
-    "arange",
-    "from_numpy",
-    "from_numpy_shared",
-    "as_tensor",
-    "get_default_dtype",
-    "set_default_dtype",
-    "manual_seed",
-    "default_dtype",
     "available_submodules",
     "list_public_api",
     "api_summary",
@@ -730,13 +697,13 @@ _BASE_EXPORTS = (
     "dot",
     "bmm",
 )
+_ensure_unique_names(_BASE_EXPORTS, "base exports")
 
-__all__ = [
-    name
-    for name in (
-        *_BASE_EXPORTS,
-        *_OPTIONAL_TOP_LEVEL_EXPORTS,
-        *_FUNCTIONAL_FORWARDERS,
-    )
-    if name in globals()
-]
+_ALL_EXPORT_CANDIDATES = (
+    *_BASE_EXPORTS,
+    *_OPTIONAL_TOP_LEVEL_EXPORTS,
+    *_FUNCTIONAL_FORWARDERS,
+)
+_ensure_unique_names(_ALL_EXPORT_CANDIDATES, "top-level public exports")
+
+__all__ = [name for name in _ALL_EXPORT_CANDIDATES if name in globals()]

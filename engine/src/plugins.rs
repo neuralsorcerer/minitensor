@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -123,53 +123,11 @@ impl PluginManager {
         }
     }
 
-    /// Load a plugin from a shared library file
-    #[cfg(feature = "dynamic-loading")]
-    pub fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        use libloading::{Library, Symbol};
-
-        let path = path.as_ref();
-
-        // Validate file extension
-        if path.extension() != Some(OsStr::new("so"))
-            && path.extension() != Some(OsStr::new("dll"))
-            && path.extension() != Some(OsStr::new("dylib"))
-        {
-            return Err(MinitensorError::invalid_argument(
-                "Plugin file must have .so, .dll, or .dylib extension",
-            ));
-        }
-
-        // Load the library
-        let lib = unsafe {
-            Library::new(path).map_err(|e| {
-                MinitensorError::plugin_error(format!("Failed to load plugin library: {}", e))
-            })?
-        };
-
-        // Get the plugin creation function
-        let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
-            lib.get(b"create_plugin").map_err(|e| {
-                MinitensorError::plugin_error(format!(
-                    "Plugin missing create_plugin function: {}",
-                    e
-                ))
-            })?
-        };
-
-        // Create the plugin instance
-        let plugin_ptr = unsafe { create_plugin() };
-        if plugin_ptr.is_null() {
-            return Err(MinitensorError::plugin_error(
-                "Plugin creation returned null",
-            ));
-        }
-
-        let plugin = unsafe { Arc::from_raw(plugin_ptr) };
+    fn install_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
+        let plugin_info = plugin.info();
 
         // Validate version compatibility
         let current_version = VersionInfo::current()?;
-        let plugin_info = plugin.info();
 
         if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
             return Err(MinitensorError::version_mismatch(format!(
@@ -221,61 +179,56 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Load a plugin from a shared library file
+    #[cfg(feature = "dynamic-loading")]
+    pub fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        use libloading::{Library, Symbol};
+
+        let path = path.as_ref();
+
+        // Validate file extension
+        if path.extension() != Some(OsStr::new("so"))
+            && path.extension() != Some(OsStr::new("dll"))
+            && path.extension() != Some(OsStr::new("dylib"))
+        {
+            return Err(MinitensorError::invalid_argument(
+                "Plugin file must have .so, .dll, or .dylib extension",
+            ));
+        }
+
+        // Load the library
+        let lib = unsafe {
+            Library::new(path).map_err(|e| {
+                MinitensorError::plugin_error(format!("Failed to load plugin library: {}", e))
+            })?
+        };
+
+        // Get the plugin creation function
+        let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
+            lib.get(b"create_plugin").map_err(|e| {
+                MinitensorError::plugin_error(format!(
+                    "Plugin missing create_plugin function: {}",
+                    e
+                ))
+            })?
+        };
+
+        // Create the plugin instance
+        let plugin_ptr = unsafe { create_plugin() };
+        if plugin_ptr.is_null() {
+            return Err(MinitensorError::plugin_error(
+                "Plugin creation returned null",
+            ));
+        }
+
+        let plugin = unsafe { Arc::from_raw(plugin_ptr) };
+
+        self.install_plugin(plugin)
+    }
+
     /// Register a plugin directly (for statically linked plugins)
     pub fn register_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
-        let plugin_info = plugin.info();
-
-        // Validate version compatibility
-        let current_version = VersionInfo::current()?;
-
-        if !current_version.is_compatible_with(&plugin_info.min_minitensor_version) {
-            return Err(MinitensorError::version_mismatch(format!(
-                "Plugin '{}' requires minitensor >= {}, but current version is {}",
-                plugin_info.name, plugin_info.min_minitensor_version, current_version
-            )));
-        }
-
-        if let Some(max_version) = &plugin_info.max_minitensor_version {
-            if !max_version.is_compatible_with(&current_version) {
-                return Err(MinitensorError::version_mismatch(format!(
-                    "Plugin '{}' requires minitensor <= {}, but current version is {}",
-                    plugin_info.name, max_version, current_version
-                )));
-            }
-        }
-
-        // Check for name conflicts
-        {
-            let plugins = self.loaded_plugins.read().map_err(|_| {
-                MinitensorError::internal_error("Failed to acquire plugins read lock")
-            })?;
-
-            if plugins.contains_key(&plugin_info.name) {
-                return Err(MinitensorError::plugin_error(format!(
-                    "Plugin '{}' is already loaded",
-                    plugin_info.name
-                )));
-            }
-        }
-
-        // Initialize the plugin
-        plugin.initialize(&self.plugin_registry)?;
-
-        // Register custom operations
-        for op in plugin.custom_operations() {
-            self.plugin_registry.register(op)?;
-        }
-
-        // Store the plugin
-        {
-            let mut plugins = self.loaded_plugins.write().map_err(|_| {
-                MinitensorError::internal_error("Failed to acquire plugins write lock")
-            })?;
-
-            plugins.insert(plugin_info.name.clone(), plugin);
-        }
-
-        Ok(())
+        self.install_plugin(plugin)
     }
 
     /// Unload a plugin by name
