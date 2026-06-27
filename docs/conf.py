@@ -46,11 +46,12 @@ exclude_patterns = [
 templates_path = ["_templates"]
 html_static_path = ["_static"]
 
-html_theme = "sphinx_rtd_theme"
+html_theme = "furo"
 html_title = f"{project} documentation"
 html_short_title = project
 html_logo = "_static/img/minitensor-small.png"
 html_favicon = "_static/img/minitensor-small.png"
+html_css_files = ["custom.css"]
 html_show_sourcelink = True
 html_show_sphinx = False
 html_last_updated_fmt = "%Y-%m-%d"

@@ -1,0 +1,8 @@
+:root {
+  --color-brand-primary: #3c60b1;
+  --color-brand-content: #3c60b1;
+}
+
+.sidebar-brand-text {
+  font-weight: 700;
+}
