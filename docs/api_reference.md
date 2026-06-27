@@ -425,9 +425,9 @@ have a functional signature).
 
 All optimizer classes share a common interface:
 
-- `step()` — apply parameter updates and clear the global autograd graph.
-- `zero_grad(set_to_none: bool = False)` — reset gradients.
-- `lr` property — read/write learning rate.
+- `step()` -- apply parameter updates and clear the global autograd graph.
+- `zero_grad(set_to_none: bool = False)` -- reset gradients.
+- `lr` property -- read/write learning rate.
 
 ## 8) NumPy compatibility module (`minitensor.numpy_compat`)
 
@@ -462,13 +462,13 @@ correction values.
 
 ### Core types
 
-- `ModelVersion` — semantic version for serialized models.
-- `ModelMetadata` — name, description, architecture, shapes, custom metadata.
-- `SerializationFormat` — `json()`, `binary()`, `messagepack()`.
-- `SerializedModel` — metadata + state dict.
-- `StateDict` — tensor parameters/buffers.
-- `DeploymentModel` — compact model format for inference.
-- `ModelSerializer` — `save()` / `load()` helpers.
+- `ModelVersion` -- semantic version for serialized models.
+- `ModelMetadata` -- name, description, architecture, shapes, custom metadata.
+- `SerializationFormat` -- `json()`, `binary()`, `messagepack()`.
+- `SerializedModel` -- metadata + state dict.
+- `StateDict` -- tensor parameters/buffers.
+- `DeploymentModel` -- compact model format for inference.
+- `ModelSerializer` -- `save()` / `load()` helpers.
 
 ### Convenience functions
 
@@ -484,10 +484,10 @@ correction values.
 
 ### Python-side plugins
 
-- `CustomPlugin` — plugin object with init/cleanup/custom-op callbacks.
-- `PluginRegistry` — register/unregister/list Python plugins.
-- `CustomLayer` — define custom layers in Python.
-- `PluginBuilder` — fluent builder for plugin metadata.
+- `CustomPlugin` -- plugin object with init/cleanup/custom-op callbacks.
+- `PluginRegistry` -- register/unregister/list Python plugins.
+- `CustomLayer` -- define custom layers in Python.
+- `PluginBuilder` -- fluent builder for plugin metadata.
 
 ### Dynamic loading (if compiled)
 
@@ -529,9 +529,9 @@ compiled API after rebuilding the extension.
 
 ## 15) Where to go next
 
-- [`docs/index.md`](./index.md) — documentation map and maintenance checklist.
-- [`docs/development.md`](./development.md) — contributor setup, validation, and PR workflow.
-- [`docs/custom_operations.md`](./custom_operations.md) — custom ops and autograd integration.
-- [`docs/plugin_system.md`](./plugin_system.md`) — plugin registry and compatibility handling.
-- [`docs/performance.md`](./performance.md) — performance tuning and profiling.
-- `examples/` and `examples/notebooks/` — end-to-end usage patterns.
+- [`docs/index.md`](./index.md) -- documentation map and maintenance checklist.
+- [`docs/development.md`](./development.md) -- contributor setup, validation, and PR workflow.
+- [`docs/custom_operations.md`](./custom_operations.md) -- custom ops and autograd integration.
+- [`docs/plugin_system.md`](./plugin_system.md) -- plugin registry and compatibility handling.
+- [`docs/performance.md`](./performance.md) -- performance tuning and profiling.
+- `examples/` and `examples/notebooks/` -- end-to-end usage patterns.

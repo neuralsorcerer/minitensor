@@ -48,6 +48,7 @@ dev = [
 ]
 docs = [
     "sphinx>=8.1",
+    "furo>=2024.8.6",
     "sphinx-rtd-theme>=3.1",
     "myst-parser[linkify]>=4.0",
 ]

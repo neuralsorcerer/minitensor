@@ -1,32 +1,58 @@
 # Custom Operations System
 
-The minitensor library provides a powerful extensibility framework that lets
-users define their own tensor operations with full automatic differentiation
-support. This system enables developers to extend the library's functionality
-without modifying the core codebase.
+MiniTensor's custom-operations system is currently a Rust-engine extension
+point with a small Python execution API. The compiled examples demonstrate how
+to register Rust `CustomOp` implementations in the global registry and invoke
+them from Python. Python can register and manage plugin metadata, but the
+current public Python package does **not** expose a Python `CustomOpBuilder` for
+creating new tensor kernels entirely in Python.
 
-## Overview
+## Current public Python API
 
-The custom operations system consists of several key components:
+The top-level `minitensor` package exposes these helpers when the Rust extension
+is available:
 
-1. **CustomOp Trait**: Defines the interface for custom operations
-2. **CustomOpRegistry**: Manages registration and execution of custom operations
-3. **CustomOpBuilder**: Provides a convenient builder pattern for creating operations
-4. **Automatic Differentiation Integration**: Seamless integration with the gradient computation system
-5. **Python Bindings**: Full Python API for registering and executing custom operations
+| Function | Behavior |
+| --- | --- |
+| `register_example_custom_ops()` | Registers the bundled Rust example operations: `swish`, `gelu`, `mish`, `power`, and `layer_norm`. |
+| `list_custom_ops_py()` | Returns registered operation names. |
+| `is_custom_op_registered_py(name)` | Checks whether a name is present in the global registry. |
+| `execute_custom_op_py(name, inputs)` | Executes a registered operation with a Python list of tensors or tensor wrappers and returns a `Tensor`. |
+| `unregister_custom_op_py(name)` | Removes an operation from the global registry. |
 
-## Core Components
+Example:
 
-### CustomOp Trait
+```python
+import minitensor as mt
 
-The `CustomOp` trait defines the interface that all custom operations must implement:
+mt.register_example_custom_ops()
+assert mt.is_custom_op_registered_py("swish")
+
+x = mt.Tensor([[1.0, 2.0, -1.0]], requires_grad=True)
+y = mt.execute_custom_op_py("swish", [x])
+print(y.shape)
+```
+
+`execute_custom_op_py` accepts either core `Tensor` objects or wrapper objects
+with a `_tensor` attribute. The binding returns a tensor object directly; older
+examples that manually allocated a wrapper around the returned core tensor are
+not required for the current binding.
+
+## Rust engine model
+
+Custom operations implement the `CustomOp` trait. The trait is `Send + Sync` so
+registered operations can be shared safely by the global registry.
 
 ```rust
 pub trait CustomOp: Send + Sync {
     fn name(&self) -> &str;
     fn validate_inputs(&self, inputs: &[&Tensor]) -> Result<()>;
     fn forward(&self, inputs: &[&Tensor]) -> Result<Tensor>;
-    fn create_gradient_function(&self, inputs: &[&Tensor], output: &Tensor) -> Option<Arc<dyn GradientFunction>>;
+    fn create_gradient_function(
+        &self,
+        inputs: &[&Tensor],
+        output: &Tensor,
+    ) -> Option<Arc<dyn GradientFunction>>;
     fn num_inputs(&self) -> usize;
     fn output_shape(&self, input_shapes: &[&Shape]) -> Result<Shape>;
     fn output_dtype(&self, input_dtypes: &[DataType]) -> Result<DataType>;
@@ -34,228 +60,139 @@ pub trait CustomOp: Send + Sync {
 }
 ```
 
-### CustomOpBuilder
-
-The builder pattern provides a convenient way to create custom operations:
+The engine also provides `CustomOpBuilder::new(name, num_inputs)` for Rust code.
+A builder can attach forward logic, optional backward logic, validation, and
+output metadata inference before calling `build()`.
 
 ```rust
 let op = CustomOpBuilder::new("my_operation", 2)
     .forward(|inputs| {
-        // Forward pass implementation
-        Ok(result_tensor)
-    })
-    .backward(|grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-        // Backward pass implementation
-        Ok(gradients_map)
+        let lhs = inputs[0];
+        let rhs = inputs[1];
+        arithmetic::add(lhs, rhs)
     })
     .validate(|inputs| {
-        // Input validation
+        if inputs[0].shape() != inputs[1].shape() {
+            return Err(MinitensorError::shape_mismatch(
+                inputs[0].shape().dims().to_vec(),
+                inputs[1].shape().dims().to_vec(),
+            ));
+        }
         Ok(())
     })
     .build()?;
 ```
 
-## Example Custom Operations
+## Bundled example operations
 
-The library includes several example custom operations to demonstrate the system.
-They can be registered from Python via `mt.register_example_custom_ops()`:
+The registered examples are intentionally simple demonstration operations. They
+are useful for testing the registry and binding path; they are not promised to
+match the fully optimized mathematical layers in `minitensor.nn`.
 
-### 1. Swish Activation Function
+### `swish`
 
-```rust
-pub fn create_swish_op() -> Result<Arc<dyn CustomOp>> {
-    CustomOpBuilder::new("swish", 1)
-        .forward(|inputs| {
-            let x = inputs[0];
-            let sigmoid_x = activation::sigmoid(x)?;
-            arithmetic::mul(x, &sigmoid_x)
-        })
-        .backward(|grad_output, input_ids, input_shapes, input_dtypes, input_devices| {
-            // Swish gradient implementation
-            let mut gradients = HashMap::new();
-            // ... gradient computation logic
-            Ok(gradients)
-        })
-        .build()
-}
-```
+Forward pass:
 
-### 2. GELU Activation Function
+$$
+\operatorname{swish}(x) = x\,\sigma(x), \qquad
+\sigma(x)=\frac{1}{1+e^{-x}}.
+$$
 
-```rust
-pub fn create_gelu_op() -> Result<Arc<dyn CustomOp>> {
-    CustomOpBuilder::new("gelu", 1)
-        .forward(|inputs| {
-            let x = inputs[0];
-            // GELU implementation using existing operations
-            let tanh_x = activation::tanh(x)?;
-            let one = Tensor::ones(x.shape().clone(), x.dtype(), x.device(), false);
-            let one_plus_tanh = arithmetic::add(&one, &tanh_x)?;
-            arithmetic::mul(x, &one_plus_tanh)
-        })
-        .build()
-}
-```
+For a scalar component, the exact derivative is
 
-### 3. Element-wise Power Operation
+$$
+\frac{d}{dx}\left[x\sigma(x)\right]
+= \sigma(x) + x\sigma(x)(1-\sigma(x)).
+$$
 
-```rust
-pub fn create_power_op() -> Result<Arc<dyn CustomOp>> {
-    CustomOpBuilder::new("power", 2)
-        .forward(|inputs| {
-            let base = inputs[0];
-            let exponent = inputs[1];
-            // Power operation implementation
-            arithmetic::mul(base, exponent) // Simplified
-        })
-        .validate(|inputs| {
-            if inputs[0].shape() != inputs[1].shape() {
-                return Err(MinitensorError::shape_mismatch(
-                    inputs[0].shape().dims().to_vec(),
-                    inputs[1].shape().dims().to_vec()
-                ));
-            }
-            Ok(())
-        })
-        .build()
-}
-```
+The example Rust backward implementation is deliberately simplified and returns
+a tensor of ones with the input shape and dtype. Use it as a registry example,
+not as a numerically exact training primitive.
 
-## Python API
+### `gelu`
 
-The custom operations system is fully accessible from Python:
+The comments in the Rust example mention the common tanh approximation
 
-### Registration
+$$
+\operatorname{GELU}(x) \approx \tfrac{1}{2}x\left(1 + \tanh\left(\sqrt{2/\pi}
+(x + 0.044715x^3)\right)\right),
+$$
 
-```python
-import minitensor as mt
+but the demonstration code actually computes
 
-# Register example custom operations
-mt.register_example_custom_ops()
+$$
+x(1 + \tanh(x)).
+$$
 
-# List registered operations
-ops = mt.list_custom_ops_py()
-print("Available operations:", ops)
+This differs by a missing factor of `1/2` and omits the cubic approximation
+term. Prefer the built-in `nn.GELU`/tensor GELU operation when you need standard
+GELU semantics.
 
-# Check if an operation is registered
-is_registered = mt.is_custom_op_registered_py("swish")
-print("Swish registered:", is_registered)
-```
+### `mish`
 
-### Execution
+The standard Mish activation is
 
-```python
-import minitensor as mt
+$$
+\operatorname{mish}(x)=x\tanh(\log(1+e^x)).
+$$
 
-# Create input tensor
-x = mt.Tensor([[1.0, 2.0, -1.0]], requires_grad=True)
+The bundled example simplifies it to `x * tanh(x)` for demonstration.
 
-# Execute custom operation (result is a core tensor)
-res_core = mt.execute_custom_op_py("swish", [x._tensor])
-result = mt.Tensor.__new__(mt.Tensor)
-result._tensor = res_core
-print("Swish result:", result)
-```
+### `power`
 
-### Advanced Usage
+The operation is named `power`, validates that both inputs have identical shape,
+and advertises output dtype promotion between `float32` and `float64`. Its
+forward pass is currently simplified to elementwise multiplication of base and
+exponent tensors, not exponentiation:
+
+$$
+powerExample(a,b)=a\,b.
+$$
+
+For true scalar exponentiation $a^b$, the derivatives would be
+$\partial a^b/\partial a = b a^{b-1}$ and
+$\partial a^b/\partial b = a^b \log a$ where defined. The example backward
+path does not implement those formulas.
+
+### `layer_norm`
+
+The example validates that `weight` and `bias` are one-dimensional and match the
+last input dimension. Its forward pass currently returns a clone of the input.
+A mathematical layer normalization over the final dimension would compute
+
+$$
+\mu = \frac{1}{H}\sum_{j=1}^{H} x_j, \qquad
+\sigma^2 = \frac{1}{H}\sum_{j=1}^{H}(x_j-\mu)^2,
+$$
+
+$$
+y_j = \gamma_j\frac{x_j-\mu}{\sqrt{\sigma^2 + \varepsilon}} + \beta_j.
+$$
+
+Use `Tensor.layer_norm(...)` or neural-network normalization layers for actual
+normalization behavior.
+
+## Registration lifecycle
+
+Rust operations are registered globally by name. Registering the bundled
+examples more than once may report duplicate-registration errors depending on
+registry state. If a test or script needs a clean state, unregister the names it
+registered:
 
 ```python
-# Power operation with two inputs
-base = mt.Tensor([[2.0, 3.0], [4.0, 5.0]], requires_grad=True)
-exponent = mt.Tensor([[2.0, 2.0], [3.0, 2.0]], requires_grad=True)
-
-power_core = mt.execute_custom_op_py("power", [base._tensor, exponent._tensor])
-power = mt.Tensor.__new__(mt.Tensor)
-power._tensor = power_core
-print("Power result:", power)
-
-# Layer normalization with three inputs
-input_tensor = mt.Tensor([[1.0, 2.0, 3.0, 4.0]], requires_grad=True)
-weight = mt.Tensor([1.0, 1.0, 1.0, 1.0], requires_grad=True)
-bias = mt.Tensor([0.0, 0.0, 0.0, 0.0], requires_grad=True)
-
-norm_core = mt.execute_custom_op_py(
-    "layer_norm", [input_tensor._tensor, weight._tensor, bias._tensor]
-)
-normalized = mt.Tensor.__new__(mt.Tensor)
-normalized._tensor = norm_core
-print("Layer norm result:", normalized)
+for name in ["swish", "gelu", "mish", "power", "layer_norm"]:
+    if mt.is_custom_op_registered_py(name):
+        mt.unregister_custom_op_py(name)
 ```
 
-## Features
+## Testing guidance
 
-### 1. Automatic Differentiation Integration
+When adding a real Rust custom operation:
 
-Custom operations seamlessly integrate with the automatic differentiation system:
-
-- Operations can define custom gradient functions
-- Gradients flow through custom operations just like built-in operations
-- Support for complex gradient computations with multiple inputs/outputs
-
-### 2. Type Safety and Validation
-
-The system provides comprehensive validation:
-
-- Input tensor count validation
-- Shape compatibility checking
-- Data type validation
-- Device compatibility verification
-- Custom validation logic support
-
-### 3. Performance Optimization
-
-Custom operations are designed for performance:
-
-- Zero-copy tensor passing where possible
-- Efficient memory management
-- Integration with SIMD and GPU backends
-- Lazy evaluation support
-
-### 4. Error Handling
-
-Robust error handling throughout the system:
-
-- Clear error messages with actionable suggestions
-- Proper error propagation from Rust to Python
-- Validation errors with detailed context
-- Runtime error detection and reporting
-
-## Best Practices
-
-### 1. Operation Design
-
-- Keep operations focused and composable
-- Use descriptive names that avoid conflicts
-- Implement proper input validation
-- Consider numerical stability
-
-### 2. Gradient Implementation
-
-- Ensure gradient correctness through testing
-- Handle edge cases (zeros, infinities, NaNs)
-- Consider gradient clipping for stability
-- Test gradient computation with finite differences
-
-### 3. Performance Considerations
-
-- Minimize memory allocations in hot paths
-- Reuse tensors where possible
-- Consider vectorization opportunities
-- Profile custom operations for bottlenecks
-
-### 4. Testing
-
-- Test with various input shapes and types
-- Verify gradient correctness
-- Test error conditions and edge cases
-- Include performance benchmarks
-
-## Future Extensions
-
-The custom operations system is designed to be extensible:
-
-1. **Plugin System**: Load operations from external libraries
-2. **JIT Compilation**: Compile custom operations for better performance
-3. **Graph Optimization**: Fuse custom operations with built-in operations
-4. **Distributed Operations**: Support for multi-device custom operations
-5. **Serialization**: Save and load custom operations with models
+- Validate input count, shapes, dtypes, devices, and edge cases explicitly.
+- Write Rust unit tests for `validate_inputs`, `output_shape`, and forward
+  values.
+- Compare gradients against finite differences for differentiable operations.
+- Test Python bindings with tensors and wrapper objects.
+- Document whether the operation is a pedagogical example or production-ready
+  mathematical primitive.

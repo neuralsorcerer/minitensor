@@ -72,7 +72,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 black --check .
 isort --check-only .
-python -m pytest tests/test_tensor_creation.py
+python -m pytest tests/tensor/test_tensor_core.py
 ```
 
 ## Documentation workflow

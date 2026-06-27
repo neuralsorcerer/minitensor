@@ -41,27 +41,6 @@ git clone https://github.com/neuralsorcerer/minitensor.git
 cd minitensor
 ```
 
-### Recommended automated install
-
-The installer creates `.venv` by default, installs build tools, builds a release
-extension, and verifies that MiniTensor imports successfully:
-
-```bash
-bash install.sh
-```
-
-Useful options:
-
-```bash
-bash install.sh --no-venv                 # use the current Python environment
-bash install.sh --venv .myvenv            # create or reuse a specific venv
-bash install.sh --debug                   # build an unoptimized debug extension
-bash install.sh --python /usr/bin/python3 # select a Python interpreter
-```
-
-On Windows, run the script from Git Bash or WSL. From PowerShell, invoke it as
-`bash install.sh` after installing Git Bash or WSL.
-
 ### Manual source install
 
 Create and activate a virtual environment:
