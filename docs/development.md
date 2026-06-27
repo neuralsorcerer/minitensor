@@ -96,3 +96,30 @@ Before submitting changes:
 - Update docs and examples for user-facing behavior.
 - Confirm generated artifacts, virtual environments, and build outputs are not
   committed.
+
+## Publishing documentation
+
+MiniTensor publishes the Markdown documentation in `docs/` with Sphinx, MyST, and
+GitHub Pages. The production build is configured in `docs/conf.py` and deployed
+by `.github/workflows/docs.yml` whenever documentation changes are pushed to the
+`main` branch. Pull requests build the same Sphinx site with warnings treated as
+errors, but deployment is restricted to `main`.
+
+To preview the documentation locally from the repository root:
+
+```bash
+python -m pip install -r docs/requirements.txt
+python -m sphinx -W --keep-going -b html docs docs/_build/html
+python -m http.server 8000 --directory docs/_build/html
+```
+
+Then open <http://127.0.0.1:8000/>.
+
+Documentation publishing rules:
+
+- Keep `docs/index.md` as the root document and update its Sphinx toctree when
+  adding or removing pages.
+- Run the local Sphinx build before opening documentation pull requests.
+- Do not commit generated files under `docs/_build/`.
+- Keep repository-local links relative so the Markdown remains readable on
+  GitHub and in the generated site.

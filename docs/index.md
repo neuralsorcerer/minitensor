@@ -3,24 +3,44 @@
 Welcome to the MiniTensor documentation. This directory contains focused guides
 for installing, using, extending, benchmarking, and contributing to MiniTensor.
 
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: User guides
+
+installation
+api_reference
+custom_operations
+plugin_system
+performance
+```
+
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: Contributor guides
+
+development
+```
+
 ## Start here
 
-- [Installation guide](installation.md) — supported installation paths for PyPI,
+- [Installation guide](installation.md) -- supported installation paths for PyPI,
   source builds, editable installs, and contributor environments.
-- [API reference](api_reference.md) — consolidated public Python API surface,
+- [API reference](api_reference.md) -- consolidated public Python API surface,
   including top-level helpers, tensors, functional operations, neural-network
   layers, optimizers, NumPy compatibility, serialization, plugins, and debug
   utilities.
-- [Development guide](development.md) — repository layout, environment setup,
+- [Development guide](development.md) -- repository layout, environment setup,
   validation commands, documentation workflow, and release checks.
 
 ## Feature guides
 
-- [Custom operations](custom_operations.md) — how the Rust custom-operation
+- [Custom operations](custom_operations.md) -- how the Rust custom-operation
   trait, registry, builder, and Python helpers fit together.
-- [Plugin system](plugin_system.md) — plugin metadata, compatibility checks,
+- [Plugin system](plugin_system.md) -- plugin metadata, compatibility checks,
   Python plugin registries, dynamic loading, and best practices.
-- [Performance benchmarks](performance.md) — benchmark commands,
+- [Performance benchmarks](performance.md) -- benchmark commands,
   interpretation guidance, profiling tips, and optimization checklist.
 
 ## Examples and notebooks
