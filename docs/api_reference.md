@@ -260,6 +260,7 @@ assert row_std.shape == (2, 3)
 
 - `softmax`, `log_softmax`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
+- `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
 - `round`, `floor`, `ceil`
 - `sin`, `cos`, `tan`
@@ -291,8 +292,9 @@ Each of the following names is accessible from:
 
 ```
 cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
-median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, nan_to_num,
-logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, sum, prod,
+median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, isnan,
+isinf, isfinite, nan_to_num, logsumexp, softmax, log_softmax,
+masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
 layer_norm, rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
@@ -301,6 +303,40 @@ swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
 acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, expm1, logaddexp, maximum,
 minimum, array_equal, allclose, where, one_hot, masked_fill
+```
+
+### Finite and NaN predicates
+
+`isnan(input)`, `isinf(input)`, and `isfinite(input)` are available as both
+top-level helpers (`minitensor.isnan`, `minitensor.isinf`,
+`minitensor.isfinite`) and functional helpers (`minitensor.functional.isnan`,
+`minitensor.functional.isinf`, `minitensor.functional.isfinite`). They mirror
+the corresponding `Tensor.isnan()`, `Tensor.isinf()`, and `Tensor.isfinite()`
+methods and always return a boolean tensor with the same shape and device as the
+input.
+
+Behavior and validation:
+
+- Floating-point tensors are classified elementwise using the underlying Rust
+  floating-point predicates.
+- Integer and boolean tensors cannot contain NaN or infinite values, so
+  `isnan` and `isinf` return all-false masks for those dtypes.
+- Integer and boolean tensors are always finite, so `isfinite` returns an
+  all-true mask for those dtypes.
+- Empty tensors preserve their empty shape and return an empty boolean mask.
+- Predicate outputs do not require gradients.
+
+Example:
+
+```python
+import minitensor as mt
+
+x = mt.Tensor([float("nan"), float("inf"), -1.5])
+
+assert mt.isnan(x).tolist() == [True, False, False]
+assert mt.functional.isinf(x).tolist() == [False, True, False]
+assert mt.isfinite(x).tolist() == [False, False, True]
+assert mt.isfinite(mt.Tensor([1, 2], dtype="int32")).tolist() == [True, True]
 ```
 
 ### Elementwise extrema

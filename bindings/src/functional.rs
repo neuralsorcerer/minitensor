@@ -713,6 +713,31 @@ pub fn nanmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     }
 }
 
+fn finite_predicate(
+    input: &Bound<PyAny>,
+    predicate: impl FnOnce(&Tensor) -> engine::error::Result<Tensor>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    predicate(tensor.tensor())
+        .map(PyTensor::from_tensor)
+        .map_err(_convert_error)
+}
+
+#[pyfunction]
+pub fn isnan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    finite_predicate(input, Tensor::isnan)
+}
+
+#[pyfunction]
+pub fn isinf(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    finite_predicate(input, Tensor::isinf)
+}
+
+#[pyfunction]
+pub fn isfinite(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    finite_predicate(input, Tensor::isfinite)
+}
+
 #[pyfunction]
 #[pyo3(signature = (input, nan=0.0, posinf=None, neginf=None))]
 pub fn nan_to_num(
@@ -1140,6 +1165,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(isnan, parent)?)?;
+    parent.add_function(wrap_pyfunction!(isinf, parent)?)?;
+    parent.add_function(wrap_pyfunction!(isfinite, parent)?)?;
     parent.add_function(wrap_pyfunction!(nan_to_num, parent)?)?;
     parent.add_function(wrap_pyfunction!(relu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardshrink, parent)?)?;

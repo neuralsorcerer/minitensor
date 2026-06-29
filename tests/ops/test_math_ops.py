@@ -797,3 +797,52 @@ def test_nan_to_num_backward_masks_replaced_entries():
         x.grad.numpy(), np.array([0.0, 0.0, 0.0, 1.0, 1.0], dtype=np.float32)
     )
     mt.clear_autograd_graph()
+
+
+def test_functional_finite_predicates_match_tensor_methods():
+    values = mt.Tensor([float("nan"), float("inf"), float("-inf"), -1.5, 0.0])
+    expected = {
+        "isnan": np.array([True, False, False, False, False], dtype=np.bool_),
+        "isinf": np.array([False, True, True, False, False], dtype=np.bool_),
+        "isfinite": np.array([False, False, False, True, True], dtype=np.bool_),
+    }
+
+    for name, expected_mask in expected.items():
+        functional_result = getattr(F, name)(values)
+        top_level_result = getattr(mt, name)(values)
+        method_result = getattr(values, name)()
+
+        assert functional_result.dtype == "bool"
+        assert top_level_result.dtype == "bool"
+        np.testing.assert_array_equal(functional_result.numpy(), method_result.numpy())
+        np.testing.assert_array_equal(top_level_result.numpy(), expected_mask)
+
+
+def test_functional_finite_predicates_non_float_and_empty_edges():
+    int_values = mt.Tensor([-2, 0, 7], dtype="int32")
+    bool_values = mt.Tensor([True, False], dtype="bool")
+    empty_values = mt.Tensor([], dtype="float64")
+
+    for values in (int_values, bool_values):
+        np.testing.assert_array_equal(
+            F.isnan(values).numpy(), np.zeros(values.shape, bool)
+        )
+        np.testing.assert_array_equal(
+            F.isinf(values).numpy(), np.zeros(values.shape, bool)
+        )
+        np.testing.assert_array_equal(
+            F.isfinite(values).numpy(), np.ones(values.shape, bool)
+        )
+
+    assert F.isnan(empty_values).shape == (0,)
+    assert F.isinf(empty_values).shape == (0,)
+    assert F.isfinite(empty_values).shape == (0,)
+    np.testing.assert_array_equal(
+        F.isnan(empty_values).numpy(), np.array([], dtype=bool)
+    )
+    np.testing.assert_array_equal(
+        F.isinf(empty_values).numpy(), np.array([], dtype=bool)
+    )
+    np.testing.assert_array_equal(
+        F.isfinite(empty_values).numpy(), np.array([], dtype=bool)
+    )
