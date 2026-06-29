@@ -52,6 +52,9 @@ of convenience aliases.
 | `help()` | Render a formatted MiniTensor API reference. |
 | `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
 | `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
+| `atleast_1d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least one dimension. |
+| `atleast_2d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least two dimensions. |
+| `atleast_3d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least three dimensions. |
 
 ### Shape compatibility helpers
 
@@ -82,6 +85,43 @@ assert shape == (5, 3, 4)
 assert mt.broadcast_shapes(mt.zeros(2, 1, 4).shape, (3, 4)) == (2, 3, 4)
 assert mt.can_broadcast((1, 3), (2, 3))
 assert not mt.can_broadcast((2, 3), (4, 3))
+```
+
+`atleast_1d(*inputs)`, `atleast_2d(*inputs)`, and `atleast_3d(*inputs)` mirror
+NumPy's `atleast_*` shape conventions while returning MiniTensor tensors.
+Existing `Tensor` inputs are preserved when they already satisfy the requested
+rank; lower-rank inputs use lightweight reshape/unsqueeze operations. Supplying
+one input returns a single `Tensor`, while supplying multiple inputs returns a
+tuple of tensors in the same order.
+
+Shape rules and validation:
+
+- `atleast_1d` reshapes scalar inputs to `(1,)` and leaves rank-1-or-higher
+  tensors unchanged.
+- `atleast_2d` reshapes scalars to `(1, 1)`, promotes vectors to row tensors of
+  shape `(1, N)`, and leaves matrices and higher-rank tensors unchanged.
+- `atleast_3d` reshapes scalars to `(1, 1, 1)`, promotes vectors to
+  `(1, N, 1)`, appends one trailing singleton dimension to matrices, and leaves
+  rank-3-or-higher tensors unchanged.
+- Empty vectors and matrices follow the same shape rules, for example
+  `atleast_2d(mt.Tensor([])).shape == (1, 0)`.
+- Calling any `atleast_*` helper without inputs raises `TypeError`.
+
+Example:
+
+```python
+import minitensor as mt
+
+scalar = mt.atleast_1d(3.5)
+row = mt.atleast_2d(mt.Tensor([1.0, 2.0, 3.0]))
+matrix_3d = mt.atleast_3d(mt.Tensor([[1.0, 2.0], [3.0, 4.0]]))
+first, second = mt.atleast_3d(1.0, mt.zeros(0, 2))
+
+assert scalar.shape == (1,)
+assert row.shape == (1, 3)
+assert matrix_3d.shape == (2, 2, 1)
+assert first.shape == (1, 1, 1)
+assert second.shape == (0, 2, 1)
 ```
 
 ### Compatibility tensor module
@@ -252,13 +292,15 @@ Each of the following names is accessible from:
 ```
 cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
 median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, nan_to_num,
-logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, softsign,
-rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal, trace, solve,
-flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes, swapdims,
-squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll, clip, clamp,
-clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin, acos, atan,
-sinh, cosh, asinh, acosh, atanh, maximum, minimum, array_equal, allclose,
-where, one_hot, masked_fill
+logsumexp, softmax, log_softmax, masked_softmax, masked_log_softmax, sum, prod,
+mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
+hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
+layer_norm, rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
+trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
+swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
+clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
+acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, expm1, logaddexp, maximum,
+minimum, array_equal, allclose, where, one_hot, masked_fill
 ```
 
 ### Elementwise extrema

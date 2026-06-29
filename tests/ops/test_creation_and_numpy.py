@@ -517,6 +517,12 @@ def test_search_api_normalizes_core_module_names():
     assert "relu" in hits
 
 
+def test_bound_api_helpers_preserve_callable_metadata():
+    assert mt.search_api.__name__ == "search_api"
+    assert mt.search_api.__doc__
+    assert mt._resolve_symbol.__name__ == "_resolve_symbol"
+
+
 def test_module_public_names_covers_optional_and_optim_branches():
     def _public_module(name: str):
         module = types.ModuleType(name)

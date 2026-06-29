@@ -1405,3 +1405,64 @@ def test_manual_seed_makes_randint_like_deterministic():
     mt.manual_seed(333)
     second = mt.randint_like(base, 0, 5).numpy()
     np.testing.assert_array_equal(first, second)
+
+
+def test_atleast_1d_shapes_scalars_vectors_and_multiple_inputs():
+    scalar = mt.atleast_1d(3.5)
+    vector = mt.Tensor([1, 2, 3])
+    first, second = mt.atleast_1d(1, vector)
+
+    assert scalar.shape == (1,)
+    np.testing.assert_allclose(scalar.numpy(), np.array([3.5], dtype=np.float32))
+    assert first.shape == (1,)
+    assert second is vector
+    assert second.shape == (3,)
+
+
+def test_atleast_2d_matches_numpy_shape_conventions():
+    scalar = mt.atleast_2d(2)
+    vector = mt.Tensor([1.0, 2.0, 3.0])
+    matrix = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    row, unchanged = mt.atleast_2d(vector, matrix)
+
+    assert scalar.shape == (1, 1)
+    assert row.shape == (1, 3)
+    assert unchanged is matrix
+    np.testing.assert_allclose(row.numpy(), np.atleast_2d(vector.numpy()))
+
+
+def test_atleast_3d_matches_numpy_shape_conventions_and_errors_without_inputs():
+    scalar = mt.atleast_3d(2)
+    vector = mt.Tensor([1.0, 2.0, 3.0])
+    matrix = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    cube = mt.ones(2, 3, 4)
+    vector_3d, matrix_3d, unchanged = mt.atleast_3d(vector, matrix, cube)
+
+    assert scalar.shape == (1, 1, 1)
+    assert vector_3d.shape == (1, 3, 1)
+    assert matrix_3d.shape == (2, 2, 1)
+    assert unchanged is cube
+    np.testing.assert_allclose(vector_3d.numpy(), np.atleast_3d(vector.numpy()))
+    np.testing.assert_allclose(matrix_3d.numpy(), np.atleast_3d(matrix.numpy()))
+    with pytest.raises(TypeError, match="requires at least one input"):
+        mt.atleast_3d()
+
+
+def test_atleast_helpers_handle_empty_and_higher_rank_inputs():
+    empty_vector = mt.Tensor([])
+    empty_matrix = mt.Tensor.zeros(0, 2)
+    cube = mt.ones(2, 3, 4)
+
+    assert mt.atleast_1d(empty_vector) is empty_vector
+    assert mt.atleast_2d(empty_vector).shape == (1, 0)
+    assert mt.atleast_3d(empty_vector).shape == (1, 0, 1)
+    assert mt.atleast_3d(empty_matrix).shape == (0, 2, 1)
+    assert mt.atleast_1d(cube) is cube
+    assert mt.atleast_2d(cube) is cube
+    assert mt.atleast_3d(cube) is cube
+
+
+@pytest.mark.parametrize("helper", [mt.atleast_1d, mt.atleast_2d])
+def test_atleast_helpers_reject_missing_inputs(helper):
+    with pytest.raises(TypeError, match="requires at least one input"):
+        helper()
