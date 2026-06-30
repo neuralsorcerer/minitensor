@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
-import builtins as _builtins
 import operator as _operator
+
+import numpy as _np
 
 from . import _core as _C
 
@@ -63,27 +64,13 @@ def broadcast_shapes(*shapes: object) -> tuple[int, ...]:
         _normalize_shape_argument(shape, f"shapes[{index}]")
         for index, shape in enumerate(shapes)
     ]
-    result_reversed: list[int] = []
-    max_rank = _builtins.max(len(shape) for shape in normalized_shapes)
-
-    for axis_from_end in range(max_rank):
-        resolved = 1
-        for shape in normalized_shapes:
-            if axis_from_end >= len(shape):
-                continue
-            dim = shape[-1 - axis_from_end]
-            if dim == 1 or dim == resolved:
-                continue
-            if resolved == 1:
-                resolved = dim
-                continue
-            raise ValueError(
-                "shapes cannot be broadcast together: "
-                + ", ".join(str(shape) for shape in normalized_shapes)
-            )
-        result_reversed.append(resolved)
-
-    return tuple(reversed(result_reversed))
+    try:
+        return tuple(int(dim) for dim in _np.broadcast_shapes(*normalized_shapes))
+    except ValueError as exc:
+        raise ValueError(
+            "shapes cannot be broadcast together: "
+            + ", ".join(str(shape) for shape in normalized_shapes)
+        ) from exc
 
 
 def can_broadcast(*shapes: object) -> bool:

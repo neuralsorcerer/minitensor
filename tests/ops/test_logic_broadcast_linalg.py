@@ -424,6 +424,19 @@ def test_broadcast_shapes_matches_numpy_style_rules() -> None:
     assert mt.broadcast_shapes((IndexLike(1), IndexLike(4)), (3, 1)) == (3, 4)
 
 
+def test_broadcast_shapes_matches_numpy_edge_cases() -> None:
+    cases = [
+        ((),),
+        ((0,), (1,)),
+        ((1, 0), (3, 0)),
+        ((1, 1, 0), (2, 3, 0), (3, 0)),
+        ((1,) * 8, (2, 1, 3, 1, 4, 1, 5, 1)),
+    ]
+
+    for shapes in cases:
+        assert mt.broadcast_shapes(*shapes) == np.broadcast_shapes(*shapes)
+
+
 def test_broadcast_shapes_accepts_tensor_shape_objects() -> None:
     tensor = mt.zeros(2, 1, 4)
     assert mt.broadcast_shapes(tensor.shape, (3, 4)) == (2, 3, 4)
