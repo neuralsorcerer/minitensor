@@ -454,6 +454,7 @@ def test_can_broadcast_returns_boolean_without_raising() -> None:
 def test_broadcast_helpers_are_public_api_entries() -> None:
     top_level = mt.list_public_api()["top_level"]
     assert "broadcast_shapes" in top_level
+    assert "broadcast_tensors" in top_level
     assert "can_broadcast" in top_level
 
 
@@ -929,3 +930,55 @@ def test_tensor_cross_invalid_axis():
     b = Tensor([4.0, 5.0, 6.0])
     with pytest.raises(ValueError):
         a.cross(b, axis=1)
+
+
+def test_broadcast_tensors_expands_inputs_without_eager_materialization() -> None:
+    row = mt.Tensor([[1.0, 2.0, 3.0]], dtype="float32", requires_grad=True)
+    column = mt.Tensor([[10.0], [20.0]], dtype="float32")
+    scalar = 5.0
+
+    row_b, column_b, scalar_b = mt.broadcast_tensors(row, column, scalar)
+
+    assert row_b.shape == (2, 3)
+    assert column_b.shape == (2, 3)
+    assert scalar_b.shape == (2, 3)
+    assert row_b.requires_grad is True
+    np.testing.assert_allclose(
+        row_b.numpy(), np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        column_b.numpy(),
+        np.array([[10.0, 10.0, 10.0], [20.0, 20.0, 20.0]], dtype=np.float32),
+    )
+    np.testing.assert_allclose(scalar_b.numpy(), np.full((2, 3), 5.0, dtype=np.float32))
+
+
+def test_broadcast_tensors_validates_inputs_and_reuses_matching_tensors() -> None:
+    tensor = mt.ones((2, 3))
+
+    (same,) = mt.broadcast_tensors(tensor)
+    assert same is tensor
+
+    with pytest.raises(TypeError):
+        mt.broadcast_tensors()
+
+    with pytest.raises(ValueError):
+        mt.broadcast_tensors(mt.ones((2, 3)), mt.ones((4, 3)))
+
+
+def test_broadcast_tensors_handles_zero_sized_broadcast_edges() -> None:
+    one = mt.ones((1,), dtype="float64", requires_grad=True)
+    empty = mt.ones((0,), dtype="float32")
+
+    one_b, empty_b = mt.broadcast_tensors(one, empty)
+
+    assert one_b.shape == (0,)
+    assert one_b.dtype == "float64"
+    assert one_b.device == one.device
+    assert one_b.requires_grad is True
+    assert one_b.numpy().shape == (0,)
+    assert empty_b is empty
+
+    leading, matrix_empty = mt.broadcast_tensors(mt.ones((1, 3)), mt.ones((0, 3)))
+    assert leading.shape == (0, 3)
+    assert matrix_empty.shape == (0, 3)

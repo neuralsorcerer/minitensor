@@ -51,6 +51,7 @@ of convenience aliases.
 | `describe_api(symbol)` | Return a one-line description for a symbol. |
 | `help()` | Render a formatted MiniTensor API reference. |
 | `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
+| `broadcast_tensors(*inputs)` | Convert tensor-like inputs and broadcast them to a shared shape, returning lightweight views where possible. |
 | `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
 | `atleast_1d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least one dimension. |
 | `atleast_2d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least two dimensions. |
@@ -64,6 +65,15 @@ may be a non-negative integer-like scalar dimension (including objects with
 `__index__`, such as NumPy integer scalars) or an iterable shape such as a
 Python tuple/list or `tensor.shape`. Scalar tensor shapes are represented by an
 empty iterable, for example `broadcast_shapes((), (2, 3)) == (2, 3)`.
+
+`broadcast_tensors(*inputs)` applies those same compatibility rules to actual
+tensor-like inputs. It converts non-`Tensor` inputs with `as_tensor`, computes
+the shared target shape once, prepends singleton dimensions when needed, and
+uses backend `expand` views for broadcasted outputs whenever possible. If a
+valid broadcast changes a length-one axis to a length-zero axis, MiniTensor
+returns a correctly shaped empty tensor preserving the source dtype, device,
+and `requires_grad` metadata because that result has no addressable elements to
+view. Inputs that already have the target shape are returned unchanged.
 
 Validation and edge cases:
 
@@ -83,6 +93,17 @@ import minitensor as mt
 shape = mt.broadcast_shapes((5, 1, 4), (1, 3, 1), (3, 4))
 assert shape == (5, 3, 4)
 assert mt.broadcast_shapes(mt.zeros(2, 1, 4).shape, (3, 4)) == (2, 3, 4)
+
+row, column, scalar = mt.broadcast_tensors(
+    mt.Tensor([[1.0, 2.0, 3.0]]),
+    mt.Tensor([[10.0], [20.0]]),
+    5.0,
+)
+assert row.shape == column.shape == scalar.shape == (2, 3)
+
+empty, already_empty = mt.broadcast_tensors(mt.ones(1), mt.ones(0))
+assert empty.shape == already_empty.shape == (0,)
+
 assert mt.can_broadcast((1, 3), (2, 3))
 assert not mt.can_broadcast((2, 3), (4, 3))
 ```

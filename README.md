@@ -170,6 +170,9 @@ min_vals, min_idx = x.min(dim=1)           # Returns values & indices; empty dim
 close = mt.allclose([0.0, float("inf")], [-0.0, float("inf")])
 exact = mt.array_equal([1, 2], mt.tensor([1.0, 2.0], dtype="float32"))
 broadcasted_shape = mt.broadcast_shapes(x.shape, (1, 4))
+broadcasted_x, broadcasted_row = mt.broadcast_tensors(
+    mt.ones(3, 1), mt.Tensor([[1.0, 2.0, 3.0, 4.0]])
+)
 row = mt.atleast_2d(mt.Tensor([1.0, 2.0, 3.0]))
 
 print(result.shape)                        # Shape([3, 4])
@@ -181,6 +184,7 @@ print(float(max_val.numpy().ravel()[0]))   # 0.0
 print(min_idx.numpy())                     # [0 0 0]
 print(close, exact)                        # True True
 print(broadcasted_shape)                    # (3, 4)
+print(broadcasted_x.shape, broadcasted_row.shape)  # Shape([3, 4]) Shape([3, 4])
 print(row.shape)                           # Shape([1, 3])
 ```
 

@@ -20,7 +20,14 @@ from ._exports import (
     _bind_functional_forwarders,
     _ensure_unique_names,
 )
-from ._shape import atleast_1d, atleast_2d, atleast_3d, broadcast_shapes, can_broadcast
+from ._shape import (
+    atleast_1d,
+    atleast_2d,
+    atleast_3d,
+    broadcast_shapes,
+    broadcast_tensors,
+    can_broadcast,
+)
 
 _api_namespace = globals()
 available_submodules = _api_helpers._bind_namespace(
@@ -262,6 +269,7 @@ _BASE_EXPORTS = (
     "list_public_api",
     "api_summary",
     "broadcast_shapes",
+    "broadcast_tensors",
     "can_broadcast",
     "atleast_1d",
     "atleast_2d",

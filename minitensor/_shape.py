@@ -96,6 +96,66 @@ def can_broadcast(*shapes: object) -> bool:
     return True
 
 
+def broadcast_tensors(*inputs: object) -> tuple[Tensor, ...]:
+    """Broadcast tensor-like inputs to a shared shape.
+
+    Inputs are converted with :func:`as_tensor`, then reshaped and expanded
+    according to NumPy/PyTorch broadcasting rules. The returned tensors are
+    views when the backend can represent the expansion without copying. Valid
+    zero-sized broadcasts that cannot be represented as views return empty
+    tensors preserving dtype, device, and ``requires_grad`` metadata.
+    """
+
+    if not inputs:
+        raise TypeError("broadcast_tensors requires at least one input")
+
+    tensors = tuple(_atleast_tensor(input) for input in inputs)
+    target_shape = broadcast_shapes(*(tuple(tensor.shape) for tensor in tensors))
+
+    return tuple(_broadcast_tensor_to(tensor, target_shape) for tensor in tensors)
+
+
+def _broadcast_tensor_to(tensor: Tensor, target_shape: tuple[int, ...]) -> Tensor:
+    current_shape = tuple(tensor.shape)
+    if current_shape == target_shape:
+        return tensor
+
+    if _requires_zero_size_materialization(current_shape, target_shape):
+        return Tensor.empty(
+            target_shape,
+            dtype=tensor.dtype,
+            device=_C.Device(tensor.device),
+            requires_grad=tensor.requires_grad,
+        )
+
+    rank_delta = len(target_shape) - len(current_shape)
+    reshaped = tensor
+    if rank_delta:
+        reshaped = tensor.reshape((1,) * rank_delta + current_shape)
+    return reshaped.expand(*target_shape)
+
+
+def _requires_zero_size_materialization(
+    current_shape: tuple[int, ...], target_shape: tuple[int, ...]
+) -> bool:
+    """Return whether broadcasting must create an empty tensor.
+
+    The Rust backend can expand existing zero-sized axes, but it cannot model
+    an axis that changes from length one to zero as a view because that shape
+    has no addressable elements. NumPy treats this as a valid broadcast, so the
+    Python helper returns a correctly shaped empty tensor for that edge case.
+    """
+
+    if 0 not in target_shape:
+        return False
+
+    padded_shape = (1,) * (len(target_shape) - len(current_shape)) + current_shape
+    return any(
+        current_dim == 1 and target_dim == 0
+        for current_dim, target_dim in zip(padded_shape, target_shape)
+    )
+
+
 def _atleast_tensor(input: object) -> Tensor:
     """Convert an input to a Tensor while preserving existing Tensor objects."""
 
