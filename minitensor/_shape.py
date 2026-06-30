@@ -102,6 +102,28 @@ def broadcast_tensors(*inputs: object) -> tuple[Tensor, ...]:
     return tuple(_broadcast_tensor_to(tensor, target_shape) for tensor in tensors)
 
 
+def broadcast_to(input: object, shape: object) -> Tensor:
+    """Broadcast a tensor-like input to an explicit target shape.
+
+    The input is converted with :func:`as_tensor`, and ``shape`` accepts the
+    same validated shape-like values as :func:`broadcast_shapes`. The returned
+    tensor is the original tensor when it already has the requested shape, an
+    expanded view when possible, or a metadata-preserving empty tensor for the
+    valid zero-sized broadcasts that cannot be represented as views.
+    """
+
+    tensor = _atleast_tensor(input)
+    target_shape = _normalize_shape_argument(shape, "shape")
+    # Reuse the shared broadcast validator so error behavior is identical to
+    # broadcast_shapes/broadcast_tensors before asking the backend to expand.
+    broadcasted_shape = broadcast_shapes(tuple(tensor.shape), target_shape)
+    if broadcasted_shape != target_shape:
+        raise ValueError(
+            f"input shape {tuple(tensor.shape)} cannot be broadcast to {target_shape}"
+        )
+    return _broadcast_tensor_to(tensor, target_shape)
+
+
 def _broadcast_tensor_to(tensor: Tensor, target_shape: tuple[int, ...]) -> Tensor:
     current_shape = tuple(tensor.shape)
     if current_shape == target_shape:

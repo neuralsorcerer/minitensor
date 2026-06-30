@@ -464,8 +464,61 @@ def test_can_broadcast_returns_boolean_without_raising() -> None:
     assert mt.can_broadcast((2, "bad")) is False
 
 
+def test_broadcast_to_matches_numpy_and_reuses_existing_tensor() -> None:
+    tensor = mt.Tensor([[1.0], [2.0]])
+
+    result = mt.broadcast_to(tensor, (2, 3))
+
+    assert result.shape == (2, 3)
+    np.testing.assert_array_equal(
+        result.numpy(), np.broadcast_to(tensor.numpy(), (2, 3))
+    )
+    assert mt.broadcast_to(result, (2, 3)) is result
+
+
+def test_broadcast_to_accepts_tensor_like_inputs_and_scalar_shape() -> None:
+    result = mt.broadcast_to([7.0], 4)
+
+    assert result.shape == (4,)
+    np.testing.assert_array_equal(result.numpy(), np.full((4,), 7.0, dtype=np.float32))
+
+
+def test_broadcast_to_supports_scalar_targets_and_leading_zero_axes() -> None:
+    scalar = mt.broadcast_to(mt.Tensor(3.0), ())
+    assert scalar.shape == ()
+    np.testing.assert_array_equal(scalar.numpy(), np.array(3.0, dtype=np.float32))
+
+    empty_row = mt.broadcast_to(mt.ones(0), (1, 0))
+    assert empty_row.shape == (1, 0)
+    np.testing.assert_array_equal(empty_row.numpy(), np.empty((1, 0), dtype=np.float32))
+
+
+def test_broadcast_to_handles_zero_sized_target_metadata() -> None:
+    tensor = mt.Tensor.ones((1,), dtype="float32", requires_grad=True)
+
+    result = mt.broadcast_to(tensor, (0,))
+
+    assert result.shape == (0,)
+    assert result.dtype == tensor.dtype
+    assert result.device == tensor.device
+    assert result.requires_grad is True
+    np.testing.assert_array_equal(result.numpy(), np.empty((0,), dtype=np.float32))
+
+
+def test_broadcast_to_rejects_invalid_or_incompatible_targets() -> None:
+    with pytest.raises(ValueError, match="cannot be broadcast"):
+        mt.broadcast_to(mt.ones(2, 3), (3, 2))
+    with pytest.raises(ValueError, match="cannot be broadcast"):
+        mt.broadcast_to(mt.ones(1, 2), (2,))
+    with pytest.raises(ValueError, match="non-negative"):
+        mt.broadcast_to(mt.ones(1), (2, -1))
+    with pytest.raises(TypeError, match="not bool"):
+        mt.broadcast_to(mt.ones(1), True)
+
+
 def test_broadcast_helpers_are_public_api_entries() -> None:
     top_level = mt.list_public_api()["top_level"]
+    assert "broadcast_to" in top_level
     assert "broadcast_shapes" in top_level
     assert "broadcast_tensors" in top_level
     assert "can_broadcast" in top_level

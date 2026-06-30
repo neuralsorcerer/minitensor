@@ -50,6 +50,7 @@ of convenience aliases.
 | `search_api(query, module=None)` | Search available symbols by name. |
 | `describe_api(symbol)` | Return a one-line description for a symbol. |
 | `help()` | Render a formatted MiniTensor API reference. |
+| `broadcast_to(input, shape)` | Broadcast one tensor-like input to an explicit target shape. |
 | `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
 | `broadcast_tensors(*inputs)` | Convert tensor-like inputs and broadcast them to a shared shape, returning lightweight views where possible. |
 | `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
@@ -74,6 +75,12 @@ valid broadcast changes a length-one axis to a length-zero axis, MiniTensor
 returns a correctly shaped empty tensor preserving the source dtype, device,
 and `requires_grad` metadata because that result has no addressable elements to
 view. Inputs that already have the target shape are returned unchanged.
+
+`broadcast_to(input, shape)` is the single-input counterpart for cases where
+the target shape is already known. It uses the same validation and expansion
+path as `broadcast_tensors`, so it preserves dtype, device, and
+`requires_grad` metadata for zero-sized results and returns the original tensor
+unchanged when no broadcast is needed.
 
 Validation and edge cases:
 
@@ -103,6 +110,9 @@ assert row.shape == column.shape == scalar.shape == (2, 3)
 
 empty, already_empty = mt.broadcast_tensors(mt.ones(1), mt.ones(0))
 assert empty.shape == already_empty.shape == (0,)
+
+column = mt.broadcast_to(mt.Tensor([[1.0], [2.0]]), (2, 3))
+assert column.shape == (2, 3)
 
 assert mt.can_broadcast((1, 3), (2, 3))
 assert not mt.can_broadcast((2, 3), (4, 3))

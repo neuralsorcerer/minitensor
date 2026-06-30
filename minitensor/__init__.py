@@ -26,6 +26,7 @@ from ._shape import (
     atleast_3d,
     broadcast_shapes,
     broadcast_tensors,
+    broadcast_to,
     can_broadcast,
 )
 
@@ -268,6 +269,7 @@ _BASE_EXPORTS = (
     "available_submodules",
     "list_public_api",
     "api_summary",
+    "broadcast_to",
     "broadcast_shapes",
     "broadcast_tensors",
     "can_broadcast",
