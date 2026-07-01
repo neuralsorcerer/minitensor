@@ -163,6 +163,7 @@ w = mt.from_numpy(np_array) # From NumPy
 result = x + y                             # Element-wise addition
 product = x.matmul(y.transpose(0, 1))      # Matrix multiplication
 mean_val = x.mean()                        # Reduction operations
+nan_median = mt.nanmedian(mt.Tensor([1.0, np.nan, 5.0]))
 std_by_row = w.astype("float32").std(dim=1, unbiased=False)
 var_all = w.astype("float32").var(dim=(0, 1), unbiased=False)
 max_val = x.max()                          # -inf for empty or all-NaN tensors
@@ -178,6 +179,7 @@ row = mt.atleast_2d(mt.Tensor([1.0, 2.0, 3.0]))
 print(result.shape)                        # Shape([3, 4])
 print(product.shape)                       # Shape([3, 3])
 print(float(mean_val.numpy().ravel()[0]))  # 0.0
+print(float(nan_median.numpy().ravel()[0]))  # 3.0
 print(std_by_row.shape)                    # Shape([2])
 print(float(var_all.numpy().ravel()[0]))   # 2.9166667
 print(float(max_val.numpy().ravel()[0]))   # 0.0

@@ -375,6 +375,54 @@ def test_nanquantile_matches_numpy():
     np.testing.assert_allclose(quant.numpy(), expected, rtol=1e-6, atol=1e-6)
 
 
+def test_nanmedian_matches_numpy_and_top_level_export():
+    data = mt.tensor([np.nan, 1.0, 3.0, np.nan, 5.0])
+    expected = np.nanmedian(data.numpy())
+
+    method_result = data.nanmedian()
+    functional_result = F.nanmedian(data)
+    top_level_result = mt.nanmedian(data)
+
+    assert method_result.shape == ()
+    np.testing.assert_allclose(method_result.numpy(), expected, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        functional_result.numpy(), expected, rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(top_level_result.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanmedian_dim_keepdim_matches_numpy():
+    data = mt.tensor([[1.0, np.nan, 5.0, 7.0], [2.0, 4.0, np.nan, 10.0]])
+    values = data.nanmedian(dim=1, keepdim=True)
+    expected = np.nanmedian(data.numpy(), axis=1, keepdims=True)
+
+    assert values.shape == (2, 1)
+    np.testing.assert_allclose(values.numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_nanmedian_all_nan_and_empty_slices_return_nan():
+    all_nan = mt.tensor([np.nan, np.nan])
+    assert np.isnan(all_nan.nanmedian().numpy())
+
+    data = mt.tensor([[np.nan, np.nan], [1.0, np.nan]])
+    values = data.nanmedian(dim=1)
+
+    np.testing.assert_allclose(
+        values.numpy(), np.array([np.nan, 1.0], dtype=np.float32), equal_nan=True
+    )
+
+    empty = mt.tensor(np.empty((0, 2), dtype=np.float32))
+    empty_values = empty.nanmedian(dim=0)
+    assert empty_values.shape == (2,)
+    assert np.isnan(empty_values.numpy()).all()
+
+
+def test_nanmedian_rejects_non_float_tensors():
+    data = mt.tensor([1, 2, 3], dtype="int32")
+    with pytest.raises(ValueError, match="nanmedian"):
+        data.nanmedian()
+
+
 def test_nanquantile_sequence_dim_keepdim():
     data = mt.tensor([[1.0, np.nan, 5.0], [2.0, 4.0, np.nan]])
     probs = [0.25, 0.75]

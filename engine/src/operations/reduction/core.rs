@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -359,6 +359,26 @@ pub fn nanquantile(
     }
 }
 
+/// Compute the median while ignoring NaN values.
+pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
+
+    match dim {
+        None => nanmedian_all(tensor, keepdim),
+        Some(dim_value) => {
+            if tensor.ndim() == 0 {
+                if dim_value == 0 || dim_value == -1 {
+                    return nanmedian_all(tensor, keepdim);
+                }
+                return Err(MinitensorError::index_error(dim_value, 0, 1));
+            }
+
+            let axis = normalize_dim(dim_value, tensor.ndim())?;
+            nanmedian_along_dim(tensor, axis, keepdim)
+        }
+    }
+}
+
 /// Compute multiple quantiles of the tensor data in a single pass while ignoring NaN values.
 pub fn nanquantiles(
     tensor: &Tensor,
@@ -416,11 +436,15 @@ fn validate_quantile_value(q: f64) -> Result<()> {
 }
 
 fn ensure_floating_point_dtype(dtype: DataType) -> Result<()> {
+    ensure_floating_point_dtype_for(dtype, "quantile")
+}
+
+fn ensure_floating_point_dtype_for(dtype: DataType, operation: &str) -> Result<()> {
     match dtype {
         DataType::Float32 | DataType::Float64 => Ok(()),
-        _ => Err(MinitensorError::invalid_operation(
-            "quantile() currently supports only floating point tensors".to_string(),
-        )),
+        _ => Err(MinitensorError::invalid_operation(format!(
+            "{operation}() currently supports only floating point tensors"
+        ))),
     }
 }
 

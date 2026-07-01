@@ -273,6 +273,13 @@ impl Tensor {
         nanquantile(self, q, dim, keepdim, interpolation)
     }
 
+    /// Median reduction that ignores NaN values
+    #[inline(always)]
+    pub fn nanmedian(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        use crate::operations::reduction::nanmedian;
+        nanmedian(self, dim, keepdim)
+    }
+
     /// Batched quantile reduction for multiple probabilities at once
     #[inline(always)]
     pub fn quantiles(

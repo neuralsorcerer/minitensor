@@ -196,6 +196,13 @@ impl PyTensor {
         }
     }
 
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanmedian(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.nanmedian(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(signature = (q, dim=None, keepdim=false, interpolation="linear"))]
     pub fn quantile(
         &self,

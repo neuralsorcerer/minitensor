@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -255,6 +255,168 @@ fn nanquantile_along_dim(
                         let quant = quantile_from_unsorted_f64(&mut buffer, q, interpolation);
                         values[o * inner + r] = quant;
                     }
+                }
+            }
+        }
+        _ => unreachable!("dtype validated"),
+    }
+
+    Ok(Tensor::new(
+        Arc::new(values_data),
+        values_shape,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
+fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+    let output_dims = if keepdim && tensor.ndim() > 0 {
+        vec![1; tensor.ndim()]
+    } else {
+        Vec::new()
+    };
+    let shape = Shape::new(output_dims);
+    let mut values_data =
+        TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let data = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            let mut buffer: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+            values[0] = if buffer.is_empty() {
+                f32::NAN
+            } else {
+                quantile_from_unsorted_f32(&mut buffer, 0.5, QuantileInterpolation::Linear)
+            };
+        }
+        DataType::Float64 => {
+            let data = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            let mut buffer: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+            values[0] = if buffer.is_empty() {
+                f64::NAN
+            } else {
+                quantile_from_unsorted_f64(&mut buffer, 0.5, QuantileInterpolation::Linear)
+            };
+        }
+        _ => unreachable!("dtype validated"),
+    }
+
+    Ok(Tensor::new(
+        Arc::new(values_data),
+        shape,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
+fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+    let dims = tensor.shape().dims();
+    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
+
+    let mut out_dims = if dims.is_empty() {
+        vec![1]
+    } else {
+        dims.to_vec()
+    };
+
+    if keepdim {
+        if !out_dims.is_empty() {
+            out_dims[dim] = 1;
+        }
+    } else if !out_dims.is_empty() {
+        out_dims.remove(dim);
+    }
+
+    let values_shape = Shape::new(out_dims);
+    let num_out = values_shape.numel();
+    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
+
+    let outer = if dims.is_empty() || dim == 0 {
+        1
+    } else {
+        dims[..dim].iter().product()
+    };
+    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    let outer_stride = dim_size * inner;
+
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let input = tensor
+                .data()
+                .as_f32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f32 slice")
+            })?;
+            let mut buffer = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    buffer.clear();
+                    for d in 0..dim_size {
+                        let value = input[o * outer_stride + d * inner + r];
+                        if !value.is_nan() {
+                            buffer.push(value);
+                        }
+                    }
+                    let out_idx = o * inner + r;
+                    values[out_idx] = if buffer.is_empty() {
+                        f32::NAN
+                    } else {
+                        quantile_from_unsorted_f32(
+                            &mut buffer,
+                            0.5,
+                            QuantileInterpolation::Linear,
+                        )
+                    };
+                }
+            }
+        }
+        DataType::Float64 => {
+            let input = tensor
+                .data()
+                .as_f64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable f64 slice")
+            })?;
+            let mut buffer = Vec::with_capacity(dim_size);
+            for o in 0..outer {
+                for r in 0..inner {
+                    buffer.clear();
+                    for d in 0..dim_size {
+                        let value = input[o * outer_stride + d * inner + r];
+                        if !value.is_nan() {
+                            buffer.push(value);
+                        }
+                    }
+                    let out_idx = o * inner + r;
+                    values[out_idx] = if buffer.is_empty() {
+                        f64::NAN
+                    } else {
+                        quantile_from_unsorted_f64(
+                            &mut buffer,
+                            0.5,
+                            QuantileInterpolation::Linear,
+                        )
+                    };
                 }
             }
         }

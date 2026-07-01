@@ -256,7 +256,7 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 
 ### Reductions, statistics, and equality
 
-- `sum`, `mean`, `median`, `quantile`, `nanquantile`
+- `sum`, `mean`, `median`, `nanmedian`, `quantile`, `nanquantile`
 - `std(dim=None, unbiased=True, keepdim=False)`
 - `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
@@ -273,6 +273,13 @@ those axes are removed after the reduction. `unbiased=True` applies the sample
 variance correction (`N / (N - 1)`) over the total number of reduced elements,
 and reductions with one or fewer samples return `NaN` rather than emitting a
 Python warning.
+
+`nanmedian(dim=None, keepdim=False)` is available as a tensor method,
+functional helper, and top-level helper. It ignores `NaN` values in floating
+point tensors, returns `NaN` for all-NaN or empty reduced slices without
+emitting a Python warning, and rejects non-floating tensors. `dim` accepts a
+single integer axis or `None`; use `keepdim=True` to preserve the reduced axis
+with length one.
 
 Example:
 
@@ -323,7 +330,7 @@ Each of the following names is accessible from:
 
 ```
 cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
-median, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, isnan,
+median, nanmedian, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, isnan,
 isinf, isfinite, nan_to_num, logsumexp, softmax, log_softmax,
 masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,

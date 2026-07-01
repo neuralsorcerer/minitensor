@@ -23,6 +23,7 @@ _FUNCTIONAL_FORWARDERS = (
     "sort",
     "argsort",
     "median",
+    "nanmedian",
     "quantile",
     "nanquantile",
     "nansum",
