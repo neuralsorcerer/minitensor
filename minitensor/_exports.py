@@ -111,6 +111,7 @@ _FUNCTIONAL_FORWARDERS = (
     "logaddexp",
     "maximum",
     "minimum",
+    "isclose",
     "array_equal",
     "allclose",
     "where",

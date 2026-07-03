@@ -261,6 +261,7 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 - `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
 - `logsumexp`
+- `isclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
@@ -340,7 +341,7 @@ trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
 acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, expm1, logaddexp, maximum,
-minimum, array_equal, allclose, where, one_hot, masked_fill
+minimum, isclose, array_equal, allclose, where, one_hot, masked_fill
 ```
 
 ### Finite and NaN predicates
@@ -414,17 +415,21 @@ assert mt.functional.minimum(x, -1.0).tolist() == [
 
 ### Equality helpers
 
-`array_equal(input, other)` and `allclose(input, other, rtol=1e-5,
+`isclose(input, other, rtol=1e-5, atol=1e-8, equal_nan=False)`,
+`array_equal(input, other)`, and `allclose(input, other, rtol=1e-5,
 atol=1e-8, equal_nan=False)` are available as both top-level helpers and
-functional helpers. Both accept MiniTensor tensors and tensor-like Python inputs
+functional helpers. They accept MiniTensor tensors and tensor-like Python inputs
 (such as Python scalars/sequences and NumPy arrays) through the normal
-Python-to-tensor conversion path.
+Python-to-tensor conversion path. `isclose` returns an elementwise boolean
+tensor, while `array_equal` and `allclose` return Python `bool` values.
 
 Behavior and validation:
 
+- `isclose` broadcasts compatible shapes, promotes compatible numeric dtypes,
+  and returns a boolean tensor mask with the broadcasted shape.
 - `array_equal` requires equal shapes, promotes compatible numeric dtypes, and
   returns a Python `bool` indicating exact element equality after promotion.
-- `allclose` promotes compatible numeric dtypes and applies
+- `isclose` and `allclose` promote compatible numeric dtypes and apply
   `abs(a - b) <= atol + rtol * abs(b)` for finite unequal floating-point values.
 - Exact equality is accepted before tolerance checks, so signed zeros and
   matching infinities compare as close. Opposite infinities and finite/non-finite
@@ -438,6 +443,8 @@ Example:
 ```python
 import minitensor as mt
 
+mask = mt.isclose([[1.0, 2.0]], [1.0 + 1e-6, 3.0], rtol=1e-5)
+assert mask.tolist() == [[True, False]]
 assert mt.array_equal([1, 2], mt.tensor([1.0, 2.0], dtype="float32"))
 assert mt.allclose([0.0, float("inf")], [-0.0, float("inf")])
 assert mt.allclose([float("nan")], [float("nan")], equal_nan=True)

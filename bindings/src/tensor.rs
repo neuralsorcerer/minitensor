@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -11,6 +11,7 @@ include!("tensor/pytensor/grad.rs");
 include!("tensor/pytensor/arithmetic.rs");
 include!("tensor/pytensor/comparison_dunder.rs");
 include!("tensor/pytensor/comparison.rs");
+include!("tensor/pytensor/isclose.rs");
 include!("tensor/pytensor/reduction.rs");
 include!("tensor/pytensor/math.rs");
 include!("tensor/pytensor/numpy.rs");

@@ -326,6 +326,87 @@ macro_rules! cmp_op {
     };
 }
 
+#[inline(always)]
+fn isclose_f32(a: f32, b: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if equal_nan && a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    (a - b).abs() <= atol + rtol * b.abs()
+}
+
+#[inline(always)]
+fn isclose_f64(a: f64, b: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if equal_nan && a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    (a - b).abs() <= atol + rtol * b.abs()
+}
+
+pub fn isclose(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> Result<Tensor> {
+    if !rtol.is_finite() || !atol.is_finite() || rtol < 0.0 || atol < 0.0 {
+        return Err(MinitensorError::invalid_operation(
+            "rtol and atol must be non-negative, finite values",
+        ));
+    }
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, common_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let mut output_data =
+        TensorData::zeros_on_device(output_shape.numel(), DataType::Bool, lhs.device());
+
+    match common_dtype {
+        DataType::Float32 => cmp_f32(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| {
+            isclose_f32(a, b, rtol as f32, atol as f32, equal_nan)
+        })?,
+        DataType::Float64 => cmp_f64(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| {
+            isclose_f64(a, b, rtol, atol, equal_nan)
+        })?,
+        DataType::Int32 => cmp_i32(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| {
+            a == b
+        })?,
+        DataType::Int64 => cmp_i64(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| {
+            a == b
+        })?,
+        DataType::Bool => cmp_bool(lhs_ref, rhs_ref, &mut output_data, &output_shape, |a, b| {
+            a == b
+        })?,
+    }
+
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        DataType::Bool,
+        lhs.device(),
+        false,
+    ))
+}
+
 cmp_op!(eq, ==, true);
 cmp_op!(ne, !=, true);
 cmp_op!(lt, <, false);

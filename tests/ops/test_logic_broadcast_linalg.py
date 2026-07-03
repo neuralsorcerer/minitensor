@@ -1048,3 +1048,31 @@ def test_broadcast_tensors_handles_zero_sized_broadcast_edges() -> None:
     leading, matrix_empty = mt.broadcast_tensors(mt.ones((1, 3)), mt.ones((0, 3)))
     assert leading.shape == (0, 3)
     assert matrix_empty.shape == (0, 3)
+
+
+def test_isclose_returns_elementwise_mask_with_broadcasting_and_special_values():
+    left = mt.tensor([[1.0, 2.0, float("nan"), float("inf")]], dtype="float32")
+    right = mt.tensor([1.0 + 1e-6, 3.0, float("nan"), float("inf")], dtype="float32")
+
+    result = mt.isclose(left, right, rtol=1e-5, atol=1e-8, equal_nan=True)
+
+    expected = np.isclose(
+        left.numpy(), right.numpy(), rtol=1e-5, atol=1e-8, equal_nan=True
+    )
+    np.testing.assert_array_equal(result.numpy(), expected)
+
+
+def test_isclose_matches_methods_and_rejects_invalid_tolerances():
+    tensor = mt.tensor([1, 2, 3], dtype="int64")
+    other = [1.0, 2.0, 4.0]
+
+    functional_result = mt.functional.isclose(tensor, other)
+    method_result = tensor.isclose(other)
+
+    np.testing.assert_array_equal(
+        functional_result.numpy(), np.array([True, True, False])
+    )
+    np.testing.assert_array_equal(method_result.numpy(), functional_result.numpy())
+
+    with pytest.raises(ValueError):
+        mt.isclose(tensor, tensor, rtol=-1.0)

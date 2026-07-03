@@ -168,6 +168,7 @@ std_by_row = w.astype("float32").std(dim=1, unbiased=False)
 var_all = w.astype("float32").var(dim=(0, 1), unbiased=False)
 max_val = x.max()                          # -inf for empty or all-NaN tensors
 min_vals, min_idx = x.min(dim=1)           # Returns values & indices; empty dims yield (inf, 0)
+close_mask = mt.isclose([[1.0, 2.0]], [1.0 + 1e-6, 3.0])
 close = mt.allclose([0.0, float("inf")], [-0.0, float("inf")])
 exact = mt.array_equal([1, 2], mt.tensor([1.0, 2.0], dtype="float32"))
 broadcasted_shape = mt.broadcast_shapes(x.shape, (1, 4))
