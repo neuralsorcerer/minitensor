@@ -176,6 +176,7 @@ broadcasted_x, broadcasted_row = mt.broadcast_tensors(
     mt.ones(3, 1), mt.Tensor([[1.0, 2.0, 3.0, 4.0]])
 )
 row = mt.atleast_2d(mt.Tensor([1.0, 2.0, 3.0]))
+grid_x, grid_y = mt.meshgrid(mt.Tensor([1.0, 2.0]), mt.Tensor([10.0, 20.0, 30.0]))
 
 print(result.shape)                        # Shape([3, 4])
 print(product.shape)                       # Shape([3, 3])
@@ -189,6 +190,7 @@ print(close, exact)                        # True True
 print(broadcasted_shape)                    # (3, 4)
 print(broadcasted_x.shape, broadcasted_row.shape)  # Shape([3, 4]) Shape([3, 4])
 print(row.shape)                           # Shape([1, 3])
+print(grid_x.shape, grid_y.shape)           # Shape([3, 2]) Shape([3, 2])
 ```
 
 #### Neural Networks

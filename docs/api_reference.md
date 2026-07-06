@@ -57,6 +57,7 @@ of convenience aliases.
 | `atleast_1d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least one dimension. |
 | `atleast_2d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least two dimensions. |
 | `atleast_3d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least three dimensions. |
+| `meshgrid(*inputs, indexing="xy", sparse=False, copy=False)` | Build coordinate grids from scalar or 1-D tensor-like coordinates. |
 
 ### Shape compatibility helpers
 
@@ -116,6 +117,46 @@ assert column.shape == (2, 3)
 
 assert mt.can_broadcast((1, 3), (2, 3))
 assert not mt.can_broadcast((2, 3), (4, 3))
+```
+
+`meshgrid(*inputs, indexing="xy", sparse=False, copy=False)` constructs coordinate
+grids from scalar or one-dimensional tensor-like coordinates. With the default
+`indexing="xy"`, the first two output axes are swapped to follow Cartesian
+plotting conventions; `indexing="ij"` preserves matrix-indexing order for all
+axes. Dense outputs are generated as lightweight broadcast views by default,
+while `sparse=True` returns only reshaped coordinate vectors that can still
+broadcast together lazily. Set `copy=True` when callers need independent tensor
+storage rather than a view. Calling `meshgrid()` with no inputs returns `()`,
+matching NumPy's empty-input convention.
+
+Validation and edge cases:
+
+- Each coordinate input must be scalar or one-dimensional after conversion with
+  `as_tensor`; higher-rank inputs raise `ValueError`.
+- Scalar inputs are promoted to length-one coordinates.
+- `indexing` must be either `"xy"` or `"ij"`; invalid strings raise
+  `ValueError`, and non-string values raise `TypeError`.
+- `sparse` and `copy` must be booleans.
+- Empty coordinate vectors are supported. Dense grids involving empty vectors
+  follow the same zero-sized broadcast behavior as `broadcast_to`.
+
+Example:
+
+```python
+import minitensor as mt
+
+x = mt.Tensor([1.0, 2.0, 3.0])
+y = mt.Tensor([10.0, 20.0])
+
+grid_x, grid_y = mt.meshgrid(x, y)
+assert grid_x.shape == grid_y.shape == (2, 3)
+
+sparse_x, sparse_y = mt.meshgrid(x, y, indexing="ij", sparse=True)
+assert sparse_x.shape == (3, 1)
+assert sparse_y.shape == (1, 2)
+
+(singleton,) = mt.meshgrid(5.0, copy=True)
+assert singleton.shape == (1,)
 ```
 
 `atleast_1d(*inputs)`, `atleast_2d(*inputs)`, and `atleast_3d(*inputs)` mirror

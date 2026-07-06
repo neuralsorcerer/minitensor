@@ -179,6 +179,72 @@ def _return_atleast_result(results: list[Tensor]) -> Tensor | tuple[Tensor, ...]
     return tuple(results)
 
 
+def meshgrid(
+    *inputs: object, indexing: str = "xy", sparse: bool = False, copy: bool = False
+) -> tuple[Tensor, ...]:
+    """Return coordinate matrices from one-dimensional coordinate tensors.
+
+    This NumPy-compatible helper accepts tensor-like 1-D inputs and returns
+    broadcasted coordinate grids. ``indexing="ij"`` preserves input axis
+    order, while ``indexing="xy"`` swaps the first two axes for Cartesian
+    plotting conventions. With ``sparse=True`` the function returns reshaped
+    coordinate vectors that broadcast lazily instead of materializing full
+    grids. Set ``copy=True`` when independent dense tensor storage is required.
+    """
+
+    if not inputs:
+        return ()
+
+    if not isinstance(indexing, str):
+        raise TypeError("indexing must be a string")
+    if indexing not in {"xy", "ij"}:
+        raise ValueError('indexing must be either "xy" or "ij"')
+    if not isinstance(sparse, bool):
+        raise TypeError("sparse must be a bool")
+    if not isinstance(copy, bool):
+        raise TypeError("copy must be a bool")
+
+    vectors = tuple(
+        _meshgrid_vector(input, index) for index, input in enumerate(inputs)
+    )
+    ndim = len(vectors)
+    lengths = [int(vector.shape[0]) for vector in vectors]
+    if indexing == "xy" and ndim > 1:
+        lengths[0], lengths[1] = lengths[1], lengths[0]
+
+    results: list[Tensor] = []
+    for axis, vector in enumerate(vectors):
+        output_axis = _meshgrid_output_axis(axis, ndim, indexing)
+        view_shape = [1] * ndim
+        view_shape[output_axis] = int(vector.shape[0])
+        reshaped = vector.reshape(*view_shape)
+        if not sparse:
+            reshaped = broadcast_to(reshaped, tuple(lengths))
+        results.append(reshaped.clone() if copy else reshaped)
+    return tuple(results)
+
+
+def _meshgrid_vector(input: object, index: int) -> Tensor:
+    tensor = _atleast_tensor(input)
+    ndim = tensor.ndim()
+    if ndim == 0:
+        return tensor.reshape(1)
+    if ndim != 1:
+        raise ValueError(
+            f"meshgrid inputs must be scalars or 1-D tensors; input {index} has ndim {ndim}"
+        )
+    return tensor
+
+
+def _meshgrid_output_axis(axis: int, ndim: int, indexing: str) -> int:
+    if indexing == "xy" and ndim > 1:
+        if axis == 0:
+            return 1
+        if axis == 1:
+            return 0
+    return axis
+
+
 def atleast_1d(*inputs: object) -> Tensor | tuple[Tensor, ...]:
     """Convert inputs to tensors with at least one dimension.
 

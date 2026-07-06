@@ -28,6 +28,7 @@ from ._shape import (
     broadcast_tensors,
     broadcast_to,
     can_broadcast,
+    meshgrid,
 )
 
 _api_namespace = globals()
@@ -276,6 +277,7 @@ _BASE_EXPORTS = (
     "atleast_1d",
     "atleast_2d",
     "atleast_3d",
+    "meshgrid",
     "search_api",
     "describe_api",
     "help",

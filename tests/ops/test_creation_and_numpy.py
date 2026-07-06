@@ -599,3 +599,54 @@ def test_api_module_helper_edge_cases():
 def test_module_public_names_rejects_non_string_input():
     with pytest.raises(TypeError, match="module must be a string"):
         mt._module_public_names(None)  # type: ignore[arg-type]
+
+
+def test_meshgrid_empty_input_matches_numpy_convention():
+    assert mt.meshgrid() == ()
+
+
+def test_meshgrid_xy_matches_numpy_dense_and_uses_views():
+    x = mt.Tensor([1.0, 2.0, 3.0])
+    y = mt.Tensor([10.0, 20.0])
+
+    grid_x, grid_y = mt.meshgrid(x, y)
+    expected_x, expected_y = np.meshgrid(x.numpy(), y.numpy(), indexing="xy")
+
+    assert grid_x.shape == [2, 3]
+    assert grid_y.shape == [2, 3]
+    np.testing.assert_allclose(grid_x.numpy(), expected_x)
+    np.testing.assert_allclose(grid_y.numpy(), expected_y)
+
+
+def test_meshgrid_ij_sparse_and_scalar_edges():
+    scalar = mt.Tensor(5.0)
+    y = mt.Tensor([1, 2], dtype="int32")
+    z = [7, 8, 9]
+
+    gx, gy, gz = mt.meshgrid(scalar, y, z, indexing="ij", sparse=True)
+
+    assert gx.shape == [1, 1, 1]
+    assert gy.shape == [1, 2, 1]
+    assert gz.shape == [1, 1, 3]
+    np.testing.assert_allclose(gx.numpy(), np.array([[[5.0]]], dtype=np.float32))
+    np.testing.assert_array_equal(gy.numpy(), np.array([[[1], [2]]], dtype=np.int32))
+    np.testing.assert_array_equal(gz.numpy(), np.array([[[7, 8, 9]]]))
+
+
+def test_meshgrid_copy_returns_independent_dense_tensors():
+    x = mt.Tensor([1.0, 2.0])
+    (grid_x,) = mt.meshgrid(x, copy=True)
+
+    assert grid_x.shape == [2]
+    np.testing.assert_allclose(grid_x.numpy(), np.array([1.0, 2.0], dtype=np.float32))
+
+
+def test_meshgrid_rejects_invalid_arguments():
+    with pytest.raises(ValueError, match="indexing"):
+        mt.meshgrid([1, 2], indexing="bad")
+    with pytest.raises(TypeError, match="sparse"):
+        mt.meshgrid([1, 2], sparse=1)
+    with pytest.raises(TypeError, match="copy"):
+        mt.meshgrid([1, 2], copy=1)
+    with pytest.raises(ValueError, match="1-D"):
+        mt.meshgrid(mt.Tensor.ones((2, 2)))
