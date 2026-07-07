@@ -791,6 +791,25 @@ def test_topk_with_dim_argument():
     np.testing.assert_array_equal(indices.numpy(), np.array([[0], [1]], dtype=np.int64))
 
 
+def test_topk_sorted_partial_tie_indices_are_stable():
+    x = mt.tensor([1.0, 5.0, 5.0, 4.0, 3.0, 2.0], dtype="float32")
+    values, indices = x.topk(3, largest=True, sorted=True)
+
+    np.testing.assert_array_equal(
+        values.numpy(), np.array([5.0, 5.0, 4.0], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(indices.numpy(), np.array([1, 2, 3], dtype=np.int64))
+
+
+def test_topk_sorted_partial_nan_ordering():
+    x = mt.tensor([1.0, np.nan, 3.0, np.nan, 2.0], dtype="float32")
+    values, indices = x.topk(3, largest=True, sorted=True)
+
+    assert np.isnan(values.numpy()[:2]).all()
+    assert values.numpy()[2] == pytest.approx(3.0)
+    np.testing.assert_array_equal(indices.numpy(), np.array([1, 3, 2], dtype=np.int64))
+
+
 def test_topk_zero_k():
     x = mt.tensor([1.0, 2.0, 3.0])
     values, indices = x.topk(0)

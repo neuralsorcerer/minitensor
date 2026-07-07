@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -840,6 +840,36 @@ mod tests {
             .collect();
         pairs.sort_by_key(|p| p.0);
         assert_eq!(pairs, vec![(1, -2.0), (3, 0.0)]);
+    }
+
+    #[test]
+    fn test_topk_sorted_partial_ties_by_first_index() {
+        let t = create_tensor_f32(vec![1.0, 5.0, 5.0, 4.0, 3.0, 2.0], vec![6]);
+        let (values, indices) = topk(&t, 3, None, true, true).unwrap();
+
+        assert_eq!(values.data().as_f32_slice().unwrap(), &[5.0, 5.0, 4.0]);
+        assert_eq!(indices.data().as_i64_slice().unwrap(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_topk_sorted_smallest_bool() {
+        let t = create_tensor_bool(vec![true, false, true, false], vec![4]);
+        let (values, indices) = topk(&t, 2, None, false, true).unwrap();
+
+        assert_eq!(values.data().as_bool_slice().unwrap(), &[false, false]);
+        assert_eq!(indices.data().as_i64_slice().unwrap(), &[1, 3]);
+    }
+
+    #[test]
+    fn test_topk_sorted_partial_nan_ordering() {
+        let t = create_tensor_f32(vec![1.0, f32::NAN, 3.0, f32::NAN, 2.0], vec![5]);
+        let (values, indices) = topk(&t, 3, None, true, true).unwrap();
+        let values = values.data().as_f32_slice().unwrap();
+
+        assert!(values[0].is_nan());
+        assert!(values[1].is_nan());
+        assert_eq!(values[2], 3.0);
+        assert_eq!(indices.data().as_i64_slice().unwrap(), &[1, 3, 2]);
     }
 
     #[test]

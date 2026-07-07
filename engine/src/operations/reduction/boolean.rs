@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -399,6 +399,27 @@ pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
     }
 }
 
+#[inline]
+fn select_topk_entries<T>(
+    entries: &mut [(usize, T)],
+    k: usize,
+    sorted: bool,
+    compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+) {
+    if k == 0 || entries.is_empty() {
+        return;
+    }
+
+    if k < entries.len() {
+        entries.select_nth_unstable_by(k - 1, compare);
+        if sorted {
+            entries[..k].sort_by(compare);
+        }
+    } else if sorted {
+        entries.sort_by(compare);
+    }
+}
+
 /// Return the top-``k`` values and their indices along ``dim``
 pub fn topk(
     tensor: &Tensor,
@@ -496,19 +517,8 @@ pub fn topk(
                         entries.push((d, input[idx]));
                     }
 
-                    if sorted {
-                        if largest {
-                            entries.sort_by(cmp_f32_desc);
-                        } else {
-                            entries.sort_by(cmp_f32_asc);
-                        }
-                    } else if k < dim_size {
-                        if largest {
-                            entries.select_nth_unstable_by(k - 1, cmp_f32_desc);
-                        } else {
-                            entries.select_nth_unstable_by(k - 1, cmp_f32_asc);
-                        }
-                    }
+                    let compare = if largest { cmp_f32_desc } else { cmp_f32_asc };
+                    select_topk_entries(&mut entries, k, sorted, compare);
 
                     let base = (o * inner + r) * k;
                     for j in 0..k {
@@ -540,19 +550,8 @@ pub fn topk(
                         entries.push((d, input[idx]));
                     }
 
-                    if sorted {
-                        if largest {
-                            entries.sort_by(cmp_f64_desc);
-                        } else {
-                            entries.sort_by(cmp_f64_asc);
-                        }
-                    } else if k < dim_size {
-                        if largest {
-                            entries.select_nth_unstable_by(k - 1, cmp_f64_desc);
-                        } else {
-                            entries.select_nth_unstable_by(k - 1, cmp_f64_asc);
-                        }
-                    }
+                    let compare = if largest { cmp_f64_desc } else { cmp_f64_asc };
+                    select_topk_entries(&mut entries, k, sorted, compare);
 
                     let base = (o * inner + r) * k;
                     for j in 0..k {
@@ -584,19 +583,8 @@ pub fn topk(
                         entries.push((d, input[idx]));
                     }
 
-                    if sorted {
-                        if largest {
-                            entries.sort_by(cmp_i32_desc);
-                        } else {
-                            entries.sort_by(cmp_i32_asc);
-                        }
-                    } else if k < dim_size {
-                        if largest {
-                            entries.select_nth_unstable_by(k - 1, cmp_i32_desc);
-                        } else {
-                            entries.select_nth_unstable_by(k - 1, cmp_i32_asc);
-                        }
-                    }
+                    let compare = if largest { cmp_i32_desc } else { cmp_i32_asc };
+                    select_topk_entries(&mut entries, k, sorted, compare);
 
                     let base = (o * inner + r) * k;
                     for j in 0..k {
@@ -628,19 +616,8 @@ pub fn topk(
                         entries.push((d, input[idx]));
                     }
 
-                    if sorted {
-                        if largest {
-                            entries.sort_by(cmp_i64_desc);
-                        } else {
-                            entries.sort_by(cmp_i64_asc);
-                        }
-                    } else if k < dim_size {
-                        if largest {
-                            entries.select_nth_unstable_by(k - 1, cmp_i64_desc);
-                        } else {
-                            entries.select_nth_unstable_by(k - 1, cmp_i64_asc);
-                        }
-                    }
+                    let compare = if largest { cmp_i64_desc } else { cmp_i64_asc };
+                    select_topk_entries(&mut entries, k, sorted, compare);
 
                     let base = (o * inner + r) * k;
                     for j in 0..k {
@@ -672,19 +649,8 @@ pub fn topk(
                         entries.push((d, input[idx]));
                     }
 
-                    if sorted {
-                        if largest {
-                            entries.sort_by(cmp_bool_desc);
-                        } else {
-                            entries.sort_by(cmp_bool_asc);
-                        }
-                    } else if k < dim_size {
-                        if largest {
-                            entries.select_nth_unstable_by(k - 1, cmp_bool_desc);
-                        } else {
-                            entries.select_nth_unstable_by(k - 1, cmp_bool_asc);
-                        }
-                    }
+                    let compare = if largest { cmp_bool_desc } else { cmp_bool_asc };
+                    select_topk_entries(&mut entries, k, sorted, compare);
 
                     let base = (o * inner + r) * k;
                     for j in 0..k {
