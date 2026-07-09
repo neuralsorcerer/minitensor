@@ -140,6 +140,141 @@ fn make_one_hot_data(
     }
 }
 
+fn bincount_labels(tensor: &Tensor) -> PyResult<Vec<usize>> {
+    if !tensor.device().is_cpu() {
+        return Err(PyValueError::new_err(
+            "bincount currently requires input labels on the CPU",
+        ));
+    }
+
+    let values: Vec<i64> = match tensor.dtype() {
+        DataType::Int64 => tensor
+            .data()
+            .as_i64_slice()
+            .map(|slice| slice.to_vec())
+            .ok_or_else(|| PyValueError::new_err("bincount could not read int64 input"))?,
+        DataType::Int32 => tensor
+            .data()
+            .as_i32_slice()
+            .map(|slice| slice.iter().map(|&value| i64::from(value)).collect())
+            .ok_or_else(|| PyValueError::new_err("bincount could not read int32 input"))?,
+        DataType::Bool => tensor
+            .data()
+            .as_bool_slice()
+            .map(|slice| slice.iter().map(|&value| i64::from(value)).collect())
+            .ok_or_else(|| PyValueError::new_err("bincount could not read bool input"))?,
+        dtype => {
+            return Err(PyTypeError::new_err(format!(
+                "bincount input must have an integer or bool dtype, got {dtype:?}",
+            )));
+        }
+    };
+
+    values
+        .into_iter()
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "bincount input values must be non-negative, got {value}",
+                ))
+            })
+        })
+        .collect()
+}
+
+fn bincount_output_len(labels: &[usize], minlength: isize) -> PyResult<usize> {
+    if minlength < 0 {
+        return Err(PyValueError::new_err("minlength must be non-negative"));
+    }
+
+    let inferred = labels
+        .iter()
+        .copied()
+        .max()
+        .map(|value| {
+            value
+                .checked_add(1)
+                .ok_or_else(|| PyValueError::new_err("bincount output size overflow"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    Ok(inferred.max(minlength as usize))
+}
+
+fn bincount_tensor(data: TensorData, dtype: DataType, output_len: usize) -> Tensor {
+    Tensor::new(
+        Arc::new(data),
+        Shape::new(vec![output_len]),
+        dtype,
+        Device::cpu(),
+        false,
+    )
+}
+
+fn make_bincount_tensor(
+    labels: &[usize],
+    weights: Option<&Tensor>,
+    minlength: isize,
+) -> PyResult<Tensor> {
+    let output_len = bincount_output_len(labels, minlength)?;
+
+    match weights {
+        None => {
+            let mut counts = vec![0_i64; output_len];
+            for &label in labels {
+                counts[label] = counts[label].checked_add(1).ok_or_else(|| {
+                    PyValueError::new_err("bincount count overflow for int64 output")
+                })?;
+            }
+            Ok(bincount_tensor(
+                TensorData::from_vec_i64(counts, Device::cpu()),
+                DataType::Int64,
+                output_len,
+            ))
+        }
+        Some(weight_tensor) => {
+            if !weight_tensor.device().is_cpu() {
+                return Err(PyValueError::new_err(
+                    "bincount currently requires weights on the CPU",
+                ));
+            }
+            match weight_tensor.dtype() {
+                DataType::Float32 => {
+                    let values = weight_tensor.data().as_f32_slice().ok_or_else(|| {
+                        PyValueError::new_err("bincount could not read float32 weights")
+                    })?;
+                    let mut counts = vec![0.0_f32; output_len];
+                    for (&label, &weight) in labels.iter().zip(values) {
+                        counts[label] += weight;
+                    }
+                    Ok(bincount_tensor(
+                        TensorData::from_vec_f32(counts, Device::cpu()),
+                        DataType::Float32,
+                        output_len,
+                    ))
+                }
+                DataType::Float64 => {
+                    let values = weight_tensor.data().as_f64_slice().ok_or_else(|| {
+                        PyValueError::new_err("bincount could not read float64 weights")
+                    })?;
+                    let mut counts = vec![0.0_f64; output_len];
+                    for (&label, &weight) in labels.iter().zip(values) {
+                        counts[label] += weight;
+                    }
+                    Ok(bincount_tensor(
+                        TensorData::from_vec_f64(counts, Device::cpu()),
+                        DataType::Float64,
+                        output_len,
+                    ))
+                }
+                dtype => Err(PyTypeError::new_err(format!(
+                    "bincount weights must have a floating-point dtype, got {dtype:?}",
+                ))),
+            }
+        }
+    }
+}
+
 fn to_pylist<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
     if let Ok(list) = value.cast::<PyList>() {
         return Ok(list.clone());
@@ -411,6 +546,35 @@ pub fn where_function(
             tensor.where_method(condition, other)
         }
     }
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, weights=None, minlength=0))]
+pub fn bincount(
+    input: &Bound<PyAny>,
+    weights: Option<&Bound<PyAny>>,
+    minlength: isize,
+) -> PyResult<PyTensor> {
+    let input_tensor = one_hot_input_to_tensor(input)?;
+    if input_tensor.shape().ndim() != 1 {
+        return Err(PyValueError::new_err("bincount input must be 1-D"));
+    }
+
+    let labels = bincount_labels(&input_tensor)?;
+    let weights_tensor = borrow_optional_tensor(weights)?;
+    if let Some(weight_tensor) = weights_tensor.as_deref()
+        && weight_tensor.tensor().shape().dims() != input_tensor.shape().dims()
+    {
+        return Err(PyValueError::new_err(
+            "weights must have the same shape as input",
+        ));
+    }
+    let output = make_bincount_tensor(
+        &labels,
+        weights_tensor.as_deref().map(PyTensor::tensor),
+        minlength,
+    )?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
@@ -1162,6 +1326,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
     parent.add_function(wrap_pyfunction!(where_function, parent)?)?;
     parent.add_function(wrap_pyfunction!(one_hot, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bincount, parent)?)?;
     parent.add_function(wrap_pyfunction!(masked_fill, parent)?)?;
     parent.add_function(wrap_pyfunction!(softmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(log_softmax, parent)?)?;

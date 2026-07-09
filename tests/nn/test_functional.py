@@ -722,3 +722,48 @@ def test_one_hot_rejects_invalid_labels_and_class_counts():
 
     with pytest.raises(TypeError, match="integer or bool dtype"):
         mt.one_hot(1.5)
+
+
+def test_bincount_counts_bool_and_integer_labels():
+    labels = mt.Tensor([0, 2, 1, 2, 2], dtype="int64")
+    counts = mt.bincount(labels)
+    assert counts.dtype == "int64"
+    assert np.array_equal(counts.numpy(), np.array([1, 1, 3], dtype=np.int64))
+
+    bool_counts = mt.functional.bincount([True, False, True], minlength=3)
+    assert np.array_equal(bool_counts.numpy(), np.array([1, 2, 0], dtype=np.int64))
+
+
+def test_bincount_weighted_and_empty_edge_cases():
+    labels = mt.Tensor([0, 1, 1, 3], dtype="int32")
+    weights = mt.Tensor([0.5, 1.25, 2.75, -1.0], dtype="float64")
+    counts = mt.bincount(labels, weights=weights, minlength=5)
+    expected = np.array([0.5, 4.0, 0.0, -1.0, 0.0], dtype=np.float64)
+    assert counts.dtype == "float64"
+    assert np.allclose(counts.numpy(), expected)
+
+    f32_counts = mt.bincount(labels, weights=weights.astype("float32"))
+    assert f32_counts.dtype == "float32"
+    assert np.allclose(f32_counts.numpy(), expected[:4].astype(np.float32))
+
+    empty = mt.bincount(mt.Tensor([], dtype="int64"), minlength=2)
+    assert np.array_equal(empty.numpy(), np.array([0, 0], dtype=np.int64))
+
+
+def test_bincount_rejects_invalid_inputs():
+    with pytest.raises(ValueError, match="non-negative"):
+        mt.bincount(mt.Tensor([0, -1], dtype="int64"))
+    with pytest.raises(ValueError, match="1-D"):
+        mt.bincount(mt.Tensor(1, dtype="int64"))
+    with pytest.raises(ValueError, match="1-D"):
+        mt.bincount(mt.Tensor([[0, 1]], dtype="int64"))
+    with pytest.raises(TypeError, match="integer or bool dtype"):
+        mt.bincount(mt.Tensor([0.0], dtype="float32"))
+    with pytest.raises(ValueError, match="same shape"):
+        mt.bincount(mt.Tensor([0, 1], dtype="int64"), weights=mt.Tensor([1.0]))
+    with pytest.raises(ValueError, match="same shape"):
+        mt.bincount(mt.Tensor([0, 1], dtype="int64"), weights=mt.Tensor([[1.0, 2.0]]))
+    with pytest.raises(TypeError, match="floating-point"):
+        mt.bincount(
+            mt.Tensor([0, 1], dtype="int64"), weights=mt.Tensor([1, 2], dtype="int64")
+        )

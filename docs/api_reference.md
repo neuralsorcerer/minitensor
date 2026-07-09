@@ -382,7 +382,7 @@ trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
 acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, expm1, logaddexp, maximum,
-minimum, isclose, array_equal, allclose, where, one_hot, masked_fill
+minimum, isclose, array_equal, allclose, where, one_hot, bincount, masked_fill
 ```
 
 ### Finite and NaN predicates
@@ -523,6 +523,43 @@ import minitensor as mt
 labels = mt.Tensor([[0, 2], [1, 2]], dtype="int64")
 encoded = mt.one_hot(labels, dtype="int32")
 assert encoded.shape_vec() == [2, 2, 3]
+```
+
+### Bin counting
+
+`bincount(input, weights=None, minlength=0)` counts occurrences of non-negative
+integer or boolean labels in a 1-D input tensor. The helper is available as both
+`minitensor.bincount(...)` and `minitensor.functional.bincount(...)`.
+
+Supported inputs:
+
+- `Tensor` values with `int32`, `int64`, or `bool` dtype on CPU.
+- Python integer/bool sequences and NumPy integer/bool arrays through the normal
+  Python-to-tensor conversion path.
+- Optional `weights` as a MiniTensor/tensor-like CPU tensor with the exact same
+  shape as `input` and floating-point dtype (`float32` or `float64`).
+
+Behavior and validation:
+
+- `input` must be exactly 1-D; scalar and multidimensional inputs are rejected.
+- Labels must be non-negative. Unweighted output has `int64` dtype.
+- With `weights`, output dtype follows the weight dtype and each bin contains
+  the sum of weights for positions assigned to that label.
+- Output length is `max(max(input) + 1, minlength)`, or `minlength` for empty
+  inputs. `minlength` must be non-negative.
+- `bincount` is currently CPU-only and rejects non-CPU label or weight tensors.
+
+Example:
+
+```python
+import minitensor as mt
+
+labels = mt.Tensor([0, 2, 1, 2, 2], dtype="int64")
+assert mt.bincount(labels).tolist() == [1, 1, 3]
+
+weights = mt.Tensor([0.5, 1.0, 2.0, 3.0, -1.0], dtype="float32")
+weighted = mt.functional.bincount(labels, weights=weights, minlength=4)
+assert weighted.tolist() == [0.5, 2.0, 3.0, 0.0]
 ```
 
 ### Tensor-centric math helpers

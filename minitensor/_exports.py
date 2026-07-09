@@ -116,6 +116,7 @@ _FUNCTIONAL_FORWARDERS = (
     "allclose",
     "where",
     "one_hot",
+    "bincount",
     "masked_fill",
 )
 
