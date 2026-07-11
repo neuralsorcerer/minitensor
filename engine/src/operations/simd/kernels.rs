@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -350,11 +350,7 @@ fn simd_mul_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<(
 
 fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = if rhs[i] == 0.0 {
-            f32::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
     Ok(())
 }
@@ -452,11 +448,7 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f32::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())
@@ -553,11 +545,7 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f32::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())
@@ -654,11 +642,7 @@ unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f32::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())
@@ -871,6 +855,40 @@ mod tests {
 
         assert_eq!(result[0], f32::INFINITY);
         assert_eq!(result[1], 1.0);
+    }
+
+    #[test]
+    fn test_simd_div_by_zero_ieee_semantics_including_tail() {
+        let len = 19;
+        let a: Vec<f32> = (0..len)
+            .map(|i| match i % 3 {
+                0 => -1.0,
+                1 => 0.0,
+                _ => 1.0,
+            })
+            .collect();
+        let b = vec![0.0_f32; len];
+        let mut result = vec![0.0_f32; len];
+        simd_div_f32(&a, &b, &mut result).unwrap();
+        for i in 0..len {
+            match i % 3 {
+                0 => assert_eq!(result[i], f32::NEG_INFINITY, "index {i}"),
+                1 => assert!(result[i].is_nan(), "index {i}"),
+                _ => assert_eq!(result[i], f32::INFINITY, "index {i}"),
+            }
+        }
+
+        let a64: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+        let b64 = vec![0.0_f64; len];
+        let mut result64 = vec![0.0_f64; len];
+        simd_div_f64(&a64, &b64, &mut result64).unwrap();
+        for i in 0..len {
+            match i % 3 {
+                0 => assert_eq!(result64[i], f64::NEG_INFINITY, "index {i}"),
+                1 => assert!(result64[i].is_nan(), "index {i}"),
+                _ => assert_eq!(result64[i], f64::INFINITY, "index {i}"),
+            }
+        }
     }
 
     #[test]

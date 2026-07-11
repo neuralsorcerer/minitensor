@@ -37,6 +37,28 @@ def test_division_broadcasting_and_zero():
     np.testing.assert_allclose(result[0, 1], 1.0)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_division_by_zero_follows_ieee_754(dtype):
+    # -x/0 -> -inf, 0/0 -> nan, +x/0 -> inf, matching NumPy/PyTorch. Use 20
+    # elements so both the SIMD body and its remainder tail are exercised and
+    # must agree.
+    pattern = np.array([-1.0, 0.0, 1.0, 2.0] * 5, dtype=dtype)
+    zeros = np.zeros(20, dtype=dtype)
+    result = (
+        mt.tensor(pattern.tolist(), dtype=dtype)
+        / mt.tensor(zeros.tolist(), dtype=dtype)
+    ).numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        expected = pattern / zeros
+    np.testing.assert_array_equal(result, expected)
+
+    # Broadcast (scalar divisor) path must agree with the same-shape path.
+    broadcast = (
+        mt.tensor(pattern.tolist(), dtype=dtype)
+        / mt.tensor(0.0, dtype=dtype)
+    ).numpy()
+    np.testing.assert_array_equal(broadcast, expected)
+
 def test_boolean_arithmetic_matches_pytorch():
     a = mt.Tensor([True, False], dtype="bool")
     b = mt.Tensor([False, True], dtype="bool")

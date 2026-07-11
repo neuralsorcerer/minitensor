@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -261,9 +261,7 @@ impl FusionSequence {
                     let second_slice = second.data().as_f32_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f32 slice from second input")
                     })?;
-                    binary_apply_f32(input_slice, second_slice, output_slice, |a, b| {
-                        if b == 0.0 { f32::INFINITY } else { a / b }
-                    });
+                    binary_apply_f32(input_slice, second_slice, output_slice, |a, b| a / b);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Div operation requires two inputs",
@@ -348,9 +346,7 @@ impl FusionSequence {
                     let second_slice = second.data().as_f64_slice().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get f64 slice from second input")
                     })?;
-                    binary_apply_f64(input_slice, second_slice, output_slice, |a, b| {
-                        if b == 0.0 { f64::INFINITY } else { a / b }
-                    });
+                    binary_apply_f64(input_slice, second_slice, output_slice, |a, b| a / b);
                 } else {
                     return Err(MinitensorError::invalid_operation(
                         "Div operation requires two inputs",

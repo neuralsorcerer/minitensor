@@ -52,7 +52,7 @@ of convenience aliases.
 | `help()` | Render a formatted MiniTensor API reference. |
 | `broadcast_to(input, shape)` | Broadcast one tensor-like input to an explicit target shape. |
 | `broadcast_shapes(*shapes)` | Compute the NumPy/PyTorch-style broadcast result for shape-like inputs without constructing tensors. |
-| `broadcast_tensors(*inputs)` | Convert tensor-like inputs and broadcast them to a shared shape, returning lightweight views where possible. |
+| `broadcast_tensors(*inputs)` | Convert tensor-like inputs and broadcast them to a shared shape, returning materialized contiguous tensors. |
 | `can_broadcast(*shapes)` | Return whether shape-like inputs are broadcast-compatible. |
 | `atleast_1d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least one dimension. |
 | `atleast_2d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least two dimensions. |
@@ -71,11 +71,13 @@ empty iterable, for example `broadcast_shapes((), (2, 3)) == (2, 3)`.
 `broadcast_tensors(*inputs)` applies those same compatibility rules to actual
 tensor-like inputs. It converts non-`Tensor` inputs with `as_tensor`, computes
 the shared target shape once, prepends singleton dimensions when needed, and
-uses backend `expand` views for broadcasted outputs whenever possible. If a
-valid broadcast changes a length-one axis to a length-zero axis, MiniTensor
-returns a correctly shaped empty tensor preserving the source dtype, device,
-and `requires_grad` metadata because that result has no addressable elements to
-view. Inputs that already have the target shape are returned unchanged.
+expands each input to the target shape, materializing the result with
+contiguous storage so every downstream operation behaves identically to a
+dense tensor. If a valid broadcast changes a length-one axis to a length-zero
+axis, MiniTensor returns a correctly shaped empty tensor preserving the source
+dtype, device, and `requires_grad` metadata because that result has no
+addressable elements. Inputs that already have the target shape are returned
+unchanged.
 
 `broadcast_to(input, shape)` is the single-input counterpart for cases where
 the target shape is already known. It uses the same validation and expansion
@@ -123,10 +125,10 @@ assert not mt.can_broadcast((2, 3), (4, 3))
 grids from scalar or one-dimensional tensor-like coordinates. With the default
 `indexing="xy"`, the first two output axes are swapped to follow Cartesian
 plotting conventions; `indexing="ij"` preserves matrix-indexing order for all
-axes. Dense outputs are generated as lightweight broadcast views by default,
-while `sparse=True` returns only reshaped coordinate vectors that can still
-broadcast together lazily. Set `copy=True` when callers need independent tensor
-storage rather than a view. Calling `meshgrid()` with no inputs returns `()`,
+axes. Dense outputs are materialized broadcast grids, while `sparse=True`
+returns only reshaped coordinate vectors that can still broadcast together
+lazily inside later operations. Set `copy=True` when callers need storage
+independent of the returned grid objects. Calling `meshgrid()` with no inputs returns `()`,
 matching NumPy's empty-input convention.
 
 Validation and edge cases:

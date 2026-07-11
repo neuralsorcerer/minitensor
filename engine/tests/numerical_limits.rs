@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -48,7 +48,7 @@ fn test_division_by_zero_infinities() {
     let result = arithmetic::div(&a, &b).unwrap();
     let vals = result.data().as_f32_slice().unwrap();
     assert!(vals[0].is_infinite() && vals[0].is_sign_positive());
-    assert!(vals[1].is_infinite() && vals[1].is_sign_positive());
+    assert!(vals[1].is_infinite() && vals[1].is_sign_negative());
 }
 
 #[test]

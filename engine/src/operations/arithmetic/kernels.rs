@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -149,9 +149,7 @@ fn div_f32_direct(
             lhs.shape(),
             rhs.shape(),
             output_shape,
-            |a, b| {
-                if b == 0.0 { f32::INFINITY } else { a / b }
-            },
+            |a, b| a / b,
         )
     }
 }
@@ -184,9 +182,7 @@ fn div_f64_direct(
             lhs.shape(),
             rhs.shape(),
             output_shape,
-            |a, b| {
-                if b == 0.0 { f64::INFINITY } else { a / b }
-            },
+            |a, b| a / b,
         )
     }
 }
@@ -612,6 +608,20 @@ mod tests {
         let result_data = result.data().as_f32_slice().unwrap();
         assert!(result_data[0].is_infinite());
         assert_eq!(result_data[1], 2.0);
+    }
+
+    #[test]
+    fn test_division_by_zero_ieee_semantics_broadcast_path() {
+        // Broadcasting a scalar zero divisor exercises the non-SIMD path,
+        // which must match IEEE 754 (and the SIMD path): -1/0 = -inf,
+        // 0/0 = NaN, 1/0 = inf.
+        let a = create_test_tensor_f32(vec![-1.0, 0.0, 1.0], vec![3], false);
+        let b = create_test_tensor_f32(vec![0.0], vec![1], false);
+        let result = div(&a, &b).unwrap();
+        let result_data = result.data().as_f32_slice().unwrap();
+        assert_eq!(result_data[0], f32::NEG_INFINITY);
+        assert!(result_data[1].is_nan());
+        assert_eq!(result_data[2], f32::INFINITY);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -236,6 +236,18 @@ impl PyTensor {
 
     /// Create from inner tensor
     pub fn from_tensor(tensor: Tensor) -> Self {
+        // The engine's kernels read tensor storage in contiguous logical
+        // order, so a non-contiguous view (today only `expand` produces one)
+        // must be materialised before it becomes visible to Python; otherwise
+        // every downstream operation would read the wrong elements.
+        let tensor = if tensor.is_contiguous() {
+            tensor
+        } else {
+            match tensor.contiguous() {
+                Ok(contiguous) => contiguous,
+                Err(_) => tensor,
+            }
+        };
         register_leaf_tensor(&tensor);
         Self { inner: tensor }
     }

@@ -527,18 +527,46 @@ def test_strides_and_contiguity_follow_backend_layout():
     np.testing.assert_allclose(materialized_np, transposed_np)
 
 
-def test_contiguous_materializes_expand():
+def test_expand_materializes_at_python_boundary():
+    # The engine's kernels assume contiguous storage, so tensors handed back
+    # to Python are materialized. expand() therefore returns a contiguous
+    # tensor whose values match NumPy broadcasting, and every downstream
+    # operation on it is safe.
     base = mt.arange(0.0, 3.0, dtype="float32").reshape(3, 1)
     expanded = base.expand(3, 4)
-    assert not expanded.is_contiguous()
+    assert expanded.is_contiguous()
 
-    materialized = expanded.contiguous()
-    assert materialized.is_contiguous()
     expected = np.broadcast_to(
         np.arange(0.0, 3.0, dtype=np.float32).reshape(3, 1),
         (3, 4),
     )
+    np.testing.assert_allclose(expanded.numpy(), expected)
+
+    materialized = expanded.contiguous()
+    assert materialized.is_contiguous()
     np.testing.assert_allclose(materialized.numpy(), expected)
+
+
+def test_expanded_tensor_computes_correctly():
+    # Regression test: operations on expanded tensors used to read only the
+    # small base buffer and silently return garbage (or panic).
+    base = mt.Tensor([[1.0], [2.0], [3.0]])
+    expanded = base.expand(3, 4)
+    expected = np.broadcast_to(
+        np.array([[1.0], [2.0], [3.0]], dtype=np.float32), (3, 4)
+    )
+
+    np.testing.assert_allclose(expanded.sum().numpy(), expected.sum())
+    np.testing.assert_allclose(expanded.exp().numpy(), np.exp(expected), rtol=1e-6)
+
+    ones = mt.Tensor(np.ones((3, 4), dtype=np.float32))
+    np.testing.assert_allclose((expanded + ones).numpy(), expected + 1.0)
+    np.testing.assert_allclose((expanded * expanded).numpy(), expected * expected)
+    np.testing.assert_allclose(expanded.mean(1).numpy(), expected.mean(axis=1))
+    np.testing.assert_allclose(
+        expanded.matmul(mt.Tensor(np.ones((4, 2), dtype=np.float32))).numpy(),
+        expected @ np.ones((4, 2), dtype=np.float32),
+    )
 
 
 def test_reshape_invalid_size():
@@ -793,7 +821,8 @@ def test_empty_tensor_reductions():
     s = t.sum()
     m = t.mean()
     np.testing.assert_allclose(s.numpy(), np.array([0.0], dtype=np.float32))
-    assert np.isinf(m.numpy())
+    # mean of an empty tensor is 0/0 = NaN, matching NumPy and PyTorch.
+    assert np.isnan(m.numpy())
 
 
 def test_cumsum_and_backward():

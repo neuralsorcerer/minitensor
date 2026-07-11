@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -6,11 +6,7 @@
 
 fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = if rhs[i] == 0.0 {
-            f64::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
     Ok(())
 }
@@ -106,11 +102,7 @@ unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f64::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())
@@ -207,11 +199,7 @@ unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f64::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())
@@ -308,11 +296,7 @@ unsafe fn simd_div_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
     }
 
     for i in simd_len..len {
-        output[i] = if rhs[i] == 0.0 {
-            f64::INFINITY
-        } else {
-            lhs[i] / rhs[i]
-        };
+        output[i] = lhs[i] / rhs[i];
     }
 
     Ok(())

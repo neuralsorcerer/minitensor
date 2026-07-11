@@ -88,9 +88,9 @@ def broadcast_tensors(*inputs: object) -> tuple[Tensor, ...]:
 
     Inputs are converted with :func:`as_tensor`, then reshaped and expanded
     according to NumPy/PyTorch broadcasting rules. The returned tensors are
-    views when the backend can represent the expansion without copying. Valid
-    zero-sized broadcasts that cannot be represented as views return empty
-    tensors preserving dtype, device, and ``requires_grad`` metadata.
+    materialized with contiguous storage so they behave identically to
+    dense tensors in every operation. Valid zero-sized broadcasts return
+    empty tensors preserving dtype, device, and ``requires_grad`` metadata.
     """
 
     if not inputs:
@@ -107,9 +107,9 @@ def broadcast_to(input: object, shape: object) -> Tensor:
 
     The input is converted with :func:`as_tensor`, and ``shape`` accepts the
     same validated shape-like values as :func:`broadcast_shapes`. The returned
-    tensor is the original tensor when it already has the requested shape, an
-    expanded view when possible, or a metadata-preserving empty tensor for the
-    valid zero-sized broadcasts that cannot be represented as views.
+    tensor is the original tensor when it already has the requested shape, a
+    materialized contiguous broadcast otherwise, or a metadata-preserving
+    empty tensor for valid zero-sized broadcasts.
     """
 
     tensor = _atleast_tensor(input)
