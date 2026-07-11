@@ -54,10 +54,10 @@ def test_division_by_zero_follows_ieee_754(dtype):
 
     # Broadcast (scalar divisor) path must agree with the same-shape path.
     broadcast = (
-        mt.tensor(pattern.tolist(), dtype=dtype)
-        / mt.tensor(0.0, dtype=dtype)
+        mt.tensor(pattern.tolist(), dtype=dtype) / mt.tensor(0.0, dtype=dtype)
     ).numpy()
     np.testing.assert_array_equal(broadcast, expected)
+
 
 def test_boolean_arithmetic_matches_pytorch():
     a = mt.Tensor([True, False], dtype="bool")
