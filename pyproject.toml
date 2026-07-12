@@ -82,6 +82,7 @@ editable-profile = "release"
 strip = false
 # Skip audit for faster builds in development
 skip-auditwheel = false
+compatibility = "pypi"
 
 [tool.black]
 line-length = 88
