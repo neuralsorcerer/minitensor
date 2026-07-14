@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -316,8 +316,8 @@ mod tests {
         let targets = create_test_tensor_f32(vec![1.2, 2.3], vec![2], false);
 
         let loss = huber.forward(&predictions, &targets).unwrap();
-        // Just check that the loss was computed successfully
-        assert_eq!(loss.shape().dims(), &[1]);
+        // A reduced loss is a 0-dim scalar (matching sum()/mean() and PyTorch).
+        assert_eq!(loss.shape().dims(), &[] as &[usize]);
     }
 
     #[test]

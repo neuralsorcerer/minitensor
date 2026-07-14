@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -270,12 +270,23 @@ mod tests {
     }
 
     #[test]
-    fn test_matmul_requires_2d_inputs() {
+    fn test_matmul_vector_operands() {
+        // 1-D @ 1-D is a dot product returning a scalar (NumPy/PyTorch semantics).
         let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
         let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
+        let dot = matmul(&a, &b).unwrap();
+        assert_eq!(dot.shape().dims(), &[] as &[usize]);
+        assert_eq!(dot.data().as_f32_slice().unwrap(), &[11.0]);
 
-        let result = matmul(&a, &b);
-        assert!(result.is_err());
+        // matrix @ vector -> vector.
+        let m = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let mv = matmul(&m, &a).unwrap();
+        assert_eq!(mv.shape().dims(), &[2]);
+        assert_eq!(mv.data().as_f32_slice().unwrap(), &[5.0, 11.0]);
+
+        // 0-D scalars remain invalid operands.
+        let s = create_test_tensor_f32(vec![1.0], vec![], false);
+        assert!(matmul(&s, &s).is_err());
     }
 
     #[test]

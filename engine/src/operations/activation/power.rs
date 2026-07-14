@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -28,6 +28,17 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
         tensor.device(),
         tensor.requires_grad(),
     );
+
+    if output.requires_grad() && tensor.dtype().is_float() {
+        let grad_fn = Arc::new(AbsBackward {
+            input_id: tensor.id(),
+            input: tensor.detach(),
+        });
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        return Ok(output_with_grad);
+    }
 
     Ok(output)
 }
@@ -104,6 +115,19 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
         tensor.device(),
         tensor.requires_grad(),
     );
+
+    if output.requires_grad() && tensor.dtype().is_float() {
+        let grad_fn = Arc::new(ClampBackward {
+            input_id: tensor.id(),
+            input: tensor.detach(),
+            min: min_val,
+            max: max_val,
+        });
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        return Ok(output_with_grad);
+    }
 
     Ok(output)
 }

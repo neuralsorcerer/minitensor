@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -43,7 +43,7 @@ impl PyTensor {
             .iter()
             .map(|obj| {
                 let t = PyTensor::from_python_value(&obj)?;
-                t.inner.unsqueeze(axis).map_err(_convert_error)
+                engine::operations::shape_ops::unsqueeze(&t.inner, axis).map_err(_convert_error)
             })
             .collect::<PyResult<_>>()?;
 

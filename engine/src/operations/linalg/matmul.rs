@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -275,10 +275,42 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
+    // NumPy/PyTorch 1-D vector semantics: a 1-D `lhs` is promoted by prepending a
+    // 1, a 1-D `rhs` by appending a 1; the added axes are removed from the result
+    // (so mat@vec -> vec, vec@mat -> vec, vec@vec -> scalar). Reshapes are
+    // grad-aware, so the gradient flows through the promotion.
+    let lhs_1d = lhs.ndim() == 1;
+    let rhs_1d = rhs.ndim() == 1;
+    if lhs_1d || rhs_1d {
+        use crate::operations::shape_ops::reshape;
+        let lhs2 = if lhs_1d {
+            reshape(lhs, Shape::new(vec![1, lhs.shape().dims()[0]]))?
+        } else {
+            lhs.clone()
+        };
+        let rhs2 = if rhs_1d {
+            reshape(rhs, Shape::new(vec![rhs.shape().dims()[0], 1]))?
+        } else {
+            rhs.clone()
+        };
+        let promoted = matmul(&lhs2, &rhs2)?;
+        // Drop the promoted axes (remove the trailing column before the leading
+        // row so the earlier index stays valid).
+        let mut dims = promoted.shape().dims().to_vec();
+        let len = dims.len();
+        if rhs_1d {
+            dims.remove(len - 1);
+        }
+        if lhs_1d {
+            dims.remove(len - 2);
+        }
+        return reshape(&promoted, Shape::new(dims));
+    }
+
     // Validate matrix multiplication dimensions
     if lhs.ndim() < 2 || rhs.ndim() < 2 {
         return Err(MinitensorError::invalid_operation(
-            "Matrix multiplication requires tensors with at least 2 dimensions",
+            "Matrix multiplication requires tensors with at least 1 dimension (scalars are not valid operands)",
         ));
     }
 

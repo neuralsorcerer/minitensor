@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -110,6 +110,61 @@ mod tests {
         let gradients = grad_fn.backward(&grad_output).unwrap();
 
         assert_eq!(gradients.len(), 2);
+    }
+
+    #[test]
+    fn test_add_backward_same_input_accumulates() {
+        // `x + x`: both operands are the same tensor. The two gradient
+        // contributions must be summed (2), not overwritten (1).
+        let shared = TensorId::new();
+        let grad_fn = AddBackward {
+            input_shapes: [vec![3], vec![3]],
+            input_ids: [shared, shared],
+        };
+
+        let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let gradients = grad_fn.backward(&grad_output).unwrap();
+
+        assert_eq!(gradients.len(), 1);
+        let grad = gradients.get(&shared).unwrap();
+        for &v in grad.data().as_f32_slice().unwrap() {
+            assert_eq!(v, 2.0);
+        }
+    }
+
+    #[test]
+    fn test_mul_backward_same_input_accumulates() {
+        // `x * x`: d/dx(x^2) = 2x. With shared operands the backward emits the
+        // same id twice (grad*rhs and grad*lhs); both must accumulate.
+        let shared = TensorId::new();
+        let x = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let grad_fn = MulBackward {
+            lhs: x.clone(),
+            rhs: x.clone(),
+            input_ids: [shared, shared],
+        };
+
+        let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let gradients = grad_fn.backward(&grad_output).unwrap();
+
+        assert_eq!(gradients.len(), 1);
+        let grad = gradients.get(&shared).unwrap();
+        let expected = [2.0f32, 4.0, 6.0];
+        for (&got, &want) in grad
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .iter()
+            .zip(expected.iter())
+        {
+            assert_eq!(got, want);
+        }
     }
 
     #[test]

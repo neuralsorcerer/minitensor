@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -34,6 +34,16 @@ impl PyTensor {
     pub fn matmul(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.matmul(&other_tensor).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __matmul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        self.matmul(other)
+    }
+
+    fn __rmatmul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let other_tensor = tensor_from_py_value(&self.inner, other)?;
+        let result = other_tensor.matmul(&self.inner).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 

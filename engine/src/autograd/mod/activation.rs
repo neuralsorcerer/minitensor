@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -177,8 +177,8 @@ impl GradientFunction for MSELossBackward {
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
         let target_grad = arithmetic::neg(&pred_grad)?;
 
-        gradients.insert(self.input_ids[0], pred_grad);
-        gradients.insert(self.input_ids[1], target_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
 
         Ok(gradients)
     }
@@ -221,8 +221,8 @@ impl GradientFunction for MAELossBackward {
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
         let target_grad = arithmetic::neg(&pred_grad)?;
 
-        gradients.insert(self.input_ids[0], pred_grad);
-        gradients.insert(self.input_ids[1], target_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
 
         Ok(gradients)
     }
@@ -340,8 +340,8 @@ impl GradientFunction for HuberLossBackward {
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
         let target_grad = arithmetic::neg(&pred_grad)?;
 
-        gradients.insert(self.input_ids[0], pred_grad);
-        gradients.insert(self.input_ids[1], target_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
 
         Ok(gradients)
     }
@@ -421,7 +421,7 @@ impl GradientFunction for CrossEntropyLossBackward {
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
 
         // Targets typically have no gradient
-        gradients.insert(self.input_ids[0], pred_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         Ok(gradients)
     }
@@ -465,7 +465,7 @@ impl GradientFunction for BCELossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        gradients.insert(self.input_ids[0], pred_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         Ok(gradients)
     }
@@ -499,7 +499,7 @@ impl GradientFunction for KLDivLossBackward {
             pred_grad = arithmetic::mul(&pred_grad, &scale)?;
         }
         let pred_grad = arithmetic::mul(&pred_grad, grad_output)?;
-        gradients.insert(self.input_ids[0], pred_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         // Gradient w.r.t targets: log(targets) - log(predictions) + 1
         let log_targets = activation::log(&self.targets)?;
@@ -518,7 +518,7 @@ impl GradientFunction for KLDivLossBackward {
             target_grad = arithmetic::mul(&target_grad, &scale)?;
         }
         let target_grad = arithmetic::mul(&target_grad, grad_output)?;
-        gradients.insert(self.input_ids[1], target_grad);
+        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
 
         Ok(gradients)
     }
@@ -566,7 +566,7 @@ impl GradientFunction for FocalLossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        gradients.insert(self.input_ids[0], pred_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         Ok(gradients)
     }

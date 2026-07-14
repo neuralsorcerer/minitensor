@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -207,18 +207,15 @@ impl PyTensor {
 
     #[pyo3(signature = (dim=None))]
     pub fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
-        let result = if let Some(d) = dim {
-            self.inner.squeeze_dim(d)
-        } else {
-            self.inner.squeeze()
-        }
-        .map_err(_convert_error)?;
+        let result =
+            engine::operations::shape_ops::squeeze(&self.inner, dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     #[pyo3(signature = (dim))]
     pub fn unsqueeze(&self, dim: isize) -> PyResult<Self> {
-        let result = self.inner.unsqueeze(dim).map_err(_convert_error)?;
+        let result =
+            engine::operations::shape_ops::unsqueeze(&self.inner, dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -342,9 +339,7 @@ impl PyTensor {
 
     #[pyo3(signature = (start_dim=0, end_dim=-1))]
     pub fn flatten(&self, start_dim: isize, end_dim: isize) -> PyResult<Self> {
-        let result = self
-            .inner
-            .flatten(start_dim, end_dim)
+        let result = engine::operations::shape_ops::flatten(&self.inner, start_dim, end_dim)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -352,5 +347,4 @@ impl PyTensor {
     pub fn ravel(&self) -> PyResult<Self> {
         self.flatten(0, -1)
     }
-
 }

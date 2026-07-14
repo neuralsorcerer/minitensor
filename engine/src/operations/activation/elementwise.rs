@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -6,12 +6,13 @@
 
 use crate::{
     autograd::{
-        AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
-        CosBackward, CoshBackward, EluBackward, ExpBackward, Expm1Backward, GeluBackward,
-        HardshrinkBackward, LeakyReluBackward, Log1pBackward, LogAddExpBackward, LogBackward,
-        LogSoftmaxBackward, MaskedLogSoftmaxBackward, NanToNumBackward, PowBackward, PowBroadcast, ReluBackward,
-        SeluBackward, SigmoidBackward, SiluBackward, SinBackward, SinhBackward, SoftmaxBackward,
-        SoftplusBackward, SoftsignBackward, TanBackward, TanhBackward, add_to_graph,
+        AbsBackward, AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward,
+        AtanhBackward, ClampBackward, CosBackward, CoshBackward, EluBackward, ExpBackward,
+        Expm1Backward, GeluBackward, HardshrinkBackward, LeakyReluBackward, Log1pBackward,
+        LogAddExpBackward, LogBackward, LogSoftmaxBackward, MaskedLogSoftmaxBackward,
+        NanToNumBackward, PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward,
+        SiluBackward, SinBackward, SinhBackward, SoftmaxBackward, SoftplusBackward, SoftsignBackward,
+        TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -103,7 +103,7 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
             grad_output.requires_grad(),
         );
 
-        gradients.insert(self.input_id, grad_input);
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
 
         Ok(gradients)
     }
@@ -145,7 +145,7 @@ impl GradientFunction for LayerNormBackward {
                     grad_output.device(),
                     false,
                 );
-                gradients.insert(self.input_id, zero);
+                accumulate_grad(&mut gradients, self.input_id, zero)?;
             }
             if self.weight_requires_grad {
                 if let Some(weight_id) = self.weight_id {
@@ -155,7 +155,7 @@ impl GradientFunction for LayerNormBackward {
                         grad_output.device(),
                         false,
                     );
-                    gradients.insert(weight_id, zero);
+                    accumulate_grad(&mut gradients, weight_id, zero)?;
                 }
             }
             if self.bias_requires_grad {
@@ -166,7 +166,7 @@ impl GradientFunction for LayerNormBackward {
                         grad_output.device(),
                         false,
                     );
-                    gradients.insert(bias_id, zero);
+                    accumulate_grad(&mut gradients, bias_id, zero)?;
                 }
             }
 
@@ -197,7 +197,7 @@ impl GradientFunction for LayerNormBackward {
             let numerator = arithmetic::sub(&tmp, &norm_term)?;
             let grad_input = arithmetic::mul(&numerator, &self.inv_std)?;
             let grad_input = arithmetic::mul(&grad_input, &inv_m_tensor)?;
-            gradients.insert(self.input_id, grad_input);
+            accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         }
 
         if self.weight_requires_grad {
@@ -210,7 +210,7 @@ impl GradientFunction for LayerNormBackward {
                 if grad_weight.shape().dims() != self.normalized_shape.as_slice() {
                     grad_weight = grad_weight.view(Shape::new(self.normalized_shape.clone()))?;
                 }
-                gradients.insert(weight_id, grad_weight);
+                accumulate_grad(&mut gradients, weight_id, grad_weight)?;
             }
         }
 
@@ -224,7 +224,7 @@ impl GradientFunction for LayerNormBackward {
                 if grad_bias.shape().dims() != self.normalized_shape.as_slice() {
                     grad_bias = grad_bias.view(Shape::new(self.normalized_shape.clone()))?;
                 }
-                gradients.insert(bias_id, grad_bias);
+                accumulate_grad(&mut gradients, bias_id, grad_bias)?;
             }
         }
 
@@ -832,7 +832,7 @@ impl GradientFunction for ReshapeBackward {
         // Reshape gradient: reshape back to original shape
         let original_shape = Shape::new(self.input_shape.clone());
         let grad_input = crate::operations::shape_ops::reshape(grad_output, original_shape)?;
-        gradients.insert(self.input_id, grad_input);
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
 
         Ok(gradients)
     }
@@ -860,7 +860,281 @@ impl GradientFunction for RepeatInterleaveBackward {
         )?;
 
         let mut gradients = FxHashMap::default();
-        gradients.insert(self.input_id, grad_input);
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for `min`/`max` reductions (global with `dim == None`, or
+/// along a single `dim`).
+///
+/// The gradient flows to every input element equal to the reduced extremum,
+/// split equally among ties so the contributions sum to the upstream gradient
+/// (matching PyTorch's `amax`/`amin` and the value branch of `min`/`max`). The
+/// extremum, its selection mask and the tie count are recomputed from the stored
+/// (detached) input, so nothing beyond the input needs to be retained.
+pub struct MinMaxBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub dim: Option<usize>,
+    pub keepdim: bool,
+    pub is_max: bool,
+    pub nan_aware: bool,
+}
+
+/// Route `grad_output` to every input element equal to the selected reduction
+/// value (`reduced`, recomputed with keepdim so it broadcasts), splitting equally
+/// among ties. Shared by min/max and median value reductions.
+fn distribute_selection_grad(
+    input: &Tensor,
+    reduced: &Tensor,
+    grad_output: &Tensor,
+    dim: Option<usize>,
+    keepdim: bool,
+) -> Result<Tensor> {
+    let input_shape = input.shape().dims().to_vec();
+    let mask = crate::operations::comparison::eq(input, reduced)?;
+    let mask_f = mask.astype(input.dtype())?;
+
+    let sum_dims = dim.map(|d| vec![d as isize]);
+    let count = reduction::sum(&mask_f, sum_dims, true)?;
+
+    let dims_vec = dim.map(|d| vec![d]);
+    let grad_kd = expand_reduction_grad(grad_output, &input_shape, &dims_vec, keepdim)?;
+    let scaled = arithmetic::div(&grad_kd, &count)?;
+    arithmetic::mul(&mask_f, &scaled)
+}
+
+impl GradientFunction for MinMaxBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let input = &self.input;
+
+        if input.numel() == 0 {
+            let zero = Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), false);
+            accumulate_grad(&mut gradients, self.input_id, zero)?;
+            return Ok(gradients);
+        }
+
+        let dim_isize = self.dim.map(|d| d as isize);
+        // Recompute the extremum with keepdim so it broadcasts against the input.
+        // NaN-aware reductions must recompute with the matching op, otherwise the
+        // propagated NaN would fail the equality mask and zero every gradient.
+        let reduced = match (self.is_max, self.nan_aware) {
+            (true, false) => reduction::max(input, dim_isize, true)?,
+            (false, false) => reduction::min(input, dim_isize, true)?,
+            (true, true) => reduction::nanmax(input, dim_isize, true)?,
+            (false, true) => reduction::nanmin(input, dim_isize, true)?,
+        };
+        let grad_input =
+            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.keepdim)?;
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for `median`/`nanmedian` value reductions. The median is one
+/// of the input elements, so the gradient flows to every element equal to it,
+/// split over ties (a valid subgradient, matching the min/max convention).
+pub struct MedianBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub dim: Option<usize>,
+    pub keepdim: bool,
+    pub nan_aware: bool,
+}
+
+impl GradientFunction for MedianBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let input = &self.input;
+
+        if input.numel() == 0 {
+            let zero = Tensor::zeros(input.shape().clone(), input.dtype(), input.device(), false);
+            accumulate_grad(&mut gradients, self.input_id, zero)?;
+            return Ok(gradients);
+        }
+
+        let dim_isize = self.dim.map(|d| d as isize);
+        let reduced = if self.nan_aware {
+            reduction::nanmedian(input, dim_isize, true)?
+        } else {
+            reduction::median(input, dim_isize, true)?.0
+        };
+        let grad_input =
+            distribute_selection_grad(input, &reduced, grad_output, self.dim, self.keepdim)?;
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for the `quantile` reduction (global with `dim == None`, or
+/// along a single `dim`).
+///
+/// A quantile is a fixed linear combination of the two order statistics that
+/// bracket the requested position, so the gradient routes back to the two
+/// original elements occupying those sorted ranks with the interpolation weights
+/// (`Lower`/`Higher`/`Nearest` collapse to a single element; `Midpoint` splits
+/// evenly). Groups containing NaN produced NaN and receive no gradient.
+pub struct QuantileBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub dim: Option<usize>,
+    pub q: f64,
+    pub interpolation: crate::operations::reduction::QuantileInterpolation,
+    pub nan_aware: bool,
+}
+
+/// Sorted-rank indices and their gradient weights for a group of length `len`.
+fn quantile_grad_coeffs(
+    len: usize,
+    q: f64,
+    interp: crate::operations::reduction::QuantileInterpolation,
+) -> (usize, usize, f64, f64) {
+    use crate::operations::reduction::QuantileInterpolation as Qi;
+    if len <= 1 {
+        return (0, 0, 1.0, 0.0);
+    }
+    let pos = q * (len - 1) as f64;
+    let lower = pos.floor() as usize;
+    let upper = pos.ceil() as usize;
+    let weight = (pos - lower as f64).clamp(0.0, 1.0);
+    match interp {
+        Qi::Linear => (lower, upper, 1.0 - weight, weight),
+        Qi::Lower => (lower, upper, 1.0, 0.0),
+        Qi::Higher => (lower, upper, 0.0, 1.0),
+        Qi::Midpoint => (lower, upper, 0.5, 0.5),
+        Qi::Nearest => {
+            // NumPy-compatible tie-to-even at weight == 0.5.
+            let nearest = if weight < 0.5 {
+                lower
+            } else if weight > 0.5 {
+                upper
+            } else {
+                lower + (lower & 1)
+            };
+            if nearest == lower {
+                (lower, upper, 1.0, 0.0)
+            } else {
+                (lower, upper, 0.0, 1.0)
+            }
+        }
+    }
+}
+
+impl GradientFunction for QuantileBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let input = &self.input;
+        let numel = input.numel();
+        let mut grad_data = TensorData::zeros_on_device(numel, input.dtype(), input.device());
+
+        if numel != 0 {
+            // Treat the global reduction as one group over the flattened tensor.
+            let dims = input.shape().dims();
+            let (outer, inner, dim_size) = match self.dim {
+                None => (1usize, 1usize, numel),
+                Some(d) => {
+                    let outer: usize = dims[..d].iter().product();
+                    let inner: usize = dims[d + 1..].iter().product();
+                    (outer, inner, dims[d])
+                }
+            };
+            let outer_stride = dim_size * inner;
+
+            macro_rules! scatter {
+                ($slice:ident, $mut_slice:ident, $ty:ty) => {{
+                    let x = input.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to read input for quantile backward")
+                    })?;
+                    let go = grad_output.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error(
+                            "Failed to read grad_output for quantile backward",
+                        )
+                    })?;
+                    let gi = grad_data.$mut_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to write grad for quantile backward")
+                    })?;
+                    let mut buffer: Vec<(usize, $ty)> = Vec::with_capacity(dim_size);
+                    for o in 0..outer {
+                        for r in 0..inner {
+                            buffer.clear();
+                            let mut skip_group = false;
+                            for d in 0..dim_size {
+                                let v = x[o * outer_stride + d * inner + r];
+                                if v.is_nan() {
+                                    if self.nan_aware {
+                                        // nanquantile ignores NaN entries.
+                                        continue;
+                                    }
+                                    // quantile propagates NaN, so the whole group's
+                                    // output is NaN and gets no gradient.
+                                    skip_group = true;
+                                    break;
+                                }
+                                buffer.push((d, v));
+                            }
+                            if skip_group || buffer.is_empty() {
+                                continue;
+                            }
+                            let (lo, up, c_lo, c_up) =
+                                quantile_grad_coeffs(buffer.len(), self.q, self.interpolation);
+                            // Only the elements at sorted ranks `lo` and `up`
+                            // (adjacent) are needed, so select them in O(n) rather
+                            // than fully sorting. NaN is already filtered, so the
+                            // comparator never sees an incomparable value.
+                            let cmp = |a: &(usize, $ty), b: &(usize, $ty)| {
+                                a.1.partial_cmp(&b.1).unwrap()
+                            };
+                            buffer.select_nth_unstable_by(up, cmp);
+                            let d_up = buffer[up].0;
+                            let d_lo = if lo == up {
+                                d_up
+                            } else {
+                                // `lo == up - 1`: the lo-th order statistic is the
+                                // largest of the elements left of `up`.
+                                buffer[..up].select_nth_unstable_by(lo, cmp);
+                                buffer[lo].0
+                            };
+                            let g = go[o * inner + r];
+                            gi[o * outer_stride + d_lo * inner + r] += g * c_lo as $ty;
+                            gi[o * outer_stride + d_up * inner + r] += g * c_up as $ty;
+                        }
+                    }
+                }};
+            }
+
+            match input.dtype() {
+                DataType::Float32 => scatter!(as_f32_slice, as_f32_slice_mut, f32),
+                DataType::Float64 => scatter!(as_f64_slice, as_f64_slice_mut, f64),
+                _ => {
+                    return Err(MinitensorError::invalid_operation(
+                        "quantile backward only supported for floating point tensors",
+                    ));
+                }
+            }
+        }
+
+        let grad_input = Tensor::new(
+            Arc::new(grad_data),
+            input.shape().clone(),
+            input.dtype(),
+            input.device(),
+            false,
+        );
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         Ok(gradients)
     }
 

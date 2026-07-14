@@ -609,6 +609,40 @@ def test_reshape_backward_preserves_gradients():
     np.testing.assert_allclose(grad.numpy(), np.ones(6, dtype=np.float32))
 
 
+def test_same_tensor_used_twice_accumulates_gradient():
+    # Regression test: when a tensor is used as both operands of one operation,
+    # both gradient contributions must accumulate instead of one silently
+    # overwriting the other. These used to return half (or a fraction) of the
+    # correct gradient.
+    x0 = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+
+    def grad_of(build):
+        x = mt.Tensor(x0.tolist(), requires_grad=True)
+        build(x).sum().backward()
+        return x.grad.numpy()
+
+    # x + x -> 2, x * x -> 2x, (x + x + x) -> 3, x**3 -> 3x^2
+    np.testing.assert_allclose(grad_of(lambda x: x + x), np.full(3, 2.0))
+    np.testing.assert_allclose(grad_of(lambda x: x * x), 2.0 * x0)
+    np.testing.assert_allclose(grad_of(lambda x: x + x + x), np.full(3, 3.0))
+    np.testing.assert_allclose(grad_of(lambda x: x * x * x), 3.0 * x0 * x0)
+
+    # Expanded views feed into the same rule: expand(x) * expand(x).
+    base = mt.Tensor([[1.0], [2.0], [3.0]], requires_grad=True)
+    e = base.expand(3, 4)
+    (e * e).sum().backward()
+    np.testing.assert_allclose(
+        base.grad.numpy().ravel(), 2.0 * np.array([1.0, 2.0, 3.0]) * 4.0
+    )
+
+    # Self matmul: L = sum(x @ x), dL/dx = 1 @ x^T + x^T @ 1.
+    xn = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    xm = mt.Tensor(xn, requires_grad=True)
+    xm.matmul(xm).sum().backward()
+    ones = np.ones((2, 2), dtype=np.float32)
+    np.testing.assert_allclose(xm.grad.numpy(), ones @ xn.T + xn.T @ ones)
+
+
 def test_transpose_invalid_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     with pytest.raises(IndexError):

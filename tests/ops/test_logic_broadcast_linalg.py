@@ -638,11 +638,20 @@ def test_matmul_bool_error():
         a.matmul(b)
 
 
-def test_matmul_insufficient_dims():
+def test_matmul_vector_operands():
+    # 1-D operands follow NumPy/PyTorch: vec@vec -> scalar, mat@vec/vec@mat -> vec.
     a = mt.Tensor([1.0, 2.0])
     b = mt.Tensor([3.0, 4.0])
-    with pytest.raises(ValueError):
-        a.matmul(b)
+    np.testing.assert_allclose(a.matmul(b).numpy(), np.dot([1.0, 2.0], [3.0, 4.0]))
+    assert a.matmul(b).numpy().shape == ()
+
+    m = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+    np.testing.assert_allclose(m.matmul(a).numpy(), np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2) @ [1.0, 2.0])
+    np.testing.assert_allclose((a @ m).numpy(), np.array([1.0, 2.0]) @ np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    # Scalars are still not valid matmul operands.
+    with pytest.raises((ValueError, RuntimeError)):
+        mt.Tensor(2.0).matmul(mt.Tensor(3.0))
 
 
 def test_matmul_batch_dimensions():
@@ -1076,3 +1085,36 @@ def test_isclose_matches_methods_and_rejects_invalid_tolerances():
 
     with pytest.raises(ValueError):
         mt.isclose(tensor, tensor, rtol=-1.0)
+
+
+def test_matmul_vector_gradients():
+    rng = np.random.default_rng(0)
+    M = rng.standard_normal((4, 3))
+    v = rng.standard_normal((3,))
+    N = rng.standard_normal((3, 5))
+
+    # matrix @ vector: d/dM (w·(M@v)) = outer(w, v), d/dv = M^T @ w
+    mM = mt.Tensor(M.tolist(), dtype="float64", requires_grad=True)
+    mv = mt.Tensor(v.tolist(), dtype="float64", requires_grad=True)
+    out = mM.matmul(mv)
+    w = rng.standard_normal(out.numpy().shape)
+    (out * mt.Tensor(w.tolist(), dtype="float64")).sum().backward()
+    np.testing.assert_allclose(mM.grad.numpy(), np.outer(w, v), rtol=1e-6)
+    np.testing.assert_allclose(mv.grad.numpy(), M.T @ w, rtol=1e-6)
+
+    # vector @ matrix
+    mv2 = mt.Tensor(v.tolist(), dtype="float64", requires_grad=True)
+    mN = mt.Tensor(N.tolist(), dtype="float64", requires_grad=True)
+    out2 = mv2.matmul(mN)
+    w2 = rng.standard_normal(out2.numpy().shape)
+    (out2 * mt.Tensor(w2.tolist(), dtype="float64")).sum().backward()
+    np.testing.assert_allclose(mv2.grad.numpy(), N @ w2, rtol=1e-6)
+    np.testing.assert_allclose(mN.grad.numpy(), np.outer(v, w2), rtol=1e-6)
+
+    # vector @ vector (dot): d/da (a·b) = b, d/db = a
+    u = rng.standard_normal((3,))
+    a = mt.Tensor(v.tolist(), dtype="float64", requires_grad=True)
+    b = mt.Tensor(u.tolist(), dtype="float64", requires_grad=True)
+    a.matmul(b).backward()
+    np.testing.assert_allclose(a.grad.numpy(), u, rtol=1e-6)
+    np.testing.assert_allclose(b.grad.numpy(), v, rtol=1e-6)

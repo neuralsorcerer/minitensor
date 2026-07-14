@@ -1,11 +1,14 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    autograd::{RepeatInterleaveBackward, ReshapeBackward, add_to_graph},
+    autograd::{
+        ConcatBackward, GatherBackward, IndexSelectBackward, RepeatBackward,
+        RepeatInterleaveBackward, ReshapeBackward, add_to_graph,
+    },
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -122,17 +125,76 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
 }
 
 
-/// Squeeze operation - remove dimensions of size 1
+/// Squeeze operation - remove dimensions of size 1.
+///
+/// Routed through [`reshape`] so the result is a first-class differentiable node
+/// (the plain `Tensor::squeeze` view shares the input's id and would attribute a
+/// wrongly-shaped gradient to it).
 pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
-    match dim {
-        Some(d) => tensor.squeeze_dim(d),
-        None => tensor.squeeze(),
-    }
+    let dims = tensor.shape().dims();
+    let new_dims: Vec<usize> = match dim {
+        None => dims.iter().copied().filter(|&d| d != 1).collect(),
+        Some(d) => {
+            let ndim = tensor.ndim() as isize;
+            let d = if d < 0 { d + ndim } else { d };
+            if d < 0 || d >= ndim {
+                return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
+            }
+            let d = d as usize;
+            if dims[d] != 1 {
+                // PyTorch leaves a non-unit axis untouched.
+                dims.to_vec()
+            } else {
+                let mut v = dims.to_vec();
+                v.remove(d);
+                v
+            }
+        }
+    };
+    reshape(tensor, Shape::new(new_dims))
 }
 
-/// Unsqueeze operation - add a dimension of size 1
+/// Unsqueeze operation - add a dimension of size 1. See [`squeeze`] for why this
+/// goes through [`reshape`] rather than the view-based `Tensor::unsqueeze`.
 pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {
-    tensor.unsqueeze(dim)
+    let ndim = tensor.ndim() as isize;
+    let d = if dim < 0 { dim + ndim + 1 } else { dim };
+    if d < 0 || d > ndim {
+        return Err(MinitensorError::index_error(d, 0, (ndim + 1) as usize));
+    }
+    let mut new_dims = tensor.shape().dims().to_vec();
+    new_dims.insert(d as usize, 1);
+    reshape(tensor, Shape::new(new_dims))
+}
+
+/// Flatten dimensions `start_dim..=end_dim` into one. Routed through [`reshape`]
+/// so gradients flow (see [`squeeze`]).
+pub fn flatten(tensor: &Tensor, start_dim: isize, end_dim: isize) -> Result<Tensor> {
+    let ndim = tensor.ndim() as isize;
+    let start = if start_dim < 0 {
+        start_dim + ndim
+    } else {
+        start_dim
+    };
+    let end = if end_dim < 0 { end_dim + ndim } else { end_dim };
+    if start < 0 || start >= ndim {
+        return Err(MinitensorError::index_error(start, 0, tensor.ndim()));
+    }
+    if end < 0 || end >= ndim {
+        return Err(MinitensorError::index_error(end, 0, tensor.ndim()));
+    }
+    if start > end {
+        return Err(MinitensorError::invalid_argument(
+            "start_dim must be less than or equal to end_dim",
+        ));
+    }
+
+    let (start, end) = (start as usize, end as usize);
+    let dims = tensor.shape().dims();
+    let mut new_dims = dims[..start].to_vec();
+    new_dims.push(dims[start..=end].iter().product());
+    new_dims.extend_from_slice(&dims[end + 1..]);
+    reshape(tensor, Shape::new(new_dims))
 }
 
 /// Permute tensor dimensions according to `dims`
@@ -355,13 +417,21 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
         DataType::Bool => concat_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    Ok(Tensor::new(
-        Arc::new(data),
-        output_shape_obj,
-        dtype,
-        device,
-        requires_grad,
-    ))
+    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+
+    if requires_grad && dtype.is_float() {
+        let grad_fn = Arc::new(ConcatBackward {
+            input_ids: tensors.iter().map(|t| t.id()).collect(),
+            sizes: tensors.iter().map(|t| t.shape().dims()[dim]).collect(),
+            dim,
+        });
+        let mut output = output;
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
+    Ok(output)
 }
 
 /// Repeat `tensor` according to `repeats` along each dimension.
@@ -372,7 +442,10 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         ));
     }
 
-    let mut result = tensor.clone();
+    // Tile on a detached view so the intermediate per-dimension copies never
+    // create graph nodes; a single RepeatBackward maps the final result straight
+    // back to the original input.
+    let mut result = tensor.detach();
 
     if repeats.len() > result.ndim() {
         let mut new_shape = vec![1; repeats.len() - result.ndim()];
@@ -455,6 +528,22 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         );
     }
 
+    if tensor.requires_grad() && tensor.dtype().is_float() && result.numel() != 0 {
+        // The identity path (`result = tensor.detach()`/reshape) preserves the
+        // input's tensor id; refresh it so the new node never points at itself.
+        let mut output = result;
+        output.refresh_autograd_metadata();
+        let mut output = output.requires_grad_(true);
+        let grad_fn = Arc::new(RepeatBackward {
+            input_id: tensor.id(),
+            input_shape: tensor.shape().dims().to_vec(),
+            repeats: repeats.to_vec(),
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
     Ok(result)
 }
 
@@ -523,13 +612,22 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
         DataType::Bool => index_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    Ok(Tensor::new(
-        Arc::new(data),
-        output_shape_obj,
-        dtype,
-        device,
-        requires_grad,
-    ))
+    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+
+    if requires_grad && dtype.is_float() {
+        let grad_fn = Arc::new(IndexSelectBackward {
+            input_id: tensor.id(),
+            input_shape: tensor.shape().dims().to_vec(),
+            dim,
+            indices: indices.to_vec(),
+        });
+        let mut output = output;
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
+    Ok(output)
 }
 
 /// Gather operation - collect elements along a dimension using an index tensor
@@ -632,13 +730,22 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
         DataType::Bool => gather_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    Ok(Tensor::new(
-        Arc::new(data),
-        output_shape_obj,
-        dtype,
-        device,
-        requires_grad,
-    ))
+    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+
+    if requires_grad && dtype.is_float() {
+        let grad_fn = Arc::new(GatherBackward {
+            input_id: tensor.id(),
+            input_shape: input_dims.to_vec(),
+            dim,
+            index: idx_slice.to_vec(),
+        });
+        let mut output = output;
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
+    Ok(output)
 }
 
 /// Slicing operation - select a contiguous range of elements
@@ -712,13 +819,25 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
         DataType::Bool => slice_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    Ok(Tensor::new(
-        Arc::new(data),
-        output_shape_obj,
-        dtype,
-        device,
-        requires_grad,
-    ))
+    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+
+    if requires_grad && dtype.is_float() {
+        // A slice selects source positions `start, start+step, ...` along `dim`;
+        // its backward scatters the gradient back to exactly those positions.
+        let indices: Vec<usize> = (0..count).map(|i| start + i * step).collect();
+        let grad_fn = Arc::new(IndexSelectBackward {
+            input_id: tensor.id(),
+            input_shape: tensor.shape().dims().to_vec(),
+            dim,
+            indices,
+        });
+        let mut output = output;
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
+    Ok(output)
 }
 
 /// Narrow tensor along a dimension starting at `start` for `length` elements
@@ -777,6 +896,35 @@ pub fn flip(tensor: &Tensor, dims: &[isize]) -> Result<Tensor> {
 
 /// Roll tensor elements along specified dimensions with wrap-around
 pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result<Tensor> {
+    // Compute the roll on a detached view so the internal slice/concatenate steps
+    // (which flatten to a storage-sharing view in the `dims == None` case) never
+    // build gradient edges; a single RollBackward inverts the whole operation.
+    let track_grad = tensor.requires_grad() && tensor.dtype().is_float();
+    let base = if track_grad {
+        tensor.detach()
+    } else {
+        tensor.clone()
+    };
+    let output = roll_forward(&base, shifts, dims)?;
+
+    if track_grad {
+        let mut output = output;
+        output.refresh_autograd_metadata();
+        let mut output = output.requires_grad_(true);
+        let grad_fn = Arc::new(crate::autograd::RollBackward {
+            input_id: tensor.id(),
+            shifts: shifts.to_vec(),
+            dims: dims.map(|d| d.to_vec()),
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        return Ok(output);
+    }
+
+    Ok(output)
+}
+
+fn roll_forward(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result<Tensor> {
     if let Some(dims) = dims {
         if shifts.len() != dims.len() {
             return Err(MinitensorError::invalid_operation(

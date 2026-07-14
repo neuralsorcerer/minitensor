@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -147,6 +147,33 @@ pub fn is_graph_consumed() -> bool {
 
 // Gradient function implementations for common operations
 
+/// Accumulate a gradient contribution for `input_id` into `gradients`.
+///
+/// A single backward pass may produce more than one gradient for the same input
+/// when a tensor is used as several operands of one operation (`x * x`, `x + x`,
+/// `x.matmul(x)`, `pow(x, x)`, ...). The gradients returned by a
+/// [`GradientFunction`] are keyed by [`TensorId`], so a plain `insert` would let
+/// the later contribution silently overwrite the earlier one and halve (or worse)
+/// the gradient. Summing on collision matches the mathematically correct result
+/// and mirrors the cross-node accumulation performed by the graph itself.
+#[inline]
+fn accumulate_grad(
+    gradients: &mut FxHashMap<TensorId, Tensor>,
+    input_id: TensorId,
+    grad: Tensor,
+) -> Result<()> {
+    use std::collections::hash_map::Entry;
+    match gradients.entry(input_id) {
+        Entry::Occupied(mut existing) => {
+            arithmetic::add_inplace(existing.get_mut(), &grad)?;
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(grad);
+        }
+    }
+    Ok(())
+}
+
 /// Gradient function for tensor cloning operation
 pub struct CloneBackward {
     pub input_id: TensorId,
@@ -184,8 +211,8 @@ impl GradientFunction for AddBackward {
         let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
         let rhs_grad = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
 
-        gradients.insert(self.input_ids[0], lhs_grad);
-        gradients.insert(self.input_ids[1], rhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
 
         Ok(gradients)
     }
@@ -213,8 +240,8 @@ impl GradientFunction for SubBackward {
         let rhs_base = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
         let rhs_grad = arithmetic::neg(&rhs_base)?;
 
-        gradients.insert(self.input_ids[0], lhs_grad);
-        gradients.insert(self.input_ids[1], rhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
 
         Ok(gradients)
     }
@@ -243,8 +270,8 @@ impl GradientFunction for MulBackward {
         let lhs_grad = reduce_gradient_for_broadcasting(&lhs_term, self.lhs.shape())?;
         let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
 
-        gradients.insert(self.input_ids[0], lhs_grad);
-        gradients.insert(self.input_ids[1], rhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
 
         Ok(gradients)
     }
@@ -286,8 +313,8 @@ impl GradientFunction for DivBackward {
         let rhs_term = arithmetic::neg(&rhs_term)?;
         let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
 
-        gradients.insert(self.input_ids[0], lhs_grad);
-        gradients.insert(self.input_ids[1], rhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
 
         Ok(gradients)
     }
@@ -326,7 +353,7 @@ impl GradientFunction for WhereBackward {
             let selected = selection::where_op(&self.condition, grad_output, zeros)?;
             let reduced =
                 reduce_gradient_for_broadcasting(&selected, &Shape::new(self.input_shape.clone()))?;
-            gradients.insert(self.input_ids[0], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[0], reduced)?;
         }
 
         if self.other_requires_grad {
@@ -341,7 +368,7 @@ impl GradientFunction for WhereBackward {
             let selected = selection::where_op(&self.condition, zeros, grad_output)?;
             let reduced =
                 reduce_gradient_for_broadcasting(&selected, &Shape::new(self.other_shape.clone()))?;
-            gradients.insert(self.input_ids[1], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[1], reduced)?;
         }
 
         Ok(gradients)
@@ -571,7 +598,7 @@ impl GradientFunction for MaximumBackward {
                 &selected,
                 &Shape::new(self.input_shapes[0].clone()),
             )?;
-            gradients.insert(self.input_ids[0], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[0], reduced)?;
         }
 
         if self.input_requires_grad[1] {
@@ -588,7 +615,7 @@ impl GradientFunction for MaximumBackward {
                 &selected,
                 &Shape::new(self.input_shapes[1].clone()),
             )?;
-            gradients.insert(self.input_ids[1], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[1], reduced)?;
         }
 
         Ok(gradients)
@@ -634,7 +661,7 @@ impl GradientFunction for MinimumBackward {
                 &selected,
                 &Shape::new(self.input_shapes[0].clone()),
             )?;
-            gradients.insert(self.input_ids[0], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[0], reduced)?;
         }
 
         if self.input_requires_grad[1] {
@@ -651,7 +678,7 @@ impl GradientFunction for MinimumBackward {
                 &selected,
                 &Shape::new(self.input_shapes[1].clone()),
             )?;
-            gradients.insert(self.input_ids[1], reduced);
+            accumulate_grad(&mut gradients, self.input_ids[1], reduced)?;
         }
 
         Ok(gradients)
@@ -678,12 +705,12 @@ impl GradientFunction for DotBackward {
 
         if self.lhs_requires_grad {
             let grad = crate::operations::arithmetic::mul(&self.rhs, grad_output)?;
-            gradients.insert(self.input_ids[0], grad);
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
         }
 
         if self.rhs_requires_grad {
             let grad = crate::operations::arithmetic::mul(&self.lhs, grad_output)?;
-            gradients.insert(self.input_ids[1], grad);
+            accumulate_grad(&mut gradients, self.input_ids[1], grad)?;
         }
 
         Ok(gradients)
@@ -740,7 +767,7 @@ impl GradientFunction for MatMulBackward {
                 (self.rhs.ndim() - 1) as isize,
             )?;
             let lhs_grad = crate::operations::linalg::matmul(grad_output, &rhs_t)?;
-            gradients.insert(self.input_ids[0], lhs_grad);
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
         }
 
         if self.rhs_requires_grad {
@@ -750,7 +777,7 @@ impl GradientFunction for MatMulBackward {
                 (self.lhs.ndim() - 1) as isize,
             )?;
             let rhs_grad = crate::operations::linalg::matmul(&lhs_t, grad_output)?;
-            gradients.insert(self.input_ids[1], rhs_grad);
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
         }
 
         Ok(gradients)
@@ -783,7 +810,7 @@ impl GradientFunction for SolveBackward {
 
         if self.rhs_requires_grad {
             let grad_rhs = crate::operations::linalg::solve(&lhs_t, grad_output)?;
-            gradients.insert(self.input_ids[1], grad_rhs);
+            accumulate_grad(&mut gradients, self.input_ids[1], grad_rhs)?;
         }
 
         if self.lhs_requires_grad {
@@ -810,7 +837,7 @@ impl GradientFunction for SolveBackward {
             let gram = crate::operations::linalg::matmul(&grad_output_view, &solution_t)?;
             let lhs_grad = crate::operations::linalg::solve(&lhs_t, &gram)?;
             let lhs_grad = crate::operations::arithmetic::neg(&lhs_grad)?;
-            gradients.insert(self.input_ids[0], lhs_grad);
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
         }
 
         Ok(gradients)

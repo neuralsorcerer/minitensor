@@ -1,14 +1,16 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
+    autograd::{Conv2dBackward, add_to_graph},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Perform 2D convolution on the input tensor.
@@ -158,13 +160,44 @@ pub fn conv2d(
                 || weight.requires_grad()
                 || bias.map_or(false, |b| b.requires_grad());
             let output_data = TensorData::from_vec_f32(output_vec, input.device());
-            Ok(Tensor::new(
+            let mut output = Tensor::new(
                 Arc::new(output_data),
                 output_shape,
                 DataType::Float32,
                 input.device(),
                 requires_grad,
-            ))
+            );
+
+            if requires_grad {
+                let mut deps: SmallVec<[_; 3]> = SmallVec::new();
+                if input.requires_grad() {
+                    deps.push(input.id());
+                }
+                if weight.requires_grad() {
+                    deps.push(weight.id());
+                }
+                let bias_requires_grad = bias.map_or(false, |b| b.requires_grad());
+                if bias_requires_grad {
+                    deps.push(bias.unwrap().id());
+                }
+                let grad_fn = Arc::new(Conv2dBackward {
+                    input: input.detach(),
+                    weight: weight.detach(),
+                    input_id: input.id(),
+                    weight_id: weight.id(),
+                    bias_id: bias.map(|b| b.id()),
+                    input_requires_grad: input.requires_grad(),
+                    weight_requires_grad: weight.requires_grad(),
+                    bias_requires_grad,
+                    stride,
+                    padding,
+                    deps,
+                });
+                output.set_grad_fn(Some(grad_fn.clone()));
+                add_to_graph(&output, Some(grad_fn))?;
+            }
+
+            Ok(output)
         }
         _ => Err(MinitensorError::invalid_operation(
             "conv2d is implemented only for Float32 CPU tensors",

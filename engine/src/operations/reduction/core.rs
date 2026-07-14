@@ -6,8 +6,8 @@
 
 use crate::{
     autograd::{
-        CumprodBackward, CumsumBackward, NanMeanBackward, NanSumBackward, ProdBackward,
-        SumBackward, add_to_graph,
+        CumprodBackward, CumsumBackward, GatherBackward, MedianBackward, MinMaxBackward,
+        NanMeanBackward, NanSumBackward, ProdBackward, QuantileBackward, SumBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
     operations::{
@@ -233,8 +233,11 @@ pub fn median(
         return Ok((tensor.clone(), None));
     }
 
-    match dim {
-        None => median_all(tensor),
+    let (values, indices, norm_dim) = match dim {
+        None => {
+            let (values, indices) = median_all(tensor)?;
+            (values, indices, None)
+        }
         Some(dim_value) => {
             let axis = if tensor.ndim() == 0 {
                 if dim_value == 0 || dim_value == -1 {
@@ -246,9 +249,35 @@ pub fn median(
                 normalize_dim(dim_value, tensor.ndim())?
             };
             let (values, indices) = median_along_dim(tensor, axis, keepdim)?;
-            Ok((values, Some(indices)))
+            (values, Some(indices), Some(axis))
         }
+    };
+    let values = attach_median_grad(values, tensor, norm_dim, keepdim, false)?;
+    Ok((values, indices))
+}
+
+/// Attach a [`MedianBackward`] gradient to a median value reduction.
+fn attach_median_grad(
+    values: Tensor,
+    input: &Tensor,
+    dim: Option<usize>,
+    keepdim: bool,
+    nan_aware: bool,
+) -> Result<Tensor> {
+    if !input.requires_grad() || !input.dtype().is_float() {
+        return Ok(values);
     }
+    let grad_fn = Arc::new(MedianBackward {
+        input_id: input.id(),
+        input: input.detach(),
+        dim,
+        keepdim,
+        nan_aware,
+    });
+    let mut values = values;
+    values.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&values, Some(grad_fn))?;
+    Ok(values)
 }
 
 /// Compute the q-th quantile of the tensor data.
@@ -268,20 +297,52 @@ pub fn quantile(
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
 
-    match dim {
-        None => quantile_all(tensor, q, keepdim, interpolation),
+    let (output, norm_dim) = match dim {
+        None => (quantile_all(tensor, q, keepdim, interpolation)?, None),
         Some(dim_value) => {
             if tensor.ndim() == 0 {
                 if dim_value == 0 || dim_value == -1 {
-                    return quantile_all(tensor, q, keepdim, interpolation);
+                    (quantile_all(tensor, q, keepdim, interpolation)?, None)
+                } else {
+                    return Err(MinitensorError::index_error(dim_value, 0, 1));
                 }
-                return Err(MinitensorError::index_error(dim_value, 0, 1));
+            } else {
+                let axis = normalize_dim(dim_value, tensor.ndim())?;
+                (
+                    quantile_along_dim(tensor, axis, keepdim, q, interpolation)?,
+                    Some(axis),
+                )
             }
-
-            let axis = normalize_dim(dim_value, tensor.ndim())?;
-            quantile_along_dim(tensor, axis, keepdim, q, interpolation)
         }
+    };
+
+    attach_quantile_grad(output, tensor, norm_dim, q, interpolation, false)
+}
+
+/// Attach a [`QuantileBackward`] gradient to a quantile value reduction.
+fn attach_quantile_grad(
+    output: Tensor,
+    input: &Tensor,
+    dim: Option<usize>,
+    q: f64,
+    interpolation: QuantileInterpolation,
+    nan_aware: bool,
+) -> Result<Tensor> {
+    if !input.requires_grad() || !input.dtype().is_float() {
+        return Ok(output);
     }
+    let grad_fn = Arc::new(QuantileBackward {
+        input_id: input.id(),
+        input: input.detach(),
+        dim,
+        q,
+        interpolation,
+        nan_aware,
+    });
+    let mut output = output;
+    output.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&output, Some(grad_fn))?;
+    Ok(output)
 }
 
 /// Compute multiple quantiles of the tensor data in a single pass.
@@ -343,40 +404,47 @@ pub fn nanquantile(
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
 
-    match dim {
-        None => nanquantile_all(tensor, q, keepdim, interpolation),
+    let (output, norm_dim) = match dim {
+        None => (nanquantile_all(tensor, q, keepdim, interpolation)?, None),
         Some(dim_value) => {
             if tensor.ndim() == 0 {
                 if dim_value == 0 || dim_value == -1 {
-                    return nanquantile_all(tensor, q, keepdim, interpolation);
+                    (nanquantile_all(tensor, q, keepdim, interpolation)?, None)
+                } else {
+                    return Err(MinitensorError::index_error(dim_value, 0, 1));
                 }
-                return Err(MinitensorError::index_error(dim_value, 0, 1));
+            } else {
+                let axis = normalize_dim(dim_value, tensor.ndim())?;
+                (
+                    nanquantile_along_dim(tensor, axis, keepdim, q, interpolation)?,
+                    Some(axis),
+                )
             }
-
-            let axis = normalize_dim(dim_value, tensor.ndim())?;
-            nanquantile_along_dim(tensor, axis, keepdim, q, interpolation)
         }
-    }
+    };
+    attach_quantile_grad(output, tensor, norm_dim, q, interpolation, true)
 }
 
 /// Compute the median while ignoring NaN values.
 pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
 
-    match dim {
-        None => nanmedian_all(tensor, keepdim),
+    let (values, norm_dim) = match dim {
+        None => (nanmedian_all(tensor, keepdim)?, None),
         Some(dim_value) => {
             if tensor.ndim() == 0 {
                 if dim_value == 0 || dim_value == -1 {
-                    return nanmedian_all(tensor, keepdim);
+                    (nanmedian_all(tensor, keepdim)?, None)
+                } else {
+                    return Err(MinitensorError::index_error(dim_value, 0, 1));
                 }
-                return Err(MinitensorError::index_error(dim_value, 0, 1));
+            } else {
+                let axis = normalize_dim(dim_value, tensor.ndim())?;
+                (nanmedian_along_dim(tensor, axis, keepdim)?, Some(axis))
             }
-
-            let axis = normalize_dim(dim_value, tensor.ndim())?;
-            nanmedian_along_dim(tensor, axis, keepdim)
         }
-    }
+    };
+    attach_median_grad(values, tensor, norm_dim, keepdim, true)
 }
 
 /// Compute multiple quantiles of the tensor data in a single pass while ignoring NaN values.

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -96,7 +96,9 @@ fn sign(tensor: &Tensor) -> Result<Tensor> {
 
 /// Sum all elements in a tensor to produce a scalar
 fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
-    let scalar_shape = Shape::new(vec![1]);
+    // Reduced losses are 0-dim scalars, matching sum()/mean() and PyTorch (a
+    // shape-[1] result breaks float(loss) on modern NumPy).
+    let scalar_shape = Shape::scalar();
     let mut output_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
@@ -527,7 +529,8 @@ mod tests {
 
         // Expected: ((1.0-1.5)² + (2.0-2.5)² + (3.0-2.5)²) / 3 = (0.25 + 0.25 + 0.25) / 3 = 0.25
         assert!((loss_data[0] - 0.25).abs() < 1e-6);
-        assert_eq!(loss.shape().dims(), &[1]);
+        // A reduced loss is a 0-dim scalar (matching sum()/mean() and PyTorch).
+        assert_eq!(loss.shape().dims(), &[] as &[usize]);
     }
 
     #[test]

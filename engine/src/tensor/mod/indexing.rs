@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -289,13 +289,14 @@ impl Tensor {
                     result_data.as_bool_slice_mut().unwrap()[0] = input[offset];
                 }
             }
-            return Ok(Tensor::new(
+            let output = Tensor::new(
                 Arc::new(result_data),
                 Shape::scalar(),
                 self.dtype,
                 self.device,
                 self.requires_grad,
-            ));
+            );
+            return self.wrap_index_grad(output, offset, Vec::new(), Vec::new(), Vec::new(), Vec::new());
         }
 
         let out_shape = Shape::new(out_dims.clone());
@@ -401,13 +402,47 @@ impl Tensor {
             }
         }
 
-        Ok(Tensor::new(
+        let output = Tensor::new(
             Arc::new(result_data),
             out_shape,
             self.dtype,
             self.device,
             self.requires_grad,
-        ))
+        );
+        self.wrap_index_grad(output, offset, out_dims, orig_dim_map, starts, steps)
+    }
+
+    /// Attach an [`IndexBackward`] gradient function to a freshly indexed tensor.
+    ///
+    /// `out_dims` is empty for a scalar (fully integer-indexed) result. Gradient
+    /// tracking is only wired for floating-point, contiguous inputs, which is
+    /// always the case at the Python boundary where indexing is applied.
+    fn wrap_index_grad(
+        &self,
+        output: Tensor,
+        offset: usize,
+        out_dims: Vec<usize>,
+        orig_dim_map: Vec<usize>,
+        starts: Vec<usize>,
+        steps: Vec<usize>,
+    ) -> Result<Tensor> {
+        if !self.requires_grad || !self.dtype.is_float() || !self.is_contiguous() {
+            return Ok(output);
+        }
+        let grad_fn = Arc::new(crate::autograd::IndexBackward {
+            input_id: self.tensor_id,
+            input_shape: self.shape.dims().to_vec(),
+            input_strides: self.strides.as_slice().to_vec(),
+            offset,
+            out_dims,
+            orig_dim_map,
+            starts,
+            steps,
+        });
+        let mut output = output;
+        output.set_grad_fn(Some(grad_fn.clone()));
+        autograd::add_to_graph(&output, Some(grad_fn))?;
+        Ok(output)
     }
 
     /// Assign values to tensor slice

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -53,7 +53,10 @@ pub fn repeat_interleave(
     output_size: Option<usize>,
 ) -> Result<Tensor> {
     if dim.is_none() {
-        let flat = tensor.flatten_all()?;
+        // Grad-aware flatten so the [numel] gradient is reshaped back to the
+        // input shape (a bare `flatten_all` view aliases the input's id and would
+        // attribute a wrongly-shaped gradient to it).
+        let flat = flatten(tensor, 0, -1)?;
         return repeat_interleave(&flat, repeats, Some(0), output_size);
     }
 

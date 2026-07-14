@@ -350,6 +350,9 @@ pub fn sort(
         false,
     );
 
+    // `values = gather(input, axis, indices)`; scatter the gradient back.
+    let values = attach_gather_like_grad(values, tensor, axis, &indices)?;
+
     Ok((values, indices))
 }
 

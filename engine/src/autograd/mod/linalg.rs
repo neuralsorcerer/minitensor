@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -763,14 +763,14 @@ impl GradientFunction for LogAddExpBackward {
         let lhs_mul = arithmetic::mul(&lhs_term, grad_output)?;
         let lhs_grad =
             reduce_gradient_for_broadcasting(&lhs_mul, &Shape::new(self.input_shapes[0].clone()))?;
-        gradients.insert(self.input_ids[0], lhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
 
         let rhs_diff = arithmetic::sub(&self.rhs.detach(), &self.output.detach())?;
         let rhs_term = rhs_diff.exp()?;
         let rhs_mul = arithmetic::mul(&rhs_term, grad_output)?;
         let rhs_grad =
             reduce_gradient_for_broadcasting(&rhs_mul, &Shape::new(self.input_shapes[1].clone()))?;
-        gradients.insert(self.input_ids[1], rhs_grad);
+        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
 
         Ok(gradients)
     }

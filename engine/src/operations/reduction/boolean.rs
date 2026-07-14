@@ -149,7 +149,7 @@ fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
 
 /// Maximum value along specified dimension
 pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    match dim {
+    let (output, norm_dim) = match dim {
         None => {
             // Find global maximum
             let result_shape = if keepdim {
@@ -168,24 +168,85 @@ pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
                 DataType::Bool => max_all_bool(tensor, &mut result_data)?,
             }
 
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                tensor.dtype(),
-                tensor.device(),
-                tensor.requires_grad(),
-            ))
+            (
+                Tensor::new(
+                    Arc::new(result_data),
+                    result_shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ),
+                None,
+            )
         }
         Some(d) => {
             let d = normalize_dim(d, tensor.ndim())?;
-            max_along_dim(tensor, d, keepdim)
+            (max_along_dim(tensor, d, keepdim)?, Some(d))
         }
+    };
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, false)
+}
+
+/// Attach a [`GatherBackward`] gradient to a value tensor that was formed by
+/// gathering the input along `dim` at `indices` (`sort`/`topk`). The forward is
+/// `values = gather(input, dim, indices)`, so the backward scatters the gradient
+/// straight back to the selected source positions.
+fn attach_gather_like_grad(
+    values: Tensor,
+    input: &Tensor,
+    dim: usize,
+    indices: &Tensor,
+) -> Result<Tensor> {
+    if !input.requires_grad() || !input.dtype().is_float() {
+        return Ok(values);
     }
+    let index = indices
+        .data()
+        .as_i64_slice()
+        .ok_or_else(|| MinitensorError::internal_error("selection indices must be int64"))?
+        .to_vec();
+    let grad_fn = Arc::new(GatherBackward {
+        input_id: input.id(),
+        input_shape: input.shape().dims().to_vec(),
+        dim,
+        index,
+    });
+    let mut values = values;
+    values.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&values, Some(grad_fn))?;
+    Ok(values)
+}
+
+/// Attach a [`MinMaxBackward`] gradient to a `min`/`max`/`nanmax`/`nanmin` value
+/// reduction (`nan_aware` selects the NaN-ignoring recompute in the backward).
+fn attach_minmax_grad(
+    output: Tensor,
+    input: &Tensor,
+    dim: Option<usize>,
+    keepdim: bool,
+    is_max: bool,
+    nan_aware: bool,
+) -> Result<Tensor> {
+    if !input.requires_grad() || !input.dtype().is_float() {
+        return Ok(output);
+    }
+    let grad_fn = Arc::new(MinMaxBackward {
+        input_id: input.id(),
+        input: input.detach(),
+        dim,
+        keepdim,
+        is_max,
+        nan_aware,
+    });
+    let mut output = output;
+    output.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&output, Some(grad_fn))?;
+    Ok(output)
 }
 
 /// Minimum value along specified dimension
 pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
-    match dim {
+    let (output, norm_dim) = match dim {
         None => {
             // Find global minimum
             let result_shape = if keepdim {
@@ -204,19 +265,23 @@ pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
                 DataType::Bool => min_all_bool(tensor, &mut result_data)?,
             }
 
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                tensor.dtype(),
-                tensor.device(),
-                tensor.requires_grad(),
-            ))
+            (
+                Tensor::new(
+                    Arc::new(result_data),
+                    result_shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ),
+                None,
+            )
         }
         Some(d) => {
             let d = normalize_dim(d, tensor.ndim())?;
-            min_along_dim(tensor, d, keepdim)
+            (min_along_dim(tensor, d, keepdim)?, Some(d))
         }
-    }
+    };
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, false)
 }
 
 /// NaN-aware maximum value along specified dimension
@@ -225,7 +290,7 @@ pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
         return max(tensor, dim, keepdim);
     }
 
-    match dim {
+    let (output, norm_dim) = match dim {
         None => {
             let result_shape = if keepdim {
                 Shape::new(vec![1; tensor.ndim()])
@@ -241,20 +306,24 @@ pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
                 _ => unreachable!("nanmax only supports floating point tensors"),
             }
 
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                tensor.dtype(),
-                tensor.device(),
-                tensor.requires_grad(),
-            ))
+            (
+                Tensor::new(
+                    Arc::new(result_data),
+                    result_shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ),
+                None,
+            )
         }
         Some(d) => {
             let d = normalize_dim(d, tensor.ndim())?;
             let (values, _) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
-            Ok(values)
+            (values, Some(d))
         }
-    }
+    };
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, true, true)
 }
 
 /// NaN-aware minimum value along specified dimension
@@ -263,7 +332,7 @@ pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
         return min(tensor, dim, keepdim);
     }
 
-    match dim {
+    let (output, norm_dim) = match dim {
         None => {
             let result_shape = if keepdim {
                 Shape::new(vec![1; tensor.ndim()])
@@ -279,26 +348,32 @@ pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
                 _ => unreachable!("nanmin only supports floating point tensors"),
             }
 
-            Ok(Tensor::new(
-                Arc::new(result_data),
-                result_shape,
-                tensor.dtype(),
-                tensor.device(),
-                tensor.requires_grad(),
-            ))
+            (
+                Tensor::new(
+                    Arc::new(result_data),
+                    result_shape,
+                    tensor.dtype(),
+                    tensor.device(),
+                    tensor.requires_grad(),
+                ),
+                None,
+            )
         }
         Some(d) => {
             let d = normalize_dim(d, tensor.ndim())?;
             let (values, _) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
-            Ok(values)
+            (values, Some(d))
         }
-    }
+    };
+    attach_minmax_grad(output, tensor, norm_dim, keepdim, false, true)
 }
 
 /// Maximum values and their indices along specified dimension
 pub fn max_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = normalize_dim(dim, tensor.ndim())?;
-    max_along_dim_with_indices(tensor, d, keepdim)
+    let (values, indices) = max_along_dim_with_indices(tensor, d, keepdim)?;
+    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, false)?;
+    Ok((values, indices))
 }
 
 /// NaN-aware maximum values and their indices along specified dimension
@@ -308,13 +383,17 @@ pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
     }
 
     let d = normalize_dim(dim, tensor.ndim())?;
-    nanmax_along_dim_with_indices(tensor, d, keepdim)
+    let (values, indices) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
+    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, true)?;
+    Ok((values, indices))
 }
 
 /// Minimum values and their indices along specified dimension
 pub fn min_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
     let d = normalize_dim(dim, tensor.ndim())?;
-    min_along_dim_with_indices(tensor, d, keepdim)
+    let (values, indices) = min_along_dim_with_indices(tensor, d, keepdim)?;
+    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, false)?;
+    Ok((values, indices))
 }
 
 /// NaN-aware minimum values and their indices along specified dimension
@@ -324,7 +403,9 @@ pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
     }
 
     let d = normalize_dim(dim, tensor.ndim())?;
-    nanmin_along_dim_with_indices(tensor, d, keepdim)
+    let (values, indices) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
+    let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, true)?;
+    Ok((values, indices))
 }
 
 /// Argument of maximum value along specified dimension
@@ -520,11 +601,13 @@ pub fn topk(
                     let compare = if largest { cmp_f32_desc } else { cmp_f32_asc };
                     select_topk_entries(&mut entries, k, sorted, compare);
 
-                    let base = (o * inner + r) * k;
+                    // Output shape is (outer, k, inner); write row-major so a
+                    // non-trailing reduction axis (inner > 1) lands correctly.
                     for j in 0..k {
                         let (index, value) = entries[j];
-                        values[base + j] = value;
-                        indices[base + j] = index as i64;
+                        let pos = o * k * inner + j * inner + r;
+                        values[pos] = value;
+                        indices[pos] = index as i64;
                     }
                 }
             }
@@ -553,11 +636,13 @@ pub fn topk(
                     let compare = if largest { cmp_f64_desc } else { cmp_f64_asc };
                     select_topk_entries(&mut entries, k, sorted, compare);
 
-                    let base = (o * inner + r) * k;
+                    // Output shape is (outer, k, inner); write row-major so a
+                    // non-trailing reduction axis (inner > 1) lands correctly.
                     for j in 0..k {
                         let (index, value) = entries[j];
-                        values[base + j] = value;
-                        indices[base + j] = index as i64;
+                        let pos = o * k * inner + j * inner + r;
+                        values[pos] = value;
+                        indices[pos] = index as i64;
                     }
                 }
             }
@@ -586,11 +671,13 @@ pub fn topk(
                     let compare = if largest { cmp_i32_desc } else { cmp_i32_asc };
                     select_topk_entries(&mut entries, k, sorted, compare);
 
-                    let base = (o * inner + r) * k;
+                    // Output shape is (outer, k, inner); write row-major so a
+                    // non-trailing reduction axis (inner > 1) lands correctly.
                     for j in 0..k {
                         let (index, value) = entries[j];
-                        values[base + j] = value;
-                        indices[base + j] = index as i64;
+                        let pos = o * k * inner + j * inner + r;
+                        values[pos] = value;
+                        indices[pos] = index as i64;
                     }
                 }
             }
@@ -619,11 +706,13 @@ pub fn topk(
                     let compare = if largest { cmp_i64_desc } else { cmp_i64_asc };
                     select_topk_entries(&mut entries, k, sorted, compare);
 
-                    let base = (o * inner + r) * k;
+                    // Output shape is (outer, k, inner); write row-major so a
+                    // non-trailing reduction axis (inner > 1) lands correctly.
                     for j in 0..k {
                         let (index, value) = entries[j];
-                        values[base + j] = value;
-                        indices[base + j] = index as i64;
+                        let pos = o * k * inner + j * inner + r;
+                        values[pos] = value;
+                        indices[pos] = index as i64;
                     }
                 }
             }
@@ -652,11 +741,13 @@ pub fn topk(
                     let compare = if largest { cmp_bool_desc } else { cmp_bool_asc };
                     select_topk_entries(&mut entries, k, sorted, compare);
 
-                    let base = (o * inner + r) * k;
+                    // Output shape is (outer, k, inner); write row-major so a
+                    // non-trailing reduction axis (inner > 1) lands correctly.
                     for j in 0..k {
                         let (index, value) = entries[j];
-                        values[base + j] = value;
-                        indices[base + j] = index as i64;
+                        let pos = o * k * inner + j * inner + r;
+                        values[pos] = value;
+                        indices[pos] = index as i64;
                     }
                 }
             }
@@ -677,6 +768,9 @@ pub fn topk(
         tensor.device(),
         false,
     );
+
+    // `values = gather(input, axis, indices)`; scatter the gradient back.
+    let values = attach_gather_like_grad(values, tensor, axis, &indices)?;
 
     Ok((values, indices))
 }
