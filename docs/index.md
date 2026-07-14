@@ -50,6 +50,30 @@ and notebooks under [`../examples/notebooks`](../examples/notebooks). Rebuild th
 Rust extension before running examples if you changed code in `engine/` or
 `bindings/`.
 
+## Citation and paper
+
+If you use MiniTensor in academic or research work, please cite the accompanying
+paper:
+
+> Soumyadip Sarkar. *MiniTensor: A Lightweight, High-Performance Tensor
+> Operations Library*. arXiv:2602.00125, 2026.
+
+- Paper: [arXiv:2602.00125](https://arxiv.org/abs/2602.00125)
+- DOI: [10.48550/arXiv.2602.00125](https://doi.org/10.48550/arXiv.2602.00125)
+- Citation metadata: [`CITATION.cff`](../CITATION.cff)
+
+```bibtex
+@misc{sarkar2026minitensorlightweighthighperformancetensor,
+      title={MiniTensor: A Lightweight, High-Performance Tensor Operations Library},
+      author={Soumyadip Sarkar},
+      year={2026},
+      eprint={2602.00125},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2602.00125},
+}
+```
+
 ## Documentation maintenance checklist
 
 When adding or changing public functionality:
