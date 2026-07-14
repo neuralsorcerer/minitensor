@@ -646,8 +646,12 @@ def test_matmul_vector_operands():
     assert a.matmul(b).numpy().shape == ()
 
     m = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
-    np.testing.assert_allclose(m.matmul(a).numpy(), np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2) @ [1.0, 2.0])
-    np.testing.assert_allclose((a @ m).numpy(), np.array([1.0, 2.0]) @ np.array([[1.0, 2.0], [3.0, 4.0]]))
+    np.testing.assert_allclose(
+        m.matmul(a).numpy(), np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2) @ [1.0, 2.0]
+    )
+    np.testing.assert_allclose(
+        (a @ m).numpy(), np.array([1.0, 2.0]) @ np.array([[1.0, 2.0], [3.0, 4.0]])
+    )
 
     # Scalars are still not valid matmul operands.
     with pytest.raises((ValueError, RuntimeError)):

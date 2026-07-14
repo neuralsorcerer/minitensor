@@ -195,7 +195,11 @@ def test_conv2d_is_differentiable(stride, padding, xshape, wshape):
     gx = _conv_finite_diff(lambda a: conv(xn=a), x, weights)
     gw = _conv_finite_diff(lambda a: conv(wn=a), w, weights)
     gb = _conv_finite_diff(lambda a: conv(bn=a), b, weights)
-    for name, ana, num in [("x", mx.grad.numpy(), gx), ("w", mw.grad.numpy(), gw), ("b", mb.grad.numpy(), gb)]:
+    for name, ana, num in [
+        ("x", mx.grad.numpy(), gx),
+        ("w", mw.grad.numpy(), gw),
+        ("b", mb.grad.numpy(), gb),
+    ]:
         rel = np.abs(ana - num).max() / (np.abs(num).max() + 1e-6)
         assert rel < 1e-2, f"conv {name} grad relerr {rel}"
 
