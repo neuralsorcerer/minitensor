@@ -378,7 +378,7 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
     }
 }
 
-/// SELU activation function following PyTorch constants
+/// SELU activation function.
 pub fn selu(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());

@@ -48,7 +48,7 @@ impl LikeArgs {
     }
 }
 
-/// NumPy-style array creation functions
+/// Array creation functions
 #[pymodule]
 pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(asarray, m)?)?;

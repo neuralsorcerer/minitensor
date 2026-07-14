@@ -50,7 +50,7 @@ def _normalize_shape_argument(shape: object, name: str) -> tuple[int, ...]:
 
 
 def broadcast_shapes(*shapes: object) -> tuple[int, ...]:
-    """Return the shape produced by NumPy/PyTorch-style broadcasting.
+    """Return the shape produced by broadcasting.
 
     Each argument may be a single non-negative integer dimension or an iterable
     of non-negative integer dimensions. Scalar shapes are represented by an
@@ -87,7 +87,7 @@ def broadcast_tensors(*inputs: object) -> tuple[Tensor, ...]:
     """Broadcast tensor-like inputs to a shared shape.
 
     Inputs are converted with :func:`as_tensor`, then reshaped and expanded
-    according to NumPy/PyTorch broadcasting rules. The returned tensors are
+    to a shared shape. The returned tensors are
     materialized with contiguous storage so they behave identically to
     dense tensors in every operation. Valid zero-sized broadcasts return
     empty tensors preserving dtype, device, and ``requires_grad`` metadata.
@@ -151,8 +151,8 @@ def _requires_zero_size_materialization(
 
     The Rust backend can expand existing zero-sized axes, but it cannot model
     an axis that changes from length one to zero as a view because that shape
-    has no addressable elements. NumPy treats this as a valid broadcast, so the
-    Python helper returns a correctly shaped empty tensor for that edge case.
+    has no addressable elements. The Python helper returns a correctly shaped
+    empty tensor for that edge case.
     """
 
     if 0 not in target_shape:
@@ -184,8 +184,8 @@ def meshgrid(
 ) -> tuple[Tensor, ...]:
     """Return coordinate matrices from one-dimensional coordinate tensors.
 
-    This NumPy-compatible helper accepts tensor-like 1-D inputs and returns
-    broadcasted coordinate grids. ``indexing="ij"`` preserves input axis
+    This helper accepts tensor-like 1-D inputs and returns broadcasted coordinate
+    grids. ``indexing="ij"`` preserves input axis
     order, while ``indexing="xy"`` swaps the first two axes for Cartesian
     plotting conventions. With ``sparse=True`` the function returns reshaped
     coordinate vectors that broadcast lazily instead of materializing full
@@ -250,7 +250,7 @@ def atleast_1d(*inputs: object) -> Tensor | tuple[Tensor, ...]:
 
     Scalar inputs are reshaped to ``(1,)``. Inputs that are already at least
     one-dimensional are returned as tensors without adding dimensions.
-    Multiple inputs return a tuple of tensors, matching NumPy's convention.
+    Multiple inputs return a tuple of tensors.
     """
 
     if not inputs:

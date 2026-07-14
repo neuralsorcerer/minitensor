@@ -275,8 +275,8 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    // NumPy/PyTorch 1-D vector semantics: a 1-D `lhs` is promoted by prepending a
-    // 1, a 1-D `rhs` by appending a 1; the added axes are removed from the result
+    // For 1-D vectors, `lhs` is promoted by prepending a 1 and `rhs` by appending
+    // a 1; the added axes are removed from the result
     // (so mat@vec -> vec, vec@mat -> vec, vec@vec -> scalar). Reshapes are
     // grad-aware, so the gradient flows through the promotion.
     let lhs_1d = lhs.ndim() == 1;

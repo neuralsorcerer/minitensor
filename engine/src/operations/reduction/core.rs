@@ -45,7 +45,7 @@ impl QuantileInterpolation {
             QuantileInterpolation::Midpoint => 0.5 * (lower + upper),
             QuantileInterpolation::Nearest => {
                 // Index-aware callers should route through `nearest_index_with_tie_even`
-                // for NumPy-compatible tie-to-even behavior. This fallback remains
+                // for tie-to-even behavior. This fallback remains
                 // deterministic for non-indexed interpolation use-cases.
                 if weight < 0.5 {
                     lower

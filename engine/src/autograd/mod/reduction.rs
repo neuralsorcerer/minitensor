@@ -873,8 +873,7 @@ impl GradientFunction for RepeatInterleaveBackward {
 /// along a single `dim`).
 ///
 /// The gradient flows to every input element equal to the reduced extremum,
-/// split equally among ties so the contributions sum to the upstream gradient
-/// (matching PyTorch's `amax`/`amin` and the value branch of `min`/`max`). The
+/// split equally among ties so the contributions sum to the upstream gradient. The
 /// extremum, its selection mask and the tie count are recomputed from the stored
 /// (detached) input, so nothing beyond the input needs to be retained.
 pub struct MinMaxBackward {
@@ -1017,7 +1016,7 @@ fn quantile_grad_coeffs(
         Qi::Higher => (lower, upper, 0.0, 1.0),
         Qi::Midpoint => (lower, upper, 0.5, 0.5),
         Qi::Nearest => {
-            // NumPy-compatible tie-to-even at weight == 0.5.
+            // Ties at weight == 0.5 round to the even index.
             let nearest = if weight < 0.5 {
                 lower
             } else if weight > 0.5 {

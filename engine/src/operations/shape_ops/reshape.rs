@@ -142,7 +142,7 @@ pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
             }
             let d = d as usize;
             if dims[d] != 1 {
-                // PyTorch leaves a non-unit axis untouched.
+                // A non-unit axis remains untouched.
                 dims.to_vec()
             } else {
                 let mut v = dims.to_vec();

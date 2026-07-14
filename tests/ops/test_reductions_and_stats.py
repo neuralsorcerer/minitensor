@@ -708,7 +708,7 @@ def test_sort_descending_with_nan():
     x = mt.tensor([float("nan"), 3.0, 1.0], dtype="float32")
     values, indices = x.sort(descending=True)
 
-    # NaNs should be placed first to align with PyTorch semantics
+    # NaNs should be placed first.
     assert math.isnan(values.numpy()[0])
     assert indices.numpy().tolist()[1:] == [1, 2]
 

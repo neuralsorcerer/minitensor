@@ -530,8 +530,7 @@ def test_strides_and_contiguity_follow_backend_layout():
 def test_expand_materializes_at_python_boundary():
     # The engine's kernels assume contiguous storage, so tensors handed back
     # to Python are materialized. expand() therefore returns a contiguous
-    # tensor whose values match NumPy broadcasting, and every downstream
-    # operation on it is safe.
+    # tensor with broadcast values, and every downstream operation on it is safe.
     base = mt.arange(0.0, 3.0, dtype="float32").reshape(3, 1)
     expanded = base.expand(3, 4)
     assert expanded.is_contiguous()
@@ -855,7 +854,7 @@ def test_empty_tensor_reductions():
     s = t.sum()
     m = t.mean()
     np.testing.assert_allclose(s.numpy(), np.array([0.0], dtype=np.float32))
-    # mean of an empty tensor is 0/0 = NaN, matching NumPy and PyTorch.
+    # mean of an empty tensor is 0/0 = NaN.
     assert np.isnan(m.numpy())
 
 

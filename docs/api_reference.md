@@ -128,8 +128,7 @@ plotting conventions; `indexing="ij"` preserves matrix-indexing order for all
 axes. Dense outputs are materialized broadcast grids, while `sparse=True`
 returns only reshaped coordinate vectors that can still broadcast together
 lazily inside later operations. Set `copy=True` when callers need storage
-independent of the returned grid objects. Calling `meshgrid()` with no inputs returns `()`,
-matching NumPy's empty-input convention.
+independent of the returned grid objects. Calling `meshgrid()` with no inputs returns `()`.
 
 Validation and edge cases:
 
@@ -436,8 +435,7 @@ Behavior and validation:
 - Python scalars, Python sequences, NumPy arrays, and MiniTensor tensors are
   accepted for `other`; `input` should be a MiniTensor tensor or tensor wrapper,
   matching the rest of the tensor-centric functional binary helpers.
-- Boolean inputs use logical OR for `maximum` and logical AND for `minimum`,
-  matching NumPy boolean extrema behavior.
+- Boolean inputs use logical OR for `maximum` and logical AND for `minimum`.
 - Floating-point NaNs are propagated when either operand at an element is NaN.
 - Incompatible shapes raise the normal MiniTensor shape/broadcasting error.
 

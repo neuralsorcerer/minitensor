@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_matmul_vector_operands() {
-        // 1-D @ 1-D is a dot product returning a scalar (NumPy/PyTorch semantics).
+        // 1-D @ 1-D is a dot product returning a scalar.
         let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
         let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
         let dot = matmul(&a, &b).unwrap();

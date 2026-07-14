@@ -85,7 +85,7 @@ impl PyTensor {
     #[staticmethod]
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
-        // For now, same as from_numpy - true zero-copy would require more complex memory management
+        // Currently delegates to from_numpy; true zero-copy requires more complex memory management.
         Self::from_numpy(array, requires_grad)
     }
 

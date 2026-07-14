@@ -922,8 +922,8 @@ impl GradientFunction for LeakyReluBackward {
 
 /// Gradient function for the element-wise absolute value.
 ///
-/// `d/dx |x| = sign(x)` with the sub-gradient at `x == 0` taken as `0`, matching
-/// PyTorch. The stored input shares storage with the forward input (a detached
+/// `d/dx |x| = sign(x)` with the sub-gradient at `x == 0` taken as `0`.
+/// The stored input shares storage with the forward input (a detached
 /// clone), so no data is copied.
 pub struct AbsBackward {
     pub input_id: TensorId,
@@ -1004,7 +1004,7 @@ impl GradientFunction for AbsBackward {
 /// Gradient function for `clamp`/`clip`.
 ///
 /// The gradient is passed through where the input lies inside the (inclusive)
-/// clamp bounds and zeroed where it was saturated, matching PyTorch. Either
+/// clamp bounds and zeroed where it was saturated. Either
 /// bound may be absent (`clamp_min`/`clamp_max`).
 pub struct ClampBackward {
     pub input_id: TensorId,

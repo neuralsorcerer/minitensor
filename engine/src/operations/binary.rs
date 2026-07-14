@@ -21,8 +21,7 @@ pub enum BinaryOpKind {
     Minimum,
 }
 
-/// Cast the two operands to a common dtype according to PyTorch style
-/// promotion rules for the supplied binary operation.
+/// Cast the two operands using the promotion rules for the supplied binary operation.
 pub fn coerce_binary_operands<'a>(
     lhs: &'a Tensor,
     rhs: &'a Tensor,

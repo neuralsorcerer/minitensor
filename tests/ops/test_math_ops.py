@@ -39,7 +39,7 @@ def test_division_broadcasting_and_zero():
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_division_by_zero_follows_ieee_754(dtype):
-    # -x/0 -> -inf, 0/0 -> nan, +x/0 -> inf, matching NumPy/PyTorch. Use 20
+    # -x/0 -> -inf, 0/0 -> nan, +x/0 -> inf. Use 20
     # elements so both the SIMD body and its remainder tail are exercised and
     # must agree.
     pattern = np.array([-1.0, 0.0, 1.0, 2.0] * 5, dtype=dtype)

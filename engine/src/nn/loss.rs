@@ -316,7 +316,7 @@ mod tests {
         let targets = create_test_tensor_f32(vec![1.2, 2.3], vec![2], false);
 
         let loss = huber.forward(&predictions, &targets).unwrap();
-        // A reduced loss is a 0-dim scalar (matching sum()/mean() and PyTorch).
+        // A reduced loss is a 0-dim scalar.
         assert_eq!(loss.shape().dims(), &[] as &[usize]);
     }
 

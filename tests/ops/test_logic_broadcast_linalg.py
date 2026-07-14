@@ -639,7 +639,7 @@ def test_matmul_bool_error():
 
 
 def test_matmul_vector_operands():
-    # 1-D operands follow NumPy/PyTorch: vec@vec -> scalar, mat@vec/vec@mat -> vec.
+    # For 1-D operands, vec@vec -> scalar and mat@vec/vec@mat -> vec.
     a = mt.Tensor([1.0, 2.0])
     b = mt.Tensor([3.0, 4.0])
     np.testing.assert_allclose(a.matmul(b).numpy(), np.dot([1.0, 2.0], [3.0, 4.0]))

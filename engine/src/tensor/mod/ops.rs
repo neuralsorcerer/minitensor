@@ -83,7 +83,7 @@ impl Tensor {
         clip(self, min_val, max_val)
     }
 
-    /// Alias for [`Tensor::clip`] following PyTorch's `clamp` naming.
+    /// Alias for [`Tensor::clip`].
     #[inline(always)]
     pub fn clamp(&self, min_val: Option<f64>, max_val: Option<f64>) -> Result<Self> {
         self.clip(min_val, max_val)

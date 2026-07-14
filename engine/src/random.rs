@@ -8,8 +8,8 @@
 //!
 //! The Rust standard `rand::rng()` helper returns a thread-local generator that
 //! cannot be deterministically seeded.  MiniTensor needs reproducible randomness
-//! across the entire stack so that Python callers can rely on `manual_seed`
-//! behaving similarly to frameworks like PyTorch.  This module owns a single
+//! across the entire stack so that Python callers can rely on `manual_seed`.
+//! This module owns a single
 //! [`StdRng`] protected by a `Mutex` and exposes helpers that allow the rest of
 //! the engine to draw random numbers while sharing the global state.
 
