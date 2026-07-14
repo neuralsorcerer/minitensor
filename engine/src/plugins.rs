@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 /// Version compatibility information for plugins
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VersionInfo {
     pub major: u32,
     pub minor: u32,
@@ -137,7 +137,7 @@ impl PluginManager {
         }
 
         if let Some(max_version) = &plugin_info.max_minitensor_version {
-            if !max_version.is_compatible_with(&current_version) {
+            if current_version > *max_version {
                 return Err(MinitensorError::version_mismatch(format!(
                     "Plugin '{}' requires minitensor <= {}, but current version is {}",
                     plugin_info.name, max_version, current_version
@@ -463,11 +463,19 @@ mod tests {
         let current_version = VersionInfo::current().unwrap();
         let mut plugin = TestPlugin::new();
 
-        plugin.info.max_minitensor_version = Some(VersionInfo::new(
-            current_version.major,
-            current_version.minor,
-            current_version.patch.saturating_sub(1),
-        ));
+        let older_supported_version = if current_version.patch > 0 {
+            VersionInfo::new(
+                current_version.major,
+                current_version.minor,
+                current_version.patch - 1,
+            )
+        } else if current_version.minor > 0 {
+            VersionInfo::new(current_version.major, current_version.minor - 1, u32::MAX)
+        } else {
+            VersionInfo::new(current_version.major.saturating_sub(1), u32::MAX, u32::MAX)
+        };
+
+        plugin.info.max_minitensor_version = Some(older_supported_version);
 
         let result = manager.register_plugin(Arc::new(plugin));
         assert!(result.is_err());
