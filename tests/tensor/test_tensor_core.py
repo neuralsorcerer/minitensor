@@ -1018,16 +1018,49 @@ def test_cumprod_backward_with_zero():
     )
 
 
+def test_prod_backward_no_zero():
+    t = mt.Tensor([2.0, 3.0, 4.0], requires_grad=True)
+    t.prod().sum().backward()
+    # grad_i = product of the others = [12, 8, 6]
+    np.testing.assert_allclose(t.grad.numpy(), np.array([12.0, 8.0, 6.0]))
+
+
+def test_prod_backward_with_single_zero():
+    t = mt.Tensor([2.0, 0.0, 3.0, 4.0], requires_grad=True)
+    t.prod().sum().backward()
+    g = t.grad.numpy()
+    assert not np.isnan(g).any()
+    np.testing.assert_allclose(g, np.array([0.0, 24.0, 0.0, 0.0]))
+
+
+def test_prod_backward_with_multiple_zeros():
+    t = mt.Tensor([2.0, 0.0, 0.0, 4.0], requires_grad=True)
+    t.prod().sum().backward()
+    np.testing.assert_allclose(t.grad.numpy(), np.zeros(4))
+
+
+def test_prod_backward_along_dim_with_zeros():
+    data = np.array([[2.0, 0.0, 3.0], [1.0, 5.0, 6.0]])
+    t = mt.Tensor(data, requires_grad=True)
+    t.prod(1).sum().backward()
+    g = t.grad.numpy()
+    assert not np.isnan(g).any()
+    # row 0 has a zero at col 1: grad = [0, 2*3, 0]; row 1 has none: [30, 6, 5].
+    np.testing.assert_allclose(g, np.array([[0.0, 6.0, 0.0], [30.0, 6.0, 5.0]]))
+
+
 def test_sum_with_nan_propagation():
     t = mt.Tensor([1.0, np.nan])
     s = t.sum()
     assert np.isnan(s.numpy()).all()
 
 
-def test_log_negative_returns_neg_infinity():
-    t = mt.Tensor([-1.0])
-    r = t.log()
-    assert np.isneginf(r.numpy()).all()
+def test_log_domain_edges_match_numpy():
+    t = mt.Tensor([-1.0, -2.0, 0.0, 1.0])
+    r = t.log().numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        expected = np.log(np.array([-1.0, -2.0, 0.0, 1.0]))
+    np.testing.assert_array_equal(r, expected)
 
 
 def test_mul_overflow_results_infinity():

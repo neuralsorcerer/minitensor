@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -296,13 +296,7 @@ fn log_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |val: f32| {
-        if val <= 0.0 {
-            f32::NEG_INFINITY
-        } else {
-            val.ln()
-        }
-    });
+    unary_apply(input_data, output_slice, f32::ln);
     Ok(())
 }
 
@@ -314,13 +308,7 @@ fn log_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
     })?;
-    unary_apply(input_data, output_slice, |val: f64| {
-        if val <= 0.0 {
-            f64::NEG_INFINITY
-        } else {
-            val.ln()
-        }
-    });
+    unary_apply(input_data, output_slice, f64::ln);
     Ok(())
 }
 

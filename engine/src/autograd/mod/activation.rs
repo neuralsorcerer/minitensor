@@ -545,23 +545,40 @@ impl GradientFunction for FocalLossBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        // Compute base gradient similar to cross entropy
+        // Exact gradient of FL = -alpha * (1 - p_t)^gamma * log(p_t) wrt the
+        // logits, where p_t is the true-class softmax probability:
+        //   dFL/dz_j = alpha * (p_j - onehot_j)
+        //              * (1 - p_t)^(gamma-1) * [ (1 - p_t) - gamma * p_t * ln(p_t) ]
+        // The modulating factor is a per-sample scalar (broadcast over classes).
         let p = self.softmax_predictions.detach();
         let t = self.targets.detach();
-        let mut base_grad = arithmetic::sub(&p, &t)?;
+        let dtype = p.dtype();
+        let device = p.device();
 
-        // Compute focal weight: alpha * (1 - p)^gamma
-        let one = Tensor::ones(p.shape().clone(), p.dtype(), p.device(), false);
-        let one_minus_p = arithmetic::sub(&one, &p)?;
-        let mut weight = tensor_power(&one_minus_p, self.gamma)?;
-        let alpha_tensor = create_scalar_tensor(self.alpha, p.dtype(), p.device())?;
-        weight = arithmetic::mul(&weight, &alpha_tensor)?;
+        // True-class probability per sample: p_t = sum(p * onehot) over classes.
+        let class_dim = (p.ndim() - 1) as isize;
+        let pt = reduction::sum(&arithmetic::mul(&p, &t)?, Some(vec![class_dim]), true)?;
 
-        base_grad = arithmetic::mul(&base_grad, &weight)?;
+        let one = create_scalar_tensor(1.0, dtype, device)?;
+        let one_minus_pt = arithmetic::sub(&one, &pt)?;
+        let log_pt = crate::operations::activation::log(&pt)?;
+        let gamma_scalar = create_scalar_tensor(self.gamma, dtype, device)?;
+        // bracket = (1 - p_t) - gamma * p_t * ln(p_t)
+        let bracket = arithmetic::sub(
+            &one_minus_pt,
+            &arithmetic::mul(&arithmetic::mul(&gamma_scalar, &pt)?, &log_pt)?,
+        )?;
+        let modulating = arithmetic::mul(&tensor_power(&one_minus_pt, self.gamma - 1.0)?, &bracket)?;
+        let alpha_tensor = create_scalar_tensor(self.alpha, dtype, device)?;
+        let weight = arithmetic::mul(&modulating, &alpha_tensor)?; // per-sample scalar
+
+        let mut base_grad = arithmetic::mul(&arithmetic::sub(&p, &t)?, &weight)?;
 
         if self.reduction == "mean" {
-            let batch = self.targets_shape[0] as f64;
-            let scale = create_scalar_tensor(1.0 / batch, base_grad.dtype(), base_grad.device())?;
+            let num_classes = *self.predictions_shape.last().unwrap_or(&1);
+            let num_samples =
+                (self.predictions_shape.iter().product::<usize>() / num_classes.max(1)) as f64;
+            let scale = create_scalar_tensor(1.0 / num_samples, dtype, device)?;
             base_grad = arithmetic::mul(&base_grad, &scale)?;
         }
 

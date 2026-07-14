@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -636,6 +636,62 @@ fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
     } else {
         Err(PyTypeError::new_err("Invalid index type"))
     }
+}
+
+/// Parse a `__getitem__` key into per-dimension indices plus the output-axis
+/// positions where a size-1 axis must be inserted for `None`/`np.newaxis`.
+///
+/// Unlike [`parse_indices`], `None` does not consume an input dimension; it
+/// inserts a new length-1 axis at the corresponding output position.
+/// Integer indices drop their dimension, slices keep it.
+fn parse_getitem_indices(
+    key: &Bound<PyAny>,
+    shape: &[usize],
+) -> PyResult<(Vec<TensorIndex>, Vec<usize>)> {
+    let items: Vec<Bound<PyAny>> = if let Ok(tup) = key.cast::<PyTuple>() {
+        tup.iter().collect()
+    } else {
+        vec![key.clone()]
+    };
+
+    // `None` entries add axes rather than selecting dimensions, so only the
+    // real (non-None) entries count against the tensor rank.
+    let real_count = items.iter().filter(|it| !it.is_none()).count();
+    if real_count > shape.len() {
+        return Err(PyIndexError::new_err("Too many indices"));
+    }
+
+    let mut real_indices: Vec<TensorIndex> = Vec::with_capacity(shape.len());
+    let mut newaxis_positions: Vec<usize> = Vec::new();
+    let mut input_dim = 0usize;
+    let mut out_dim = 0usize;
+
+    for item in &items {
+        if item.is_none() {
+            newaxis_positions.push(out_dim);
+            out_dim += 1;
+            continue;
+        }
+        let idx = parse_index(item, shape[input_dim])?;
+        // Integer indices remove the dimension; slices keep it in the output.
+        let keeps_dim = matches!(idx, TensorIndex::Slice { .. });
+        real_indices.push(idx);
+        input_dim += 1;
+        if keeps_dim {
+            out_dim += 1;
+        }
+    }
+
+    // Any dimensions not addressed explicitly are taken in full.
+    for &dim in &shape[input_dim..] {
+        real_indices.push(TensorIndex::Slice {
+            start: 0,
+            end: dim,
+            step: 1,
+        });
+    }
+
+    Ok((real_indices, newaxis_positions))
 }
 
 fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {

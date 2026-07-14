@@ -554,3 +554,34 @@ def test_diagonal_backward_gradients():
         grad.numpy(), np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     )
     mt.clear_autograd_graph()
+
+
+def test_getitem_newaxis_matches_numpy():
+    x = np.arange(20, dtype=np.float64).reshape(4, 5)
+    t = mt.Tensor(x)
+    cases = [
+        (t[None], x[None]),
+        (t[:, None], x[:, None]),
+        (t[None, :], x[None, :]),
+        (t[:, :, None], x[:, :, None]),
+        (t[None, None], x[None, None]),
+        (t[1, None], x[1, None]),
+        (t[None, 1], x[None, 1]),
+        (t[None, 1, None], x[None, 1, None]),
+        (t[1:3, None], x[1:3, None]),
+        (t[:, None, 2], x[:, None, 2]),
+    ]
+    for got, exp in cases:
+        got = got.numpy()
+        assert got.shape == exp.shape, (got.shape, exp.shape)
+        np.testing.assert_allclose(got, exp)
+
+
+def test_getitem_newaxis_3d_and_scalar():
+    y = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+    ty = mt.Tensor(y)
+    np.testing.assert_allclose(ty[:, :, None, :].numpy(), y[:, :, None, :])
+    np.testing.assert_allclose(ty[1, None, :, 2].numpy(), y[1, None, :, 2])
+    s = mt.Tensor(3.5)
+    assert s[None].numpy().shape == (1,)
+    np.testing.assert_allclose(s[None].numpy(), np.array(3.5)[None])

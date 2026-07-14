@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -683,7 +683,11 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data.par_iter().cloned().reduce(
         || f32::NEG_INFINITY,
         |a, b| {
-            if b.is_nan() { a } else { a.max(b) }
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.max(b)
+            }
         },
     );
 
@@ -704,7 +708,11 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let max_val = data.par_iter().cloned().reduce(
         || f64::NEG_INFINITY,
         |a, b| {
-            if b.is_nan() { a } else { a.max(b) }
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.max(b)
+            }
         },
     );
 
@@ -774,7 +782,11 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data.par_iter().cloned().reduce(
         || f32::INFINITY,
         |a, b| {
-            if b.is_nan() { a } else { a.min(b) }
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.min(b)
+            }
         },
     );
 
@@ -795,7 +807,11 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let min_val = data.par_iter().cloned().reduce(
         || f64::INFINITY,
         |a, b| {
-            if b.is_nan() { a } else { a.min(b) }
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.min(b)
+            }
         },
     );
 

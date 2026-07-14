@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -238,38 +238,52 @@ impl GradientFunction for ProdBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let mut grad = grad_output.clone();
-        if !self.keepdim {
-            if let Some(dims) = &self.dims {
-                let mut shape = grad.shape().dims().to_vec();
-                let mut sorted = dims.clone();
-                sorted.sort_unstable();
-                for &d in &sorted {
-                    shape.insert(d, 1);
-                }
-                grad = shape_ops::reshape(&grad, Shape::new(shape))?;
-            } else {
-                grad = shape_ops::reshape(&grad, Shape::new(vec![1; self.input.ndim()]))?;
-            }
-        }
+        let input = &self.input;
+        let input_shape = input.shape().dims().to_vec();
+        let dtype = input.dtype();
+        let device = input.device();
 
-        let mut prod = self.result.clone();
-        if !self.keepdim {
-            if let Some(dims) = &self.dims {
-                let mut shape = prod.shape().dims().to_vec();
-                let mut sorted = dims.clone();
-                sorted.sort_unstable();
-                for &d in &sorted {
-                    shape.insert(d, 1);
-                }
-                prod = shape_ops::reshape(&prod, Shape::new(shape))?;
-            } else {
-                prod = shape_ops::reshape(&prod, Shape::new(vec![1; self.input.ndim()]))?;
-            }
-        }
+        // Broadcast the upstream gradient back over the reduced axes.
+        let grad = expand_reduction_grad(grad_output, &input_shape, &self.dims, self.keepdim)?;
 
-        let div = arithmetic::div(&prod, &self.input)?;
-        let grad_input = arithmetic::mul(&grad, &div)?;
+        let reduce_dims: Option<Vec<isize>> = self
+            .dims
+            .as_ref()
+            .map(|dims| dims.iter().map(|&d| d as isize).collect());
+
+        // d(prod)/dx_i is the product of the *other* elements in the reduction
+        // group. Computing it as `total_product / x_i` breaks when the group
+        // contains zeros (0 / 0 = NaN), so handle zeros explicitly:
+        //   - no zeros in the group:  grad_i = P / x_i
+        //   - exactly one zero:       grad_i = product of the non-zero elements
+        //                             at the zero position, 0 elsewhere
+        //   - two or more zeros:      grad_i = 0 everywhere
+        let zero = create_scalar_tensor(0.0, dtype, device)?;
+        let is_zero = crate::operations::comparison::eq(input, &zero)?; // bool mask
+        let is_zero_f = is_zero.astype(dtype)?;
+        let ones = Tensor::ones(input.shape().clone(), dtype, device, false);
+
+        // Per-group zero count and product of the non-zero elements.
+        let zero_count = reduction::sum(&is_zero_f, reduce_dims.clone(), true)?;
+        let safe_input = crate::operations::selection::where_op(&is_zero, &ones, input)?;
+        let prod_nonzero = reduction::prod(&safe_input, reduce_dims, true)?;
+
+        let one_scalar = create_scalar_tensor(1.0, dtype, device)?;
+        let no_zero = crate::operations::comparison::eq(&zero_count, &zero)?.astype(dtype)?;
+        let one_zero = crate::operations::comparison::eq(&zero_count, &one_scalar)?.astype(dtype)?;
+
+        // Contribution at the (unique) zero position: product of the others.
+        let zero_term = arithmetic::mul(&is_zero_f, &one_zero)?;
+        let zero_term = arithmetic::mul(&zero_term, &prod_nonzero)?;
+
+        // Contribution at non-zero positions when the group has no zeros.
+        let nonzero_mask = arithmetic::sub(&ones, &is_zero_f)?;
+        let quotient = arithmetic::div(&prod_nonzero, &safe_input)?;
+        let nonzero_term = arithmetic::mul(&nonzero_mask, &no_zero)?;
+        let nonzero_term = arithmetic::mul(&nonzero_term, &quotient)?;
+
+        let per_element = arithmetic::add(&zero_term, &nonzero_term)?;
+        let grad_input = arithmetic::mul(&grad, &per_element)?;
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)

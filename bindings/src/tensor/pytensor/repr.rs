@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -80,8 +80,12 @@ impl PyTensor {
     }
 
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
-        let indices = parse_indices(key, self.inner.shape().dims())?;
-        let result = self.inner.index(&indices).map_err(_convert_error)?;
+        let (indices, newaxis_positions) =
+            parse_getitem_indices(key, self.inner.shape().dims())?;
+        let mut result = self.inner.index(&indices).map_err(_convert_error)?;
+        for &pos in &newaxis_positions {
+            result = result.unsqueeze(pos as isize).map_err(_convert_error)?;
+        }
         Ok(Self::from_tensor(result))
     }
 

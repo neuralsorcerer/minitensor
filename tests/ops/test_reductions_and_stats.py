@@ -88,12 +88,17 @@ def test_max_min_with_indices():
     assert np.array_equal(min_idx.numpy(), np.array([0, 1], dtype=np.int64))
 
 
-def test_max_min_with_nan_inf():
+def test_max_min_with_nan_propagates():
     t = mt.Tensor([np.nan, 1.0, np.inf, -np.inf], dtype="float32")
-    max_val = t.max()
-    min_val = t.min()
-    assert np.isinf(max_val.numpy()) and max_val.numpy() > 0
-    assert np.isinf(min_val.numpy()) and min_val.numpy() < 0
+    assert np.isnan(t.max().numpy())
+    assert np.isnan(t.min().numpy())
+
+
+def test_max_min_with_inf_no_nan():
+    # Without NaN, +/-inf reduce normally.
+    t = mt.Tensor([1.0, np.inf, -np.inf], dtype="float32")
+    assert np.isposinf(t.max().numpy())
+    assert np.isneginf(t.min().numpy())
 
 
 def test_max_min_all_equal():
@@ -108,10 +113,10 @@ def test_max_min_empty_tensor_values():
     assert np.isinf(t.min().numpy())
 
 
-def test_max_min_all_nan_returns_extremes():
+def test_max_min_all_nan_returns_nan():
     t = mt.Tensor([np.nan, np.nan], dtype="float32")
-    assert np.isneginf(t.max().numpy())
-    assert np.isinf(t.min().numpy())
+    assert np.isnan(t.max().numpy())
+    assert np.isnan(t.min().numpy())
 
 
 def test_max_min_empty_tensor_with_dim():
@@ -138,14 +143,14 @@ def test_max_min_empty_tensor_with_dim_keepdim():
     assert np.array_equal(min_idx.numpy(), np.zeros((1, 3), dtype=np.int64))
 
 
-def test_max_min_all_nan_with_dim_returns_extremes():
+def test_max_min_all_nan_with_dim_returns_nan():
     t = mt.Tensor(np.array([[np.nan, np.nan], [np.nan, np.nan]], dtype=np.float32))
     max_vals, max_idx = t.max(dim=1)
-    assert np.isneginf(max_vals.numpy()).all()
+    assert np.isnan(max_vals.numpy()).all()
     assert np.array_equal(max_idx.numpy(), np.zeros(2, dtype=np.int64))
 
     min_vals, min_idx = t.min(dim=1)
-    assert np.isposinf(min_vals.numpy()).all()
+    assert np.isnan(min_vals.numpy()).all()
     assert np.array_equal(min_idx.numpy(), np.zeros(2, dtype=np.int64))
 
 
@@ -153,13 +158,45 @@ def test_max_min_all_nan_with_dim_keepdim():
     t = mt.Tensor(np.array([[np.nan, np.nan], [np.nan, np.nan]], dtype=np.float32))
     max_vals, max_idx = t.max(dim=1, keepdim=True)
     assert max_vals.shape == (2, 1)
-    assert np.isneginf(max_vals.numpy()).all()
+    assert np.isnan(max_vals.numpy()).all()
     assert np.array_equal(max_idx.numpy(), np.zeros((2, 1), dtype=np.int64))
 
     min_vals, min_idx = t.min(dim=1, keepdim=True)
     assert min_vals.shape == (2, 1)
-    assert np.isposinf(min_vals.numpy()).all()
+    assert np.isnan(min_vals.numpy()).all()
     assert np.array_equal(min_idx.numpy(), np.zeros((2, 1), dtype=np.int64))
+
+
+def test_max_min_partial_nan_propagates_along_dim():
+    data = np.array([[1.0, np.nan, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)
+    t = mt.Tensor(data)
+    max_vals, max_idx = t.max(dim=1)
+    np.testing.assert_array_equal(max_vals.numpy(), np.max(data, axis=1))
+    np.testing.assert_array_equal(max_idx.numpy(), np.argmax(data, axis=1))
+
+    min_vals, min_idx = t.min(dim=1)
+    np.testing.assert_array_equal(min_vals.numpy(), np.min(data, axis=1))
+    np.testing.assert_array_equal(min_idx.numpy(), np.argmin(data, axis=1))
+
+
+def test_argmax_argmin_propagate_nan_and_match_reduction_indices():
+    data = np.array([[1.0, np.nan, 3.0], [np.nan, np.nan, 2.0]], dtype=np.float64)
+    t = mt.Tensor(data)
+    for axis in (0, 1):
+        np.testing.assert_array_equal(
+            t.argmax(axis).numpy(), np.argmax(data, axis=axis)
+        )
+        np.testing.assert_array_equal(
+            t.argmin(axis).numpy(), np.argmin(data, axis=axis)
+        )
+        np.testing.assert_array_equal(
+            t.argmax(axis).numpy(), t.max(dim=axis)[1].numpy()
+        )
+        np.testing.assert_array_equal(
+            t.argmin(axis).numpy(), t.min(dim=axis)[1].numpy()
+        )
+    assert t.argmax().numpy() == np.argmax(data)
+    assert t.argmin().numpy() == np.argmin(data)
 
 
 def test_max_min_empty_int_tensor_with_dim():

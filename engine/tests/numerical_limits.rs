@@ -12,7 +12,7 @@ use engine::{
 use std::sync::Arc;
 
 #[test]
-fn test_max_min_with_nan_inf() {
+fn test_max_min_with_nan_propagates() {
     let data = vec![f32::NAN, 1.0, f32::INFINITY, f32::NEG_INFINITY];
     let tensor = Tensor::new(
         Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
@@ -25,6 +25,31 @@ fn test_max_min_with_nan_inf() {
     let min_t = reduction::min(&tensor, None, false).unwrap();
     let max_val = max_t.data().as_f32_slice().unwrap()[0];
     let min_val = min_t.data().as_f32_slice().unwrap()[0];
+    assert!(max_val.is_nan());
+    assert!(min_val.is_nan());
+}
+
+#[test]
+fn test_max_min_inf_without_nan() {
+    // Without NaN, ±inf reduce normally.
+    let data = vec![1.0, f32::INFINITY, f32::NEG_INFINITY];
+    let tensor = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
+        Shape::new(vec![3]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let max_val = reduction::max(&tensor, None, false)
+        .unwrap()
+        .data()
+        .as_f32_slice()
+        .unwrap()[0];
+    let min_val = reduction::min(&tensor, None, false)
+        .unwrap()
+        .data()
+        .as_f32_slice()
+        .unwrap()[0];
     assert!(max_val.is_infinite() && max_val.is_sign_positive());
     assert!(min_val.is_infinite() && min_val.is_sign_negative());
 }
@@ -95,17 +120,18 @@ fn test_mul_overflow_results_infinity() {
 }
 
 #[test]
-fn test_log_negative_returns_neg_infinity() {
+fn test_log_negative_returns_nan() {
     let tensor = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(vec![-1.0], Device::cpu())),
-        Shape::new(vec![1]),
+        Arc::new(TensorData::from_vec_f32(vec![-1.0, -2.0], Device::cpu())),
+        Shape::new(vec![2]),
         DataType::Float32,
         Device::cpu(),
         false,
     );
     let result = activation::log(&tensor).unwrap();
-    let val = result.data().as_f32_slice().unwrap()[0];
-    assert!(val.is_infinite() && val.is_sign_negative());
+    let vals = result.data().as_f32_slice().unwrap();
+    assert!(vals[0].is_nan());
+    assert!(vals[1].is_nan());
 }
 
 #[test]

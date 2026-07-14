@@ -356,37 +356,6 @@ where
     Ok(())
 }
 
-/// Map output indices to input indices for broadcasting
-#[allow(dead_code)]
-fn map_broadcasted_index(
-    output_indices: &[usize],
-    input_shape: &Shape,
-    output_shape: &Shape,
-) -> Vec<usize> {
-    let mut input_indices = vec![0; input_shape.ndim()];
-
-    // Align dimensions from the right (broadcasting rule)
-    let output_ndim = output_shape.ndim();
-    let input_ndim = input_shape.ndim();
-
-    for i in 0..input_ndim {
-        // Map from right to left
-        let input_dim_idx = input_ndim - 1 - i;
-        let output_dim_idx = output_ndim - 1 - i;
-        let input_dim_size = input_shape.dims()[input_dim_idx];
-
-        if input_dim_size == 1 {
-            // Broadcasting: use index 0
-            input_indices[input_dim_idx] = 0;
-        } else {
-            // No broadcasting: use the output index
-            input_indices[input_dim_idx] = output_indices[output_dim_idx];
-        }
-    }
-
-    input_indices
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

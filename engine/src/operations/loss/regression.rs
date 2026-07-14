@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -139,8 +139,10 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         }
     };
 
-    // Set up gradient function if needed
-    if loss.requires_grad() {
+    // Set up gradient function if needed. The forward is computed on detached
+    // data (the exact gradient is provided by MAELossBackward from the stored
+    // sign), so gate on the inputs and enable grad on the loss explicitly.
+    if predictions.requires_grad() || targets.requires_grad() {
         let grad_fn = Arc::new(MAELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -149,7 +151,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             sign: sign_for_grad,
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -513,7 +515,11 @@ pub fn focal_loss(
     let loss = match reduction {
         "mean" => {
             let sum = sum_all_elements(&focal_values)?;
-            let n = focal_values.numel() as f64;
+            // Average over samples, matching cross_entropy: only the true-class
+            // term per sample is non-zero, so the denominator is the number of
+            // samples (numel / num_classes), not the total element count.
+            let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
+            let n = (focal_values.numel() / num_classes) as f64;
             divide_by_scalar(&sum, n)?
         }
         "sum" => sum_all_elements(&focal_values)?,
@@ -608,8 +614,10 @@ pub fn huber_loss(
         }
     };
 
-    // Set up gradient function if needed
-    if loss.requires_grad() {
+    // Set up gradient function if needed. The forward is computed on detached
+    // data (the exact gradient is provided by HuberLossBackward from the stored
+    // diff), so gate on the inputs and enable grad on the loss explicitly.
+    if predictions.requires_grad() || targets.requires_grad() {
         let grad_fn = Arc::new(HuberLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -619,7 +627,7 @@ pub fn huber_loss(
             diff: diff_for_grad,
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph

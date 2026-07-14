@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -202,29 +202,67 @@ impl Layer for BatchNorm1d {
             ));
         }
 
-        // Reshape for statistics computation
-        let reshaped = if input.ndim() == 3 {
-            let n = input.size(0)?;
-            let l = input.size(2)?;
-            input.view(Shape::new(vec![n * l, self.num_features]))?
-        } else {
-            input.clone()
-        };
+        // Choose the normalization statistics. In training mode we use the
+        // current batch statistics (biased variance) and update the running
+        // estimates; in eval mode we use the stored running statistics so
+        // inference is independent of the batch (and works for batch size 1).
+        // Mirrors BatchNorm2d.
+        let (mean, var) = if self.training {
+            let reshaped = if input.ndim() == 3 {
+                let n = input.size(0)?;
+                let l = input.size(2)?;
+                input.view(Shape::new(vec![n * l, self.num_features]))?
+            } else {
+                input.clone()
+            };
 
-        let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
-        let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-        let var = crate::operations::arithmetic::mul(&centered, &centered)?
-            .mean(Some(vec![0isize]), true)?; // [1,C]
+            let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
+            let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
+            let var = crate::operations::arithmetic::mul(&centered, &centered)?
+                .mean(Some(vec![0isize]), true)?; // [1,C], biased, pre-eps
 
-        let mean = if input.ndim() == 3 {
-            mean.view(Shape::new(vec![1, self.num_features, 1]))?
+            // Update running statistics with the batch statistics *before* eps
+            // is added: running = (1 - momentum) * running + momentum * batch.
+            let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
+            let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
+            self.running_mean = crate::operations::arithmetic::add(
+                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
+            )?;
+            self.running_var = crate::operations::arithmetic::add(
+                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
+                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
+            )?;
+
+            if input.ndim() == 3 {
+                (
+                    mean.view(Shape::new(vec![1, self.num_features, 1]))?,
+                    var.view(Shape::new(vec![1, self.num_features, 1]))?,
+                )
+            } else {
+                (
+                    mean.view(Shape::new(vec![1, self.num_features]))?,
+                    var.view(Shape::new(vec![1, self.num_features]))?,
+                )
+            }
+        } else if input.ndim() == 3 {
+            (
+                self.running_mean
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features, 1]))?,
+                self.running_var
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features, 1]))?,
+            )
         } else {
-            mean.view(Shape::new(vec![1, self.num_features]))?
-        };
-        let var = if input.ndim() == 3 {
-            var.view(Shape::new(vec![1, self.num_features, 1]))?
-        } else {
-            var.view(Shape::new(vec![1, self.num_features]))?
+            (
+                self.running_mean
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features]))?,
+                self.running_var
+                    .clone()
+                    .view(Shape::new(vec![1, self.num_features]))?,
+            )
         };
 
         let centered = crate::operations::arithmetic::sub(input, &mean)?;
@@ -246,21 +284,6 @@ impl Layer for BatchNorm1d {
             &crate::operations::arithmetic::mul(&normalized, &weight)?,
             &bias,
         )?;
-
-        if self.training {
-            // Update running statistics: running = momentum*current + (1-momentum)*running
-            let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
-            let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
-
-            self.running_mean = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
-            )?;
-            self.running_var = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
-            )?;
-        }
 
         Ok(output)
     }
@@ -603,6 +626,50 @@ mod tests {
         let before = mean_before.data().as_f32_slice().unwrap()[0];
         let after = layer.running_mean().data().as_f32_slice().unwrap()[0];
         assert!((after - before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_batchnorm1d_eval_uses_running_stats() {
+        // With momentum = 1.0 a single training forward sets the running stats
+        // to exactly that batch's (biased) statistics. Eval must then normalize a
+        // *different* batch with those running stats, independent of the eval
+        // batch — not recompute batch statistics.
+        let mut layer =
+            BatchNorm1d::new(2, Some(0.0), Some(1.0), Device::cpu(), DataType::Float32).unwrap();
+
+        // feature 0 = [1, 3] -> mean 2, var 1; feature 1 = [2, 4] -> mean 3, var 1.
+        let train = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, 2.0, 3.0, 4.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        layer.forward(&train).unwrap();
+
+        layer.eval();
+        // A different batch with different statistics.
+        let test = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![5.0, 6.0, 7.0, 8.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let out = layer.forward(&test).unwrap();
+        let o = out.data().as_f32_slice().unwrap();
+        // (x - running_mean) / sqrt(running_var + eps=0), running_mean=[2,3], var=[1,1].
+        // row0: (5-2, 6-3) = (3, 3); row1: (7-2, 8-3) = (5, 5).
+        assert!((o[0] - 3.0).abs() < 1e-4);
+        assert!((o[1] - 3.0).abs() < 1e-4);
+        assert!((o[2] - 5.0).abs() < 1e-4);
+        assert!((o[3] - 5.0).abs() < 1e-4);
     }
 
     #[test]

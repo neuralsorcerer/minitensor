@@ -767,3 +767,91 @@ def test_bincount_rejects_invalid_inputs():
         mt.bincount(
             mt.Tensor([0, 1], dtype="int64"), weights=mt.Tensor([1, 2], dtype="int64")
         )
+
+
+def _softmax_np(z):
+    e = np.exp(z - z.max(-1, keepdims=True))
+    return e / e.sum(-1, keepdims=True)
+
+
+def test_focal_loss_forward_matches_definition():
+    # mean reduction averages over samples (not numel): only the true-class term
+    # is non-zero per sample. FL = alpha * (1 - p_t)^gamma * -log(p_t).
+    rng = np.random.default_rng(0)
+    logits = rng.standard_normal((6, 4))
+    cls = rng.integers(0, 4, 6)
+    for alpha, gamma in [(0.25, 2.0), (0.5, 1.0), (0.75, 3.0)]:
+        fl = nn.FocalLoss(alpha=alpha, gamma=gamma, reduction="mean")
+        got = fl(mt.Tensor(logits), mt.Tensor(cls.tolist(), dtype="int64")).numpy()
+        p = _softmax_np(logits)
+        pt = p[np.arange(6), cls]
+        ref = (alpha * (1 - pt) ** gamma * (-np.log(pt))).mean()
+        np.testing.assert_allclose(got, ref, rtol=1e-5)
+
+
+def test_focal_loss_gradient_matches_finite_diff():
+    rng = np.random.default_rng(1)
+    logits = rng.standard_normal((5, 3))
+    cls = rng.integers(0, 3, 5)
+    tgt = mt.Tensor(cls.tolist(), dtype="int64")
+    alpha, gamma = 0.25, 2.0
+    fl = nn.FocalLoss(alpha=alpha, gamma=gamma, reduction="mean")
+
+    x = mt.Tensor(logits, requires_grad=True)
+    fl(x, tgt).backward()
+    grad = x.grad.numpy()
+
+    def fwd(z):
+        p = _softmax_np(z)
+        pt = p[np.arange(5), cls]
+        return (alpha * (1 - pt) ** gamma * (-np.log(pt))).mean()
+
+    num = np.zeros_like(logits)
+    eps = 1e-6
+    for i in np.ndindex(*logits.shape):
+        zp = logits.copy()
+        zp[i] += eps
+        zm = logits.copy()
+        zm[i] -= eps
+        num[i] = (fwd(zp) - fwd(zm)) / (2 * eps)
+    np.testing.assert_allclose(grad, num, rtol=1e-3, atol=1e-6)
+
+
+def _finite_diff_grad(np_loss, x0, eps=1e-6):
+    num = np.zeros_like(x0)
+    for i in np.ndindex(*x0.shape):
+        xp = x0.copy()
+        xp[i] += eps
+        xm = x0.copy()
+        xm[i] -= eps
+        num[i] = (np_loss(xp) - np_loss(xm)) / (2 * eps)
+    return num
+
+
+def test_regression_losses_propagate_gradients():
+    # MAE / Huber / SmoothL1 previously computed the loss on detached data, so
+    # backward() failed (output had requires_grad=False). They must now flow
+    # gradients matching finite differences.
+    rng = np.random.default_rng(5)
+    pred = rng.standard_normal((6, 3))
+    targ = rng.standard_normal((6, 3))
+    tt = mt.Tensor(targ)
+    huber = lambda v: np.where(
+        np.abs(v - targ) <= 1, 0.5 * (v - targ) ** 2, np.abs(v - targ) - 0.5
+    )
+    cases = [
+        (lambda z: nn.MAELoss()(z, tt), lambda v: np.abs(v - targ).mean()),
+        (lambda z: nn.HuberLoss()(z, tt), lambda v: huber(v).mean()),
+        (lambda z: nn.SmoothL1Loss()(z, tt), lambda v: huber(v).mean()),
+        (lambda z: F.smooth_l1_loss(z, tt, "mean"), lambda v: huber(v).mean()),
+        (lambda z: F.smooth_l1_loss(z, tt, "sum"), lambda v: huber(v).sum()),
+    ]
+    for mt_loss, np_loss in cases:
+        mt.clear_autograd_graph()
+        x = mt.Tensor(pred, requires_grad=True)
+        out = mt_loss(x)
+        assert out.requires_grad
+        out.backward()
+        np.testing.assert_allclose(
+            x.grad.numpy(), _finite_diff_grad(np_loss, pred), rtol=1e-3, atol=1e-6
+        )

@@ -29,7 +29,11 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..layout.dim_size {
                         let idx = o * layout.outer_stride + d * layout.inner + r;
                         let val = input[idx];
-                        if !val.is_nan() && val < min_val {
+                        if val.is_nan() {
+                            min_idx = d;
+                            break;
+                        }
+                        if val < min_val {
                             min_val = val;
                             min_idx = d;
                         }
@@ -50,7 +54,11 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
                     for d in 0..layout.dim_size {
                         let idx = o * layout.outer_stride + d * layout.inner + r;
                         let val = input[idx];
-                        if !val.is_nan() && val < min_val {
+                        if val.is_nan() {
+                            min_idx = d;
+                            break;
+                        }
+                        if val < min_val {
                             min_val = val;
                             min_idx = d;
                         }
