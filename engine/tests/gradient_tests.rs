@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -514,4 +514,68 @@ proptest! {
         assert_relative_eq!(gb[1], a_vals[1], epsilon = 1e-6);
         autograd::clear_graph().unwrap();
     }
+}
+
+#[test]
+fn test_repeat_zero_repeat_keeps_differentiable_zero_gradient() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], true);
+    let repeated = input.repeat(vec![0]).unwrap();
+
+    assert!(repeated.requires_grad());
+    assert_eq!(repeated.shape().dims(), &[0]);
+
+    let grad_output = Tensor::zeros(
+        repeated.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&repeated, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    assert_eq!(grad_input.shape().dims(), &[3]);
+    assert_eq!(grad_input.data().as_f32_slice().unwrap(), &[0.0, 0.0, 0.0]);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_repeat_empty_identity_keeps_differentiable_edge() {
+    autograd::clear_graph().unwrap();
+    let input = create_test_tensor_f32(Vec::new(), vec![0, 2], true);
+    let repeated = input.repeat(vec![1, 1]).unwrap();
+
+    assert!(repeated.requires_grad());
+    assert_eq!(repeated.shape().dims(), &[0, 2]);
+
+    let grad_output = Tensor::zeros(
+        repeated.shape().clone(),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let grads = autograd::backward(&repeated, Some(grad_output)).unwrap();
+    let grad_input = grads.get(&input.id()).unwrap();
+    assert_eq!(grad_input.shape().dims(), &[0, 2]);
+    assert_eq!(grad_input.numel(), 0);
+    autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_repeat_rejects_overflowing_output_numel_before_allocation() {
+    let shape = Shape::new(vec![usize::MAX]);
+    let tensor = Tensor::new(
+        Arc::new(TensorData::zeros(0, DataType::Float32)),
+        shape,
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+
+    let err = tensor
+        .repeat(vec![2])
+        .expect_err("repeat should reject overflowing output sizes");
+    assert!(
+        err.to_string()
+            .contains("repeat output dimensions exceed supported size")
+    );
 }

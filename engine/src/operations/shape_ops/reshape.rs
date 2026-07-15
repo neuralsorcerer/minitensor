@@ -35,6 +35,45 @@ fn empty_tensor(shape: Shape, dtype: DataType, device: Device, requires_grad: bo
     )
 }
 
+fn checked_repeat_dim(size: usize, repeat: usize) -> Result<usize> {
+    size.checked_mul(repeat).ok_or_else(|| {
+        MinitensorError::invalid_operation(
+            "repeat output dimensions exceed supported size".to_string(),
+        )
+    })
+}
+
+fn checked_repeat_numel(dims: &[usize]) -> Result<usize> {
+    if dims.is_empty() {
+        return Ok(1);
+    }
+
+    dims.iter().try_fold(1usize, |numel, &dim| {
+        numel.checked_mul(dim).ok_or_else(|| {
+            MinitensorError::invalid_operation(
+                "repeat output dimensions exceed supported size".to_string(),
+            )
+        })
+    })
+}
+
+fn attach_repeat_backward(mut output: Tensor, input: &Tensor, repeats: &[usize]) -> Result<Tensor> {
+    if input.requires_grad() && input.dtype().is_float() {
+        output.refresh_autograd_metadata();
+        let mut output = output.requires_grad_(true);
+        let grad_fn = Arc::new(RepeatBackward {
+            input_id: input.id(),
+            input_shape: input.shape().dims().to_vec(),
+            repeats: repeats.to_vec(),
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+        Ok(output)
+    } else {
+        Ok(output)
+    }
+}
+
 /// Reshape operation with gradient support
 pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
     // Check if the total number of elements matches
@@ -456,15 +495,16 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
     if repeats.iter().any(|&r| r == 0) {
         let mut out_shape = result.shape().dims().to_vec();
         for (dim, &rep) in repeats.iter().enumerate() {
-            out_shape[dim] *= rep;
+            out_shape[dim] = checked_repeat_dim(out_shape[dim], rep)?;
         }
 
-        return Ok(empty_tensor(
+        let output = empty_tensor(
             Shape::new(out_shape),
             result.dtype(),
             result.device(),
-            result.requires_grad(),
-        ));
+            false,
+        );
+        return attach_repeat_backward(output, tensor, repeats);
     }
 
     for (dim, &rep) in repeats.iter().enumerate() {
@@ -474,10 +514,13 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         let dims = result.shape().dims().to_vec();
         let dim_size = dims[dim];
         let inner: usize = dims[dim + 1..].iter().product();
+        let repeated_dim = checked_repeat_dim(dim_size, rep)?;
+        let chunk_size = checked_repeat_dim(repeated_dim, inner)?;
+        let src_chunk_size = checked_repeat_dim(dim_size, inner)?;
         let mut output_shape = dims.clone();
-        output_shape[dim] = dim_size * rep;
+        output_shape[dim] = repeated_dim;
+        let output_numel = checked_repeat_numel(&output_shape)?;
         let output_shape_obj = Shape::new(output_shape);
-        let output_numel = output_shape_obj.numel();
 
         let dtype = result.dtype();
         let device = result.device();
@@ -494,8 +537,6 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
                     MinitensorError::invalid_operation("Tensor data access failed for repeat")
                 })?;
                 let mut out = vec![<$ty>::default(); output_numel];
-                let chunk_size = dim_size * rep * inner;
-                let src_chunk_size = dim_size * inner;
                 out.par_chunks_mut(chunk_size)
                     .enumerate()
                     .for_each(|(o, out_chunk)| {
@@ -528,23 +569,7 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         );
     }
 
-    if tensor.requires_grad() && tensor.dtype().is_float() && result.numel() != 0 {
-        // The identity path (`result = tensor.detach()`/reshape) preserves the
-        // input's tensor id; refresh it so the new node never points at itself.
-        let mut output = result;
-        output.refresh_autograd_metadata();
-        let mut output = output.requires_grad_(true);
-        let grad_fn = Arc::new(RepeatBackward {
-            input_id: tensor.id(),
-            input_shape: tensor.shape().dims().to_vec(),
-            repeats: repeats.to_vec(),
-        });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
-    }
-
-    Ok(result)
+    attach_repeat_backward(result, tensor, repeats)
 }
 
 /// Indexing operation - select elements along specified dimensions
