@@ -66,16 +66,83 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     serialization::register_serialization_module(py, m)?;
 
     // Autograd helpers
+    m.add_class::<GradMode>()?;
     m.add_function(wrap_pyfunction!(get_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(clear_autograd_graph, m)?)?;
     m.add_function(wrap_pyfunction!(is_autograd_graph_consumed, m)?)?;
     m.add_function(wrap_pyfunction!(mark_autograd_graph_consumed, m)?)?;
+    m.add_function(wrap_pyfunction!(no_grad, m)?)?;
+    m.add_function(wrap_pyfunction!(enable_grad, m)?)?;
+    m.add_function(wrap_pyfunction!(is_grad_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(set_grad_enabled, m)?)?;
 
     m.add_function(wrap_pyfunction!(get_default_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(set_default_dtype, m)?)?;
     m.add_function(wrap_pyfunction!(manual_seed, m)?)?;
 
     Ok(())
+}
+
+/// Context manager that sets the thread-local autograd recording mode on
+/// entry and restores the previous mode on exit. Re-entrant: each `with`
+/// block restores whatever mode was active when it was entered.
+#[pyclass(name = "GradMode")]
+struct GradMode {
+    target: bool,
+    previous: Option<bool>,
+}
+
+#[pymethods]
+impl GradMode {
+    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        let prev = engine::autograd::set_grad_enabled(slf.target);
+        slf.previous = Some(prev);
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&mut self, _args: &Bound<'_, pyo3::types::PyTuple>) -> bool {
+        if let Some(prev) = self.previous.take() {
+            engine::autograd::set_grad_enabled(prev);
+        }
+        false
+    }
+}
+
+/// Return a context manager that disables gradient recording.
+///
+/// Inside the block, operation results do not require gradients, no autograd
+/// nodes are recorded, and no operands are saved for backward — mirroring
+/// `torch.no_grad()`. Tensors can still opt in explicitly via
+/// `requires_grad_(True)`.
+#[pyfunction]
+fn no_grad() -> GradMode {
+    GradMode {
+        target: false,
+        previous: None,
+    }
+}
+
+/// Return a context manager that re-enables gradient recording, e.g. inside
+/// an outer `no_grad()` block.
+#[pyfunction]
+fn enable_grad() -> GradMode {
+    GradMode {
+        target: true,
+        previous: None,
+    }
+}
+
+/// Query whether gradient recording is currently enabled on this thread.
+#[pyfunction]
+fn is_grad_enabled() -> bool {
+    engine::autograd::is_grad_enabled()
+}
+
+/// Set the gradient recording mode, returning the previous mode.
+#[pyfunction]
+fn set_grad_enabled(enabled: bool) -> bool {
+    engine::autograd::set_grad_enabled(enabled)
 }
 
 #[pyfunction]
@@ -143,6 +210,10 @@ mod tests {
                 "clear_autograd_graph",
                 "is_autograd_graph_consumed",
                 "mark_autograd_graph_consumed",
+                "no_grad",
+                "enable_grad",
+                "is_grad_enabled",
+                "set_grad_enabled",
                 "get_default_dtype",
                 "set_default_dtype",
                 "manual_seed",

@@ -158,7 +158,7 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
             ));
         }
 
-        if total_elements % known_product != 0 {
+        if !total_elements.is_multiple_of(known_product) {
             return Err(MinitensorError::invalid_operation(
                 "cannot infer reshape dimension".to_string(),
             ));
@@ -504,7 +504,7 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
         result = result.reshape(Shape::new(new_shape))?;
     }
 
-    if repeats.iter().any(|&r| r == 0) {
+    if repeats.contains(&0) {
         let mut out_shape = result.shape().dims().to_vec();
         for (dim, &rep) in repeats.iter().enumerate() {
             out_shape[dim] = checked_repeat_dim(out_shape[dim], rep)?;

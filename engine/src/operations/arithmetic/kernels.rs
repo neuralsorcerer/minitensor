@@ -206,7 +206,7 @@ where
     let rhs_dims = rhs_shape.dims();
     let rank = output_dims.len();
 
-    if output_shape.numel() == 0 || output_dims.iter().any(|&dim| dim == 0) {
+    if output_shape.numel() == 0 || output_dims.contains(&0) {
         return Ok(());
     }
 

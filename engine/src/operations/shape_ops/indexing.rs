@@ -72,13 +72,12 @@ pub fn repeat_interleave(
     let reps = expand_repeats(repeats, dim_size)?;
     let total_repeats: usize = reps.iter().sum();
 
-    if let Some(expected) = output_size {
-        if expected != total_repeats {
+    if let Some(expected) = output_size
+        && expected != total_repeats {
             return Err(MinitensorError::invalid_argument(format!(
                 "repeat_interleave: output_size ({expected}) must equal sum of repeats ({total_repeats})"
             )));
         }
-    }
 
     let dtype = tensor.dtype();
     let device = tensor.device();

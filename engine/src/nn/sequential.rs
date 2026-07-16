@@ -171,6 +171,8 @@ impl SequentialBuilder {
     }
 
     /// Add a layer to the builder
+    // Builder-pattern `add`, not arithmetic; renaming would break the public API.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, layer: Box<dyn Layer>) -> Self {
         self.layers.push(layer);
         self

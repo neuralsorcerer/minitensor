@@ -58,12 +58,11 @@ impl MemoryInfo {
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 for line in content.lines() {
-                    if line.starts_with("MemTotal:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<usize>() {
-                                return kb * 1024; // Convert KB to bytes
-                            }
-                        }
+                    if line.starts_with("MemTotal:")
+                        && let Some(kb_str) = line.split_whitespace().nth(1)
+                        && let Ok(kb) = kb_str.parse::<usize>()
+                    {
+                        return kb * 1024; // Convert KB to bytes
                     }
                 }
             }
@@ -100,12 +99,11 @@ impl MemoryInfo {
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 for line in content.lines() {
-                    if line.starts_with("MemAvailable:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<usize>() {
-                                return kb * 1024; // Convert KB to bytes
-                            }
-                        }
+                    if line.starts_with("MemAvailable:")
+                        && let Some(kb_str) = line.split_whitespace().nth(1)
+                        && let Ok(kb) = kb_str.parse::<usize>()
+                    {
+                        return kb * 1024; // Convert KB to bytes
                     }
                 }
             }
@@ -120,12 +118,11 @@ impl MemoryInfo {
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 for line in content.lines() {
-                    if line.starts_with("SwapTotal:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<usize>() {
-                                return kb * 1024; // Convert KB to bytes
-                            }
-                        }
+                    if line.starts_with("SwapTotal:")
+                        && let Some(kb_str) = line.split_whitespace().nth(1)
+                        && let Ok(kb) = kb_str.parse::<usize>()
+                    {
+                        return kb * 1024; // Convert KB to bytes
                     }
                 }
             }
@@ -139,12 +136,11 @@ impl MemoryInfo {
         {
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 for line in content.lines() {
-                    if line.starts_with("SwapFree:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<usize>() {
-                                return kb * 1024; // Convert KB to bytes
-                            }
-                        }
+                    if line.starts_with("SwapFree:")
+                        && let Some(kb_str) = line.split_whitespace().nth(1)
+                        && let Ok(kb) = kb_str.parse::<usize>()
+                    {
+                        return kb * 1024; // Convert KB to bytes
                     }
                 }
             }
@@ -176,29 +172,25 @@ impl MemoryInfo {
                 if let (Ok(size_str), Ok(line_size_str)) = (
                     std::fs::read_to_string(format!("{}/size", cache_path)),
                     std::fs::read_to_string(format!("{}/coherency_line_size", cache_path)),
+                ) && let (Some(size), Ok(line_size)) = (
+                    Self::parse_cache_size(&size_str),
+                    line_size_str.trim().parse::<usize>(),
                 ) {
-                    if let (Some(size), Ok(line_size)) = (
-                        Self::parse_cache_size(&size_str),
-                        line_size_str.trim().parse::<usize>(),
-                    ) {
-                        // Try to read associativity
-                        let associativity = std::fs::read_to_string(format!(
-                            "{}/ways_of_associativity",
-                            cache_path
-                        ))
-                        .ok()
-                        .and_then(|s| s.trim().parse::<usize>().ok())
-                        .unwrap_or(8); // Default associativity
+                    // Try to read associativity
+                    let associativity =
+                        std::fs::read_to_string(format!("{}/ways_of_associativity", cache_path))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<usize>().ok())
+                            .unwrap_or(8); // Default associativity
 
-                        cache_info.push(CacheInfo {
-                            level: level as u8,
-                            size,
-                            line_size,
-                            associativity,
-                            latency_cycles: Self::estimate_cache_latency(level as u8),
-                            bandwidth: None, // Will be benchmarked separately if needed
-                        });
-                    }
+                    cache_info.push(CacheInfo {
+                        level: level as u8,
+                        size,
+                        line_size,
+                        associativity,
+                        latency_cycles: Self::estimate_cache_latency(level as u8),
+                        bandwidth: None, // Will be benchmarked separately if needed
+                    });
                 }
             }
         }
@@ -370,7 +362,7 @@ impl MemoryBandwidth {
         }
 
         let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let accesses = (size + 63) / 64;
+        let accesses = size.div_ceil(64);
         let bytes_per_second = (accesses * 64) as f64 / avg_time;
         bytes_per_second / (1024.0 * 1024.0 * 1024.0)
     }
@@ -393,7 +385,7 @@ impl MemoryBandwidth {
         }
 
         let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let accesses = (size + 63) / 64;
+        let accesses = size.div_ceil(64);
         let bytes_per_second = (accesses * 64) as f64 / avg_time;
         bytes_per_second / (1024.0 * 1024.0 * 1024.0)
     }
@@ -463,7 +455,7 @@ impl CacheInfo {
     /// Estimate access latency for this cache level
     #[inline]
     pub fn access_latency(&self) -> Duration {
-        let cycles = self.latency_cycles.unwrap_or_else(|| match self.level {
+        let cycles = self.latency_cycles.unwrap_or(match self.level {
             1 => 4,
             2 => 12,
             3 => 40,

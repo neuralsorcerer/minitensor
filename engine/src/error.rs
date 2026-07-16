@@ -449,13 +449,9 @@ impl MinitensorError {
         let suggestion = match (expected_dims, actual_dims) {
             (Some(expected), Some(actual)) => {
                 if expected > actual {
-                    Some(format!(
-                        "Use .unsqueeze() to add dimensions or .view() to reshape"
-                    ))
+                    Some("Use .unsqueeze() to add dimensions or .view() to reshape".to_string())
                 } else {
-                    Some(format!(
-                        "Use .squeeze() to remove dimensions or .view() to reshape"
-                    ))
+                    Some("Use .squeeze() to remove dimensions or .view() to reshape".to_string())
                 }
             }
             _ => Some("Check tensor dimensions and use reshape operations if needed".to_string()),

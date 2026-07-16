@@ -136,13 +136,13 @@ impl PluginManager {
             )));
         }
 
-        if let Some(max_version) = &plugin_info.max_minitensor_version {
-            if current_version > *max_version {
-                return Err(MinitensorError::version_mismatch(format!(
-                    "Plugin '{}' requires minitensor <= {}, but current version is {}",
-                    plugin_info.name, max_version, current_version
-                )));
-            }
+        if let Some(max_version) = &plugin_info.max_minitensor_version
+            && current_version > *max_version
+        {
+            return Err(MinitensorError::version_mismatch(format!(
+                "Plugin '{}' requires minitensor <= {}, but current version is {}",
+                plugin_info.name, max_version, current_version
+            )));
         }
 
         // Check for name conflicts

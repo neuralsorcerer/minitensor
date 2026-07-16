@@ -430,27 +430,24 @@ impl TensorDebugger {
         }
 
         // Check for very large values
-        if let Some(max_val) = tensor.max_value() {
-            if max_val > 1e6 {
-                issues.push(format!(
-                    "⚠️  Tensor has very large values (max: {:.2e})",
-                    max_val
-                ));
-            }
+        if let Some(max_val) = tensor.max_value()
+            && max_val > 1e6
+        {
+            issues.push(format!(
+                "⚠️  Tensor has very large values (max: {:.2e})",
+                max_val
+            ));
         }
 
         // Check for very small gradients
-        if tensor.requires_grad() {
-            if let Some(grad) = tensor.grad() {
-                if let Some(grad_max) = grad.max_value() {
-                    if grad_max < 1e-8 {
-                        issues.push(
-                            "⚠️  Gradients are very small, may indicate vanishing gradient problem"
-                                .to_string(),
-                        );
-                    }
-                }
-            }
+        if tensor.requires_grad()
+            && let Some(grad) = tensor.grad()
+            && let Some(grad_max) = grad.max_value()
+            && grad_max < 1e-8
+        {
+            issues.push(
+                "⚠️  Gradients are very small, may indicate vanishing gradient problem".to_string(),
+            );
         }
 
         // Check memory usage

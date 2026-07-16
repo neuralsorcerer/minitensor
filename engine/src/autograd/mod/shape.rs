@@ -169,8 +169,8 @@ impl GradientFunction for Conv2dBackward {
         }
 
         // grad_bias: parallel over output channels.
-        if self.bias_requires_grad {
-            if let Some(bias_id) = self.bias_id {
+        if self.bias_requires_grad
+            && let Some(bias_id) = self.bias_id {
                 let mut grad_bias = vec![0f32; out_channels];
                 grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
                     let mut sum = 0f32;
@@ -191,7 +191,6 @@ impl GradientFunction for Conv2dBackward {
                 );
                 accumulate_grad(&mut gradients, bias_id, grad)?;
             }
-        }
 
         Ok(gradients)
     }

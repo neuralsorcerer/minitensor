@@ -98,6 +98,11 @@ impl MemoryPool {
     }
 
     /// Return memory to the pool for future reuse.
+    ///
+    /// The pointer must have been produced by [`Self::allocate`] with the
+    /// same `size`; the fn stays safe for API-compat with the allocator
+    /// stack (see `Allocator::deallocate`).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[inline]
     pub fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {

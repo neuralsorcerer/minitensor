@@ -49,12 +49,12 @@ fn scalar_tensor(
     }
 }
 
-fn cached_scalar<'a>(
-    cache: &'a mut Option<Tensor>,
+fn cached_scalar(
+    cache: &mut Option<Tensor>,
     value: f64,
     dtype: DataType,
     device: Device,
-) -> Result<&'a Tensor> {
+) -> Result<&Tensor> {
     let needs_update = match cache {
         Some(t) => t.dtype() != dtype || t.device() != device,
         None => true,
@@ -181,8 +181,9 @@ impl Softmax {
     /// Create a new Softmax activation layer
     ///
     /// # Arguments
-    /// * `dim` - A dimension along which Softmax will be computed (so every slice
-    ///           along dim will sum to 1). Default: None (applies to the last dimension)
+    /// * `dim` - A dimension along which Softmax will be computed (so every
+    ///   slice along dim will sum to 1). Default: None (applies to the last
+    ///   dimension)
     pub fn new(dim: Option<usize>) -> Self {
         Self { dim }
     }
@@ -480,7 +481,7 @@ mod tests {
         );
         let output = elu.forward(&input).unwrap();
         let out_slice = output.data().as_f32_slice().unwrap();
-        let expected = vec![(-1f32).exp() - 1.0, 0.0, 1.0];
+        let expected = [(-1f32).exp() - 1.0, 0.0, 1.0];
         for (o, e) in out_slice.iter().zip(expected.iter()) {
             assert!((o - e).abs() < 1e-4);
         }

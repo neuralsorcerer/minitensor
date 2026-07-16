@@ -1111,25 +1111,25 @@ mod core_tests {
 
     #[test]
     fn test_comparator_tie_breaking_and_nan_ordering() {
-        let mut f32_desc = vec![(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
+        let mut f32_desc = [(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
         f32_desc.sort_by(cmp_f32_desc);
         assert!(f32_desc[0].1.is_nan());
         assert_eq!(f32_desc[0].0, 2);
         assert_eq!(f32_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
 
-        let mut f32_asc = vec![(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
+        let mut f32_asc = [(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
         f32_asc.sort_by(cmp_f32_asc);
         assert!(f32_asc[2].1.is_nan());
         assert_eq!(f32_asc[2].0, 2);
         assert_eq!(f32_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
 
-        let mut f64_desc = vec![(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
+        let mut f64_desc = [(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
         f64_desc.sort_by(cmp_f64_desc);
         assert!(f64_desc[0].1.is_nan());
         assert_eq!(f64_desc[0].0, 2);
         assert_eq!(f64_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
 
-        let mut f64_asc = vec![(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
+        let mut f64_asc = [(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
         f64_asc.sort_by(cmp_f64_asc);
         assert!(f64_asc[2].1.is_nan());
         assert_eq!(f64_asc[2].0, 2);

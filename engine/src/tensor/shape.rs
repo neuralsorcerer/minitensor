@@ -42,14 +42,24 @@ impl Shape {
         self.dims.len()
     }
 
-    /// Get the total number of elements
+    /// Get the total number of elements.
+    ///
+    /// The product is computed with checked arithmetic in every build
+    /// profile: a silently wrapped element count would under-allocate
+    /// storage while indexing code still trusts the individual dimensions,
+    /// turning an absurd shape into out-of-bounds reads/writes instead of a
+    /// clean failure.
     #[inline(always)]
     pub fn numel(&self) -> usize {
-        if self.dims.is_empty() {
-            1 // scalar
-        } else {
-            self.dims.iter().product()
-        }
+        self.dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tensor shape {:?} has more elements than usize can represent",
+                    self.dims
+                )
+            })
     }
 
     /// Get the size of a specific dimension
@@ -165,11 +175,16 @@ impl Strides {
     #[inline(always)]
     pub fn from_shape(shape: &Shape) -> Self {
         let mut strides = Vec::with_capacity(shape.ndim());
-        let mut stride = 1;
+        let mut stride = 1usize;
 
         for &dim in shape.dims().iter().rev() {
             strides.push(stride);
-            stride *= dim;
+            stride = stride.checked_mul(dim).unwrap_or_else(|| {
+                panic!(
+                    "tensor shape {:?} has more elements than usize can represent",
+                    shape.dims()
+                )
+            });
         }
 
         strides.reverse();
@@ -239,6 +254,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "more elements than usize can represent")]
+    fn test_numel_overflow_panics() {
+        // A wrapped product would report a tiny element count for an absurd
+        // shape and let downstream code under-allocate storage.
+        let shape = Shape::new(vec![usize::MAX, 2]);
+        let _ = shape.numel();
+    }
+
+    #[test]
+    #[should_panic(expected = "more elements than usize can represent")]
+    fn test_strides_overflow_panics() {
+        let shape = Shape::new(vec![usize::MAX, 4, 2]);
+        let _ = Strides::from_shape(&shape);
+    }
+
+    #[test]
     fn test_broadcasting() {
         let shape1 = Shape::new(vec![3, 1]);
         let shape2 = Shape::new(vec![1, 4]);
@@ -258,7 +289,7 @@ mod tests {
         assert!(strides.is_contiguous(&shape));
 
         let linear_idx = strides.linear_index(&[1, 2, 3]);
-        assert_eq!(linear_idx, 1 * 12 + 2 * 4 + 3 * 1);
+        assert_eq!(linear_idx, 12 + 2 * 4 + 3);
     }
 
     #[test]

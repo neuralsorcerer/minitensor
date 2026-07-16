@@ -262,7 +262,7 @@ impl GpuDevice {
     pub fn memory_bandwidth(&self) -> f64 {
         self.capabilities
             .memory_bandwidth
-            .unwrap_or_else(|| match self.device_type {
+            .unwrap_or(match self.device_type {
                 DeviceType::Cuda => {
                     if self.memory_size > 32 * 1024 * 1024 * 1024 {
                         900.0

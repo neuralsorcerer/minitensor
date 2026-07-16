@@ -307,7 +307,6 @@ impl RMSprop {
                 let p = param.data_mut().as_f64_slice_mut().unwrap();
                 let g = grad.data().as_f64_slice().unwrap();
                 let sq = square_avg.data_mut().as_f64_slice_mut().unwrap();
-                let lr = lr;
                 let momentum = self.momentum;
                 match (momentum_buffer_opt, grad_avg_opt) {
                     (Some(mb), Some(ga)) => {

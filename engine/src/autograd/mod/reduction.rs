@@ -147,8 +147,8 @@ impl GradientFunction for LayerNormBackward {
                 );
                 accumulate_grad(&mut gradients, self.input_id, zero)?;
             }
-            if self.weight_requires_grad {
-                if let Some(weight_id) = self.weight_id {
+            if self.weight_requires_grad
+                && let Some(weight_id) = self.weight_id {
                     let zero = Tensor::zeros(
                         Shape::new(self.normalized_shape.clone()),
                         grad_output.dtype(),
@@ -157,9 +157,8 @@ impl GradientFunction for LayerNormBackward {
                     );
                     accumulate_grad(&mut gradients, weight_id, zero)?;
                 }
-            }
-            if self.bias_requires_grad {
-                if let Some(bias_id) = self.bias_id {
+            if self.bias_requires_grad
+                && let Some(bias_id) = self.bias_id {
                     let zero = Tensor::zeros(
                         Shape::new(self.normalized_shape.clone()),
                         grad_output.dtype(),
@@ -168,7 +167,6 @@ impl GradientFunction for LayerNormBackward {
                     );
                     accumulate_grad(&mut gradients, bias_id, zero)?;
                 }
-            }
 
             return Ok(gradients);
         }
@@ -200,8 +198,8 @@ impl GradientFunction for LayerNormBackward {
             accumulate_grad(&mut gradients, self.input_id, grad_input)?;
         }
 
-        if self.weight_requires_grad {
-            if let Some(weight_id) = self.weight_id {
+        if self.weight_requires_grad
+            && let Some(weight_id) = self.weight_id {
                 let mut grad_weight = arithmetic::mul(&grad_output_detached, &normalized)?;
                 if self.axis_start > 0 {
                     let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
@@ -212,10 +210,9 @@ impl GradientFunction for LayerNormBackward {
                 }
                 accumulate_grad(&mut gradients, weight_id, grad_weight)?;
             }
-        }
 
-        if self.bias_requires_grad {
-            if let Some(bias_id) = self.bias_id {
+        if self.bias_requires_grad
+            && let Some(bias_id) = self.bias_id {
                 let mut grad_bias = grad_output_detached.clone();
                 if self.axis_start > 0 {
                     let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
@@ -226,7 +223,6 @@ impl GradientFunction for LayerNormBackward {
                 }
                 accumulate_grad(&mut gradients, bias_id, grad_bias)?;
             }
-        }
 
         Ok(gradients)
     }

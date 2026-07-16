@@ -51,20 +51,15 @@ impl ParameterGroup {
 }
 
 /// Gradient clipping configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum GradientClipping {
     /// No gradient clipping
+    #[default]
     None,
     /// Clip gradients by norm
     ByNorm { max_norm: f64 },
     /// Clip gradients by value
     ByValue { min_value: f64, max_value: f64 },
-}
-
-impl Default for GradientClipping {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Learning rate scheduler interface

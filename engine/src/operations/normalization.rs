@@ -52,7 +52,7 @@ fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> 
 /// running estimates during evaluation.
 ///
 /// * `input` - Input tensor of shape `[N, C, ...]` where the second dimension
-///             is interpreted as the feature/channel dimension.
+///   is interpreted as the feature/channel dimension.
 /// * `running_mean` - Optional running mean buffer updated during training.
 /// * `running_var` - Optional running variance buffer updated during training.
 /// * `weight` - Optional learnable scale parameter (gamma).
@@ -80,37 +80,37 @@ pub fn batch_norm(
     let num_features = input.size(1)?;
 
     // Validate parameter shapes
-    if let Some(w) = weight {
-        if w.ndim() != 1 || w.size(0)? != num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![num_features],
-                vec![w.size(0)?],
-            ));
-        }
+    if let Some(w) = weight
+        && (w.ndim() != 1 || w.size(0)? != num_features)
+    {
+        return Err(MinitensorError::shape_mismatch(
+            vec![num_features],
+            vec![w.size(0)?],
+        ));
     }
-    if let Some(b) = bias {
-        if b.ndim() != 1 || b.size(0)? != num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![num_features],
-                vec![b.size(0)?],
-            ));
-        }
+    if let Some(b) = bias
+        && (b.ndim() != 1 || b.size(0)? != num_features)
+    {
+        return Err(MinitensorError::shape_mismatch(
+            vec![num_features],
+            vec![b.size(0)?],
+        ));
     }
-    if let Some(rm) = &running_mean {
-        if rm.ndim() != 1 || rm.size(0)? != num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![num_features],
-                vec![rm.size(0)?],
-            ));
-        }
+    if let Some(rm) = &running_mean
+        && (rm.ndim() != 1 || rm.size(0)? != num_features)
+    {
+        return Err(MinitensorError::shape_mismatch(
+            vec![num_features],
+            vec![rm.size(0)?],
+        ));
     }
-    if let Some(rv) = &running_var {
-        if rv.ndim() != 1 || rv.size(0)? != num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![num_features],
-                vec![rv.size(0)?],
-            ));
-        }
+    if let Some(rv) = &running_var
+        && (rv.ndim() != 1 || rv.size(0)? != num_features)
+    {
+        return Err(MinitensorError::shape_mismatch(
+            vec![num_features],
+            vec![rv.size(0)?],
+        ));
     }
 
     // Dimensions along which to compute statistics (all except channel dim)
@@ -165,23 +165,21 @@ pub fn batch_norm(
 
     // Update running statistics if training (mean_used/var_used hold the
     // batch statistics whenever training is true)
-    if training {
-        if let (Some(rm), Some(rv)) = (running_mean, running_var) {
-            let mean_flat = mean_used.view(Shape::new(vec![num_features]))?.detach();
-            let var_flat = var_used.view(Shape::new(vec![num_features]))?.detach();
+    if training && let (Some(rm), Some(rv)) = (running_mean, running_var) {
+        let mean_flat = mean_used.view(Shape::new(vec![num_features]))?.detach();
+        let var_flat = var_used.view(Shape::new(vec![num_features]))?.detach();
 
-            let m_tensor = scalar_tensor(momentum, input.dtype(), input.device())?;
-            let one_minus_tensor = scalar_tensor(1.0 - momentum, input.dtype(), input.device())?;
+        let m_tensor = scalar_tensor(momentum, input.dtype(), input.device())?;
+        let one_minus_tensor = scalar_tensor(1.0 - momentum, input.dtype(), input.device())?;
 
-            *rm = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(rm, &one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&mean_flat, &m_tensor)?,
-            )?;
-            *rv = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(rv, &one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&var_flat, &m_tensor)?,
-            )?;
-        }
+        *rm = crate::operations::arithmetic::add(
+            &crate::operations::arithmetic::mul(rm, &one_minus_tensor)?,
+            &crate::operations::arithmetic::mul(&mean_flat, &m_tensor)?,
+        )?;
+        *rv = crate::operations::arithmetic::add(
+            &crate::operations::arithmetic::mul(rv, &one_minus_tensor)?,
+            &crate::operations::arithmetic::mul(&var_flat, &m_tensor)?,
+        )?;
     }
 
     Ok(output)

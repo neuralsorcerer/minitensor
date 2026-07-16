@@ -498,12 +498,11 @@ impl SystemInfo {
     fn get_uptime() -> Duration {
         #[cfg(target_os = "linux")]
         {
-            if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
-                if let Some(uptime_str) = content.split_whitespace().next() {
-                    if let Ok(uptime_secs) = uptime_str.parse::<f64>() {
-                        return Duration::from_secs_f64(uptime_secs);
-                    }
-                }
+            if let Ok(content) = std::fs::read_to_string("/proc/uptime")
+                && let Some(uptime_str) = content.split_whitespace().next()
+                && let Ok(uptime_secs) = uptime_str.parse::<f64>()
+            {
+                return Duration::from_secs_f64(uptime_secs);
             }
         }
 
@@ -515,14 +514,14 @@ impl SystemInfo {
         {
             if let Ok(content) = std::fs::read_to_string("/proc/loadavg") {
                 let parts: Vec<&str> = content.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    if let (Ok(load1), Ok(load5), Ok(load15)) = (
+                if parts.len() >= 3
+                    && let (Ok(load1), Ok(load5), Ok(load15)) = (
                         parts[0].parse::<f64>(),
                         parts[1].parse::<f64>(),
                         parts[2].parse::<f64>(),
-                    ) {
-                        return Some((load1, load5, load15));
-                    }
+                    )
+                {
+                    return Some((load1, load5, load15));
                 }
             }
         }
@@ -548,10 +547,10 @@ impl ThermalInfo {
             // Try to read from thermal zones
             for i in 0..10 {
                 let temp_path = format!("/sys/class/thermal/thermal_zone{}/temp", i);
-                if let Ok(temp_str) = std::fs::read_to_string(&temp_path) {
-                    if let Ok(temp_millicelsius) = temp_str.trim().parse::<i32>() {
-                        return Some(temp_millicelsius as f64 / 1000.0);
-                    }
+                if let Ok(temp_str) = std::fs::read_to_string(&temp_path)
+                    && let Ok(temp_millicelsius) = temp_str.trim().parse::<i32>()
+                {
+                    return Some(temp_millicelsius as f64 / 1000.0);
                 }
             }
         }

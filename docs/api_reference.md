@@ -44,6 +44,10 @@ of convenience aliases.
 | `clear_autograd_graph()` | Clear the global autograd graph. |
 | `is_autograd_graph_consumed()` | Inspect whether a graph has been consumed. |
 | `mark_autograd_graph_consumed()` | Mark the current graph as consumed. |
+| `no_grad()` | Context manager: disable gradient recording (results are detached leaves; nothing is saved for backward). |
+| `enable_grad()` | Context manager: re-enable gradient recording inside a `no_grad()` block. |
+| `is_grad_enabled()` | Query the thread-local gradient recording mode. |
+| `set_grad_enabled(enabled)` | Set the gradient recording mode, returning the previous mode. |
 | `available_submodules()` | Return availability of optional submodules. |
 | `list_public_api()` | Return public API symbol lists by module. |
 | `api_summary()` | Return version and API counts by module. |

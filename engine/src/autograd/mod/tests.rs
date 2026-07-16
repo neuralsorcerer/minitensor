@@ -535,4 +535,64 @@ mod tests {
         }
         assert!(grad_input.allclose(&expected, 1e-6, 1e-6));
     }
+
+    #[test]
+    fn test_no_grad_guard_disables_recording() {
+        clear_graph().unwrap();
+
+        let a = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let b = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+
+        {
+            let _guard = NoGradGuard::new();
+            assert!(!is_grad_enabled());
+
+            // New tensors created inside the scope never require gradients.
+            let c = Tensor::ones(
+                Shape::new(vec![2]),
+                DataType::Float32,
+                Device::cpu(),
+                true,
+            );
+            assert!(!c.requires_grad());
+
+            // Operation results are detached leaves.
+            let out = arithmetic::add(&a, &b).unwrap();
+            assert!(!out.requires_grad());
+            assert!(out.grad_fn().is_none());
+
+            // Explicit opt-in still works.
+            let opted = c.requires_grad_(true);
+            assert!(opted.requires_grad());
+        }
+
+        // Mode restored: recording works again.
+        assert!(is_grad_enabled());
+        let out = arithmetic::add(&a, &b).unwrap();
+        assert!(out.requires_grad());
+        assert!(out.grad_fn().is_some());
+
+        clear_graph().unwrap();
+    }
+
+    #[test]
+    fn test_set_grad_enabled_round_trip() {
+        assert!(is_grad_enabled());
+        let prev = set_grad_enabled(false);
+        assert!(prev);
+        assert!(!is_grad_enabled());
+        let prev = set_grad_enabled(true);
+        assert!(!prev);
+        assert!(is_grad_enabled());
+    }
 }

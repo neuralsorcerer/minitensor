@@ -364,6 +364,11 @@ impl ComputationGraph {
         self.gradients.clear();
     }
 
+    /// Remove the stored gradient for a single tensor, if any.
+    pub fn remove_gradient(&mut self, tensor_id: TensorId) -> Option<Tensor> {
+        self.gradients.remove(&tensor_id)
+    }
+
     /// Get the number of nodes in the graph
     pub fn num_nodes(&self) -> usize {
         self.nodes.len()
@@ -775,7 +780,7 @@ mod tests {
         assert!(gradients.contains_key(&c));
 
         // 'a' should appear in the gradients (accumulated from both paths)
-        assert!(gradients.get(&a).is_some());
+        assert!(gradients.contains_key(&a));
     }
 
     #[test]

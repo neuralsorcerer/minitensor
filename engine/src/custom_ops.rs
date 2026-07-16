@@ -165,10 +165,8 @@ impl CustomOpRegistry {
 
         // Set up gradient tracking if any input requires gradients
         let requires_grad = inputs.iter().any(|t| t.requires_grad());
-        if requires_grad {
-            if let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
-                add_to_graph(&output, Some(grad_fn))?;
-            }
+        if requires_grad && let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
+            add_to_graph(&output, Some(grad_fn))?;
         }
 
         Ok(output)
@@ -454,7 +452,7 @@ impl CustomOp for BuiltCustomOp {
                     "No input devices provided",
                 ))
             } else {
-                Ok(input_devices[0].clone())
+                Ok(*input_devices[0])
             }
         }
     }

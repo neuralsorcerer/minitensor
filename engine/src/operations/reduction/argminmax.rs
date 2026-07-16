@@ -799,8 +799,8 @@ mod tests {
         let t = create_tensor_i32(vec![1, 0, 2, 3], vec![2, 2]);
         let all_res = all(&t, None, false).unwrap();
         let any_res = any(&t, None, false).unwrap();
-        assert_eq!(all_res.data().as_bool_slice().unwrap()[0], false);
-        assert_eq!(any_res.data().as_bool_slice().unwrap()[0], true);
+        assert!(!all_res.data().as_bool_slice().unwrap()[0]);
+        assert!(any_res.data().as_bool_slice().unwrap()[0]);
     }
 
     #[test]

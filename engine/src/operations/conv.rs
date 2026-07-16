@@ -57,13 +57,13 @@ pub fn conv2d(
         ));
     }
 
-    if let Some(b) = bias {
-        if b.ndim() != 1 || b.size(0)? != out_channels {
-            return Err(MinitensorError::shape_mismatch(
-                vec![out_channels],
-                vec![b.size(0)?],
-            ));
-        }
+    if let Some(b) = bias
+        && (b.ndim() != 1 || b.size(0)? != out_channels)
+    {
+        return Err(MinitensorError::shape_mismatch(
+            vec![out_channels],
+            vec![b.size(0)?],
+        ));
     }
 
     if stride.0 == 0 || stride.1 == 0 {
@@ -158,7 +158,7 @@ pub fn conv2d(
 
             let requires_grad = input.requires_grad()
                 || weight.requires_grad()
-                || bias.map_or(false, |b| b.requires_grad());
+                || bias.is_some_and(|b| b.requires_grad());
             let output_data = TensorData::from_vec_f32(output_vec, input.device());
             let mut output = Tensor::new(
                 Arc::new(output_data),
@@ -176,7 +176,7 @@ pub fn conv2d(
                 if weight.requires_grad() {
                     deps.push(weight.id());
                 }
-                let bias_requires_grad = bias.map_or(false, |b| b.requires_grad());
+                let bias_requires_grad = bias.is_some_and(|b| b.requires_grad());
                 if bias_requires_grad {
                     deps.push(bias.unwrap().id());
                 }

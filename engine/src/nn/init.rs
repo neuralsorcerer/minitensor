@@ -87,7 +87,7 @@ pub fn init_constant(
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
-            let vec = vec![value as f64; numel];
+            let vec = vec![value; numel];
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
@@ -126,65 +126,40 @@ pub fn init_uniform(
         DataType::Float32 => {
             let dist = Uniform::new(a as f32, b as f32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Uniform::new(a, b).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Uniform::new(a as i32, b as i32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Uniform::new(a as i64, b as i64).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Uniform::new(0.0, 1.0).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng) > 0.5;
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng) > 0.5));
             });
             TensorData::from_vec_bool(vec, device)
         }
@@ -212,65 +187,40 @@ pub fn init_normal(
         DataType::Float32 => {
             let dist = Normal::new(mean as f32, std as f32).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng);
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng)));
             });
             TensorData::from_vec_f64(vec, device)
         }
         DataType::Int32 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng).round() as i32;
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng).round() as i32));
             });
             TensorData::from_vec_i32(vec, device)
         }
         DataType::Int64 => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng).round() as i64;
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng).round() as i64));
             });
             TensorData::from_vec_i64(vec, device)
         }
         DataType::Bool => {
             let dist = Normal::new(mean, std).unwrap();
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
-                for v in &mut vec {
-                    *v = dist.sample(rng) > 0.0;
-                }
+                vec.extend((0..numel).map(|_| dist.sample(rng) > 0.0));
             });
             TensorData::from_vec_bool(vec, device)
         }
@@ -313,7 +263,7 @@ pub fn truncated_normal_init(
         ));
     }
 
-    if !(upper > lower) {
+    if upper <= lower {
         return Err(MinitensorError::invalid_argument(
             "truncated_normal requires upper bound to be greater than lower bound",
         ));
@@ -327,7 +277,7 @@ pub fn truncated_normal_init(
     let lower_cdf = normal.cdf(lower);
     let upper_cdf = normal.cdf(upper);
 
-    if !(upper_cdf > lower_cdf) {
+    if upper_cdf <= lower_cdf {
         return Err(MinitensorError::invalid_argument(
             "truncated_normal bounds must span non-zero probability mass",
         ));
@@ -337,40 +287,33 @@ pub fn truncated_normal_init(
     let data = match dtype {
         DataType::Float32 => {
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
                 let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
-                for value in &mut vec {
+                vec.extend((0..numel).map(|_| {
                     let mut sample_cdf = uniform.sample(rng);
                     if sample_cdf <= 0.0 {
                         sample_cdf = f64::EPSILON;
                     } else if sample_cdf >= 1.0 {
                         sample_cdf = 1.0 - f64::EPSILON;
                     }
-                    let sample = normal.inverse_cdf(sample_cdf);
-                    *value = sample as f32;
-                }
+                    normal.inverse_cdf(sample_cdf) as f32
+                }));
             });
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let mut vec = Vec::with_capacity(numel);
-            unsafe {
-                vec.set_len(numel);
-            }
             random::with_rng(|rng| {
                 let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
-                for value in &mut vec {
+                vec.extend((0..numel).map(|_| {
                     let mut sample_cdf = uniform.sample(rng);
                     if sample_cdf <= 0.0 {
                         sample_cdf = f64::EPSILON;
                     } else if sample_cdf >= 1.0 {
                         sample_cdf = 1.0 - f64::EPSILON;
                     }
-                    *value = normal.inverse_cdf(sample_cdf);
-                }
+                    normal.inverse_cdf(sample_cdf)
+                }));
             });
             TensorData::from_vec_f64(vec, device)
         }
@@ -579,7 +522,7 @@ mod tests {
         .unwrap();
         let slice = tensor.data().as_f32_slice().unwrap();
         for &v in slice {
-            assert!(v >= -0.5 && v <= 0.5);
+            assert!((-0.5..=0.5).contains(&v));
         }
     }
 

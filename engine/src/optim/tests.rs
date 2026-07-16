@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)] // file is already the `tests` module of `optim`
 mod tests {
     use crate::optim::optimizer::LearningRateScheduler;
     use crate::optim::{

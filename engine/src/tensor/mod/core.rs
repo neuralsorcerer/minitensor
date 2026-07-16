@@ -70,7 +70,12 @@ impl Tensor {
             strides,
             dtype,
             device,
-            requires_grad,
+            // While grad recording is disabled (`no_grad`), newly created
+            // tensors never require gradients. Callers that genuinely need a
+            // trainable leaf inside a no-grad scope can opt back in with
+            // `requires_grad_(true)`, which expresses explicit intent and is
+            // not gated.
+            requires_grad: requires_grad && autograd::is_grad_enabled(),
             grad_fn: None,
             grad: None,
             tensor_id: TensorId::new(),
@@ -338,9 +343,18 @@ impl Tensor {
 }
 
 impl Tensor {
-    /// Set the gradient function for this tensor
+    /// Set the gradient function for this tensor.
+    ///
+    /// While grad recording is disabled (`no_grad` scopes and the backward
+    /// executor), attaching a gradient function is a no-op so operation
+    /// outputs stay leaves; this mirrors the gating in
+    /// [`autograd::add_to_graph`], keeping the tensor's metadata and the
+    /// graph consistent. Clearing (`None`) is always honoured.
     #[inline(always)]
     pub fn set_grad_fn(&mut self, grad_fn: Option<Arc<dyn GradientFunction>>) {
+        if grad_fn.is_some() && !autograd::is_grad_enabled() {
+            return;
+        }
         self.grad_fn = grad_fn;
     }
 
@@ -398,10 +412,15 @@ impl Tensor {
         Ok(())
     }
 
-    /// Clear the gradient for this tensor
+    /// Clear the gradient for this tensor.
+    ///
+    /// Only this tensor's gradient is affected — both the copy stored on the
+    /// tensor and its entry in the global gradient map. (Earlier versions
+    /// wiped every gradient on the thread, so zeroing one tensor silently
+    /// cleared unrelated models' gradients.)
     #[inline(always)]
     pub fn zero_grad(&mut self, set_to_none: bool) {
-        autograd::zero_gradients();
+        autograd::clear_gradient(self);
         if set_to_none {
             self.grad = None;
             return;

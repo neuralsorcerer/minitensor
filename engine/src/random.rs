@@ -32,7 +32,7 @@ static GLOBAL_RNG: Lazy<Mutex<StdRng>> = Lazy::new(|| {
 #[inline]
 pub fn with_rng<T>(f: impl FnOnce(&mut StdRng) -> T) -> T {
     let mut guard = GLOBAL_RNG.lock();
-    f(&mut *guard)
+    f(&mut guard)
 }
 
 /// Seed the global RNG with the provided value.

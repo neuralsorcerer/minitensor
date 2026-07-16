@@ -71,13 +71,12 @@ impl Tensor {
     /// Clip tensor values to the provided range.
     #[inline(always)]
     pub fn clip(&self, min_val: Option<f64>, max_val: Option<f64>) -> Result<Self> {
-        if let (Some(min), Some(max)) = (min_val, max_val) {
-            if min > max {
+        if let (Some(min), Some(max)) = (min_val, max_val)
+            && min > max {
                 return Err(MinitensorError::invalid_argument(format!(
                     "clip minimum {min} cannot be greater than maximum {max}",
                 )));
             }
-        }
 
         use crate::operations::activation::clip;
         clip(self, min_val, max_val)
@@ -678,13 +677,10 @@ impl Tensor {
             && other.device.is_cpu()
             && self.is_contiguous()
             && other.is_contiguous()
-        {
-            if let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
-                if a == b {
+            && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes())
+                && a == b {
                     return true;
                 }
-            }
-        }
 
         let numel = self.numel();
         match self.dtype {
@@ -742,11 +738,9 @@ impl Tensor {
             && other.device.is_cpu()
             && self.is_contiguous()
             && other.is_contiguous()
-        {
-            if let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
+            && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
                 return a == b;
             }
-        }
 
         let numel = self.numel();
         match self.dtype {

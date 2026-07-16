@@ -630,6 +630,9 @@ where
     }
 }
 
+// Copy-scalar helpers mirroring `f32::is_nan` and friends, which also take
+// `self` by value.
+#[allow(clippy::wrong_self_convention)]
 trait FloatClassify {
     fn is_nan_value(self) -> bool;
     fn is_finite_value(self) -> bool;

@@ -174,7 +174,7 @@ impl FusionSequence {
 
         // Execute operations in sequence
         for (i, op) in self.operations.iter().enumerate() {
-            let second_input = inputs.get(i + 1).map(|t| *t);
+            let second_input = inputs.get(i + 1).copied();
             current_data = Arc::new(self.execute_single_op(op, &current_data, second_input)?);
         }
 
@@ -415,7 +415,7 @@ impl MemoryPool {
     pub fn return_to_pool(&mut self, data: TensorData, dtype: DataType, device: Device) {
         let key = (dtype, device);
 
-        let pool = self.pools.entry(key).or_insert_with(VecDeque::new);
+        let pool = self.pools.entry(key).or_default();
 
         // Only keep the tensor if the pool isn't full
         if pool.len() < self.max_pool_size {

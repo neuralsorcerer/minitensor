@@ -115,8 +115,21 @@ impl Device {
         }
     }
 
-    /// Parse device from string
+    /// Parse device from string.
+    ///
+    /// Inherent convenience wrapper kept for API compatibility; the canonical
+    /// implementation is the [`std::str::FromStr`] impl, so `"cuda:1".parse()`
+    /// also works.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(device_str: &str) -> Result<Self, String> {
+        device_str.parse()
+    }
+}
+
+impl std::str::FromStr for Device {
+    type Err = String;
+
+    fn from_str(device_str: &str) -> Result<Self, Self::Err> {
         match device_str.to_lowercase().as_str() {
             "cpu" => Ok(Self::cpu()),
             "cuda" => Ok(Self::cuda(Some(0))),

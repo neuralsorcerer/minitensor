@@ -71,7 +71,7 @@ thread_local! {
 }
 
 thread_local! {
-    static GRAPH_CONSUMED: Cell<bool> = Cell::new(false);
+    static GRAPH_CONSUMED: Cell<bool> = const { Cell::new(false) };
 }
 
 // Thread-local gradient recording mode. While disabled, `add_to_graph` is a
@@ -86,6 +86,13 @@ thread_local! {
 /// Query whether autograd recording is currently enabled on this thread.
 pub fn is_grad_enabled() -> bool {
     GRAD_ENABLED.with(|flag| flag.get())
+}
+
+/// Enable or disable autograd recording on this thread, returning the
+/// previous state. Building block for user-facing `no_grad()` /
+/// `enable_grad()` context managers.
+pub fn set_grad_enabled(enabled: bool) -> bool {
+    GRAD_ENABLED.with(|flag| flag.replace(enabled))
 }
 
 /// RAII guard that disables autograd recording for its lifetime.
@@ -209,6 +216,11 @@ pub fn get_gradient(tensor: &Tensor) -> Option<Tensor> {
 /// Clear all stored gradients in the global computation graph
 pub fn zero_gradients() {
     GLOBAL_GRAPH.with(|graph| graph.borrow_mut().zero_grad());
+}
+
+/// Remove the stored gradient for a single tensor from the global graph.
+pub fn clear_gradient(tensor: &Tensor) -> Option<Tensor> {
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().remove_gradient(tensor.id()))
 }
 
 /// Clear the global computation graph

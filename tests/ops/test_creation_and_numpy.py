@@ -249,6 +249,10 @@ def _load_stubbed_module(monkeypatch: pytest.MonkeyPatch):
     core.clear_autograd_graph = lambda: None
     core.is_autograd_graph_consumed = lambda: False
     core.mark_autograd_graph_consumed = lambda: None
+    core.no_grad = lambda: None
+    core.enable_grad = lambda: None
+    core.is_grad_enabled = lambda: True
+    core.set_grad_enabled = lambda enabled: True
     core.functional = _DummyModule(f"{module_name}._core.functional")
     core.nn = _DummyModule(f"{module_name}._core.nn")
     core.optim = _DummyModule(f"{module_name}._core.optim")

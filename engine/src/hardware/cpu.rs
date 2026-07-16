@@ -222,61 +222,57 @@ impl CpuInfo {
             // L1 data cache
             if let Ok(size_str) =
                 std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index0/size")
+                && let Some(size) = Self::parse_cache_size(&size_str)
             {
-                if let Some(size) = Self::parse_cache_size(&size_str) {
-                    cache_levels.push(CacheLevel {
-                        level: 1,
-                        cache_type: CacheType::Data,
-                        size,
-                        line_size: 64,    // Common default
-                        associativity: 8, // Common default
-                    });
-                }
+                cache_levels.push(CacheLevel {
+                    level: 1,
+                    cache_type: CacheType::Data,
+                    size,
+                    line_size: 64,    // Common default
+                    associativity: 8, // Common default
+                });
             }
 
             // L1 instruction cache
             if let Ok(size_str) =
                 std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index1/size")
+                && let Some(size) = Self::parse_cache_size(&size_str)
             {
-                if let Some(size) = Self::parse_cache_size(&size_str) {
-                    cache_levels.push(CacheLevel {
-                        level: 1,
-                        cache_type: CacheType::Instruction,
-                        size,
-                        line_size: 64,
-                        associativity: 8,
-                    });
-                }
+                cache_levels.push(CacheLevel {
+                    level: 1,
+                    cache_type: CacheType::Instruction,
+                    size,
+                    line_size: 64,
+                    associativity: 8,
+                });
             }
 
             // L2 cache
             if let Ok(size_str) =
                 std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index2/size")
+                && let Some(size) = Self::parse_cache_size(&size_str)
             {
-                if let Some(size) = Self::parse_cache_size(&size_str) {
-                    cache_levels.push(CacheLevel {
-                        level: 2,
-                        cache_type: CacheType::Unified,
-                        size,
-                        line_size: 64,
-                        associativity: 8,
-                    });
-                }
+                cache_levels.push(CacheLevel {
+                    level: 2,
+                    cache_type: CacheType::Unified,
+                    size,
+                    line_size: 64,
+                    associativity: 8,
+                });
             }
 
             // L3 cache
             if let Ok(size_str) =
                 std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cache/index3/size")
+                && let Some(size) = Self::parse_cache_size(&size_str)
             {
-                if let Some(size) = Self::parse_cache_size(&size_str) {
-                    cache_levels.push(CacheLevel {
-                        level: 3,
-                        cache_type: CacheType::Unified,
-                        size,
-                        line_size: 64,
-                        associativity: 16,
-                    });
-                }
+                cache_levels.push(CacheLevel {
+                    level: 3,
+                    cache_type: CacheType::Unified,
+                    size,
+                    line_size: 64,
+                    associativity: 16,
+                });
             }
         }
 

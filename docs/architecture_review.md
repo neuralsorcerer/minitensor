@@ -101,9 +101,9 @@ refactor; the rest are documented with a migration path in section 7.
     one thread silently lose their history on another. Single-threaded
     Python use is safe (GIL), but the engine API allows cross-thread misuse
     with silent wrong results. (Documented; see section 7.)
-11. **`t.zero_grad()` on one tensor clears every gradient on the thread**
-    (`autograd::zero_gradients()` wipes the global map). Semantics differ
-    from PyTorch and can surprise multi-model setups. (Documented.)
+11. **[FIXED] `t.zero_grad()` on one tensor cleared every gradient on the
+    thread** (`autograd::zero_gradients()` wiped the global map). It now
+    removes only that tensor's gradient.
 12. **Per-dtype kernel duplication.** Nearly every op repeats the same body
     five times (f32/f64/i32/i64/bool) — thousands of duplicated lines (e.g.
     `elementwise.rs` ~880 lines for 4 ops). A dtype-dispatch macro or generic
@@ -113,22 +113,38 @@ refactor; the rest are documented with a migration path in section 7.
     manager are not wired into any execution path (hardware/fusion are only
     referenced by examples/tests). They inflate the maintenance surface and
     the public API. (Documented; removal is a semver decision.)
-14. **`#![allow(clippy::all)]` on the engine crate and no clippy in CI**
-    (lints.yml only runs rustfmt via pre-commit). Lint debt accumulates
-    invisibly. (Documented.)
+14. **[FIXED] `#![allow(clippy::all)]` on the engine crate and no clippy in
+    CI** (lints.yml only ran rustfmt via pre-commit). The blanket allow is
+    gone, the workspace is warning-free, and CI now runs
+    `cargo clippy --workspace --all-targets -- -D warnings`. This also
+    surfaced and fixed real issues: UB-producing initializer kernels in
+    `nn/init.rs` and two deny-level raw-pointer lints in the memory stack.
 15. **`include!`-based module layout** (`autograd/mod/*.rs`,
     `tensor/mod/*.rs`, bindings `pytensor/*.rs`) merges many files into one
     module, defeating visibility boundaries, slowing incremental compiles,
     and confusing tools. (Documented.)
-16. **Uninitialized `Vec<u8>` buffers** (`set_len` before write) are relied
-    on for output allocation. All writers fill before read, but the pattern
-    is UB-adjacent and should move to `MaybeUninit`/`Vec::spare_capacity_mut`.
-    (Documented.)
-17. **API-inconsistencies at the Python layer.** `requires_grad_()` returns
-    `None` instead of `self` (breaks chaining, diverges from PyTorch);
-    `expand` materializes at the FFI boundary, so it is semantically `repeat`
-    with extra steps; `get_gradient` can return gradients for tensors that
-    do not require grad. (Documented.)
+16. **[PARTIALLY FIXED] Uninitialized `Vec<u8>` buffers** (`set_len` before
+    write) were relied on throughout. The genuinely dangerous cases are
+    fixed: `nn/init.rs` no longer creates `&mut` slices over uninitialized
+    values, `bool` storage is always zero-initialized, and `clone_data`
+    copies safely. Op *output* buffers remain uninitialized behind one
+    documented helper because full zero-initialization measured 30–35%
+    slower on large element-wise ops; the tracked fix is `MaybeUninit`-typed
+    kernel writes (section 7).
+17. **[PARTIALLY FIXED] API-inconsistencies at the Python layer.**
+    `requires_grad_()` now returns `self` (chaining works, matching
+    PyTorch). Still open: `expand` materializes at the FFI boundary, so it
+    is semantically `repeat` with extra steps, and `get_gradient` can return
+    gradients for tensors that do not require grad.
+18. **[FIXED] Unchecked shape products.** `Shape::numel` computed
+    `dims.iter().product()`, which wraps in release builds: an absurd shape
+    could report a small element count, under-allocate storage, and turn
+    later stride-based indexing into out-of-bounds access. `numel` and
+    `Strides::from_shape` now use checked multiplication in every profile.
+19. **[FIXED] No inference mode.** Repeated forward passes with
+    `requires_grad` parameters grew the thread-local graph (and its saved
+    operands) without bound; there was no way to turn recording off.
+    `no_grad()` / `enable_grad()` now exist end to end (see section 7).
 
 ## 3. Target architecture
 
@@ -213,23 +229,58 @@ sits beside ops (ops register, autograd executes ops through trait objects).
 
 ## 7. Prioritized remaining migration plan
 
+Completed in the second change set:
+
+- **User-facing `no_grad()` / `enable_grad()`** — gradient recording is now
+  gated centrally (`Tensor::new`, `Tensor::set_grad_fn`, `add_to_graph`), so
+  results inside `no_grad()` are detached leaves, nothing is saved for
+  backward, and inference no longer grows the graph. Exposed in Python as
+  `mt.no_grad()`, `mt.enable_grad()`, `mt.is_grad_enabled()`,
+  `mt.set_grad_enabled()`. One documented divergence from PyTorch: factory
+  functions called inside `no_grad` also produce non-grad tensors; use
+  `requires_grad_(True)` (which expresses explicit intent and is never
+  gated) to opt back in.
+- **Per-tensor `zero_grad`** — `Tensor::zero_grad` now removes only its own
+  entry from the global gradient map (`autograd::clear_gradient`) instead of
+  wiping every gradient on the thread.
+- **`requires_grad_` returns `self`** in Python, enabling
+  `mt.randn(...).requires_grad_(True)` chaining.
+- **Clippy enabled** — `#![allow(clippy::all)]` removed; the workspace is
+  clean under `cargo clippy --workspace --all-targets -- -D warnings`, which
+  now runs in CI (lints workflow). Three style lints are allowed crate-wide
+  with documented justification (`needless_range_loop`,
+  `too_many_arguments`, `items_after_test_module` — the last is an artifact
+  of the `include!` layout).
+- **Overflow-safe shape arithmetic** — `Shape::numel` and
+  `Strides::from_shape` use checked multiplication in all build profiles; a
+  wrapped element count could previously under-allocate storage while
+  indexing code still trusted the dimensions (out-of-bounds writes via the
+  raw-pointer kernels).
+- **Undefined behavior removed from initializer kernels** — `nn/init.rs`
+  built `&mut` slices over uninitialized memory (instant UB for `bool`);
+  all twelve sites now write through `Vec::extend`. `clone_data` uses
+  `Vec::clone` instead of `set_len` + copy.
+
+Still open, in priority order:
+
 1. **Interior mutability for parameter storage** — remove the last aliasing
    cast in `data_mut` (medium effort, high value; unblocks `Send`-safe use).
 2. **dtype dispatch macro** — collapse per-dtype kernel copies (large LOC
    win, low risk, mechanical).
-3. **User-facing `no_grad()`** — the guard exists; expose a context manager
-   in bindings and gate `requires_grad` in `Tensor::new` (small effort,
-   fixes unbounded graph growth during inference).
-4. **Replace `include!` layout with real modules** — mechanical, improves
-   tooling and visibility control.
-5. **Delete or feature-gate speculative subsystems** (`hardware`, `fusion`,
+3. **Replace `include!` layout with real modules** — mechanical, improves
+   tooling and visibility control (also re-enables
+   `items_after_test_module`).
+4. **Delete or feature-gate speculative subsystems** (`hardware`, `fusion`,
    `debug`, pooled allocator) — semver-major cleanup.
-6. **Per-tensor `zero_grad` semantics** — store grads on tensors (or key
-   deletion by id) instead of wiping the global map.
-7. **Enable clippy in CI** and remove `#![allow(clippy::all)]`, burning down
-   warnings incrementally.
-8. **`MaybeUninit` output buffers**; **`requires_grad_` returning self**;
-   dtype-aware `get_gradient` gating.
+5. **`MaybeUninit`-typed kernel output writes** — the op output buffers are
+   still allocated uninitialized behind a single documented helper
+   (`TensorData::owned_output_buffer`). Zero-initializing them instead was
+   implemented and measured: 30–35% slower on large element-wise ops
+   (`calloc` must memset reused allocations, doubling output write
+   traffic), so it was reverted. The proper fix is writing through
+   `MaybeUninit` in the kernels, which is sound without the extra pass.
+6. **dtype-aware `get_gradient` gating** — gradients are retrievable for
+   tensors that never required them.
 
 ## 8-11. Implementation, tests, validation, benchmarks
 

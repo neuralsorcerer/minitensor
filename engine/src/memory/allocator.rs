@@ -218,6 +218,10 @@ impl Allocator for CpuAllocator {
         }
     }
 
+    // The `Allocator` trait keeps `deallocate` a safe fn for API-compat; the
+    // caller contract (pointer must come from `allocate` with the same size)
+    // is documented on the trait. Same pattern as `backends::cpu`.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     #[inline(always)]
     fn deallocate(&mut self, ptr: *mut u8, size: usize) -> Result<()> {
         if ptr.is_null() || size == 0 {

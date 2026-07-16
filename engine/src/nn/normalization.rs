@@ -352,8 +352,8 @@ impl BatchNorm2d {
         Ok(Self {
             weight,
             bias,
-            running_mean: running_mean,
-            running_var: running_var,
+            running_mean,
+            running_var,
             num_features,
             _eps: eps,
             _momentum: momentum,

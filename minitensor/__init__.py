@@ -128,6 +128,10 @@ get_gradient = _C.get_gradient
 clear_autograd_graph = _C.clear_autograd_graph
 is_autograd_graph_consumed = _C.is_autograd_graph_consumed
 mark_autograd_graph_consumed = _C.mark_autograd_graph_consumed
+no_grad = _C.no_grad
+enable_grad = _C.enable_grad
+is_grad_enabled = _C.is_grad_enabled
+set_grad_enabled = _C.set_grad_enabled
 
 functional = _C.functional
 _sys.modules[__name__ + ".functional"] = functional
@@ -285,6 +289,10 @@ _BASE_EXPORTS = (
     "clear_autograd_graph",
     "is_autograd_graph_consumed",
     "mark_autograd_graph_consumed",
+    "no_grad",
+    "enable_grad",
+    "is_grad_enabled",
+    "set_grad_enabled",
     "functional",
     "nn",
     "optim",

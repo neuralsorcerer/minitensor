@@ -61,9 +61,14 @@ impl PyTensor {
         Ok(())
     }
 
-    pub fn requires_grad_(&mut self, requires_grad: bool) -> PyResult<()> {
-        self.inner = self.inner.clone().requires_grad_(requires_grad);
-        Ok(())
+    /// Set `requires_grad` in place and return `self`, so calls chain the
+    /// same way as in PyTorch: `x = mt.randn(2, 2).requires_grad_(True)`.
+    pub fn requires_grad_<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        requires_grad: bool,
+    ) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().requires_grad_(requires_grad);
+        slf
     }
 
     #[pyo3(signature = (source, *, non_blocking=false))]

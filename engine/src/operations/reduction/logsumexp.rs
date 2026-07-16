@@ -436,11 +436,10 @@ pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
         None
     };
 
-    if let Some(dims) = &dim {
-        if dims.is_empty() {
+    if let Some(dims) = &dim
+        && dims.is_empty() {
             return Ok(tensor.clone());
         }
-    }
 
     let (sum, count) = match dim {
         None => {
