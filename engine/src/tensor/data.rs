@@ -8,17 +8,36 @@ use crate::{
     device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
 };
 use rayon::prelude::*;
+use std::cell::UnsafeCell;
 
 /// Tensor data storage.
 ///
 /// Sharing is managed exclusively through `Arc<TensorData>`; the struct itself
 /// owns its buffer and frees it on drop.
-#[derive(Debug)]
+///
+/// The buffer lives in an [`UnsafeCell`] because one mutation path is
+/// deliberately allowed through a shared reference: in-place parameter
+/// updates, which must stay visible through every `Arc` handle to the
+/// parameter (see [`DataMut`]). All other access goes through ordinary
+/// `&self`/`&mut self` methods.
 pub struct TensorData {
     /// Raw data buffer
-    buffer: TensorBuffer,
+    buffer: UnsafeCell<TensorBuffer>,
     /// Memory layout information
     layout: MemoryLayout,
+}
+
+impl std::fmt::Debug for TensorData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.buffer_ref() {
+            TensorBuffer::Owned(_) => "owned",
+            TensorBuffer::Raw { .. } => "raw",
+        };
+        f.debug_struct("TensorData")
+            .field("buffer", &kind)
+            .field("layout", &self.layout)
+            .finish()
+    }
 }
 
 /// Buffer storage for tensor data
@@ -47,7 +66,97 @@ pub struct MemoryLayout {
     pub device: Device,
 }
 
+/// Generates the typed slice accessors for one dtype:
+/// - `$shared(&self)`: shared read view;
+/// - `$exclusive(&mut self)`: exclusive write view;
+/// - `$unchecked(&self)`: write view through a shared reference, used only by
+///   [`DataMut`] for in-place parameter updates (see its safety contract).
+///
+/// Empty tensors hand out well-aligned dangling pointers so callers can treat
+/// every dtype uniformly. All accessors return `None` for dtype mismatches or
+/// non-CPU storage.
+macro_rules! typed_slice_accessors {
+    ($ty:ty, $variant:ident, $shared:ident, $exclusive:ident, $unchecked:ident) => {
+        #[inline(always)]
+        pub fn $shared(&self) -> Option<&[$ty]> {
+            if self.layout.dtype != DataType::$variant || !self.layout.device.is_cpu() {
+                return None;
+            }
+            let ptr = if self.layout.numel == 0 {
+                std::ptr::NonNull::<$ty>::dangling().as_ptr()
+            } else {
+                self.as_ptr() as *const $ty
+            };
+            Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
+        }
+
+        #[inline(always)]
+        pub fn $exclusive(&mut self) -> Option<&mut [$ty]> {
+            if self.layout.dtype != DataType::$variant || !self.layout.device.is_cpu() {
+                return None;
+            }
+            let ptr = if self.layout.numel == 0 {
+                std::ptr::NonNull::<$ty>::dangling().as_ptr()
+            } else {
+                self.as_mut_ptr() as *mut $ty
+            };
+            Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
+        }
+
+        /// # Safety
+        /// See [`TensorData::data_ptr_shared`]: the returned slice must not
+        /// overlap the lifetime of any other reference to this tensor's
+        /// element data, and access must be externally synchronized.
+        // `&self -> &mut` is the point of this accessor: it is the
+        // UnsafeCell-backed interior-mutability path for in-place parameter
+        // updates, with the aliasing contract stated above.
+        #[allow(clippy::mut_from_ref)]
+        #[inline(always)]
+        pub(crate) unsafe fn $unchecked(&self) -> Option<&mut [$ty]> {
+            if self.layout.dtype != DataType::$variant || !self.layout.device.is_cpu() {
+                return None;
+            }
+            let ptr = if self.layout.numel == 0 {
+                std::ptr::NonNull::<$ty>::dangling().as_ptr()
+            } else {
+                unsafe { self.data_ptr_shared() as *mut $ty }
+            };
+            Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
+        }
+    };
+}
+
 impl TensorData {
+    /// Shared view of the buffer.
+    ///
+    /// Sound because nothing ever mutates the `TensorBuffer` value itself
+    /// (enum tag, `Vec` header, raw-pointer fields) through a shared
+    /// reference — the shared-mutation path in [`DataMut`] only writes the
+    /// *element bytes* the buffer points to.
+    #[inline(always)]
+    fn buffer_ref(&self) -> &TensorBuffer {
+        unsafe { &*self.buffer.get() }
+    }
+
+    /// Pointer to the element bytes with write provenance, obtained through
+    /// the `UnsafeCell` from a shared reference.
+    ///
+    /// # Safety
+    /// Callers must guarantee that writes through the returned pointer do not
+    /// overlap the lifetime of any other reference to this tensor's element
+    /// data, and that access is externally synchronized (in practice: the
+    /// Python GIL serializes optimizer steps, and gradient functions only
+    /// read their saved operands before the step runs).
+    #[inline(always)]
+    unsafe fn data_ptr_shared(&self) -> *mut u8 {
+        // A transient `&mut TensorBuffer` scoped to this expression is the
+        // sanctioned way to derive a writable pointer from an `UnsafeCell`.
+        match unsafe { &mut *self.buffer.get() } {
+            TensorBuffer::Owned(vec) => vec.as_mut_ptr(),
+            TensorBuffer::Raw { ptr, .. } => *ptr,
+        }
+    }
+
     #[inline(always)]
     fn validate_from_vec_type<T: 'static>(dtype: DataType) {
         let type_id = std::any::TypeId::of::<T>();
@@ -150,7 +259,9 @@ impl TensorData {
                 .checked_mul(dtype.size_bytes())
                 .expect("tensor size overflow");
             let mut data = Self {
-                buffer: TensorBuffer::Owned(Self::owned_buffer_for_dtype(size_bytes, dtype)),
+                buffer: UnsafeCell::new(TensorBuffer::Owned(Self::owned_buffer_for_dtype(
+                    size_bytes, dtype,
+                ))),
                 layout: MemoryLayout {
                     dtype,
                     numel,
@@ -214,7 +325,7 @@ impl TensorData {
         };
 
         Self {
-            buffer,
+            buffer: UnsafeCell::new(buffer),
             layout: MemoryLayout {
                 dtype,
                 numel,
@@ -258,7 +369,7 @@ impl TensorData {
         };
 
         Self {
-            buffer,
+            buffer: UnsafeCell::new(buffer),
             layout: MemoryLayout {
                 dtype,
                 numel,
@@ -272,7 +383,7 @@ impl TensorData {
     #[inline(always)]
     pub fn from_bytes(buffer: Vec<u8>, dtype: DataType, numel: usize) -> Self {
         Self {
-            buffer: TensorBuffer::Owned(buffer),
+            buffer: UnsafeCell::new(TensorBuffer::Owned(buffer)),
             layout: MemoryLayout {
                 dtype,
                 numel,
@@ -355,7 +466,7 @@ impl TensorData {
         };
 
         Self {
-            buffer,
+            buffer: UnsafeCell::new(buffer),
             layout: MemoryLayout {
                 dtype,
                 numel,
@@ -405,7 +516,7 @@ impl TensorData {
         device: Device,
     ) -> Self {
         Self {
-            buffer: TensorBuffer::Raw { ptr, size, device },
+            buffer: UnsafeCell::new(TensorBuffer::Raw { ptr, size, device }),
             layout: MemoryLayout {
                 dtype,
                 numel,
@@ -418,7 +529,7 @@ impl TensorData {
     /// Get the raw buffer as a slice (CPU only)
     #[inline(always)]
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match &self.buffer {
+        match self.buffer_ref() {
             TensorBuffer::Owned(vec) => Some(vec.as_slice()),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
@@ -437,7 +548,7 @@ impl TensorData {
     /// Get the raw buffer as a mutable slice (CPU only)
     #[inline(always)]
     pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
-        match &mut self.buffer {
+        match self.buffer.get_mut() {
             TensorBuffer::Owned(vec) => Some(vec.as_mut_slice()),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
@@ -456,7 +567,7 @@ impl TensorData {
     /// Get the raw pointer (for GPU operations)
     #[inline(always)]
     pub fn as_ptr(&self) -> *const u8 {
-        match &self.buffer {
+        match self.buffer_ref() {
             TensorBuffer::Owned(vec) => vec.as_ptr(),
             TensorBuffer::Raw { ptr, .. } => *ptr,
         }
@@ -465,7 +576,7 @@ impl TensorData {
     /// Get the mutable raw pointer (for GPU operations)
     #[inline(always)]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        match &mut self.buffer {
+        match self.buffer.get_mut() {
             TensorBuffer::Owned(vec) => vec.as_mut_ptr(),
             TensorBuffer::Raw { ptr, .. } => *ptr,
         }
@@ -504,7 +615,7 @@ impl TensorData {
     /// Get the size in bytes
     #[inline(always)]
     pub fn size_bytes(&self) -> usize {
-        match &self.buffer {
+        match self.buffer_ref() {
             TensorBuffer::Owned(vec) => vec.len(),
             TensorBuffer::Raw { size, .. } => *size,
         }
@@ -524,7 +635,7 @@ impl TensorData {
 
     /// Create a copy of the tensor data
     pub fn clone_data(&self) -> Self {
-        let new_buffer = match &self.buffer {
+        let new_buffer = match self.buffer_ref() {
             TensorBuffer::Owned(vec) => TensorBuffer::Owned(vec.clone()),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
@@ -555,170 +666,86 @@ impl TensorData {
         };
 
         Self {
-            buffer: new_buffer,
+            buffer: UnsafeCell::new(new_buffer),
             layout: self.layout.clone(),
         }
     }
 
-    /// Get typed slice for f32 data (CPU only)
-    #[inline(always)]
-    pub fn as_f32_slice(&self) -> Option<&[f32]> {
-        if self.layout.dtype != DataType::Float32 || !self.layout.device.is_cpu() {
-            return None;
+    typed_slice_accessors!(
+        f32,
+        Float32,
+        as_f32_slice,
+        as_f32_slice_mut,
+        as_f32_slice_mut_unchecked
+    );
+    typed_slice_accessors!(
+        f64,
+        Float64,
+        as_f64_slice,
+        as_f64_slice_mut,
+        as_f64_slice_mut_unchecked
+    );
+    typed_slice_accessors!(
+        i32,
+        Int32,
+        as_i32_slice,
+        as_i32_slice_mut,
+        as_i32_slice_mut_unchecked
+    );
+    typed_slice_accessors!(
+        i64,
+        Int64,
+        as_i64_slice,
+        as_i64_slice_mut,
+        as_i64_slice_mut_unchecked
+    );
+    typed_slice_accessors!(
+        bool,
+        Bool,
+        as_bool_slice,
+        as_bool_slice_mut,
+        as_bool_slice_mut_unchecked
+    );
+}
+
+/// Mutable access to a tensor's storage, produced by `Tensor::data_mut`.
+///
+/// The `Unique` variant is ordinary exclusive access (storage uniquely owned,
+/// possibly after copy-on-write). The `Shared` variant is the one deliberate
+/// exception in the crate: in-place updates of leaf parameters whose storage
+/// is shared across `Arc` handles, so the update stays visible through every
+/// handle (PyTorch in-place parameter semantics). Its safety contract is
+/// documented on [`TensorData::data_ptr_shared`] and upheld by the callers:
+/// optimizer steps run GIL-serialized, after backward has finished reading
+/// saved operands.
+pub enum DataMut<'a> {
+    Unique(&'a mut TensorData),
+    Shared(&'a TensorData),
+}
+
+macro_rules! data_mut_accessor {
+    ($name:ident, $unchecked:ident, $ty:ty) => {
+        /// Consumes the access token and returns a slice borrowing from the
+        /// underlying tensor, so `t.data_mut().as_…_slice_mut()` keeps the
+        /// slice alive for the caller's borrow of `t`.
+        #[inline(always)]
+        pub fn $name(self) -> Option<&'a mut [$ty]> {
+            match self {
+                DataMut::Unique(data) => data.$name(),
+                // SAFETY: contract documented on `DataMut` and
+                // `TensorData::data_ptr_shared`.
+                DataMut::Shared(data) => unsafe { data.$unchecked() },
+            }
         }
+    };
+}
 
-        let ptr = self.as_ptr() as *const f32;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<f32>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
-    }
-
-    /// Get mutable typed slice for f32 data (CPU only)
-    #[inline(always)]
-    pub fn as_f32_slice_mut(&mut self) -> Option<&mut [f32]> {
-        if self.layout.dtype != DataType::Float32 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_mut_ptr() as *mut f32;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<f32>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
-    }
-
-    /// Get typed slice for f64 data (CPU only)
-    #[inline(always)]
-    pub fn as_f64_slice(&self) -> Option<&[f64]> {
-        if self.layout.dtype != DataType::Float64 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_ptr() as *const f64;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<f64>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
-    }
-
-    /// Get mutable typed slice for f64 data (CPU only)
-    #[inline(always)]
-    pub fn as_f64_slice_mut(&mut self) -> Option<&mut [f64]> {
-        if self.layout.dtype != DataType::Float64 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_mut_ptr() as *mut f64;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<f64>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
-    }
-
-    /// Get typed slice for i32 data (CPU only)
-    #[inline(always)]
-    pub fn as_i32_slice(&self) -> Option<&[i32]> {
-        if self.layout.dtype != DataType::Int32 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_ptr() as *const i32;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<i32>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
-    }
-
-    /// Get mutable typed slice for i32 data (CPU only)
-    #[inline(always)]
-    pub fn as_i32_slice_mut(&mut self) -> Option<&mut [i32]> {
-        if self.layout.dtype != DataType::Int32 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_mut_ptr() as *mut i32;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<i32>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
-    }
-
-    /// Get typed slice for i64 data (CPU only)
-    #[inline(always)]
-    pub fn as_i64_slice(&self) -> Option<&[i64]> {
-        if self.layout.dtype != DataType::Int64 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_ptr() as *const i64;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<i64>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
-    }
-
-    /// Get mutable typed slice for i64 data (CPU only)
-    #[inline(always)]
-    pub fn as_i64_slice_mut(&mut self) -> Option<&mut [i64]> {
-        if self.layout.dtype != DataType::Int64 || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_mut_ptr() as *mut i64;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<i64>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
-    }
-
-    /// Get typed slice for bool data (CPU only)
-    #[inline(always)]
-    pub fn as_bool_slice(&self) -> Option<&[bool]> {
-        if self.layout.dtype != DataType::Bool || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_ptr() as *const bool;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<bool>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
-    }
-
-    /// Get mutable typed slice for bool data (CPU only)
-    #[inline(always)]
-    pub fn as_bool_slice_mut(&mut self) -> Option<&mut [bool]> {
-        if self.layout.dtype != DataType::Bool || !self.layout.device.is_cpu() {
-            return None;
-        }
-
-        let ptr = self.as_mut_ptr() as *mut bool;
-        let ptr = if self.layout.numel == 0 {
-            std::ptr::NonNull::<bool>::dangling().as_ptr()
-        } else {
-            ptr
-        };
-        Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
-    }
+impl<'a> DataMut<'a> {
+    data_mut_accessor!(as_f32_slice_mut, as_f32_slice_mut_unchecked, f32);
+    data_mut_accessor!(as_f64_slice_mut, as_f64_slice_mut_unchecked, f64);
+    data_mut_accessor!(as_i32_slice_mut, as_i32_slice_mut_unchecked, i32);
+    data_mut_accessor!(as_i64_slice_mut, as_i64_slice_mut_unchecked, i64);
+    data_mut_accessor!(as_bool_slice_mut, as_bool_slice_mut_unchecked, bool);
 }
 
 impl Drop for TensorData {
@@ -726,7 +753,7 @@ impl Drop for TensorData {
         // `TensorData` is shared via `Arc`, so `drop` runs exactly once, when
         // the last reference goes away. Owned buffers free themselves; raw
         // device buffers are returned to the allocator here.
-        if let TensorBuffer::Raw { ptr, size, device } = &self.buffer {
+        if let TensorBuffer::Raw { ptr, size, device } = self.buffer.get_mut() {
             let _ = global_deallocate(*ptr, *size, *device);
         }
     }

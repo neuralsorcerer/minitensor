@@ -88,6 +88,7 @@ mod tests {
         let grad_fn = Arc::new(AddBackward {
             input_shapes: [vec![2, 2], vec![2, 2]],
             input_ids: [TensorId::new(), TensorId::new()],
+            input_requires_grad: [true, true],
         });
 
         graph.add_tensor_with_grad_req(tensor_id, Some(grad_fn), true);
@@ -99,6 +100,7 @@ mod tests {
         let grad_fn = AddBackward {
             input_shapes: [vec![2, 2], vec![2, 2]],
             input_ids: [TensorId::new(), TensorId::new()],
+            input_requires_grad: [true, true],
         };
 
         let grad_output = Tensor::ones(
@@ -120,6 +122,7 @@ mod tests {
         let grad_fn = AddBackward {
             input_shapes: [vec![3], vec![3]],
             input_ids: [shared, shared],
+            input_requires_grad: [true, true],
         };
 
         let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
@@ -148,6 +151,7 @@ mod tests {
             lhs: x.clone(),
             rhs: x.clone(),
             input_ids: [shared, shared],
+            input_requires_grad: [true, true],
         };
 
         let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
@@ -594,5 +598,45 @@ mod tests {
         let prev = set_grad_enabled(true);
         assert!(!prev);
         assert!(is_grad_enabled());
+    }
+
+    #[test]
+    fn test_frozen_inputs_receive_no_gradient() {
+        clear_graph().unwrap();
+
+        let trainable = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let frozen = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        type BinOp = fn(&Tensor, &Tensor) -> Result<Tensor>;
+        let ops: [BinOp; 4] = [
+            arithmetic::add,
+            arithmetic::sub,
+            arithmetic::mul,
+            arithmetic::div,
+        ];
+        for op in ops {
+            let out = op(&trainable, &frozen).unwrap();
+            let grad = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+            let grads = backward_collect(&out, Some(grad)).unwrap();
+            assert!(
+                grads.contains_key(&trainable.id()),
+                "trainable input must receive a gradient"
+            );
+            assert!(
+                !grads.contains_key(&frozen.id()),
+                "frozen input must not receive a gradient"
+            );
+            clear_graph().unwrap();
+        }
     }
 }

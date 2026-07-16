@@ -545,6 +545,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2, 3], vec![2, 3]],
             input_ids: [leaf1, leaf2],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(result, Some(add_fn));
 
@@ -576,6 +577,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, b],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(c, Some(add_fn));
 
@@ -611,6 +613,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [leaf1, leaf2],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(result, Some(add_fn));
 
@@ -662,6 +665,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [leaf, leaf], // Self-dependency is ok
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(result, Some(add_fn));
         assert!(graph.validate().is_ok());
@@ -676,10 +680,12 @@ mod tests {
         let add_a = Arc::new(AddBackward {
             input_shapes: [vec![1], vec![1]],
             input_ids: [b, b],
+            input_requires_grad: [true, true],
         });
         let add_b = Arc::new(AddBackward {
             input_shapes: [vec![1], vec![1]],
             input_ids: [a, a],
+            input_requires_grad: [true, true],
         });
 
         graph.add_tensor(a, Some(add_a));
@@ -709,6 +715,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, b],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(c, Some(add_fn));
 
@@ -747,6 +754,7 @@ mod tests {
         let add_fn1 = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, b],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(temp1, Some(add_fn1));
 
@@ -755,6 +763,7 @@ mod tests {
         let add_fn2 = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, c],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(temp2, Some(add_fn2));
 
@@ -763,6 +772,7 @@ mod tests {
         let add_fn3 = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [temp1, temp2],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(d, Some(add_fn3));
 
@@ -798,6 +808,7 @@ mod tests {
             Some(Arc::new(AddBackward {
                 input_shapes: [vec![2], vec![2]],
                 input_ids: [a, b],
+                input_requires_grad: [true, true],
             })),
         );
 
@@ -812,6 +823,7 @@ mod tests {
             Some(Arc::new(AddBackward {
                 input_shapes: [vec![2], vec![2]],
                 input_ids: [x, y],
+                input_requires_grad: [true, true],
             })),
         );
 
@@ -840,6 +852,7 @@ mod tests {
             Some(Arc::new(AddBackward {
                 input_shapes: [vec![2], vec![2]],
                 input_ids: [a, b],
+                input_requires_grad: [true, true],
             })),
         );
 
@@ -872,6 +885,7 @@ mod tests {
         let add_fn = Arc::new(AddBackward {
             input_shapes: [vec![2], vec![2]],
             input_ids: [a, b],
+            input_requires_grad: [true, true],
         });
         graph.add_tensor(c, Some(add_fn));
 

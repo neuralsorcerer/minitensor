@@ -298,6 +298,9 @@ impl GradientFunction for CloneBackward {
 pub struct AddBackward {
     pub input_shapes: [Vec<usize>; 2],
     pub input_ids: [TensorId; 2],
+    /// Which inputs actually need a gradient; contributions for frozen
+    /// inputs are skipped entirely (no broadcast reduction, no map entry).
+    pub input_requires_grad: [bool; 2],
 }
 
 impl GradientFunction for AddBackward {
@@ -305,16 +308,18 @@ impl GradientFunction for AddBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        // For addition, gradients flow through unchanged, but we need to handle broadcasting
-        let lhs_shape = Shape::new(self.input_shapes[0].clone());
-        let rhs_shape = Shape::new(self.input_shapes[1].clone());
-
-        // Reduce gradients to match input shapes if broadcasting occurred
-        let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
-        let rhs_grad = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        // For addition, gradients flow through unchanged, but broadcasting must
+        // be undone. Inputs that do not require a gradient are skipped.
+        if self.input_requires_grad[0] {
+            let lhs_shape = Shape::new(self.input_shapes[0].clone());
+            let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let rhs_shape = Shape::new(self.input_shapes[1].clone());
+            let rhs_grad = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -328,6 +333,8 @@ impl GradientFunction for AddBackward {
 pub struct SubBackward {
     pub input_shapes: [Vec<usize>; 2],
     pub input_ids: [TensorId; 2],
+    /// Which inputs actually need a gradient (see [`AddBackward`]).
+    pub input_requires_grad: [bool; 2],
 }
 
 impl GradientFunction for SubBackward {
@@ -335,15 +342,17 @@ impl GradientFunction for SubBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        let lhs_shape = Shape::new(self.input_shapes[0].clone());
-        let rhs_shape = Shape::new(self.input_shapes[1].clone());
-
-        let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
-        let rhs_base = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
-        let rhs_grad = arithmetic::neg(&rhs_base)?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        if self.input_requires_grad[0] {
+            let lhs_shape = Shape::new(self.input_shapes[0].clone());
+            let lhs_grad = reduce_gradient_for_broadcasting(grad_output, &lhs_shape)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let rhs_shape = Shape::new(self.input_shapes[1].clone());
+            let rhs_base = reduce_gradient_for_broadcasting(grad_output, &rhs_shape)?;
+            let rhs_grad = arithmetic::neg(&rhs_base)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -358,6 +367,8 @@ pub struct MulBackward {
     pub lhs: Tensor,
     pub rhs: Tensor,
     pub input_ids: [TensorId; 2],
+    /// Which inputs actually need a gradient (see [`AddBackward`]).
+    pub input_requires_grad: [bool; 2],
 }
 
 impl GradientFunction for MulBackward {
@@ -365,15 +376,17 @@ impl GradientFunction for MulBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        // d/dx(x*y) = y and d/dy(x*y) = x
-        let lhs_term = arithmetic::mul(grad_output, &self.rhs.detach())?;
-        let rhs_term = arithmetic::mul(grad_output, &self.lhs.detach())?;
-
-        let lhs_grad = reduce_gradient_for_broadcasting(&lhs_term, self.lhs.shape())?;
-        let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        // d/dx(x*y) = y and d/dy(x*y) = x; skip frozen inputs entirely.
+        if self.input_requires_grad[0] {
+            let lhs_term = arithmetic::mul(grad_output, &self.rhs.detach())?;
+            let lhs_grad = reduce_gradient_for_broadcasting(&lhs_term, self.lhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let rhs_term = arithmetic::mul(grad_output, &self.lhs.detach())?;
+            let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -388,6 +401,8 @@ pub struct DivBackward {
     pub lhs: Tensor,
     pub rhs: Tensor,
     pub input_ids: [TensorId; 2],
+    /// Which inputs actually need a gradient (see [`AddBackward`]).
+    pub input_requires_grad: [bool; 2],
 }
 
 impl GradientFunction for DivBackward {
@@ -397,18 +412,24 @@ impl GradientFunction for DivBackward {
 
         let rhs = self.rhs.detach();
 
-        // d/dx(x/y) = 1/y  =>  grad_x = grad / y
+        // grad/y is needed by both branches; compute it once if either input
+        // requires a gradient.
         let grad_over_rhs = arithmetic::div(grad_output, &rhs)?;
-        let lhs_grad = reduce_gradient_for_broadcasting(&grad_over_rhs, self.lhs.shape())?;
+
+        // d/dx(x/y) = 1/y  =>  grad_x = grad / y
+        if self.input_requires_grad[0] {
+            let lhs_grad = reduce_gradient_for_broadcasting(&grad_over_rhs, self.lhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
 
         // d/dy(x/y) = -x/y^2  =>  grad_y = -(grad / y) * (x / y)
-        let lhs_over_rhs = arithmetic::div(&self.lhs.detach(), &rhs)?;
-        let rhs_term = arithmetic::mul(&grad_over_rhs, &lhs_over_rhs)?;
-        let rhs_term = arithmetic::neg(&rhs_term)?;
-        let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        if self.input_requires_grad[1] {
+            let lhs_over_rhs = arithmetic::div(&self.lhs.detach(), &rhs)?;
+            let rhs_term = arithmetic::mul(&grad_over_rhs, &lhs_over_rhs)?;
+            let rhs_term = arithmetic::neg(&rhs_term)?;
+            let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
 
         Ok(gradients)
     }

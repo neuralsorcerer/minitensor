@@ -52,6 +52,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let grad_fn = Arc::new(AddBackward {
                 input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
                 input_ids: [lhs.id(), rhs.id()],
+                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
             output.set_grad_fn(Some(grad_fn.clone()));
             add_to_graph(&output, Some(grad_fn))?;
@@ -87,6 +88,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         let grad_fn = Arc::new(AddBackward {
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
         output.set_grad_fn(Some(grad_fn.clone()));
@@ -233,6 +235,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let grad_fn = Arc::new(SubBackward {
                 input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
                 input_ids: [lhs.id(), rhs.id()],
+                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
             output.set_grad_fn(Some(grad_fn.clone()));
             add_to_graph(&output, Some(grad_fn))?;
@@ -268,6 +271,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         let grad_fn = Arc::new(SubBackward {
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
             input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
         output.set_grad_fn(Some(grad_fn.clone()));
@@ -308,6 +312,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 lhs: lhs.clone(),
                 rhs: rhs.clone(),
                 input_ids: [lhs.id(), rhs.id()],
+                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
             output.set_grad_fn(Some(grad_fn.clone()));
             add_to_graph(&output, Some(grad_fn))?;
@@ -344,6 +349,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs: lhs.clone(),
             rhs: rhs.clone(),
             input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
         output.set_grad_fn(Some(grad_fn.clone()));
@@ -384,6 +390,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 lhs: lhs.clone(),
                 rhs: rhs.clone(),
                 input_ids: [lhs.id(), rhs.id()],
+                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
             output.set_grad_fn(Some(grad_fn.clone()));
             add_to_graph(&output, Some(grad_fn))?;
@@ -420,6 +427,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs: lhs.clone(),
             rhs: rhs.clone(),
             input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
         output.set_grad_fn(Some(grad_fn.clone()));

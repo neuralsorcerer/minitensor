@@ -4,7 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-pub use data::TensorData;
+pub use data::{DataMut, TensorData};
 pub use dtype::DataType;
 pub use shape::{Shape, Strides};
 
@@ -173,7 +173,7 @@ impl Tensor {
         &self.data
     }
 
-    /// Get a mutable reference to the tensor data.
+    /// Get mutable access to the tensor data.
     ///
     /// Non-leaf tensors (and tensors that do not require gradients) get
     /// copy-on-write semantics: if the storage is shared, it is cloned first
@@ -183,31 +183,28 @@ impl Tensor {
     /// Leaf tensors that require gradients (i.e. parameters) are mutated in
     /// place even when the storage is shared, so that optimizer updates stay
     /// visible through every handle to the parameter — mirroring PyTorch's
-    /// in-place parameter update semantics.
+    /// in-place parameter update semantics. That path goes through the
+    /// storage layer's interior mutability (see [`DataMut`]) instead of
+    /// fabricating a `&mut TensorData` from the shared `Arc`.
     #[inline(always)]
-    pub(crate) fn data_mut(&mut self) -> &mut TensorData {
+    pub(crate) fn data_mut(&mut self) -> DataMut<'_> {
         let needs_detach = self.grad_fn.is_some() || !self.requires_grad;
         if needs_detach {
             if Arc::get_mut(&mut self.data).is_none() {
                 let cloned = self.data.as_ref().clone_data();
                 self.data = Arc::new(cloned);
             }
-            Arc::get_mut(&mut self.data).expect("Tensor data should be uniquely owned")
-        } else {
-            // Take the sound path whenever the storage is uniquely owned.
-            if Arc::get_mut(&mut self.data).is_some() {
-                return Arc::get_mut(&mut self.data).expect("uniqueness just checked");
-            }
-            // SAFETY(known limitation): shared parameter storage is mutated in
-            // place through the `Arc`. Callers are single-threaded through the
-            // Python GIL and the saved copies in gradient functions are only
-            // read before the optimizer step that performs this mutation, but
-            // this aliasing is not expressible in the borrow checker and
-            // should eventually move to interior mutability at the storage
-            // layer (see docs/architecture_review.md).
-            let ptr = Arc::as_ptr(&self.data) as *mut TensorData;
-            unsafe { &mut *ptr }
+            return DataMut::Unique(
+                Arc::get_mut(&mut self.data).expect("Tensor data should be uniquely owned"),
+            );
         }
+        // Take the exclusive path whenever the storage is uniquely owned.
+        if Arc::get_mut(&mut self.data).is_some() {
+            return DataMut::Unique(
+                Arc::get_mut(&mut self.data).expect("uniqueness just checked"),
+            );
+        }
+        DataMut::Shared(self.data.as_ref())
     }
 
     /// Create a deep copy of the tensor data while preserving autograd history.
