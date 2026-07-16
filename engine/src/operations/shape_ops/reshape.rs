@@ -84,8 +84,20 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
         ));
     }
 
-    // Use the tensor's built-in view method for reshaping and refresh metadata
-    let mut reshaped = tensor.view(new_shape.clone())?;
+    // Reinterpret the buffer when possible; materialise a contiguous copy for
+    // non-contiguous inputs (e.g. results of `expand`) so the new shape always
+    // describes real storage. The copy is made outside of autograd because the
+    // ReshapeBackward node attached below already routes gradients straight to
+    // the original tensor.
+    let mut reshaped = if tensor.is_contiguous() {
+        tensor.view(new_shape.clone())?
+    } else {
+        tensor
+            .detach()
+            .contiguous()?
+            .view(new_shape.clone())?
+            .requires_grad_(tensor.requires_grad())
+    };
     reshaped.refresh_autograd_metadata();
 
     // Set up gradient function if needed

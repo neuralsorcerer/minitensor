@@ -62,7 +62,7 @@ pub trait GradientFunction: Send + Sync {
     }
 }
 
-pub use graph::ComputationGraph;
+pub use graph::{BackwardStep, ComputationGraph, execute_backward_plan};
 
 // Thread-local computation graph to avoid cross-test interference
 thread_local! {
@@ -74,41 +74,131 @@ thread_local! {
     static GRAPH_CONSUMED: Cell<bool> = Cell::new(false);
 }
 
+// Thread-local gradient recording mode. While disabled, `add_to_graph` is a
+// no-op, so tensor operations do not record autograd nodes. The backward pass
+// disables recording while it executes gradient kernels; previously this was
+// enforced only by the accident that the graph happened to be borrowed, which
+// silently dropped registrations instead of making the policy explicit.
+thread_local! {
+    static GRAD_ENABLED: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Query whether autograd recording is currently enabled on this thread.
+pub fn is_grad_enabled() -> bool {
+    GRAD_ENABLED.with(|flag| flag.get())
+}
+
+/// RAII guard that disables autograd recording for its lifetime.
+///
+/// Used internally by the backward pass; also usable as a building block for a
+/// user-facing `no_grad` mode.
+pub struct NoGradGuard {
+    prev: bool,
+}
+
+impl NoGradGuard {
+    pub fn new() -> Self {
+        let prev = GRAD_ENABLED.with(|flag| flag.replace(false));
+        Self { prev }
+    }
+}
+
+impl Default for NoGradGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for NoGradGuard {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        GRAD_ENABLED.with(|flag| flag.set(prev));
+    }
+}
+
 /// Add a tensor and its gradient function to the global computation graph
 pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>) -> Result<()> {
+    if !is_grad_enabled() {
+        return Ok(());
+    }
     GLOBAL_GRAPH.with(|graph| {
-        if let Ok(mut g) = graph.try_borrow_mut() {
-            g.add_tensor_with_grad_req(tensor.id(), grad_fn, tensor.requires_grad());
-        }
+        graph
+            .borrow_mut()
+            .add_tensor_with_grad_req(tensor.id(), grad_fn, tensor.requires_grad());
     });
     reset_graph_consumed();
     Ok(())
 }
 
-/// Perform backward pass from the given tensor using the global computation graph
-pub fn backward(
+fn implicit_gradient(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<Tensor> {
+    match grad_output {
+        Some(g) => Ok(g),
+        None => {
+            if tensor.numel() != 1 {
+                return Err(MinitensorError::gradient_error(
+                    "Gradient can only be implicitly created for scalar tensors",
+                ));
+            }
+            Ok(Tensor::ones(
+                tensor.shape().clone(),
+                tensor.dtype(),
+                tensor.device(),
+                false,
+            ))
+        }
+    }
+}
+
+/// Perform backward pass from the given tensor using the global computation
+/// graph. Gradients are stored in the graph and can be read individually with
+/// [`get_gradient`]; nothing is cloned on this path.
+///
+/// The graph is only borrowed to plan the pass and to store the results, so
+/// gradient kernels run without holding the thread-local borrow.
+pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<()> {
+    let grad = implicit_gradient(tensor, grad_output)?;
+
+    let plan = GLOBAL_GRAPH.with(|graph| {
+        let graph = graph.borrow();
+        if !graph.contains_tensor(tensor.id()) && is_graph_consumed() {
+            return Err(MinitensorError::gradient_error_with_suggestion(
+                "Computation graph for this tensor has already been freed",
+                "Re-run the forward pass or call backward(retain_graph=True)",
+                None,
+            ));
+        }
+        graph.plan_backward(tensor.id())
+    })?;
+
+    let gradients = {
+        // Gradient kernels must not record new autograd nodes.
+        let _guard = NoGradGuard::new();
+        execute_backward_plan(&plan, tensor.id(), grad)?
+    };
+
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().set_gradients(gradients));
+    Ok(())
+}
+
+/// Perform a backward pass and return a snapshot of every gradient computed.
+///
+/// This clones the full gradient map and exists for tests and diagnostics;
+/// production code should call [`backward`] and read the gradients it needs
+/// via [`get_gradient`].
+pub fn backward_collect(
     tensor: &Tensor,
     grad_output: Option<Tensor>,
 ) -> Result<FxHashMap<TensorId, Tensor>> {
-    GLOBAL_GRAPH.with(|graph| {
-        let grad = match grad_output {
-            Some(g) => g,
-            None => {
-                if tensor.numel() != 1 {
-                    return Err(MinitensorError::gradient_error(
-                        "Gradient can only be implicitly created for scalar tensors",
-                    ));
-                }
-                Tensor::ones(
-                    tensor.shape().clone(),
-                    tensor.dtype(),
-                    tensor.device(),
-                    false,
-                )
-            }
-        };
-        graph.borrow_mut().backward(tensor.id(), Some(grad))
-    })
+    backward(tensor, grad_output)?;
+    Ok(GLOBAL_GRAPH.with(|graph| graph.borrow().gradients_snapshot()))
+}
+
+/// Release the autograd nodes (and the tensors they saved for backward)
+/// reachable from `tensor`. Stored gradients remain available. Called by the
+/// bindings after a non-retaining backward pass so saved activations are freed
+/// immediately rather than at the next optimizer step.
+pub fn release_saved_subgraph(tensor: &Tensor) {
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().release_saved_subgraph(tensor.id()));
 }
 
 /// Get the gradient for a tensor from the last backward pass
@@ -293,23 +383,15 @@ impl GradientFunction for DivBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        // d/dx(x/y) = 1 / y
-        let rhs_inv = arithmetic::div(
-            &Tensor::ones(
-                self.rhs.shape().clone(),
-                self.rhs.dtype(),
-                self.rhs.device(),
-                false,
-            ),
-            &self.rhs.detach(),
-        )?;
-        let lhs_term = arithmetic::mul(grad_output, &rhs_inv)?;
-        let lhs_grad = reduce_gradient_for_broadcasting(&lhs_term, self.lhs.shape())?;
+        let rhs = self.rhs.detach();
 
-        // d/dy(x/y) = -x / y^2
-        let num = arithmetic::mul(grad_output, &self.lhs.detach())?;
-        let rhs_sq = arithmetic::mul(&self.rhs.detach(), &self.rhs.detach())?;
-        let rhs_term = arithmetic::div(&num, &rhs_sq)?;
+        // d/dx(x/y) = 1/y  =>  grad_x = grad / y
+        let grad_over_rhs = arithmetic::div(grad_output, &rhs)?;
+        let lhs_grad = reduce_gradient_for_broadcasting(&grad_over_rhs, self.lhs.shape())?;
+
+        // d/dy(x/y) = -x/y^2  =>  grad_y = -(grad / y) * (x / y)
+        let lhs_over_rhs = arithmetic::div(&self.lhs.detach(), &rhs)?;
+        let rhs_term = arithmetic::mul(&grad_over_rhs, &lhs_over_rhs)?;
         let rhs_term = arithmetic::neg(&rhs_term)?;
         let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
 

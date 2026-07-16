@@ -76,16 +76,69 @@ impl GraphNode {
     }
 }
 
+/// A single step of a backward pass: the tensor to propagate from and the
+/// gradient function (if any) that produces gradients for its inputs.
+///
+/// Plans hold `Arc` clones of the gradient functions so they can be executed
+/// without keeping the graph borrowed. This is what allows the thread-local
+/// graph to stay accessible while user-visible gradient kernels run.
+pub struct BackwardStep {
+    pub tensor_id: TensorId,
+    pub grad_fn: Option<Arc<dyn GradientFunction>>,
+    pub requires_grad: bool,
+}
+
+/// Execute a previously planned backward pass.
+///
+/// `plan` must be in reverse-topological order (outputs before inputs), as
+/// produced by [`ComputationGraph::plan_backward`]. The function is free of
+/// any borrow of the graph itself, so it is safe to run while the global
+/// graph is unlocked.
+pub fn execute_backward_plan(
+    plan: &[BackwardStep],
+    start_tensor: TensorId,
+    gradient: Tensor,
+) -> Result<FxHashMap<TensorId, Tensor>> {
+    let mut gradients: FxHashMap<TensorId, Tensor> = FxHashMap::default();
+    gradients.reserve(plan.len().max(1));
+    gradients.insert(start_tensor, gradient);
+
+    for step in plan {
+        // Skip nodes that never received a gradient (dead branches) and nodes
+        // that do not participate in differentiation.
+        if !step.requires_grad {
+            continue;
+        }
+        // Take the gradient for this node out of the map to avoid cloning.
+        if let Some(grad_output) = gradients.remove(&step.tensor_id) {
+            if let Some(grad_fn) = &step.grad_fn {
+                let input_grads = grad_fn.backward(&grad_output)?;
+                for (input_id, grad) in input_grads {
+                    match gradients.entry(input_id) {
+                        Entry::Occupied(mut e) => {
+                            arithmetic::add_inplace(e.get_mut(), &grad)?;
+                        }
+                        Entry::Vacant(e) => {
+                            e.insert(grad);
+                        }
+                    }
+                }
+            }
+            // Re-insert the gradient for this node so it remains available to
+            // callers via `get_gradient` after the pass completes.
+            gradients.insert(step.tensor_id, grad_output);
+        }
+    }
+
+    Ok(gradients)
+}
+
 /// Computation graph for automatic differentiation
 pub struct ComputationGraph {
     /// Nodes in the graph
     nodes: FxHashMap<TensorId, GraphNode>,
-    /// Topological ordering for backward pass
-    topological_order: Vec<TensorId>,
     /// Gradients computed during backward pass
     gradients: FxHashMap<TensorId, Tensor>,
-    /// Whether the cached topological order is stale
-    needs_order_update: bool,
 }
 
 impl ComputationGraph {
@@ -93,9 +146,7 @@ impl ComputationGraph {
     pub fn new() -> Self {
         Self {
             nodes: FxHashMap::default(),
-            topological_order: Vec::new(),
             gradients: FxHashMap::default(),
-            needs_order_update: false,
         }
     }
 
@@ -121,7 +172,6 @@ impl ComputationGraph {
 
         let node = GraphNode::new(tensor_id, grad_fn, requires_grad);
         self.nodes.insert(tensor_id, node);
-        self.needs_order_update = true;
     }
 
     /// Add a named tensor to the computation graph (for debugging)
@@ -134,97 +184,130 @@ impl ComputationGraph {
     ) {
         let node = GraphNode::new(tensor_id, grad_fn, requires_grad).with_name(name);
         self.nodes.insert(tensor_id, node);
-        self.needs_order_update = true;
     }
 
-    /// Update the topological ordering of nodes using a non-recursive DFS.
-    /// This avoids building explicit dependent lists and minimizes allocations
-    /// compared to Kahn's algorithm while still detecting cycles.
-    fn update_topological_order(&mut self) {
-        self.topological_order.clear();
-        self.topological_order.reserve(self.nodes.len());
+    /// Visit the subgraph reachable from `start` through input edges, in
+    /// reverse-topological order (outputs before inputs), calling `visit` for
+    /// each reachable node id. Detects cycles and reports them as errors.
+    fn visit_reachable_reverse_topo(
+        &self,
+        start: TensorId,
+        mut visit: impl FnMut(&GraphNode),
+    ) -> Result<()> {
+        if !self.nodes.contains_key(&start) {
+            return Ok(());
+        }
 
         // 0 = unvisited, 1 = visiting, 2 = visited
         let mut state: FxHashMap<TensorId, u8> = FxHashMap::default();
-        state.reserve(self.nodes.len());
-        let mut stack: Vec<(TensorId, usize)> = Vec::with_capacity(self.nodes.len());
-        let mut has_cycle = false;
+        let mut stack: Vec<(TensorId, usize)> = Vec::new();
+        // Post-order collection (inputs before outputs); reversed at the end.
+        let mut post_order: Vec<TensorId> = Vec::new();
 
-        for &node_id in self.nodes.keys() {
-            if state.get(&node_id).copied().unwrap_or(0) != 0 {
-                continue;
-            }
-            stack.push((node_id, 0));
-            while let Some((current_id, idx)) = stack.last_mut() {
-                match state.get(current_id).copied().unwrap_or(0) {
-                    0 => {
-                        state.insert(*current_id, 1);
-                    }
-                    1 => {}
-                    2 => {
-                        stack.pop();
-                        continue;
-                    }
-                    _ => unreachable!(),
+        stack.push((start, 0));
+        while let Some((current_id, idx)) = stack.last_mut() {
+            match state.get(current_id).copied().unwrap_or(0) {
+                0 => {
+                    state.insert(*current_id, 1);
                 }
+                1 => {}
+                2 => {
+                    stack.pop();
+                    continue;
+                }
+                _ => unreachable!(),
+            }
 
-                let inputs = if let Some(node) = self.nodes.get(current_id) {
-                    &node.inputs
-                } else {
+            let inputs = match self.nodes.get(current_id) {
+                Some(node) => &node.inputs,
+                None => {
                     state.insert(*current_id, 2);
                     stack.pop();
                     continue;
-                };
-
-                if *idx < inputs.len() {
-                    let next = inputs[*idx];
-                    *idx += 1;
-                    if !self.nodes.contains_key(&next) {
-                        continue;
-                    }
-                    match state.get(&next).copied().unwrap_or(0) {
-                        0 => stack.push((next, 0)),
-                        1 => {
-                            has_cycle = true;
-                            break;
-                        }
-                        2 => {}
-                        _ => unreachable!(),
-                    }
-                } else {
-                    state.insert(*current_id, 2);
-                    self.topological_order.push(*current_id);
-                    stack.pop();
                 }
-            }
-            if has_cycle {
-                break;
+            };
+
+            if *idx < inputs.len() {
+                let next = inputs[*idx];
+                *idx += 1;
+                if !self.nodes.contains_key(&next) {
+                    continue;
+                }
+                match state.get(&next).copied().unwrap_or(0) {
+                    0 => stack.push((next, 0)),
+                    1 => {
+                        return Err(crate::error::MinitensorError::gradient_error(
+                            "Computation graph contains cycles",
+                        ));
+                    }
+                    2 => {}
+                    _ => unreachable!(),
+                }
+            } else {
+                state.insert(*current_id, 2);
+                post_order.push(*current_id);
+                stack.pop();
             }
         }
 
-        if has_cycle {
-            self.topological_order.clear();
-        } else {
-            // We collected nodes from inputs to outputs; reverse for backward pass
-            self.topological_order.reverse();
+        for id in post_order.into_iter().rev() {
+            if let Some(node) = self.nodes.get(&id) {
+                visit(node);
+            }
         }
-
-        self.needs_order_update = false;
+        Ok(())
     }
 
-    fn ensure_topological_order(&mut self) {
-        if self.needs_order_update {
-            self.update_topological_order();
+    /// Build an executable backward plan for the subgraph reachable from
+    /// `start_tensor`. Only reachable nodes are visited, so the cost of a
+    /// backward pass is proportional to the size of the traced subgraph, not
+    /// to every tensor ever recorded on this thread.
+    pub fn plan_backward(&self, start_tensor: TensorId) -> Result<Vec<BackwardStep>> {
+        let mut plan = Vec::new();
+        self.visit_reachable_reverse_topo(start_tensor, |node| {
+            plan.push(BackwardStep {
+                tensor_id: node.tensor_id,
+                grad_fn: node.grad_fn.clone(),
+                requires_grad: node.requires_grad,
+            });
+        })?;
+        Ok(plan)
+    }
+
+    /// Replace the stored gradient map with the results of a backward pass.
+    pub fn set_gradients(&mut self, gradients: FxHashMap<TensorId, Tensor>) {
+        self.gradients = gradients;
+    }
+
+    /// Clone the stored gradient map. Intended for tests and diagnostics; the
+    /// training path reads individual gradients via [`Self::get_gradient`].
+    pub fn gradients_snapshot(&self) -> FxHashMap<TensorId, Tensor> {
+        self.gradients.clone()
+    }
+
+    /// Drop every node reachable from `start` that carries a gradient
+    /// function. This releases the tensors captured for backward (activations,
+    /// saved operands) as soon as the pass is finished, instead of holding
+    /// them until the next optimizer step. Leaf nodes and stored gradients are
+    /// preserved so `get_gradient` keeps working.
+    pub fn release_saved_subgraph(&mut self, start: TensorId) {
+        let mut interior: Vec<TensorId> = Vec::new();
+        // Ignore cycle errors here: releasing is best-effort cleanup.
+        let _ = self.visit_reachable_reverse_topo(start, |node| {
+            if node.grad_fn.is_some() {
+                interior.push(node.tensor_id);
+            }
+        });
+        for id in interior {
+            self.nodes.remove(&id);
         }
     }
 
-    /// Perform backward pass from a given tensor
-    pub fn backward(
-        &mut self,
-        start_tensor: TensorId,
-        gradient: Option<Tensor>,
-    ) -> Result<FxHashMap<TensorId, Tensor>> {
-        self.ensure_topological_order();
+    /// Perform backward pass from a given tensor.
+    ///
+    /// Gradients are stored in the graph and can be queried afterwards with
+    /// [`Self::get_gradient`]; nothing is cloned on the hot path.
+    pub fn backward(&mut self, start_tensor: TensorId, gradient: Option<Tensor>) -> Result<()> {
         if !self.nodes.contains_key(&start_tensor) && crate::autograd::is_graph_consumed() {
             return Err(
                 crate::error::MinitensorError::gradient_error_with_suggestion(
@@ -234,55 +317,21 @@ impl ComputationGraph {
                 ),
             );
         }
-        // Clear previous gradients and ensure sufficient capacity for accumulation
-        self.gradients.clear();
-        self.gradients.reserve(self.nodes.len());
 
-        // Set the initial gradient
-        if let Some(grad) = gradient {
-            self.gradients.insert(start_tensor, grad);
-        } else {
-            return Err(crate::error::MinitensorError::gradient_error(
-                "Initial gradient must be provided",
-            ));
-        }
+        let gradient = gradient.ok_or_else(|| {
+            crate::error::MinitensorError::gradient_error("Initial gradient must be provided")
+        })?;
 
-        // Process nodes in topological order (outputs to inputs)
-        for &node_id in &self.topological_order {
-            if let Some(node) = self.nodes.get(&node_id) {
-                // Skip if this node doesn't require gradients
-                if !node.requires_grad {
-                    continue;
-                }
-
-                // Take the gradient for this node out of the map to avoid cloning
-                if let Some(grad_output) = self.gradients.remove(&node_id) {
-                    // If this node has a gradient function, compute gradients for inputs
-                    if let Some(grad_fn) = &node.grad_fn {
-                        let input_grads = grad_fn.backward(&grad_output)?;
-                        for (input_id, grad) in input_grads {
-                            match self.gradients.entry(input_id) {
-                                Entry::Occupied(mut e) => {
-                                    arithmetic::add_inplace(e.get_mut(), &grad)?;
-                                }
-                                Entry::Vacant(e) => {
-                                    e.insert(grad);
-                                }
-                            }
-                        }
-                    }
-                    // Re-insert the gradient for this node so it is available in the
-                    // final gradient map returned to callers
-                    self.gradients.insert(node_id, grad_output);
-                }
-            }
-        }
-
-        Ok(self.gradients.clone())
+        let plan = self.plan_backward(start_tensor)?;
+        // Gradient kernels must not record new autograd nodes; make that
+        // explicit instead of relying on the graph being borrowed.
+        let _guard = crate::autograd::NoGradGuard::new();
+        self.gradients = execute_backward_plan(&plan, start_tensor, gradient)?;
+        Ok(())
     }
 
     /// Validate the computation graph for correctness
-    pub fn validate(&mut self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         // Check for cycles
         if self.has_cycles() {
             return Err(crate::error::MinitensorError::gradient_error(
@@ -325,10 +374,66 @@ impl ComputationGraph {
         self.nodes.contains_key(&tensor_id)
     }
 
-    /// Get the topological order of tensor IDs
-    pub fn topological_order(&mut self) -> &[TensorId] {
-        self.ensure_topological_order();
-        &self.topological_order
+    /// Compute a reverse-topological order (outputs before inputs) of the
+    /// whole graph. Diagnostic API: the backward pass itself only orders the
+    /// reachable subgraph via [`Self::plan_backward`]. Returns an empty vector
+    /// if the graph contains cycles.
+    pub fn topological_order(&self) -> Vec<TensorId> {
+        // 0 = unvisited, 1 = visiting, 2 = visited
+        let mut state: FxHashMap<TensorId, u8> = FxHashMap::default();
+        state.reserve(self.nodes.len());
+        let mut stack: Vec<(TensorId, usize)> = Vec::with_capacity(self.nodes.len());
+        let mut post_order: Vec<TensorId> = Vec::with_capacity(self.nodes.len());
+
+        for &root in self.nodes.keys() {
+            if state.get(&root).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            stack.push((root, 0));
+            while let Some((current_id, idx)) = stack.last_mut() {
+                match state.get(current_id).copied().unwrap_or(0) {
+                    0 => {
+                        state.insert(*current_id, 1);
+                    }
+                    1 => {}
+                    2 => {
+                        stack.pop();
+                        continue;
+                    }
+                    _ => unreachable!(),
+                }
+
+                let inputs = match self.nodes.get(current_id) {
+                    Some(node) => &node.inputs,
+                    None => {
+                        state.insert(*current_id, 2);
+                        stack.pop();
+                        continue;
+                    }
+                };
+
+                if *idx < inputs.len() {
+                    let next = inputs[*idx];
+                    *idx += 1;
+                    if !self.nodes.contains_key(&next) {
+                        continue;
+                    }
+                    match state.get(&next).copied().unwrap_or(0) {
+                        0 => stack.push((next, 0)),
+                        1 => return Vec::new(), // cycle
+                        2 => {}
+                        _ => unreachable!(),
+                    }
+                } else {
+                    state.insert(*current_id, 2);
+                    post_order.push(*current_id);
+                    stack.pop();
+                }
+            }
+        }
+
+        post_order.reverse();
+        post_order
     }
 
     /// Get a node by tensor ID
@@ -346,27 +451,20 @@ impl ComputationGraph {
     }
 
     /// Check if there are cycles in the computation graph
-    pub fn has_cycles(&mut self) -> bool {
-        self.ensure_topological_order();
-        self.topological_order.len() != self.nodes.len()
+    pub fn has_cycles(&self) -> bool {
+        self.topological_order().len() != self.nodes.len()
     }
 
     /// Remove a tensor and its dependencies from the graph
     pub fn remove_tensor(&mut self, tensor_id: TensorId) {
         if self.nodes.remove(&tensor_id).is_some() {
-            // Remove from topological order
-            self.topological_order.retain(|&id| id != tensor_id);
-
             // Remove any gradients
             self.gradients.remove(&tensor_id);
-
-            // Mark order as stale since dependencies changed
-            self.needs_order_update = true;
         }
     }
 
     /// Get statistics about the computation graph
-    pub fn stats(&mut self) -> GraphStats {
+    pub fn stats(&self) -> GraphStats {
         let leaf_nodes = self
             .nodes
             .values()
@@ -614,7 +712,8 @@ mod tests {
         let grad_c = Tensor::ones(grad_shape, DataType::Float32, Device::cpu(), false);
 
         // Perform backward pass
-        let gradients = graph.backward(c, Some(grad_c)).unwrap();
+        graph.backward(c, Some(grad_c)).unwrap();
+        let gradients = graph.gradients_snapshot();
 
         // Should have gradients for a and b
         assert!(gradients.contains_key(&a));
@@ -667,7 +766,8 @@ mod tests {
         let grad_d = Tensor::ones(grad_shape, DataType::Float32, Device::cpu(), false);
 
         // Perform backward pass
-        let gradients = graph.backward(d, Some(grad_d)).unwrap();
+        graph.backward(d, Some(grad_d)).unwrap();
+        let gradients = graph.gradients_snapshot();
 
         // Should have gradients for all tensors
         assert!(gradients.contains_key(&a));
@@ -676,6 +776,80 @@ mod tests {
 
         // 'a' should appear in the gradients (accumulated from both paths)
         assert!(gradients.get(&a).is_some());
+    }
+
+    #[test]
+    fn test_plan_backward_only_visits_reachable_subgraph() {
+        let mut graph = ComputationGraph::new();
+
+        // Graph 1: c = a + b
+        let a = TensorId::new();
+        let b = TensorId::new();
+        let c = TensorId::new();
+        graph.add_tensor(a, None);
+        graph.add_tensor(b, None);
+        graph.add_tensor(
+            c,
+            Some(Arc::new(AddBackward {
+                input_shapes: [vec![2], vec![2]],
+                input_ids: [a, b],
+            })),
+        );
+
+        // Unrelated graph 2: z = x + y
+        let x = TensorId::new();
+        let y = TensorId::new();
+        let z = TensorId::new();
+        graph.add_tensor(x, None);
+        graph.add_tensor(y, None);
+        graph.add_tensor(
+            z,
+            Some(Arc::new(AddBackward {
+                input_shapes: [vec![2], vec![2]],
+                input_ids: [x, y],
+            })),
+        );
+
+        let plan = graph.plan_backward(c).unwrap();
+        let planned: Vec<TensorId> = plan.iter().map(|s| s.tensor_id).collect();
+        assert_eq!(planned.len(), 3);
+        assert!(planned.contains(&a) && planned.contains(&b) && planned.contains(&c));
+        assert!(!planned.contains(&x) && !planned.contains(&y) && !planned.contains(&z));
+        // Reverse-topological: the output comes first.
+        assert_eq!(planned[0], c);
+    }
+
+    #[test]
+    fn test_release_saved_subgraph_drops_interior_nodes_keeps_gradients() {
+        use crate::device::Device;
+        use crate::tensor::{DataType, Shape, Tensor};
+
+        let mut graph = ComputationGraph::new();
+        let a = TensorId::new();
+        let b = TensorId::new();
+        let c = TensorId::new();
+        graph.add_tensor(a, None);
+        graph.add_tensor(b, None);
+        graph.add_tensor(
+            c,
+            Some(Arc::new(AddBackward {
+                input_shapes: [vec![2], vec![2]],
+                input_ids: [a, b],
+            })),
+        );
+
+        let grad = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+        graph.backward(c, Some(grad)).unwrap();
+        assert!(graph.get_gradient(a).is_some());
+
+        graph.release_saved_subgraph(c);
+        // Interior node (with grad_fn) removed, leaves preserved.
+        assert!(!graph.contains_tensor(c));
+        assert!(graph.contains_tensor(a));
+        assert!(graph.contains_tensor(b));
+        // Gradients stay readable after release.
+        assert!(graph.get_gradient(a).is_some());
+        assert!(graph.get_gradient(b).is_some());
     }
 
     #[test]

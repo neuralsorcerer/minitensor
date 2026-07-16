@@ -608,7 +608,7 @@ mod tests {
         let expected = -((0.8f32).ln() + (0.8f32).ln()) / 2.0;
         assert!((loss_val - expected).abs() < 1e-6);
 
-        let grads = crate::autograd::backward(&loss, None).unwrap();
+        let grads = crate::autograd::backward_collect(&loss, None).unwrap();
         let grad = grads.get(&predictions.id()).unwrap();
         let grad_slice = grad.data().as_f32_slice().unwrap();
         let expected_grad = [-(1.0 / 0.8) / 2.0, (1.0 / 0.8) / 2.0];
@@ -626,7 +626,7 @@ mod tests {
         let expected = 0.5 * ((0.5f32.ln() - 0.4f32.ln()) + (0.5f32.ln() - 0.6f32.ln()));
         assert!((loss_val - expected).abs() < 1e-6);
 
-        let grads = crate::autograd::backward(&loss, None).unwrap();
+        let grads = crate::autograd::backward_collect(&loss, None).unwrap();
         let grad = grads.get(&predictions.id()).unwrap();
         let grad_slice = grad.data().as_f32_slice().unwrap();
         let expected_grad = [-(0.5 / 0.4) / 2.0, -(0.5 / 0.6) / 2.0];

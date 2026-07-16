@@ -251,6 +251,53 @@ mod tests {
     }
 
     #[test]
+    fn test_view_rejects_non_contiguous_tensor() {
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
+        let tensor = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![1, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let expanded = tensor.expand(vec![4, 3]).unwrap();
+        assert!(!expanded.is_contiguous());
+        // A raw view would silently pair the new shape with storage that only
+        // holds 3 elements; it must be rejected.
+        assert!(expanded.view(Shape::new(vec![12])).is_err());
+    }
+
+    #[test]
+    fn test_reshape_materializes_non_contiguous_tensor() {
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
+        let tensor = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![1, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let expanded = tensor.expand(vec![4, 3]).unwrap();
+        let reshaped = expanded.reshape(Shape::new(vec![12])).unwrap();
+        assert_eq!(reshaped.shape().dims(), &[12]);
+        // Storage must now really contain all 12 broadcast elements.
+        assert_eq!(reshaped.data().numel(), 12);
+        assert_eq!(
+            reshaped.data().as_f32_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+        );
+
+        // The ops-layer reshape must materialise as well.
+        let via_op =
+            crate::operations::shape_ops::reshape(&expanded, Shape::new(vec![12])).unwrap();
+        assert_eq!(via_op.data().numel(), 12);
+        assert_eq!(
+            via_op.data().as_f32_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
     fn test_reshape_scalar_to_vector() {
         let scalar = Tensor::ones(Shape::scalar(), DataType::Float32, Device::cpu(), false);
         let reshaped = scalar.reshape(Shape::new(vec![1])).unwrap();

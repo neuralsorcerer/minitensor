@@ -75,7 +75,7 @@ mod tests {
         );
         let result = nan_to_num(&tensor, 0.0, Some(10.0), Some(-10.0)).unwrap();
         let summed = crate::operations::reduction::sum(&result, None, false).unwrap();
-        let grads = autograd::backward(&summed, None).unwrap();
+        let grads = autograd::backward_collect(&summed, None).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         assert_eq!(
             grad.data().as_f32_slice().unwrap(),
@@ -224,7 +224,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         let grad_vals = grad.data().as_f32_slice().unwrap();
         assert_eq!(grad_vals, &[1.0, 0.0, 0.0, 1.0, 1.0]);
@@ -410,7 +410,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - 3.0 * 2.0_f32.powf(2.0)).abs() < 1e-6);
@@ -450,7 +450,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&base.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();
         let base_val = base.data().as_f32_slice().unwrap()[0];
@@ -473,7 +473,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&exp.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();
         let exp_val = exp.data().as_f32_slice().unwrap()[0];
@@ -503,7 +503,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - 0.25).abs() < 1e-6);
@@ -530,7 +530,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad = grads.get(&tensor.id()).unwrap();
         let g = grad.data().as_f32_slice().unwrap();
         assert!((g[0] - (-0.5 * 0.25_f32.powf(-1.5))).abs() < 1e-5);
@@ -564,7 +564,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
         let grad_tensor = grads.get(&tensor.id()).unwrap();
         let grad_data = grad_tensor.data().as_f32_slice().unwrap();
 

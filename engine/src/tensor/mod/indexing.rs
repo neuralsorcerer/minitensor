@@ -17,7 +17,7 @@ impl Tensor {
             .collect();
 
         let new_shape = Shape::new(new_dims);
-        self.view(new_shape)
+        self.reshape(new_shape)
     }
 
     /// Squeeze specific dimension if it has size 1. Negative indices are supported.
@@ -39,7 +39,7 @@ impl Tensor {
         let mut new_dims = self.shape.dims().to_vec();
         new_dims.remove(dim);
         let new_shape = Shape::new(new_dims);
-        self.view(new_shape)
+        self.reshape(new_shape)
     }
 
     /// Add dimension of size 1. Negative indices are supported.
@@ -57,7 +57,7 @@ impl Tensor {
         let mut new_dims = self.shape.dims().to_vec();
         new_dims.insert(dim, 1);
         let new_shape = Shape::new(new_dims);
-        self.view(new_shape)
+        self.reshape(new_shape)
     }
 
     /// Expand tensor dimensions without allocating new memory
@@ -198,7 +198,7 @@ impl Tensor {
         }
 
         let new_shape = Shape::new(new_dims);
-        self.view(new_shape)
+        self.reshape(new_shape)
     }
 }
 

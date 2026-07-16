@@ -397,7 +397,7 @@ fn test_softmax_backward_dim1() {
     let grad_output = create_test_tensor_f32(vec![0.1, 0.2, 0.3, 0.4], vec![2, 2], false);
 
     let result = activation::softmax(&input, Some(1)).unwrap();
-    let grads = autograd::backward(&result, Some(grad_output.clone())).unwrap();
+    let grads = autograd::backward_collect(&result, Some(grad_output.clone())).unwrap();
     let grad_data = grads
         .get(&input.id())
         .unwrap()
@@ -434,7 +434,7 @@ fn test_softmax_backward_dim0() {
     let grad_output = create_test_tensor_f32(vec![0.1, 0.2, 0.3, 0.4], vec![2, 2], false);
 
     let result = activation::softmax(&input, Some(0)).unwrap();
-    let grads = autograd::backward(&result, Some(grad_output.clone())).unwrap();
+    let grads = autograd::backward_collect(&result, Some(grad_output.clone())).unwrap();
     let grad_data = grads
         .get(&input.id())
         .unwrap()

@@ -335,7 +335,7 @@ mod tests {
         let out = arithmetic::add(&a, &b).unwrap();
 
         let grad = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
-        let grads = backward(&out, Some(grad)).unwrap();
+        let grads = backward_collect(&out, Some(grad)).unwrap();
 
         let grad_a = grads.get(&a.id()).unwrap();
         let grad_b = grads.get(&b.id()).unwrap();

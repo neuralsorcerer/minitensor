@@ -8,17 +8,17 @@ use crate::{
     device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
 };
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Tensor data storage with reference counting
+/// Tensor data storage.
+///
+/// Sharing is managed exclusively through `Arc<TensorData>`; the struct itself
+/// owns its buffer and frees it on drop.
 #[derive(Debug)]
 pub struct TensorData {
     /// Raw data buffer
     buffer: TensorBuffer,
     /// Memory layout information
     layout: MemoryLayout,
-    /// Reference count for memory management
-    ref_count: AtomicUsize,
 }
 
 /// Buffer storage for tensor data
@@ -150,7 +150,6 @@ impl TensorData {
                     is_contiguous: true,
                     device,
                 },
-                ref_count: AtomicUsize::new(1),
             };
             data.fill_with_ones();
 
@@ -218,7 +217,6 @@ impl TensorData {
                 is_contiguous: true,
                 device: actual_device,
             },
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -258,7 +256,6 @@ impl TensorData {
                 is_contiguous: true,
                 device: actual_device,
             },
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -273,7 +270,6 @@ impl TensorData {
                 is_contiguous: true,
                 device: Device::cpu(),
             },
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -357,7 +353,6 @@ impl TensorData {
                 is_contiguous: true,
                 device: actual_device,
             },
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -408,7 +403,6 @@ impl TensorData {
                 is_contiguous: true,
                 device,
             },
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -519,24 +513,6 @@ impl TensorData {
         self.layout.is_contiguous
     }
 
-    /// Increment reference count
-    #[inline(always)]
-    pub fn inc_ref(&self) {
-        self.ref_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement reference count and return new count
-    #[inline(always)]
-    pub fn dec_ref(&self) -> usize {
-        self.ref_count.fetch_sub(1, Ordering::Relaxed) - 1
-    }
-
-    /// Get current reference count
-    #[inline(always)]
-    pub fn ref_count(&self) -> usize {
-        self.ref_count.load(Ordering::Relaxed)
-    }
-
     /// Create a copy of the tensor data
     pub fn clone_data(&self) -> Self {
         let new_buffer = match &self.buffer {
@@ -587,7 +563,6 @@ impl TensorData {
         Self {
             buffer: new_buffer,
             layout: self.layout.clone(),
-            ref_count: AtomicUsize::new(1),
         }
     }
 
@@ -754,12 +729,11 @@ impl TensorData {
 
 impl Drop for TensorData {
     fn drop(&mut self) {
-        // Only deallocate if this is the last reference
-        if self.ref_count.load(Ordering::Relaxed) == 1 {
-            if let TensorBuffer::Raw { ptr, size, device } = &self.buffer {
-                // Deallocate GPU memory
-                let _ = global_deallocate(*ptr, *size, *device);
-            }
+        // `TensorData` is shared via `Arc`, so `drop` runs exactly once, when
+        // the last reference goes away. Owned buffers free themselves; raw
+        // device buffers are returned to the allocator here.
+        if let TensorBuffer::Raw { ptr, size, device } = &self.buffer {
+            let _ = global_deallocate(*ptr, *size, *device);
         }
     }
 }
@@ -778,7 +752,6 @@ mod tests {
         assert_eq!(data.dtype(), DataType::Float32);
         assert_eq!(data.size_bytes(), 40); // 10 * 4 bytes
         assert!(data.is_contiguous());
-        assert_eq!(data.ref_count(), 1);
     }
 
     #[test]
@@ -815,16 +788,15 @@ mod tests {
     }
 
     #[test]
-    fn test_reference_counting() {
-        let data = TensorData::zeros(5, DataType::Float32);
-        assert_eq!(data.ref_count(), 1);
+    fn test_arc_sharing() {
+        use std::sync::Arc;
 
-        data.inc_ref();
-        assert_eq!(data.ref_count(), 2);
-
-        let new_count = data.dec_ref();
-        assert_eq!(new_count, 1);
-        assert_eq!(data.ref_count(), 1);
+        let data = Arc::new(TensorData::zeros(5, DataType::Float32));
+        let shared = Arc::clone(&data);
+        assert_eq!(Arc::strong_count(&data), 2);
+        drop(shared);
+        assert_eq!(Arc::strong_count(&data), 1);
+        assert_eq!(data.numel(), 5);
     }
 
     #[test]

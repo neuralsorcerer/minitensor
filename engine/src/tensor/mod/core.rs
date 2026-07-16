@@ -168,7 +168,17 @@ impl Tensor {
         &self.data
     }
 
-    /// Get a mutable reference to the tensor data
+    /// Get a mutable reference to the tensor data.
+    ///
+    /// Non-leaf tensors (and tensors that do not require gradients) get
+    /// copy-on-write semantics: if the storage is shared, it is cloned first
+    /// so in-place mutation cannot corrupt other tensors or saved autograd
+    /// state.
+    ///
+    /// Leaf tensors that require gradients (i.e. parameters) are mutated in
+    /// place even when the storage is shared, so that optimizer updates stay
+    /// visible through every handle to the parameter — mirroring PyTorch's
+    /// in-place parameter update semantics.
     #[inline(always)]
     pub(crate) fn data_mut(&mut self) -> &mut TensorData {
         let needs_detach = self.grad_fn.is_some() || !self.requires_grad;
@@ -179,6 +189,17 @@ impl Tensor {
             }
             Arc::get_mut(&mut self.data).expect("Tensor data should be uniquely owned")
         } else {
+            // Take the sound path whenever the storage is uniquely owned.
+            if Arc::get_mut(&mut self.data).is_some() {
+                return Arc::get_mut(&mut self.data).expect("uniqueness just checked");
+            }
+            // SAFETY(known limitation): shared parameter storage is mutated in
+            // place through the `Arc`. Callers are single-threaded through the
+            // Python GIL and the saved copies in gradient functions are only
+            // read before the optimizer step that performs this mutation, but
+            // this aliasing is not expressible in the borrow checker and
+            // should eventually move to interior mutability at the storage
+            // layer (see docs/architecture_review.md).
             let ptr = Arc::as_ptr(&self.data) as *mut TensorData;
             unsafe { &mut *ptr }
         }
@@ -449,12 +470,18 @@ impl Tensor {
         };
 
         // Perform backward pass through the computation graph
-        autograd::backward(self, Some(grad)).map(|_| ()) // Convert HashMap result to ()
+        autograd::backward(self, Some(grad))
     }
 }
 
 impl Tensor {
-    /// Create a view of this tensor with a new shape
+    /// Create a view of this tensor with a new shape.
+    ///
+    /// The tensor must be contiguous: a view only reinterprets the existing
+    /// buffer, and re-striding a non-contiguous tensor (e.g. the result of
+    /// `expand`) would silently associate the new shape with storage that does
+    /// not contain the tensor's logical elements. Use [`Self::reshape`] to get
+    /// an automatic copy in that case.
     #[inline(always)]
     pub fn view(&self, new_shape: Shape) -> Result<Self> {
         if new_shape.numel() != self.numel() {
@@ -464,16 +491,29 @@ impl Tensor {
             ));
         }
 
+        if !self.is_contiguous() {
+            return Err(MinitensorError::invalid_operation(
+                "view is not supported for non-contiguous tensors; call contiguous() or reshape() instead",
+            ));
+        }
+
         let mut tensor = self.clone();
         tensor.strides = Strides::from_shape(&new_shape);
         tensor.shape = new_shape;
         Ok(tensor)
     }
 
-    /// Reshape the tensor to a new shape
+    /// Reshape the tensor to a new shape.
+    ///
+    /// Returns a zero-copy view when the tensor is contiguous and materialises
+    /// a contiguous copy otherwise.
     #[inline(always)]
     pub fn reshape(&self, new_shape: Shape) -> Result<Self> {
-        self.view(new_shape)
+        if self.is_contiguous() {
+            self.view(new_shape)
+        } else {
+            self.contiguous()?.view(new_shape)
+        }
     }
 
     /// Flatten the tensor into a one-dimensional view.

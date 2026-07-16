@@ -398,7 +398,7 @@ mod tests {
             result.device(),
             false,
         );
-        let grads = autograd::backward(&result, Some(ones)).unwrap();
+        let grads = autograd::backward_collect(&result, Some(ones)).unwrap();
 
         let grad_input = grads.get(&input.id()).unwrap();
         let grad_weight = grads.get(&weight.id()).unwrap();

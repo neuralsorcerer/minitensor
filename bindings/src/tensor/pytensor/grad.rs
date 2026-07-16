@@ -52,6 +52,10 @@ impl PyTensor {
 
         if !retain_graph {
             engine::autograd::mark_graph_consumed();
+            // Free the tensors saved for backward (activations, operands)
+            // immediately instead of holding them until the next optimizer
+            // step. Gradients remain available via `.grad`/`get_gradient`.
+            engine::autograd::release_saved_subgraph(&self.inner);
         }
 
         Ok(())

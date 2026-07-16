@@ -133,20 +133,7 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             let rhs_slice = rhs.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
             })?;
-            let len = lhs_slice.len();
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    lhs_slice[i] += rhs_slice[i];
-                }
-            } else {
-                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
-                let rhs_ptr = rhs_slice.as_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let lhs_ptr = lhs_ptr as *mut f32;
-                    let rhs_ptr = rhs_ptr as *const f32;
-                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
-                });
-            }
+            binary_assign_slices(lhs_slice, rhs_slice, |l, r| l + r);
         }
         DataType::Float64 => {
             let lhs_slice = lhs.data_mut().as_f64_slice_mut().ok_or_else(|| {
@@ -155,20 +142,7 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             let rhs_slice = rhs.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
             })?;
-            let len = lhs_slice.len();
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    lhs_slice[i] += rhs_slice[i];
-                }
-            } else {
-                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
-                let rhs_ptr = rhs_slice.as_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let lhs_ptr = lhs_ptr as *mut f64;
-                    let rhs_ptr = rhs_ptr as *const f64;
-                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
-                });
-            }
+            binary_assign_slices(lhs_slice, rhs_slice, |l, r| l + r);
         }
         DataType::Int32 => {
             let lhs_slice = lhs.data_mut().as_i32_slice_mut().ok_or_else(|| {
@@ -177,20 +151,7 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             let rhs_slice = rhs.data().as_i32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
             })?;
-            let len = lhs_slice.len();
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    lhs_slice[i] += rhs_slice[i];
-                }
-            } else {
-                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
-                let rhs_ptr = rhs_slice.as_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let lhs_ptr = lhs_ptr as *mut i32;
-                    let rhs_ptr = rhs_ptr as *const i32;
-                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
-                });
-            }
+            binary_assign_slices(lhs_slice, rhs_slice, |l, r| l + r);
         }
         DataType::Int64 => {
             let lhs_slice = lhs.data_mut().as_i64_slice_mut().ok_or_else(|| {
@@ -199,20 +160,7 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             let rhs_slice = rhs.data().as_i64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
             })?;
-            let len = lhs_slice.len();
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    lhs_slice[i] += rhs_slice[i];
-                }
-            } else {
-                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
-                let rhs_ptr = rhs_slice.as_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let lhs_ptr = lhs_ptr as *mut i64;
-                    let rhs_ptr = rhs_ptr as *const i64;
-                    *lhs_ptr.add(i) += *rhs_ptr.add(i);
-                });
-            }
+            binary_assign_slices(lhs_slice, rhs_slice, |l, r| l + r);
         }
         DataType::Bool => {
             let lhs_slice = lhs.data_mut().as_bool_slice_mut().ok_or_else(|| {
@@ -221,23 +169,38 @@ pub fn add_inplace(lhs: &mut Tensor, rhs: &Tensor) -> Result<()> {
             let rhs_slice = rhs.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
             })?;
-            let len = lhs_slice.len();
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    lhs_slice[i] = lhs_slice[i] || rhs_slice[i];
-                }
-            } else {
-                let lhs_ptr = lhs_slice.as_mut_ptr() as usize;
-                let rhs_ptr = rhs_slice.as_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let lhs_ptr = lhs_ptr as *mut bool;
-                    let rhs_ptr = rhs_ptr as *const bool;
-                    *lhs_ptr.add(i) = *lhs_ptr.add(i) || *rhs_ptr.add(i);
-                });
-            }
+            binary_assign_slices(lhs_slice, rhs_slice, |l, r| l || r);
         }
     }
     Ok(())
+}
+
+/// Apply `op` element-wise, writing the result into `lhs`.
+///
+/// Safe replacement for the previous raw-pointer parallel loops: chunked
+/// `rayon` iteration keeps bounds information visible to the compiler (so the
+/// inner loops still vectorise) without any `unsafe`.
+#[inline]
+fn binary_assign_slices<T: Copy + Send + Sync>(
+    lhs: &mut [T],
+    rhs: &[T],
+    op: impl Fn(T, T) -> T + Send + Sync,
+) {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    const CHUNK: usize = 4096;
+    if lhs.len() < PAR_THRESHOLD {
+        for (l, &r) in lhs.iter_mut().zip(rhs.iter()) {
+            *l = op(*l, r);
+        }
+    } else {
+        lhs.par_chunks_mut(CHUNK)
+            .zip(rhs.par_chunks(CHUNK))
+            .for_each(|(lhs_chunk, rhs_chunk)| {
+                for (l, &r) in lhs_chunk.iter_mut().zip(rhs_chunk.iter()) {
+                    *l = op(*l, r);
+                }
+            });
+    }
 }
 
 /// Element-wise subtraction with broadcasting support
