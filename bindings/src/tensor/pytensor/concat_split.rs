@@ -54,8 +54,9 @@ impl PyTensor {
     }
 
     /// Select elements along a dimension using integer indices
-    pub fn index_select(&self, dim: isize, indices: &Bound<PyList>) -> PyResult<PyTensor> {
-        let idx_vec: Vec<usize> = indices.extract()?;
+    /// (a Python sequence or an integer tensor)
+    pub fn index_select(&self, dim: isize, indices: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let idx_vec = extract_index_vector(indices)?;
         let result = engine::operations::shape_ops::index_select(&self.inner, dim, &idx_vec)
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))

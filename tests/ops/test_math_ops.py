@@ -868,3 +868,44 @@ def test_functional_finite_predicates_non_float_and_empty_edges():
     np.testing.assert_array_equal(
         F.isfinite(empty_values).numpy(), np.array([], dtype=bool)
     )
+
+
+def test_pow_broadcasts_shapes():
+    rng = np.random.default_rng(11)
+    base = np.abs(rng.standard_normal((3, 1, 5))) + 0.5
+    exponent = rng.standard_normal((1, 4, 5))
+
+    result = mt.Tensor(base.tolist(), dtype="float64") ** mt.Tensor(
+        exponent.tolist(), dtype="float64"
+    )
+    np.testing.assert_allclose(result.numpy(), base**exponent, rtol=1e-6)
+
+    # trailing-dim broadcast against a 1-D exponent
+    base2 = np.abs(rng.standard_normal((3, 4))) + 0.5
+    exp2 = rng.standard_normal((4,))
+    result2 = mt.Tensor(base2.tolist(), dtype="float64") ** mt.Tensor(
+        exp2.tolist(), dtype="float64"
+    )
+    np.testing.assert_allclose(result2.numpy(), base2**exp2, rtol=1e-6)
+
+
+def test_pow_broadcast_gradients():
+    rng = np.random.default_rng(12)
+    base = np.abs(rng.standard_normal((3, 4))) + 0.5
+    exponent = rng.standard_normal((4,)) * 0.5
+
+    mb = mt.Tensor(base.tolist(), dtype="float64", requires_grad=True)
+    me = mt.Tensor(exponent.tolist(), dtype="float64", requires_grad=True)
+    (mb**me).sum().backward()
+
+    expected_base_grad = exponent * base ** (exponent - 1.0)
+    expected_exp_grad = (base**exponent * np.log(base)).sum(axis=0)
+    np.testing.assert_allclose(mb.grad.numpy(), expected_base_grad, rtol=1e-6)
+    np.testing.assert_allclose(me.grad.numpy(), expected_exp_grad, rtol=1e-6)
+
+
+def test_pow_incompatible_shapes_error():
+    a = mt.Tensor(np.ones((2, 3), dtype=np.float32))
+    b = mt.Tensor(np.ones((2, 4), dtype=np.float32))
+    with pytest.raises(ValueError):
+        _ = a**b

@@ -113,12 +113,13 @@ impl Tensor {
                     )));
                 }
             } else {
-                if target != 1 {
+                if size_spec == -1 {
                     return Err(MinitensorError::invalid_operation(
-                        "cannot introduce new leading dimension".to_string(),
+                        "the size -1 is not allowed for a new leading dimension".to_string(),
                     ));
                 }
-                new_dims[n_new - 1 - i] = 1;
+                // New leading dimensions broadcast with stride 0.
+                new_dims[n_new - 1 - i] = target;
                 new_strides[n_new - 1 - i] = 0;
             }
         }

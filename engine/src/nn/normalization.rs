@@ -208,18 +208,18 @@ impl Layer for BatchNorm1d {
         // inference is independent of the batch (and works for batch size 1).
         // Mirrors BatchNorm2d.
         let (mean, var) = if self.training {
-            let reshaped = if input.ndim() == 3 {
-                let n = input.size(0)?;
-                let l = input.size(2)?;
-                input.view(Shape::new(vec![n * l, self.num_features]))?
+            // Reduce over every axis except the channel axis (dim 1). A flat
+            // `view` must NOT be used here: reinterpreting [N, C, L] as
+            // [N*L, C] interleaves values from different channels.
+            let axes: Vec<isize> = if input.ndim() == 3 {
+                vec![0, 2]
             } else {
-                input.clone()
+                vec![0]
             };
-
-            let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
-            let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-            let var = crate::operations::arithmetic::mul(&centered, &centered)?
-                .mean(Some(vec![0isize]), true)?; // [1,C], biased, pre-eps
+            let mean = input.mean(Some(axes.clone()), true)?; // [1,C] or [1,C,1]
+            let centered = crate::operations::arithmetic::sub(input, &mean)?;
+            let var =
+                crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?; // biased, pre-eps
 
             // Update running statistics with the batch statistics *before* eps
             // is added: running = (1 - momentum) * running + momentum * batch.
@@ -234,17 +234,7 @@ impl Layer for BatchNorm1d {
                 &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
             )?;
 
-            if input.ndim() == 3 {
-                (
-                    mean.view(Shape::new(vec![1, self.num_features, 1]))?,
-                    var.view(Shape::new(vec![1, self.num_features, 1]))?,
-                )
-            } else {
-                (
-                    mean.view(Shape::new(vec![1, self.num_features]))?,
-                    var.view(Shape::new(vec![1, self.num_features]))?,
-                )
-            }
+            (mean, var)
         } else if input.ndim() == 3 {
             (
                 self.running_mean
@@ -425,17 +415,15 @@ impl Layer for BatchNorm2d {
             ));
         }
 
-        // Reshape to compute statistics over N*H*W x C when training
+        // Compute statistics per channel over the (N, H, W) axes when training.
+        // A flat `view` of [N, C, H, W] as [N*H*W, C] must NOT be used here:
+        // it interleaves values from different channels.
         let (mean, var) = if self.training {
-            let n = input.size(0)?;
-            let h = input.size(2)?;
-            let w = input.size(3)?;
-            let reshaped = input.view(Shape::new(vec![n * h * w, self.num_features]))?;
-
-            let mean = reshaped.mean(Some(vec![0isize]), true)?; // [1,C]
-            let centered = crate::operations::arithmetic::sub(&reshaped, &mean)?;
-            let var = crate::operations::arithmetic::mul(&centered, &centered)?
-                .mean(Some(vec![0isize]), true)?; // [1,C]
+            let axes: Vec<isize> = vec![0, 2, 3];
+            let mean = input.mean(Some(axes.clone()), true)?;
+            let centered = crate::operations::arithmetic::sub(input, &mean)?;
+            let var =
+                crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?;
 
             let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
             let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
@@ -449,10 +437,7 @@ impl Layer for BatchNorm2d {
                 &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
             )?;
 
-            (
-                mean.view(Shape::new(vec![1, self.num_features, 1, 1]))?,
-                var.view(Shape::new(vec![1, self.num_features, 1, 1]))?,
-            )
+            (mean, var)
         } else {
             (
                 self.running_mean
@@ -670,6 +655,81 @@ mod tests {
         assert!((o[1] - 3.0).abs() < 1e-4);
         assert!((o[2] - 5.0).abs() < 1e-4);
         assert!((o[3] - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_batchnorm1d_3d_per_channel_statistics() {
+        // momentum = 1.0 makes running stats equal the batch statistics, so we
+        // can read the per-channel mean directly. Channel 0 = [1, 2, 3, 4]
+        // (mean 2.5), channel 1 = [10, 20, 30, 40] (mean 25). A flat reshape
+        // of [N, C, L] to [N*L, C] would interleave the channels and produce
+        // wrong statistics here.
+        let mut layer =
+            BatchNorm1d::new(2, Some(0.0), Some(1.0), Device::cpu(), DataType::Float32).unwrap();
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, 2.0, 10.0, 20.0, 3.0, 4.0, 30.0, 40.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        layer.forward(&input).unwrap();
+
+        let mean = layer.running_mean().data().as_f32_slice().unwrap();
+        let var = layer.running_var().data().as_f32_slice().unwrap();
+        assert!((mean[0] - 2.5).abs() < 1e-5, "channel 0 mean: {}", mean[0]);
+        assert!((mean[1] - 25.0).abs() < 1e-4, "channel 1 mean: {}", mean[1]);
+        assert!((var[0] - 1.25).abs() < 1e-5, "channel 0 var: {}", var[0]);
+        assert!((var[1] - 125.0).abs() < 1e-3, "channel 1 var: {}", var[1]);
+    }
+
+    #[test]
+    fn test_batchnorm2d_per_channel_statistics() {
+        // Channel 0 = [1..4] (mean 2.5, var 1.25); channel 1 = [5..8]
+        // (mean 6.5, var 1.25). With momentum = 1.0 the running stats equal
+        // the batch statistics after one forward pass.
+        let mut layer =
+            BatchNorm2d::new(2, Some(0.0), Some(1.0), Device::cpu(), DataType::Float32).unwrap();
+        let input = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![1, 2, 2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let out = layer.forward(&input).unwrap();
+
+        let mean = layer.named_buffers()["running_mean"]
+            .data()
+            .as_f32_slice()
+            .unwrap();
+        let var = layer.named_buffers()["running_var"]
+            .data()
+            .as_f32_slice()
+            .unwrap();
+        assert!((mean[0] - 2.5).abs() < 1e-5, "channel 0 mean: {}", mean[0]);
+        assert!((mean[1] - 6.5).abs() < 1e-5, "channel 1 mean: {}", mean[1]);
+        assert!((var[0] - 1.25).abs() < 1e-5, "channel 0 var: {}", var[0]);
+        assert!((var[1] - 1.25).abs() < 1e-5, "channel 1 var: {}", var[1]);
+
+        // Each channel is normalized with its own statistics.
+        let o = out.data().as_f32_slice().unwrap();
+        let expected = [-1.3416407f32, -0.4472136, 0.4472136, 1.3416407];
+        for c in 0..2 {
+            for i in 0..4 {
+                assert!(
+                    (o[c * 4 + i] - expected[i]).abs() < 1e-4,
+                    "channel {c} element {i}: {}",
+                    o[c * 4 + i]
+                );
+            }
+        }
     }
 
     #[test]

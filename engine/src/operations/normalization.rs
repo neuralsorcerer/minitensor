@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -115,17 +115,17 @@ pub fn batch_norm(
 
     // Dimensions along which to compute statistics (all except channel dim)
     let axes: Vec<usize> = (0..input.ndim()).filter(|&d| d != 1).collect();
-
-    // Compute batch statistics if needed
     let axes_isize: Vec<isize> = axes.iter().map(|&d| d as isize).collect();
-    let batch_mean = input.mean(Some(axes_isize.clone()), true)?; // [1, C, ...]
-    let centered = crate::operations::arithmetic::sub(input, &batch_mean)?;
-    let batch_var = crate::operations::arithmetic::mul(&centered, &centered)?
-        .mean(Some(axes_isize.clone()), true)?;
 
-    // Decide which statistics to use
-    let (mean_used, var_used) = if training || running_mean.is_none() || running_var.is_none() {
-        (batch_mean.clone(), batch_var.clone())
+    // Compute batch statistics only when they are actually used: during
+    // training, or in eval mode when no running estimates are available.
+    let use_batch_stats = training || running_mean.is_none() || running_var.is_none();
+    let (mean_used, var_used, centered) = if use_batch_stats {
+        let batch_mean = input.mean(Some(axes_isize.clone()), true)?; // [1, C, ...]
+        let centered = crate::operations::arithmetic::sub(input, &batch_mean)?;
+        let batch_var = crate::operations::arithmetic::mul(&centered, &centered)?
+            .mean(Some(axes_isize.clone()), true)?;
+        (batch_mean, batch_var, centered)
     } else if let (Some(rm), Some(rv)) = (running_mean.as_ref(), running_var.as_ref()) {
         // Use running statistics (reshape for broadcasting)
         let mut rm_view = (*rm).clone().unsqueeze(0)?; // [1, C]
@@ -134,7 +134,8 @@ pub fn batch_norm(
             rm_view = rm_view.unsqueeze(rm_view.ndim() as isize)?;
             rv_view = rv_view.unsqueeze(rv_view.ndim() as isize)?;
         }
-        (rm_view, rv_view)
+        let centered = crate::operations::arithmetic::sub(input, &rm_view)?;
+        (rm_view, rv_view, centered)
     } else {
         unreachable!("running stats checked")
     };
@@ -144,7 +145,6 @@ pub fn batch_norm(
 
     let var_eps = crate::operations::arithmetic::add(&var_used, &eps_tensor)?;
     let std = crate::operations::activation::sqrt(&var_eps)?;
-    let centered = crate::operations::arithmetic::sub(input, &mean_used)?;
     let mut output = crate::operations::arithmetic::div(&centered, &std)?;
 
     // Scale and shift
@@ -163,11 +163,12 @@ pub fn batch_norm(
         output = crate::operations::arithmetic::add(&output, &b_view)?;
     }
 
-    // Update running statistics if training
+    // Update running statistics if training (mean_used/var_used hold the
+    // batch statistics whenever training is true)
     if training {
         if let (Some(rm), Some(rv)) = (running_mean, running_var) {
-            let mean_flat = batch_mean.view(Shape::new(vec![num_features]))?.detach();
-            let var_flat = batch_var.view(Shape::new(vec![num_features]))?.detach();
+            let mean_flat = mean_used.view(Shape::new(vec![num_features]))?.detach();
+            let var_flat = var_used.view(Shape::new(vec![num_features]))?.detach();
 
             let m_tensor = scalar_tensor(momentum, input.dtype(), input.device())?;
             let one_minus_tensor = scalar_tensor(1.0 - momentum, input.dtype(), input.device())?;

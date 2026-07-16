@@ -317,12 +317,31 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let lhs_shape = lhs.shape().dims();
     let rhs_shape = rhs.shape().dims();
 
-    // Ensure batch dimensions match
+    // Broadcast batch dimensions when they differ, e.g.
+    // [2, 3, 4] @ [4, 5] or [1, 3, 4] @ [7, 4, 5]. The expanded operands are
+    // materialized contiguously; expand/contiguous are grad-aware so the
+    // gradient reduces back over the broadcast batch dimensions.
     if lhs_shape[..lhs_shape.len() - 2] != rhs_shape[..rhs_shape.len() - 2] {
-        return Err(MinitensorError::shape_mismatch(
-            lhs_shape.to_vec(),
-            rhs_shape.to_vec(),
-        ));
+        let lhs_batch = Shape::new(lhs_shape[..lhs_shape.len() - 2].to_vec());
+        let rhs_batch = Shape::new(rhs_shape[..rhs_shape.len() - 2].to_vec());
+        let batch = lhs_batch.broadcast_with(&rhs_batch).map_err(|_| {
+            MinitensorError::shape_mismatch(lhs_shape.to_vec(), rhs_shape.to_vec())
+        })?;
+
+        let mut lhs_target: Vec<isize> = batch.dims().iter().map(|&d| d as isize).collect();
+        lhs_target.extend_from_slice(&[
+            lhs_shape[lhs_shape.len() - 2] as isize,
+            lhs_shape[lhs_shape.len() - 1] as isize,
+        ]);
+        let mut rhs_target: Vec<isize> = batch.dims().iter().map(|&d| d as isize).collect();
+        rhs_target.extend_from_slice(&[
+            rhs_shape[rhs_shape.len() - 2] as isize,
+            rhs_shape[rhs_shape.len() - 1] as isize,
+        ]);
+
+        let lhs_b = lhs.expand(lhs_target)?.contiguous()?;
+        let rhs_b = rhs.expand(rhs_target)?.contiguous()?;
+        return matmul(&lhs_b, &rhs_b);
     }
 
     // Get the last two dimensions for matrix multiplication

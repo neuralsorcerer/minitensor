@@ -181,8 +181,11 @@ def test_expand_negative_one():
 
 def test_expand_invalid():
     t = Tensor([1, 2, 3])
+    # An existing dimension of size != 1 cannot change size.
     with pytest.raises(Exception):
-        t.expand(2, 3)
+        t.expand(4)
+    with pytest.raises(Exception):
+        t.expand(2, 4)
 
 
 def test_functional_expand():
@@ -585,3 +588,45 @@ def test_getitem_newaxis_3d_and_scalar():
     s = mt.Tensor(3.5)
     assert s[None].numpy().shape == (1,)
     np.testing.assert_allclose(s[None].numpy(), np.array(3.5)[None])
+
+
+def test_index_select_accepts_tensor_indices():
+    x = np.arange(12, dtype=np.float32).reshape(3, 4)
+    tx = mt.Tensor(x)
+    idx = mt.Tensor([2, 0], dtype="int64")
+
+    result = tx.index_select(1, idx)
+    np.testing.assert_allclose(result.numpy(), x[:, [2, 0]])
+
+    # int32 index tensors are accepted as well
+    idx32 = mt.Tensor([1, 2], dtype="int32")
+    result32 = tx.index_select(0, idx32)
+    np.testing.assert_allclose(result32.numpy(), x[[1, 2]])
+
+    # top-level function accepts tensors too
+    result_fn = mt.index_select(tx, 1, idx)
+    np.testing.assert_allclose(result_fn.numpy(), x[:, [2, 0]])
+
+    # lists keep working
+    result_list = tx.index_select(1, [3, 1])
+    np.testing.assert_allclose(result_list.numpy(), x[:, [3, 1]])
+
+
+def test_index_select_rejects_bad_index_tensors():
+    tx = mt.Tensor(np.arange(6, dtype=np.float32).reshape(2, 3))
+    with pytest.raises(TypeError):
+        tx.index_select(0, mt.Tensor([0.5, 1.0]))
+    with pytest.raises(ValueError):
+        tx.index_select(0, mt.Tensor([[0], [1]], dtype="int64"))
+    with pytest.raises(ValueError):
+        tx.index_select(0, [-1])
+
+
+def test_expand_adds_leading_dimensions():
+    x = np.arange(4, dtype=np.float32)
+    tx = mt.Tensor(x)
+    expanded = tx.expand(3, 2, 4)
+    np.testing.assert_allclose(expanded.numpy(), np.broadcast_to(x, (3, 2, 4)))
+
+    with pytest.raises(ValueError):
+        tx.expand(-1, 4)

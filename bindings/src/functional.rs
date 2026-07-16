@@ -275,16 +275,6 @@ fn make_bincount_tensor(
     }
 }
 
-fn to_pylist<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
-    if let Ok(list) = value.cast::<PyList>() {
-        return Ok(list.clone());
-    }
-
-    let seq = value.extract::<Vec<isize>>()?;
-    let list = PyList::new(value.py(), seq)?;
-    Ok(list)
-}
-
 #[pyfunction]
 #[pyo3(signature = (input, start_dim=None, end_dim=None))]
 pub fn flatten(
@@ -520,8 +510,7 @@ pub fn index_select(
     indices: &Bound<PyAny>,
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    let list = to_pylist(indices)?;
-    tensor.index_select(dim, &list)
+    tensor.index_select(dim, indices)
 }
 
 #[pyfunction]

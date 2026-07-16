@@ -1122,3 +1122,48 @@ def test_matmul_vector_gradients():
     a.matmul(b).backward()
     np.testing.assert_allclose(a.grad.numpy(), u, rtol=1e-6)
     np.testing.assert_allclose(b.grad.numpy(), v, rtol=1e-6)
+
+
+def test_matmul_broadcasts_batch_dimensions():
+    rng = np.random.default_rng(3)
+    a = rng.standard_normal((2, 3, 4))
+    b = rng.standard_normal((4, 5))
+
+    # batched @ 2D
+    out = mt.Tensor(a.tolist(), dtype="float64").matmul(
+        mt.Tensor(b.tolist(), dtype="float64")
+    )
+    np.testing.assert_allclose(out.numpy(), a @ b, rtol=1e-6)
+
+    # 2D @ batched
+    c = rng.standard_normal((3, 4))
+    d = rng.standard_normal((2, 4, 5))
+    out2 = mt.Tensor(c.tolist(), dtype="float64").matmul(
+        mt.Tensor(d.tolist(), dtype="float64")
+    )
+    np.testing.assert_allclose(out2.numpy(), c @ d, rtol=1e-6)
+
+    # size-1 batch dim broadcast against a larger batch
+    e = rng.standard_normal((1, 3, 4))
+    f = rng.standard_normal((5, 4, 2))
+    out3 = mt.Tensor(e.tolist(), dtype="float64").matmul(
+        mt.Tensor(f.tolist(), dtype="float64")
+    )
+    np.testing.assert_allclose(out3.numpy(), e @ f, rtol=1e-6)
+
+
+def test_matmul_batch_broadcast_gradients():
+    rng = np.random.default_rng(4)
+    a = rng.standard_normal((2, 3, 4))
+    b = rng.standard_normal((4, 5))
+
+    ma = mt.Tensor(a.tolist(), dtype="float64", requires_grad=True)
+    mb = mt.Tensor(b.tolist(), dtype="float64", requires_grad=True)
+    out = ma.matmul(mb)
+    out.sum().backward()
+
+    grad_out = np.ones((2, 3, 5))
+    expected_a = grad_out @ np.broadcast_to(b, (2, 4, 5)).transpose(0, 2, 1)
+    expected_b = (a.transpose(0, 2, 1) @ grad_out).sum(axis=0)
+    np.testing.assert_allclose(ma.grad.numpy(), expected_a, rtol=1e-6)
+    np.testing.assert_allclose(mb.grad.numpy(), expected_b, rtol=1e-6)

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Soumyadip Sarkar.
+// Copyright (c) Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
@@ -33,10 +33,14 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     } else if exp_numel == 1 {
         PowBroadcast::ExponentScalar
     } else {
-        return Err(MinitensorError::shape_mismatch(
-            base_shape.dims().to_vec(),
-            exponent_shape.dims().to_vec(),
-        ));
+        // General broadcasting: materialize both operands at the broadcast
+        // shape (expand and contiguous are grad-aware) and recurse into the
+        // same-shape fast path.
+        let out_shape = base_shape.broadcast_with(&exponent_shape)?;
+        let dims: Vec<isize> = out_shape.dims().iter().map(|&d| d as isize).collect();
+        let base_b = base.expand(dims.clone())?.contiguous()?;
+        let exp_b = exponent.expand(dims)?.contiguous()?;
+        return pow(&base_b, &exp_b);
     };
 
     let output_shape = match broadcast {

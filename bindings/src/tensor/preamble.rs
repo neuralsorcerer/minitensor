@@ -56,6 +56,55 @@ fn extract_wrapped_pytensor(value: &Bound<PyAny>) -> Option<PyTensor> {
     None
 }
 
+/// Extract integer indices from either an integer tensor or any Python
+/// sequence of ints (list, tuple, numpy array, ...).
+fn extract_index_vector(indices: &Bound<PyAny>) -> PyResult<Vec<usize>> {
+    if let Some(py_tensor) = extract_wrapped_pytensor(indices) {
+        let tensor = py_tensor.inner.contiguous().map_err(_convert_error)?;
+        if tensor.ndim() > 1 {
+            return Err(PyValueError::new_err(
+                "index tensor must be 0-D or 1-D".to_string(),
+            ));
+        }
+        let values: Vec<i64> = match tensor.dtype() {
+            DataType::Int32 => tensor
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor data"))?
+                .iter()
+                .map(|&v| v as i64)
+                .collect(),
+            DataType::Int64 => tensor
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor data"))?
+                .to_vec(),
+            dtype => {
+                return Err(PyTypeError::new_err(format!(
+                    "index tensor must have an integer dtype, got {dtype:?}",
+                )));
+            }
+        };
+        values
+            .into_iter()
+            .map(|v| {
+                usize::try_from(v).map_err(|_| {
+                    PyValueError::new_err(format!("index {v} is negative; indices must be >= 0"))
+                })
+            })
+            .collect()
+    } else {
+        let seq = indices.extract::<Vec<isize>>()?;
+        seq.into_iter()
+            .map(|v| {
+                usize::try_from(v).map_err(|_| {
+                    PyValueError::new_err(format!("index {v} is negative; indices must be >= 0"))
+                })
+            })
+            .collect()
+    }
+}
+
 fn parse_clip_bound(value: Option<&Bound<PyAny>>, name: &str) -> PyResult<Option<f64>> {
     match value {
         None => Ok(None),
