@@ -445,79 +445,42 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
         tensor.device(),
     );
 
+    /// Applies negation for one dtype: fetch the input/output slices and map
+    /// element-wise (parallel above `PAR_THRESHOLD`).
+    macro_rules! neg_arm {
+        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from tensor"
+                ))
+            })?;
+            let output = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from output"
+                ))
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = -i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = -i;
+                }
+            }
+        }};
+    }
+
     match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
-            })?;
-            let output = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = -i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = -i;
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = -i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = -i;
-                }
-            }
-        }
-        DataType::Int32 => {
-            let input = tensor.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from tensor")
-            })?;
-            let output = output_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice from output")
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = -i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = -i;
-                }
-            }
-        }
-        DataType::Int64 => {
-            let input = tensor.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from tensor")
-            })?;
-            let output = output_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice from output")
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = -i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = -i;
-                }
-            }
-        }
+        DataType::Float32 => neg_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
+        DataType::Float64 => neg_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
+        DataType::Int32 => neg_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
+        DataType::Int64 => neg_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Negation not supported for boolean tensors",
@@ -547,308 +510,3 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
 }
 
 // Helper functions for type-specific operations
-
-fn add_f32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_add_f32(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a + b,
-        )
-    }
-}
-
-fn add_f64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_add_f64(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a + b,
-        )
-    }
-}
-
-fn add_i32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a + b,
-    )
-}
-
-fn add_i64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a + b,
-    )
-}
-
-fn add_bool_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable bool slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a || b,
-    )
-}
-
-fn sub_f32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_sub_f32(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a - b,
-        )
-    }
-}
-
-fn sub_f64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_sub_f64(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a - b,
-        )
-    }
-}
-
-fn sub_i32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a - b,
-    )
-}
-
-fn sub_i64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a - b,
-    )
-}
-
-fn mul_f32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_mul_f32(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a * b,
-        )
-    }
-}

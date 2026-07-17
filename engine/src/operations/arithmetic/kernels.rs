@@ -4,188 +4,123 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn mul_f64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_mul_f64(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a * b,
-        )
-    }
+/// Generates a dtype-specialized broadcasting binary kernel.
+///
+/// Every kernel has the same shape: fetch both input slices and the output
+/// slice for the dtype, then apply `$op` element-wise with broadcasting.
+macro_rules! binary_kernel {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $op:expr) => {
+        fn $name(
+            lhs: &Tensor,
+            rhs: &Tensor,
+            output_data: &mut TensorData,
+            output_shape: &Shape,
+        ) -> Result<()> {
+            let lhs_data = lhs.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from lhs tensor"
+                ))
+            })?;
+            let rhs_data = rhs.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from rhs tensor"
+                ))
+            })?;
+            let output_slice = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from output data"
+                ))
+            })?;
+            broadcast_binary_op(
+                lhs_data,
+                rhs_data,
+                output_slice,
+                lhs.shape(),
+                rhs.shape(),
+                output_shape,
+                $op,
+            )
+        }
+    };
 }
 
-fn mul_i32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a * b,
-    )
+/// Same as [`binary_kernel!`], with a SIMD fast path for same-shape inputs
+/// (f32/f64 only).
+macro_rules! binary_kernel_simd {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $simd:ident, $op:expr) => {
+        fn $name(
+            lhs: &Tensor,
+            rhs: &Tensor,
+            output_data: &mut TensorData,
+            output_shape: &Shape,
+        ) -> Result<()> {
+            let lhs_data = lhs.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from lhs tensor"
+                ))
+            })?;
+            let rhs_data = rhs.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from rhs tensor"
+                ))
+            })?;
+            let output_slice = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from output data"
+                ))
+            })?;
+            if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
+                $simd(lhs_data, rhs_data, output_slice)
+            } else {
+                broadcast_binary_op(
+                    lhs_data,
+                    rhs_data,
+                    output_slice,
+                    lhs.shape(),
+                    rhs.shape(),
+                    output_shape,
+                    $op,
+                )
+            }
+        }
+    };
 }
 
-fn mul_i64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-    })?;
+// Addition: `+` for numeric dtypes, logical OR for bool.
+binary_kernel_simd!(add_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_add_f32, |a, b| a + b);
+binary_kernel_simd!(add_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_add_f64, |a, b| a + b);
+binary_kernel!(add_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a + b);
+binary_kernel!(add_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a + b);
+binary_kernel!(add_bool_direct, as_bool_slice, as_bool_slice_mut, "bool", |a, b| a || b);
 
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
+// Subtraction: bool is rejected during operand coercion.
+binary_kernel_simd!(sub_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_sub_f32, |a, b| a - b);
+binary_kernel_simd!(sub_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_sub_f64, |a, b| a - b);
+binary_kernel!(sub_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a - b);
+binary_kernel!(sub_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a - b);
 
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a * b,
-    )
-}
+// Multiplication: `*` for numeric dtypes, logical AND for bool.
+binary_kernel_simd!(mul_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_mul_f32, |a, b| a * b);
+binary_kernel_simd!(mul_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_mul_f64, |a, b| a * b);
+binary_kernel!(mul_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a * b);
+binary_kernel!(mul_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a * b);
+binary_kernel!(mul_bool_direct, as_bool_slice, as_bool_slice_mut, "bool", |a, b| a && b);
 
-fn mul_bool_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable bool slice from output data")
-    })?;
-
-    broadcast_binary_op(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-        |a, b| a && b,
-    )
-}
-
-fn div_f32_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_div_f32(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a / b,
-        )
-    }
-}
-
-fn div_f64_direct(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
-    let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
-    })?;
-    let rhs_data = rhs.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    // Use SIMD fast path if possible (no broadcasting, same shapes)
-    if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-        simd_div_f64(lhs_data, rhs_data, output_slice)
-    } else {
-        broadcast_binary_op(
-            lhs_data,
-            rhs_data,
-            output_slice,
-            lhs.shape(),
-            rhs.shape(),
-            output_shape,
-            |a, b| a / b,
-        )
-    }
-}
+// Division: integer and bool operands coerce to floating point beforehand.
+binary_kernel_simd!(div_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_div_f32, |a, b| a / b);
+binary_kernel_simd!(div_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_div_f64, |a, b| a / b);
 
 /// Generic broadcasting binary operation
 pub(crate) fn broadcast_binary_op<T, F>(
