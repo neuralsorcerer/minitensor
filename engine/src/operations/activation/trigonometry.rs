@@ -247,6 +247,7 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             output: output.clone().detach(),
             input_ids: [lhs.id(), rhs.id()],
             input_shapes: [lhs.shape().dims().to_vec(), rhs.shape().dims().to_vec()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
         let mut output_with_grad = output;

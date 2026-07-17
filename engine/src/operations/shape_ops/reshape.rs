@@ -475,6 +475,7 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             input_ids: tensors.iter().map(|t| t.id()).collect(),
             sizes: tensors.iter().map(|t| t.shape().dims()[dim]).collect(),
             dim,
+            input_requires_grad: tensors.iter().map(|t| t.requires_grad()).collect(),
         });
         let mut output = output;
         output.set_grad_fn(Some(grad_fn.clone()));

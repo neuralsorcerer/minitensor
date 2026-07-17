@@ -682,4 +682,32 @@ mod tests {
         assert!(grads.contains_key(&targets_rg.id()));
         clear_graph().unwrap();
     }
+
+    #[test]
+    fn test_concat_frozen_inputs_receive_no_gradient() {
+        clear_graph().unwrap();
+
+        let trainable = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let frozen = Tensor::ones(
+            Shape::new(vec![2, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let out = crate::operations::shape_ops::concatenate(&[&trainable, &frozen], 0).unwrap();
+        let grad = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = backward_collect(&out, Some(grad)).unwrap();
+
+        let trainable_grad = grads.get(&trainable.id()).expect("trainable grad");
+        assert_eq!(trainable_grad.shape().dims(), &[2, 2]);
+        assert!(!grads.contains_key(&frozen.id()));
+
+        clear_graph().unwrap();
+    }
 }

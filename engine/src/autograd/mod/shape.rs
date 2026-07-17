@@ -1263,20 +1263,30 @@ pub struct ConcatBackward {
     pub input_ids: SmallVec<[TensorId; 4]>,
     pub sizes: SmallVec<[usize; 4]>,
     pub dim: usize,
+    /// Which inputs actually need a gradient; frozen inputs skip their
+    /// slice extraction.
+    pub input_requires_grad: SmallVec<[bool; 4]>,
 }
 
 impl GradientFunction for ConcatBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         let mut offset = 0usize;
-        for (&id, &size) in self.input_ids.iter().zip(self.sizes.iter()) {
-            let grad_slice = crate::operations::shape_ops::narrow(
-                grad_output,
-                self.dim as isize,
-                offset,
-                size,
-            )?;
-            accumulate_grad(&mut gradients, id, grad_slice)?;
+        for ((&id, &size), &needs_grad) in self
+            .input_ids
+            .iter()
+            .zip(self.sizes.iter())
+            .zip(self.input_requires_grad.iter())
+        {
+            if needs_grad {
+                let grad_slice = crate::operations::shape_ops::narrow(
+                    grad_output,
+                    self.dim as isize,
+                    offset,
+                    size,
+                )?;
+                accumulate_grad(&mut gradients, id, grad_slice)?;
+            }
             offset += size;
         }
         Ok(gradients)

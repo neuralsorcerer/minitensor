@@ -751,6 +751,9 @@ pub struct LogAddExpBackward {
     pub output: Tensor,
     pub input_ids: [TensorId; 2],
     pub input_shapes: [Vec<usize>; 2],
+    /// Which inputs actually need a gradient; frozen inputs skip their
+    /// exp/sub/mul/reduce chain entirely.
+    pub input_requires_grad: [bool; 2],
 }
 
 impl GradientFunction for LogAddExpBackward {
@@ -758,19 +761,27 @@ impl GradientFunction for LogAddExpBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        let lhs_diff = arithmetic::sub(&self.lhs.detach(), &self.output.detach())?;
-        let lhs_term = lhs_diff.exp()?;
-        let lhs_mul = arithmetic::mul(&lhs_term, grad_output)?;
-        let lhs_grad =
-            reduce_gradient_for_broadcasting(&lhs_mul, &Shape::new(self.input_shapes[0].clone()))?;
-        accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        if self.input_requires_grad[0] {
+            let lhs_diff = arithmetic::sub(&self.lhs.detach(), &self.output.detach())?;
+            let lhs_term = lhs_diff.exp()?;
+            let lhs_mul = arithmetic::mul(&lhs_term, grad_output)?;
+            let lhs_grad = reduce_gradient_for_broadcasting(
+                &lhs_mul,
+                &Shape::new(self.input_shapes[0].clone()),
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
 
-        let rhs_diff = arithmetic::sub(&self.rhs.detach(), &self.output.detach())?;
-        let rhs_term = rhs_diff.exp()?;
-        let rhs_mul = arithmetic::mul(&rhs_term, grad_output)?;
-        let rhs_grad =
-            reduce_gradient_for_broadcasting(&rhs_mul, &Shape::new(self.input_shapes[1].clone()))?;
-        accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        if self.input_requires_grad[1] {
+            let rhs_diff = arithmetic::sub(&self.rhs.detach(), &self.output.detach())?;
+            let rhs_term = rhs_diff.exp()?;
+            let rhs_mul = arithmetic::mul(&rhs_term, grad_output)?;
+            let rhs_grad = reduce_gradient_for_broadcasting(
+                &rhs_mul,
+                &Shape::new(self.input_shapes[1].clone()),
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
 
         Ok(gradients)
     }

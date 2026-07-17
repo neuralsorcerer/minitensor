@@ -316,11 +316,25 @@ Completed in the fifth change set:
   likewise skipped when predictions are frozen. Regression test:
   `test_loss_targets_receive_no_gradient`.
 
+Completed in the sixth change set:
+
+- **Gating audit finished.** The last multi-input gradient functions
+  without per-input `requires_grad` flags — `LogAddExpBackward` (which ran
+  an `exp`/`sub`/`mul`/reduce chain per side unconditionally) and
+  `ConcatBackward` (which extracted a gradient slice per input) — are now
+  gated. `PowBackward` and `LayerNormBackward` already had flags;
+  single-input functions need none (they are only reached when their
+  input requires grad). Regression test:
+  `test_concat_frozen_inputs_receive_no_gradient`.
+- **Comparison kernels deduplicated.** The five hand-copied `cmp_*`
+  helpers collapsed into one `cmp_kernel!` macro, continuing the pattern
+  from the storage accessors and arithmetic kernels.
+
 Still open, in priority order:
 
-1. **dtype dispatch macro for the remaining ops files** — the accessor
-   layer and arithmetic kernels are done; comparison, activation, and
-   reduction kernels still carry per-dtype copies.
+1. **dtype dispatch macro for the remaining ops files** — activation and
+   reduction kernels still carry per-dtype copies (storage accessors,
+   arithmetic, and comparison are done).
 2. **Replace `include!` layout with real modules** — mechanical, improves
    tooling and visibility control (also re-enables
    `items_after_test_module`).
@@ -334,9 +348,6 @@ Still open, in priority order:
    (`calloc` must memset reused allocations, doubling output write
    traffic), so it was reverted. The proper fix is writing through
    `MaybeUninit` in the kernels, which is sound without the extra pass.
-5. **Audit remaining multi-input gradient functions** (concat, pow,
-   normalization) for the same per-input gating; single-input functions
-   need no flags (they are only reached when their input requires grad).
 
 ## 8-11. Implementation, tests, validation, benchmarks
 
