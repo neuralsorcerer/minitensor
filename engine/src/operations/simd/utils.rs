@@ -4,7 +4,11 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+use crate::error::Result;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+pub(crate) fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     for i in 0..lhs.len() {
         output[i] = lhs[i] / rhs[i];
     }
@@ -14,7 +18,7 @@ fn simd_div_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<(
 // x86_64 AVX2 f64 implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // AVX2 processes 4 f64s at once
 
     let len = lhs.len();
@@ -38,7 +42,7 @@ unsafe fn simd_add_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -62,7 +66,7 @@ unsafe fn simd_sub_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -86,7 +90,7 @@ unsafe fn simd_mul_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -111,7 +115,7 @@ unsafe fn simd_div_f64_avx2(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 // x86_64 SSE f64 implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2; // SSE processes 2 f64s at once
 
     let len = lhs.len();
@@ -135,7 +139,7 @@ unsafe fn simd_add_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();
@@ -159,7 +163,7 @@ unsafe fn simd_sub_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();
@@ -183,7 +187,7 @@ unsafe fn simd_mul_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();
@@ -208,7 +212,7 @@ unsafe fn simd_div_f64_sse(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Resu
 // ARM NEON f64 implementations
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2; // NEON processes 2 f64s at once
 
     let len = lhs.len();
@@ -232,7 +236,7 @@ unsafe fn simd_add_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();
@@ -256,7 +260,7 @@ unsafe fn simd_sub_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();
@@ -280,7 +284,7 @@ unsafe fn simd_mul_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_div_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub(crate) unsafe fn simd_div_f64_neon(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
     const SIMD_WIDTH: usize = 2;
 
     let len = lhs.len();

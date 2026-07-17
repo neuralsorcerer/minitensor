@@ -4,14 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+
 use crate::{
-    autograd::{DotBackward, MatMulBackward, SolveBackward, TransposeBackward, add_to_graph},
+    autograd::{DotBackward, MatMulBackward, SolveBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::{
-        binary::{BinaryOpKind, coerce_binary_operands},
-        reduction,
-    },
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    operations::binary::{BinaryOpKind, coerce_binary_operands},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -19,7 +18,7 @@ use std::sync::Arc;
 #[cfg(feature = "blas")]
 use cblas::{Layout, Transpose};
 
-const PAR_THRESHOLD: usize = 1 << 12;
+pub(crate) const PAR_THRESHOLD: usize = 1 << 12;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DiagonalSpec {
@@ -30,7 +29,7 @@ pub(crate) struct DiagonalSpec {
     pub output_dims: Vec<usize>,
 }
 
-fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     let dim = if dim < 0 { dim + ndim as isize } else { dim };
     if dim < 0 || dim >= ndim as isize {
         Err(MinitensorError::index_error(dim, 0, ndim))
@@ -105,7 +104,7 @@ pub(crate) fn compute_diagonal_spec(
     })
 }
 
-fn diagonal_copy<T: Copy + Send + Sync>(
+pub(crate) fn diagonal_copy<T: Copy + Send + Sync>(
     input: &[T],
     output: &mut [T],
     dims: &[usize],
@@ -197,7 +196,14 @@ pub(crate) fn diagonal_scatter<T>(
 
 #[cfg(feature = "blas")]
 #[inline]
-unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
+pub(crate) unsafe fn gemm_f32(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b: *const f32,
+    c: *mut f32,
+) {
     cblas::sgemm(
         Layout::RowMajor,
         Transpose::None,
@@ -218,7 +224,14 @@ unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c
 
 #[cfg(feature = "blas")]
 #[inline]
-unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
+pub(crate) unsafe fn gemm_f64(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f64,
+    b: *const f64,
+    c: *mut f64,
+) {
     cblas::dgemm(
         Layout::RowMajor,
         Transpose::None,
@@ -239,7 +252,14 @@ unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c
 
 #[cfg(not(feature = "blas"))]
 #[inline]
-unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
+pub(crate) unsafe fn gemm_f32(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b: *const f32,
+    c: *mut f32,
+) {
     unsafe {
         matrixmultiply::sgemm(
             m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
@@ -249,7 +269,14 @@ unsafe fn gemm_f32(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c
 
 #[cfg(not(feature = "blas"))]
 #[inline]
-unsafe fn gemm_f64(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
+pub(crate) unsafe fn gemm_f64(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f64,
+    b: *const f64,
+    c: *mut f64,
+) {
     unsafe {
         matrixmultiply::dgemm(
             m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
@@ -324,9 +351,9 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if lhs_shape[..lhs_shape.len() - 2] != rhs_shape[..rhs_shape.len() - 2] {
         let lhs_batch = Shape::new(lhs_shape[..lhs_shape.len() - 2].to_vec());
         let rhs_batch = Shape::new(rhs_shape[..rhs_shape.len() - 2].to_vec());
-        let batch = lhs_batch.broadcast_with(&rhs_batch).map_err(|_| {
-            MinitensorError::shape_mismatch(lhs_shape.to_vec(), rhs_shape.to_vec())
-        })?;
+        let batch = lhs_batch
+            .broadcast_with(&rhs_batch)
+            .map_err(|_| MinitensorError::shape_mismatch(lhs_shape.to_vec(), rhs_shape.to_vec()))?;
 
         let mut lhs_target: Vec<isize> = batch.dims().iter().map(|&d| d as isize).collect();
         lhs_target.extend_from_slice(&[

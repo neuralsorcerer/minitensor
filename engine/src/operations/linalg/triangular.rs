@@ -4,8 +4,15 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    error::Result,
+    tensor::{Shape, Strides},
+};
+use rayon::prelude::*;
+
 /// Generic transpose implementation
-fn transpose_generic<T: Copy + Send + Sync>(
+pub(crate) fn transpose_generic<T: Copy + Send + Sync>(
     input_data: &[T],
     output_data: &mut [T],
     input_shape: &Shape,
@@ -75,7 +82,10 @@ fn transpose_generic<T: Copy + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::DataType;
+    use crate::tensor::Tensor;
     use crate::{autograd::GradientFunction, device::Device, tensor::TensorData};
+    use std::sync::Arc;
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);

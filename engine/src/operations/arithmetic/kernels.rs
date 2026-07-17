@@ -4,13 +4,22 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::operations::simd::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{Shape, Strides, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use smallvec::SmallVec;
+use smallvec::smallvec;
+
 /// Generates a dtype-specialized broadcasting binary kernel.
 ///
 /// Every kernel has the same shape: fetch both input slices and the output
 /// slice for the dtype, then apply `$op` element-wise with broadcasting.
 macro_rules! binary_kernel {
     ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $op:expr) => {
-        fn $name(
+        pub(crate) fn $name(
             lhs: &Tensor,
             rhs: &Tensor,
             output_data: &mut TensorData,
@@ -54,7 +63,7 @@ macro_rules! binary_kernel {
 /// (f32/f64 only).
 macro_rules! binary_kernel_simd {
     ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $simd:ident, $op:expr) => {
-        fn $name(
+        pub(crate) fn $name(
             lhs: &Tensor,
             rhs: &Tensor,
             output_data: &mut TensorData,
@@ -99,28 +108,132 @@ macro_rules! binary_kernel_simd {
 }
 
 // Addition: `+` for numeric dtypes, logical OR for bool.
-binary_kernel_simd!(add_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_add_f32, |a, b| a + b);
-binary_kernel_simd!(add_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_add_f64, |a, b| a + b);
-binary_kernel!(add_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a + b);
-binary_kernel!(add_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a + b);
-binary_kernel!(add_bool_direct, as_bool_slice, as_bool_slice_mut, "bool", |a, b| a || b);
+binary_kernel_simd!(
+    add_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    simd_add_f32,
+    |a, b| a + b
+);
+binary_kernel_simd!(
+    add_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    simd_add_f64,
+    |a, b| a + b
+);
+binary_kernel!(
+    add_i32_direct,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    |a, b| a + b
+);
+binary_kernel!(
+    add_i64_direct,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    |a, b| a + b
+);
+binary_kernel!(
+    add_bool_direct,
+    as_bool_slice,
+    as_bool_slice_mut,
+    "bool",
+    |a, b| a || b
+);
 
 // Subtraction: bool is rejected during operand coercion.
-binary_kernel_simd!(sub_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_sub_f32, |a, b| a - b);
-binary_kernel_simd!(sub_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_sub_f64, |a, b| a - b);
-binary_kernel!(sub_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a - b);
-binary_kernel!(sub_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a - b);
+binary_kernel_simd!(
+    sub_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    simd_sub_f32,
+    |a, b| a - b
+);
+binary_kernel_simd!(
+    sub_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    simd_sub_f64,
+    |a, b| a - b
+);
+binary_kernel!(
+    sub_i32_direct,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    |a, b| a - b
+);
+binary_kernel!(
+    sub_i64_direct,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    |a, b| a - b
+);
 
 // Multiplication: `*` for numeric dtypes, logical AND for bool.
-binary_kernel_simd!(mul_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_mul_f32, |a, b| a * b);
-binary_kernel_simd!(mul_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_mul_f64, |a, b| a * b);
-binary_kernel!(mul_i32_direct, as_i32_slice, as_i32_slice_mut, "i32", |a, b| a * b);
-binary_kernel!(mul_i64_direct, as_i64_slice, as_i64_slice_mut, "i64", |a, b| a * b);
-binary_kernel!(mul_bool_direct, as_bool_slice, as_bool_slice_mut, "bool", |a, b| a && b);
+binary_kernel_simd!(
+    mul_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    simd_mul_f32,
+    |a, b| a * b
+);
+binary_kernel_simd!(
+    mul_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    simd_mul_f64,
+    |a, b| a * b
+);
+binary_kernel!(
+    mul_i32_direct,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    |a, b| a * b
+);
+binary_kernel!(
+    mul_i64_direct,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    |a, b| a * b
+);
+binary_kernel!(
+    mul_bool_direct,
+    as_bool_slice,
+    as_bool_slice_mut,
+    "bool",
+    |a, b| a && b
+);
 
 // Division: integer and bool operands coerce to floating point beforehand.
-binary_kernel_simd!(div_f32_direct, as_f32_slice, as_f32_slice_mut, "f32", simd_div_f32, |a, b| a / b);
-binary_kernel_simd!(div_f64_direct, as_f64_slice, as_f64_slice_mut, "f64", simd_div_f64, |a, b| a / b);
+binary_kernel_simd!(
+    div_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    simd_div_f32,
+    |a, b| a / b
+);
+binary_kernel_simd!(
+    div_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    simd_div_f64,
+    |a, b| a / b
+);
 
 /// Generic broadcasting binary operation
 pub(crate) fn broadcast_binary_op<T, F>(
@@ -295,6 +408,9 @@ where
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::operations::arithmetic::{add, div, mul, neg, sub};
+    use crate::tensor::DataType;
+    use std::sync::Arc;
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);

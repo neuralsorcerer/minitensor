@@ -4,26 +4,18 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+
 use crate::{
-    autograd::{
-        CumprodBackward, CumsumBackward, GatherBackward, MedianBackward, MinMaxBackward,
-        NanMeanBackward, NanSumBackward, ProdBackward, QuantileBackward, SumBackward, add_to_graph,
-    },
+    autograd::{MedianBackward, QuantileBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::{
-        activation, arithmetic, shape_ops,
-        simd::{
-            simd_prod_f32, simd_prod_f64, simd_prod_i32, simd_prod_i64, simd_sum_f32, simd_sum_f64,
-            simd_sum_i32, simd_sum_i64,
-        },
-    },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-const NANQUANTILE_ALL_NAN_ERR: &str = "nanquantile() encountered an all-NaN slice";
+pub(crate) const NANQUANTILE_ALL_NAN_ERR: &str = "nanquantile() encountered an all-NaN slice";
 
 /// Interpolation modes supported by the quantile reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +29,7 @@ pub enum QuantileInterpolation {
 
 impl QuantileInterpolation {
     #[inline(always)]
-    fn interpolate(self, lower: f64, upper: f64, weight: f64) -> f64 {
+    pub(crate) fn interpolate(self, lower: f64, upper: f64, weight: f64) -> f64 {
         match self {
             QuantileInterpolation::Linear => lower + (upper - lower) * weight,
             QuantileInterpolation::Lower => lower,
@@ -47,17 +39,16 @@ impl QuantileInterpolation {
                 // Index-aware callers should route through `nearest_index_with_tie_even`
                 // for tie-to-even behavior. This fallback remains
                 // deterministic for non-indexed interpolation use-cases.
-                if weight < 0.5 {
-                    lower
-                } else {
-                    upper
-                }
+                if weight < 0.5 { lower } else { upper }
             }
         }
     }
 }
 
-fn normalize_reduction_dims(dims: Option<Vec<isize>>, ndim: usize) -> Result<Option<Vec<usize>>> {
+pub(crate) fn normalize_reduction_dims(
+    dims: Option<Vec<isize>>,
+    ndim: usize,
+) -> Result<Option<Vec<usize>>> {
     let ndim = ndim as isize;
     Ok(match dims {
         Some(dims) => {
@@ -77,7 +68,7 @@ fn normalize_reduction_dims(dims: Option<Vec<isize>>, ndim: usize) -> Result<Opt
     })
 }
 
-fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
+pub(crate) fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
     let numel = tensor.numel();
     let mut mask = vec![false; numel];
 
@@ -120,7 +111,7 @@ fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
-fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
+pub(crate) fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     match (a.1.is_nan(), b.1.is_nan()) {
         (true, true) => a.0.cmp(&b.0),
         (true, false) => Ordering::Less,
@@ -132,7 +123,7 @@ fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     }
 }
 
-fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
+pub(crate) fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     match (a.1.is_nan(), b.1.is_nan()) {
         (true, true) => a.0.cmp(&b.0),
         (true, false) => Ordering::Greater,
@@ -144,7 +135,7 @@ fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     }
 }
 
-fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+pub(crate) fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
     match (a.1.is_nan(), b.1.is_nan()) {
         (true, true) => a.0.cmp(&b.0),
         (true, false) => Ordering::Less,
@@ -156,7 +147,7 @@ fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
     }
 }
 
-fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+pub(crate) fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
     match (a.1.is_nan(), b.1.is_nan()) {
         (true, true) => a.0.cmp(&b.0),
         (true, false) => Ordering::Greater,
@@ -168,35 +159,35 @@ fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
     }
 }
 
-fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
+pub(crate) fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
     match b.1.cmp(&a.1) {
         Ordering::Equal => a.0.cmp(&b.0),
         order => order,
     }
 }
 
-fn cmp_i32_asc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
+pub(crate) fn cmp_i32_asc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
     match a.1.cmp(&b.1) {
         Ordering::Equal => a.0.cmp(&b.0),
         order => order,
     }
 }
 
-fn cmp_i64_desc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
+pub(crate) fn cmp_i64_desc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
     match b.1.cmp(&a.1) {
         Ordering::Equal => a.0.cmp(&b.0),
         order => order,
     }
 }
 
-fn cmp_i64_asc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
+pub(crate) fn cmp_i64_asc(a: &(usize, i64), b: &(usize, i64)) -> Ordering {
     match a.1.cmp(&b.1) {
         Ordering::Equal => a.0.cmp(&b.0),
         order => order,
     }
 }
 
-fn cmp_bool_desc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
+pub(crate) fn cmp_bool_desc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
     match (a.1, b.1) {
         (true, true) | (false, false) => a.0.cmp(&b.0),
         (true, false) => Ordering::Less,
@@ -204,7 +195,7 @@ fn cmp_bool_desc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
     }
 }
 
-fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
+pub(crate) fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
     match (a.1, b.1) {
         (true, true) | (false, false) => a.0.cmp(&b.0),
         (true, false) => Ordering::Greater,
@@ -212,7 +203,7 @@ fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
     }
 }
 
-fn ensure_non_empty(numel: usize) -> Result<()> {
+pub(crate) fn ensure_non_empty(numel: usize) -> Result<()> {
     if numel == 0 {
         Err(MinitensorError::invalid_argument(
             "median() does not support empty tensors".to_string(),
@@ -516,7 +507,7 @@ fn ensure_floating_point_dtype_for(dtype: DataType, operation: &str) -> Result<(
     }
 }
 
-fn fill_quantile_single_f32(
+pub(crate) fn fill_quantile_single_f32(
     input: &[f32],
     values: &mut [f32],
     outer: usize,
@@ -532,7 +523,7 @@ fn fill_quantile_single_f32(
     }
 }
 
-fn fill_quantile_single_f64(
+pub(crate) fn fill_quantile_single_f64(
     input: &[f64],
     values: &mut [f64],
     outer: usize,
@@ -548,7 +539,7 @@ fn fill_quantile_single_f64(
     }
 }
 
-fn fill_quantiles_single_f32(
+pub(crate) fn fill_quantiles_single_f32(
     input: &[f32],
     values: &mut [f32],
     outer: usize,
@@ -568,7 +559,7 @@ fn fill_quantiles_single_f32(
     }
 }
 
-fn fill_quantiles_single_f64(
+pub(crate) fn fill_quantiles_single_f64(
     input: &[f64],
     values: &mut [f64],
     outer: usize,
@@ -588,7 +579,7 @@ fn fill_quantiles_single_f64(
     }
 }
 
-fn fill_nanquantile_single_f32(
+pub(crate) fn fill_nanquantile_single_f32(
     input: &[f32],
     values: &mut [f32],
     outer: usize,
@@ -610,7 +601,7 @@ fn fill_nanquantile_single_f32(
     Ok(())
 }
 
-fn fill_nanquantile_single_f64(
+pub(crate) fn fill_nanquantile_single_f64(
     input: &[f64],
     values: &mut [f64],
     outer: usize,
@@ -632,7 +623,7 @@ fn fill_nanquantile_single_f64(
     Ok(())
 }
 
-fn fill_nanquantiles_single_f32(
+pub(crate) fn fill_nanquantiles_single_f32(
     input: &[f32],
     values: &mut [f32],
     outer: usize,
@@ -658,7 +649,7 @@ fn fill_nanquantiles_single_f32(
     Ok(())
 }
 
-fn fill_nanquantiles_single_f64(
+pub(crate) fn fill_nanquantiles_single_f64(
     input: &[f64],
     values: &mut [f64],
     outer: usize,
@@ -684,7 +675,7 @@ fn fill_nanquantiles_single_f64(
     Ok(())
 }
 
-fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
+pub(crate) fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
     if value.is_nan() {
         values.fill(f32::NAN);
     } else {
@@ -692,7 +683,7 @@ fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
     }
 }
 
-fn fill_quantiles_all_single_f64(value: f64, values: &mut [f64]) {
+pub(crate) fn fill_quantiles_all_single_f64(value: f64, values: &mut [f64]) {
     if value.is_nan() {
         values.fill(f64::NAN);
     } else {
@@ -700,7 +691,7 @@ fn fill_quantiles_all_single_f64(value: f64, values: &mut [f64]) {
     }
 }
 
-fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) -> Result<()> {
+pub(crate) fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) -> Result<()> {
     if value.is_nan() {
         return Err(MinitensorError::invalid_argument(
             NANQUANTILE_ALL_NAN_ERR.to_string(),
@@ -710,7 +701,7 @@ fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) -> Result<()
     Ok(())
 }
 
-fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) -> Result<()> {
+pub(crate) fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) -> Result<()> {
     if value.is_nan() {
         return Err(MinitensorError::invalid_argument(
             NANQUANTILE_ALL_NAN_ERR.to_string(),
@@ -721,14 +712,14 @@ fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) -> Result<()
 }
 
 #[derive(Clone, Copy)]
-struct QuantilePosition {
-    lower_idx: usize,
-    upper_idx: usize,
-    nearest_idx: usize,
-    weight: f64,
+pub(crate) struct QuantilePosition {
+    pub(crate) lower_idx: usize,
+    pub(crate) upper_idx: usize,
+    pub(crate) nearest_idx: usize,
+    pub(crate) weight: f64,
 }
 
-fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<QuantilePosition> {
+pub(crate) fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<QuantilePosition> {
     let mut positions = Vec::with_capacity(qs.len());
     for &q in qs {
         positions.push(quantile_position_for_len_q(len, q));
@@ -737,7 +728,7 @@ fn quantile_positions_for_len(len: usize, qs: &[f64]) -> Vec<QuantilePosition> {
 }
 
 #[inline(always)]
-fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePosition {
+pub(crate) fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePosition {
     if len <= 1 {
         return QuantilePosition {
             lower_idx: 0,
@@ -762,7 +753,7 @@ fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePosition {
     }
 }
 
-fn quantiles_from_sorted_f32(
+pub(crate) fn quantiles_from_sorted_f32(
     values: &[f32],
     positions: &[QuantilePosition],
     interpolation: QuantileInterpolation,
@@ -773,7 +764,7 @@ fn quantiles_from_sorted_f32(
     }
 }
 
-fn quantiles_from_sorted_f64(
+pub(crate) fn quantiles_from_sorted_f64(
     values: &[f64],
     positions: &[QuantilePosition],
     interpolation: QuantileInterpolation,
@@ -789,7 +780,10 @@ fn nearest_index_with_tie_even(lower_idx: usize, upper_idx: usize, weight: f64) 
     debug_assert!((0.0..=1.0).contains(&weight));
 
     if upper_idx <= lower_idx {
-        debug_assert_eq!(upper_idx, lower_idx, "nearest_index_with_tie_even requires upper_idx >= lower_idx");
+        debug_assert_eq!(
+            upper_idx, lower_idx,
+            "nearest_index_with_tie_even requires upper_idx >= lower_idx"
+        );
         return lower_idx;
     }
 
@@ -804,7 +798,7 @@ fn nearest_index_with_tie_even(lower_idx: usize, upper_idx: usize, weight: f64) 
     }
 }
 
-fn quantile_from_sorted_position_f32(
+pub(crate) fn quantile_from_sorted_position_f32(
     values: &[f32],
     position: &QuantilePosition,
     interpolation: QuantileInterpolation,
@@ -821,7 +815,7 @@ fn quantile_from_sorted_position_f32(
     }
 }
 
-fn quantile_from_sorted_position_f64(
+pub(crate) fn quantile_from_sorted_position_f64(
     values: &[f64],
     position: &QuantilePosition,
     interpolation: QuantileInterpolation,
@@ -1097,7 +1091,10 @@ mod core_tests {
             false,
         );
         let f64_mask = non_nan_mask(&f64_tensor).unwrap();
-        assert_eq!(f64_mask.data().as_bool_slice().unwrap(), &[false, true, true],);
+        assert_eq!(
+            f64_mask.data().as_bool_slice().unwrap(),
+            &[false, true, true],
+        );
 
         let bool_tensor = Tensor::new(
             Arc::new(TensorData::from_vec_bool(vec![true, false], Device::cpu())),
@@ -1115,25 +1112,37 @@ mod core_tests {
         f32_desc.sort_by(cmp_f32_desc);
         assert!(f32_desc[0].1.is_nan());
         assert_eq!(f32_desc[0].0, 2);
-        assert_eq!(f32_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            f32_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
 
         let mut f32_asc = [(1, 2.0f32), (0, 2.0), (2, f32::NAN)];
         f32_asc.sort_by(cmp_f32_asc);
         assert!(f32_asc[2].1.is_nan());
         assert_eq!(f32_asc[2].0, 2);
-        assert_eq!(f32_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            f32_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
 
         let mut f64_desc = [(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
         f64_desc.sort_by(cmp_f64_desc);
         assert!(f64_desc[0].1.is_nan());
         assert_eq!(f64_desc[0].0, 2);
-        assert_eq!(f64_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            f64_desc[1..].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
 
         let mut f64_asc = [(1, 2.0f64), (0, 2.0), (2, f64::NAN)];
         f64_asc.sort_by(cmp_f64_asc);
         assert!(f64_asc[2].1.is_nan());
         assert_eq!(f64_asc[2].0, 2);
-        assert_eq!(f64_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            f64_asc[..2].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
 
         let mut i32_desc = vec![(1, 7_i32), (0, 7_i32), (2, 1_i32)];
         i32_desc.sort_by(cmp_i32_desc);

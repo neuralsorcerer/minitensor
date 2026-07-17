@@ -4,7 +4,15 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
+pub(crate) fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let layout = reduction_layout(tensor, dim, keepdim)?;
     let mut result_data = TensorData::zeros_on_device(
         layout.output_shape.numel(),
@@ -141,7 +149,11 @@ fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor
 
 macro_rules! cumprod_forward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
-        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            result_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
             let input_data = tensor
                 .data()
                 .$get()
@@ -220,7 +232,7 @@ macro_rules! cumprod_forward {
 
 macro_rules! cumprod_backward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
-        fn $name(
+        pub(crate) fn $name(
             input: &Tensor,
             output: &Tensor,
             grad: &Tensor,
@@ -471,7 +483,11 @@ macro_rules! cumprod_backward {
 
 macro_rules! cumsum_forward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
-        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            result_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
             let input_data = tensor
                 .data()
                 .$get()
@@ -550,7 +566,11 @@ macro_rules! cumsum_forward {
 
 macro_rules! cumsum_backward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
-        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            result_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
             let input_data = tensor
                 .data()
                 .$get()
@@ -651,6 +671,7 @@ cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::tensor::Shape;
     use std::sync::Arc;
 
     fn create_tensor_f32(data: Vec<f32>, shape: Vec<usize>) -> Tensor {

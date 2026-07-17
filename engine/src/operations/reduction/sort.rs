@@ -4,6 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::operations::shape_ops;
+use crate::operations::simd::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
 pub fn sort(
     tensor: &Tensor,
     dim: Option<isize>,
@@ -367,13 +377,23 @@ pub fn argsort(
 }
 
 /// Standard deviation along specified dimensions
-pub fn std(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
+pub fn std(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<Tensor> {
     let variance = var(tensor, dim, keepdim, unbiased)?;
     crate::operations::activation::sqrt(&variance)
 }
 
 /// Variance along specified dimensions
-pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Tensor> {
+pub fn var(
+    tensor: &Tensor,
+    dim: Option<Vec<isize>>,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
             "Variance only supported for floating point tensors",
@@ -402,9 +422,7 @@ pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bo
         return Ok(tensor.clone());
     }
 
-    let reduction_dims: Vec<usize> = dims
-        .clone()
-        .unwrap_or_else(|| (0..tensor.ndim()).collect());
+    let reduction_dims: Vec<usize> = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
     let reduction_dims_isize: Vec<isize> = reduction_dims.iter().map(|&d| d as isize).collect();
 
     // Keep reduced axes while computing deviations so broadcasting is unambiguous for
@@ -423,8 +441,12 @@ pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bo
         if sample_count <= 1 {
             let nan_count = variance.numel();
             let nan_data = match variance.dtype() {
-                DataType::Float32 => TensorData::from_vec_f32(vec![f32::NAN; nan_count], variance.device()),
-                DataType::Float64 => TensorData::from_vec_f64(vec![f64::NAN; nan_count], variance.device()),
+                DataType::Float32 => {
+                    TensorData::from_vec_f32(vec![f32::NAN; nan_count], variance.device())
+                }
+                DataType::Float64 => {
+                    TensorData::from_vec_f64(vec![f64::NAN; nan_count], variance.device())
+                }
                 _ => unreachable!("variance is only defined for floating point tensors"),
             };
             variance = Tensor::new(
@@ -438,14 +460,20 @@ pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bo
             let correction = sample_count as f64 / (sample_count - 1) as f64;
             let correction_tensor = match variance.dtype() {
                 DataType::Float32 => Tensor::new(
-                    Arc::new(TensorData::from_vec_f32(vec![correction as f32], variance.device())),
+                    Arc::new(TensorData::from_vec_f32(
+                        vec![correction as f32],
+                        variance.device(),
+                    )),
                     Shape::scalar(),
                     DataType::Float32,
                     variance.device(),
                     false,
                 ),
                 DataType::Float64 => Tensor::new(
-                    Arc::new(TensorData::from_vec_f64(vec![correction], variance.device())),
+                    Arc::new(TensorData::from_vec_f64(
+                        vec![correction],
+                        variance.device(),
+                    )),
                     Shape::scalar(),
                     DataType::Float64,
                     variance.device(),
@@ -477,7 +505,7 @@ pub fn var(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bo
 
 // Helper functions for type-specific operations
 
-fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -497,7 +525,7 @@ fn prod_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -517,7 +545,7 @@ fn prod_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -537,7 +565,7 @@ fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -557,7 +585,7 @@ fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn prod_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn prod_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_bool_slice()
@@ -573,7 +601,7 @@ fn prod_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -593,7 +621,7 @@ fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -613,7 +641,7 @@ fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -633,7 +661,7 @@ fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -653,7 +681,7 @@ fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -671,7 +699,7 @@ fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -689,7 +717,7 @@ fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nanmean_all_f32(
+pub(crate) fn nanmean_all_f32(
     tensor: &Tensor,
     sum_data: &mut TensorData,
     count_data: &mut TensorData,
@@ -722,7 +750,7 @@ fn nanmean_all_f32(
     Ok(())
 }
 
-fn nanmean_all_f64(
+pub(crate) fn nanmean_all_f64(
     tensor: &Tensor,
     sum_data: &mut TensorData,
     count_data: &mut TensorData,
@@ -755,7 +783,11 @@ fn nanmean_all_f64(
     Ok(())
 }
 
-fn nanmean_from_sum_count(sum: &Tensor, count: &Tensor, requires_grad: bool) -> Result<Tensor> {
+pub(crate) fn nanmean_from_sum_count(
+    sum: &Tensor,
+    count: &Tensor,
+    requires_grad: bool,
+) -> Result<Tensor> {
     if sum.dtype() != count.dtype() || sum.shape() != count.shape() {
         return Err(MinitensorError::invalid_operation(
             "nanmean requires sum and count tensors with matching dtype and shape",

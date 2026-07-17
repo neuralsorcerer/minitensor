@@ -4,23 +4,18 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+
 use crate::{
     autograd::{AddBackward, DivBackward, MulBackward, NegBackward, SubBackward, add_to_graph},
     error::{MinitensorError, Result},
-    operations::{
-        binary::{BinaryOpKind, coerce_binary_operands},
-        simd::{
-            can_use_simd_fast_path, simd_add_f32, simd_add_f64, simd_div_f32, simd_div_f64,
-            simd_mul_f32, simd_mul_f64, simd_sub_f32, simd_sub_f64,
-        },
-    },
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    operations::binary::{BinaryOpKind, coerce_binary_operands},
+    tensor::{DataType, Tensor, TensorData},
 };
 use rayon::prelude::*;
-use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
-const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {

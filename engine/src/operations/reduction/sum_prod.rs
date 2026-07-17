@@ -4,7 +4,19 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+use crate::operations::simd::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
+pub(crate) fn sum_along_dim_f32(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_f32_slice()
@@ -83,7 +95,11 @@ fn sum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     Ok(())
 }
 
-fn nansum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn nansum_along_dim_f32(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_f32_slice()
@@ -167,7 +183,11 @@ fn nansum_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usiz
     Ok(())
 }
 
-fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn sum_along_dim_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_f64_slice()
@@ -246,7 +266,11 @@ fn sum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     Ok(())
 }
 
-fn nansum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn nansum_along_dim_f64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_f64_slice()
@@ -330,7 +354,11 @@ fn nansum_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usiz
     Ok(())
 }
 
-fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn sum_along_dim_i32(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_i32_slice()
@@ -409,7 +437,11 @@ fn sum_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) 
     Ok(())
 }
 
-fn sum_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn sum_along_dim_i64(
+    tensor: &Tensor,
+    result_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     let input_data = tensor
         .data()
         .as_i64_slice()
@@ -674,7 +706,7 @@ fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize
 }
 
 // Helper implementations for max/min operations
-fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -699,7 +731,7 @@ fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -724,7 +756,7 @@ fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn max_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn max_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -740,7 +772,7 @@ fn max_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn max_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn max_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -756,7 +788,7 @@ fn max_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_bool_slice()
@@ -773,7 +805,7 @@ fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
 }
 
 // Similar implementations for min functions
-fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -798,7 +830,7 @@ fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -823,7 +855,7 @@ fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn min_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn min_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -839,7 +871,7 @@ fn min_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn min_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn min_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -855,7 +887,7 @@ fn min_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_bool_slice()
@@ -871,7 +903,7 @@ fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nanmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn nanmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()

@@ -4,7 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn min_along_dim_with_indices(
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Tensor, TensorData},
+};
+use std::sync::Arc;
+
+pub(crate) fn min_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
@@ -183,7 +190,7 @@ fn min_along_dim_with_indices(
     ))
 }
 
-fn nanmin_along_dim_with_indices(
+pub(crate) fn nanmin_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
@@ -279,7 +286,7 @@ fn nanmin_along_dim_with_indices(
     ))
 }
 
-fn argmax_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn argmax_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let layout = reduction_layout(tensor, dim, keepdim)?;
     let mut result_data = TensorData::zeros_on_device(
         layout.output_shape.numel(),

@@ -6,8 +6,8 @@
 
 use crate::{
     autograd::{
-        ConcatBackward, GatherBackward, IndexSelectBackward, RepeatBackward,
-        RepeatInterleaveBackward, ReshapeBackward, add_to_graph,
+        ConcatBackward, GatherBackward, IndexSelectBackward, RepeatBackward, ReshapeBackward,
+        add_to_graph,
     },
     device::Device,
     error::{MinitensorError, Result},
@@ -16,7 +16,7 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     let dim = if dim < 0 { dim + ndim as isize } else { dim };
     if dim < 0 || dim >= ndim as isize {
         Err(MinitensorError::index_error(dim, 0, ndim))
@@ -174,7 +174,6 @@ pub fn reshape_with_inference(tensor: &Tensor, dims: Vec<isize>) -> Result<Tenso
 
     reshape(tensor, Shape::new(out_dims))
 }
-
 
 /// Squeeze operation - remove dimensions of size 1.
 ///
@@ -468,7 +467,13 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
         DataType::Bool => concat_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+    let output = Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    );
 
     if requires_grad && dtype.is_float() {
         let grad_fn = Arc::new(ConcatBackward {
@@ -650,7 +655,13 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
         DataType::Bool => index_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+    let output = Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    );
 
     if requires_grad && dtype.is_float() {
         let grad_fn = Arc::new(IndexSelectBackward {
@@ -768,7 +779,13 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
         DataType::Bool => gather_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+    let output = Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    );
 
     if requires_grad && dtype.is_float() {
         let grad_fn = Arc::new(GatherBackward {
@@ -857,7 +874,13 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
         DataType::Bool => slice_impl!(bool, as_bool_slice, from_vec_bool),
     };
 
-    let output = Tensor::new(Arc::new(data), output_shape_obj, dtype, device, requires_grad);
+    let output = Tensor::new(
+        Arc::new(data),
+        output_shape_obj,
+        dtype,
+        device,
+        requires_grad,
+    );
 
     if requires_grad && dtype.is_float() {
         // A slice selects source positions `start, start+step, ...` along `dim`;
@@ -1037,7 +1060,7 @@ where
     Ok(out)
 }
 
-fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<usize>> {
+pub(crate) fn collect_repeats_from_tensor(tensor: &Tensor, dim_size: usize) -> Result<Vec<usize>> {
     if !tensor.device().is_cpu() {
         return Err(MinitensorError::invalid_operation(
             "repeat_interleave: repeats tensor must reside on CPU".to_string(),
@@ -1171,12 +1194,20 @@ mod reshape_tests {
         let result = reshape_with_inference(&tensor, vec![2, 3]);
 
         assert!(result.is_ok());
-        assert_eq!(result.expect("reshape should succeed").shape().dims(), &[2, 3]);
+        assert_eq!(
+            result.expect("reshape should succeed").shape().dims(),
+            &[2, 3]
+        );
     }
 
     #[test]
     fn reshape_with_inference_infers_single_negative_dimension() {
-        let tensor = Tensor::zeros(Shape::new(vec![12]), DataType::Float32, Device::cpu(), false);
+        let tensor = Tensor::zeros(
+            Shape::new(vec![12]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
 
         let reshaped = reshape_with_inference(&tensor, vec![3, -1]).expect("reshape should work");
 

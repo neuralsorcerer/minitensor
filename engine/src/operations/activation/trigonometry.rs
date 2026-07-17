@@ -4,6 +4,28 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::autograd::EluBackward;
+use crate::autograd::GeluBackward;
+use crate::autograd::HardshrinkBackward;
+use crate::autograd::LeakyReluBackward;
+use crate::autograd::LogAddExpBackward;
+use crate::autograd::LogSoftmaxBackward;
+use crate::autograd::PowBackward;
+use crate::autograd::PowBroadcast;
+use crate::autograd::ReluBackward;
+use crate::autograd::SeluBackward;
+use crate::autograd::SiluBackward;
+use crate::autograd::SoftmaxBackward;
+use crate::autograd::SoftplusBackward;
+use crate::autograd::SoftsignBackward;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Tensor, TensorData},
+};
+use std::sync::Arc;
+
 /// Element-wise power with tensor exponent and gradient support
 pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     // Check device and dtype compatibility

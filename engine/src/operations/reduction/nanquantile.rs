@@ -4,7 +4,17 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn nanquantiles_along_dim(
+use super::*;
+use crate::autograd::NanSumBackward;
+use crate::autograd::SumBackward;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use std::sync::Arc;
+
+pub(crate) fn nanquantiles_along_dim(
     tensor: &Tensor,
     dim: usize,
     qs: &[f64],
@@ -219,7 +229,7 @@ fn nanquantiles_along_dim(
     ))
 }
 
-fn quantile_from_unsorted_f32(
+pub(crate) fn quantile_from_unsorted_f32(
     values: &mut [f32],
     q: f64,
     interpolation: QuantileInterpolation,
@@ -253,7 +263,7 @@ fn quantile_from_unsorted_f32(
     value as f32
 }
 
-fn quantile_from_unsorted_f64(
+pub(crate) fn quantile_from_unsorted_f64(
     values: &mut [f64],
     q: f64,
     interpolation: QuantileInterpolation,
@@ -331,7 +341,7 @@ fn select_quantile_bounds_f64(
     (lower, upper)
 }
 
-fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
+pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
     let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
     match tensor.dtype() {
@@ -449,7 +459,11 @@ fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
     Ok((value, None))
 }
 
-fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tensor, Tensor)> {
+pub(crate) fn median_along_dim(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
     let dims = tensor.shape().dims();
     let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
 
@@ -677,7 +691,7 @@ fn median_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<(Tenso
     Ok((values, indices))
 }
 
-fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     let dim = if dim < 0 { dim + ndim as isize } else { dim };
     if dim < 0 || dim >= ndim as isize {
         Err(MinitensorError::index_error(dim, 0, ndim))

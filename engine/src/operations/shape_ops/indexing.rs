@@ -4,6 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::autograd::RepeatInterleaveBackward;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
 fn expand_repeats(spec: RepeatInterleaveSpec<'_>, dim_size: usize) -> Result<Vec<usize>> {
     match spec {
         RepeatInterleaveSpec::Scalar(value) => Ok(vec![value; dim_size]),
@@ -73,11 +83,12 @@ pub fn repeat_interleave(
     let total_repeats: usize = reps.iter().sum();
 
     if let Some(expected) = output_size
-        && expected != total_repeats {
-            return Err(MinitensorError::invalid_argument(format!(
-                "repeat_interleave: output_size ({expected}) must equal sum of repeats ({total_repeats})"
-            )));
-        }
+        && expected != total_repeats
+    {
+        return Err(MinitensorError::invalid_argument(format!(
+            "repeat_interleave: output_size ({expected}) must equal sum of repeats ({total_repeats})"
+        )));
+    }
 
     let dtype = tensor.dtype();
     let device = tensor.device();

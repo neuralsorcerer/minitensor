@@ -4,7 +4,19 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+use super::*;
+use crate::autograd::GatherBackward;
+use crate::autograd::MinMaxBackward;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::sync::Arc;
+
+pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
         return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
     }
@@ -191,7 +203,7 @@ pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
 /// gathering the input along `dim` at `indices` (`sort`/`topk`). The forward is
 /// `values = gather(input, dim, indices)`, so the backward scatters the gradient
 /// straight back to the selected source positions.
-fn attach_gather_like_grad(
+pub(crate) fn attach_gather_like_grad(
     values: Tensor,
     input: &Tensor,
     dim: usize,

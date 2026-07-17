@@ -4,6 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+
 use crate::{
     autograd::{
         BCELossBackward, CrossEntropyLossBackward, FocalLossBackward, HuberLossBackward,
@@ -19,10 +21,9 @@ use crate::{
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
-const CHUNK: usize = 1024;
+pub(crate) const CHUNK: usize = 1024;
 
 /// Mean Squared Error (MSE) loss function
 ///
@@ -112,7 +113,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     // Compute absolute differences: |predictions - targets|
     // Also compute the sign for gradient computation
     let diff = sub(predictions, targets)?;
-    let sign_diff = sign(&diff)?;
+    let sign_diff = sign_tensor(&diff)?;
     let sign_for_grad = sign_diff.clone().detach();
     let abs_diff = activation_abs(&diff.detach())?;
 
@@ -168,7 +169,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
 /// Cross Entropy loss function for classification
 ///
 /// Computes the cross entropy loss between predictions (logits) and targets:
-/// CE = -Σ(targets * log(softmax(predictions)))
+/// CE = -Σ(targets * log_tensor(softmax(predictions)))
 ///
 /// # Arguments
 /// * `predictions` - Model predictions (logits) tensor
@@ -205,8 +206,7 @@ pub fn cross_entropy_loss(
     let eps_mask = comparison::eq(&eps_template, &eps_template)?;
     let eps_tensor = masked_fill_scalar(&eps_template, &eps_mask, eps)?;
     let zero_mask = comparison::le(&softmax_predictions, &eps_tensor)?;
-    let log_predictions =
-        masked_fill_scalar(&log_predictions_base, &zero_mask, f64::NEG_INFINITY)?;
+    let log_predictions = masked_fill_scalar(&log_predictions_base, &zero_mask, f64::NEG_INFINITY)?;
 
     // Compute negative log likelihood summed over classes
     let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
@@ -313,7 +313,7 @@ pub fn cross_entropy(
 /// Binary Cross Entropy loss function
 ///
 /// Computes the binary cross entropy loss between predictions and targets:
-/// BCE = -Σ(targets * log(predictions) + (1 - targets) * log(1 - predictions))
+/// BCE = -Σ(targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions))
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor (probabilities between 0 and 1)
@@ -330,8 +330,8 @@ pub fn binary_cross_entropy_loss(
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute BCE: -[targets * log(predictions) + (1 - targets) * log(1 - predictions)]
-    let log_predictions = log(predictions)?;
+    // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
+    let log_predictions = log_tensor(predictions)?;
 
     let ones = Tensor::ones(
         predictions.shape().clone(),
@@ -341,7 +341,7 @@ pub fn binary_cross_entropy_loss(
     );
     let one_minus_targets = sub(&ones, targets)?;
     let one_minus_predictions = sub(&ones, predictions)?;
-    let log_one_minus_predictions = log(&one_minus_predictions)?;
+    let log_one_minus_predictions = log_tensor(&one_minus_predictions)?;
 
     let term1 = mul(targets, &log_predictions)?;
     let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
@@ -398,14 +398,14 @@ pub fn binary_cross_entropy_loss(
 /// Kullback-Leibler divergence loss function
 ///
 /// Computes KL divergence between target and prediction distributions:
-/// KL(target || prediction) = Σ target * (log(target) - log(prediction))
+/// KL(target || prediction) = Σ target * (log_tensor(target) - log_tensor(prediction))
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute elementwise targets * (log(targets) - log(predictions))
-    let log_targets = log(targets)?;
-    let log_predictions = log(predictions)?;
+    // Compute elementwise targets * (log_tensor(targets) - log_tensor(predictions))
+    let log_targets = log_tensor(targets)?;
+    let log_predictions = log_tensor(predictions)?;
     let diff = sub(&log_targets, &log_predictions)?;
     let kld = mul(targets, &diff)?;
 
@@ -459,7 +459,7 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
 /// Focal loss function for handling class imbalance
 ///
 /// Computes the focal loss, which is a modified cross entropy loss:
-/// FL = -α * (1 - p_t)^γ * log(p_t)
+/// FL = -α * (1 - p_t)^γ * log_tensor(p_t)
 /// where p_t is the predicted probability for the true class
 ///
 /// # Arguments
@@ -661,8 +661,8 @@ pub fn smooth_l1_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -
 
 /// Log-cosh loss for robust regression
 ///
-/// Computes log(cosh(x)) where x = predictions - targets using a numerically
-/// stable formulation: |x| + log1p(exp(-2|x|)) - log(2).
+/// Computes log_tensor(cosh(x)) where x = predictions - targets using a numerically
+/// stable formulation: |x| + log1p(exp(-2|x|)) - log_tensor(2).
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor

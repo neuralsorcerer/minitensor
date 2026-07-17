@@ -4,27 +4,24 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+
 use crate::{
     autograd::{
-        AbsBackward, AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward,
-        AtanhBackward, ClampBackward, CosBackward, CoshBackward, EluBackward, ExpBackward,
-        Expm1Backward, GeluBackward, HardshrinkBackward, LeakyReluBackward, Log1pBackward,
-        LogAddExpBackward, LogBackward, LogSoftmaxBackward, MaskedLogSoftmaxBackward,
-        NanToNumBackward, PowBackward, PowBroadcast, ReluBackward, SeluBackward, SigmoidBackward,
-        SiluBackward, SinBackward, SinhBackward, SoftmaxBackward, SoftplusBackward, SoftsignBackward,
-        TanBackward, TanhBackward, add_to_graph,
+        AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
+        CosBackward, CoshBackward, ExpBackward, Expm1Backward, Log1pBackward, LogBackward,
+        SigmoidBackward, SinBackward, SinhBackward, TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    tensor::{DataType, Tensor, TensorData},
 };
-use libm::{erf, erff};
 use rayon::prelude::*;
 use std::sync::Arc;
 
-const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
 #[inline(always)]
-fn unary_apply<T, F>(input: &[T], output: &mut [T], op: F)
+pub(crate) fn unary_apply<T, F>(input: &[T], output: &mut [T], op: F)
 where
     T: Copy + Send + Sync,
     F: Fn(T) -> T + Sync + Send,

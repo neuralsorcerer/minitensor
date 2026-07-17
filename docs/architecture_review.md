@@ -347,12 +347,17 @@ Still open, in priority order:
 1. **dtype dispatch macro for the remaining ops files** — activation and
    reduction kernels still carry per-dtype copies (storage accessors,
    arithmetic, and comparison are done).
-2. **Convert the remaining `include!` clusters** (`operations/*`, bindings
-   `pytensor/*`) — `autograd` and `tensor` are done; then drop the
-   crate-wide `items_after_test_module` allow. The `tensor` conversion
-   uses a children-of-core layout (`ops`/`indexing`/`autograd`/`utils` are
-   child modules of the module declaring `Tensor`), which preserves the
-   struct's field privacy — no field had to become `pub(crate)`.
+2. **Convert the remaining `include!` clusters** — engine-side conversion
+   is complete: `autograd`, `tensor`, and all seven `operations` clusters
+   (27 files) are real modules. Kernel-only submodules re-export at
+   `pub(crate)` so internal helpers stop leaking into the public API. The
+   `tensor` conversion uses a children-of-core layout (`ops`/`indexing`/
+   `autograd`/`utils` are child modules of the module declaring `Tensor`),
+   preserving the struct's field privacy — no field had to become
+   `pub(crate)`. Left: the feature-gated `backends/opencl` pair (not
+   compiled by default, so a conversion could not be validated here) and
+   the bindings clusters (`tensor.rs`: 19 files, `nn.rs`: 2); then drop
+   the crate-wide `items_after_test_module` allow.
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.

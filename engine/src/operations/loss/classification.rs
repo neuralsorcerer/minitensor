@@ -4,7 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn fill_one_hot_f64<T, F>(
+use super::*;
+use crate::operations::arithmetic::mul;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
+pub(crate) fn fill_one_hot_f64<T, F>(
     indices: &[T],
     out: &mut [f64],
     num_classes: usize,
@@ -21,7 +30,7 @@ where
 }
 
 /// Compute the sign of each tensor element (-1.0, 0.0, or 1.0)
-fn sign(tensor: &Tensor) -> Result<Tensor> {
+pub(crate) fn sign_tensor(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
         TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
@@ -95,7 +104,7 @@ fn sign(tensor: &Tensor) -> Result<Tensor> {
 }
 
 /// Sum all elements in a tensor to produce a scalar
-fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
+pub(crate) fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
     // Reduced losses are 0-dim scalars; a shape-[1] result breaks float(loss).
     let scalar_shape = Shape::scalar();
     let mut output_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
@@ -160,7 +169,7 @@ fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
 }
 
 /// Divide tensor by a scalar value
-fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
+pub(crate) fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
     let mut output_data =
         TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
@@ -221,7 +230,7 @@ fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
 }
 
 /// Create a scalar tensor with the given value
-fn create_scalar_tensor(
+pub(crate) fn create_scalar_tensor(
     value: f64,
     dtype: DataType,
     device: crate::device::Device,
@@ -259,7 +268,7 @@ fn create_scalar_tensor(
 }
 
 /// Compute Huber loss element-wise
-fn compute_huber_elementwise(
+pub(crate) fn compute_huber_elementwise(
     abs_diff: &Tensor,
     diff: &Tensor,
     _delta_tensor: &Tensor,
@@ -343,7 +352,7 @@ fn compute_huber_elementwise(
 }
 
 /// Compute natural logarithm of tensor elements
-fn log(tensor: &Tensor) -> Result<Tensor> {
+pub(crate) fn log_tensor(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
         TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 
@@ -443,14 +452,17 @@ fn negate(tensor: &Tensor) -> Result<Tensor> {
 }
 
 /// Compute negative log likelihood for classification
-fn negative_log_likelihood(log_predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+pub(crate) fn negative_log_likelihood(
+    log_predictions: &Tensor,
+    targets: &Tensor,
+) -> Result<Tensor> {
     // Simplified implementation - multiply log predictions by targets and negate
     let likelihood = mul(log_predictions, targets)?;
     negate(&likelihood)
 }
 
 /// Raise tensor elements to a power
-fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
+pub(crate) fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
     let mut output_data =
         TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
 

@@ -4,7 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn ceil_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{Tensor, TensorData},
+};
+
+pub(crate) fn ceil_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -19,11 +25,13 @@ fn ceil_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::DataType;
     use crate::{
         autograd,
         device::Device,
         tensor::{Shape, Tensor, TensorData},
     };
+    use std::sync::Arc;
 
     fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);

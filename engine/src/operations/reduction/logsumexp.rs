@@ -4,6 +4,20 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::autograd::CumprodBackward;
+use crate::autograd::CumsumBackward;
+use crate::autograd::NanMeanBackward;
+use crate::autograd::ProdBackward;
+use crate::operations::{activation, arithmetic, shape_ops};
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
 /// Numerically stable log-sum-exp reduction along specified dimensions
 pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     match tensor.dtype() {
@@ -437,9 +451,10 @@ pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
     };
 
     if let Some(dims) = &dim
-        && dims.is_empty() {
-            return Ok(tensor.clone());
-        }
+        && dims.is_empty()
+    {
+        return Ok(tensor.clone());
+    }
 
     let (sum, count) = match dim {
         None => {

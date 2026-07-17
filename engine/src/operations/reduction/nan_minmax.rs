@@ -4,7 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn nanmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
+pub(crate) fn nanmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -37,7 +44,7 @@ fn nanmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nanmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn nanmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -70,7 +77,7 @@ fn nanmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn nanmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn nanmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -104,7 +111,7 @@ fn nanmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
 }
 
 // Placeholder implementations for argmax/argmin
-fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -144,7 +151,7 @@ fn argmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -184,7 +191,7 @@ fn argmax_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmax_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmax_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -205,7 +212,7 @@ fn argmax_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmax_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmax_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -226,7 +233,7 @@ fn argmax_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmax_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmax_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_bool_slice()
@@ -243,7 +250,7 @@ fn argmax_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> 
 }
 
 // Similar implementations for argmin
-fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f32_slice()
@@ -283,7 +290,7 @@ fn argmin_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_f64_slice()
@@ -323,7 +330,7 @@ fn argmin_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmin_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmin_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i32_slice()
@@ -344,7 +351,7 @@ fn argmin_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmin_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmin_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_i64_slice()
@@ -365,7 +372,7 @@ fn argmin_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn argmin_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+pub(crate) fn argmin_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
         .as_bool_slice()
@@ -381,15 +388,19 @@ fn argmin_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> 
     Ok(())
 }
 
-struct DimReductionLayout {
-    output_shape: Shape,
-    dim_size: usize,
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
+pub(crate) struct DimReductionLayout {
+    pub(crate) output_shape: Shape,
+    pub(crate) dim_size: usize,
+    pub(crate) outer: usize,
+    pub(crate) inner: usize,
+    pub(crate) outer_stride: usize,
 }
 
-fn reduction_layout(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<DimReductionLayout> {
+pub(crate) fn reduction_layout(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<DimReductionLayout> {
     if dim >= tensor.ndim() {
         return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
     }
@@ -416,7 +427,7 @@ fn reduction_layout(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<DimRed
 }
 
 // Placeholder implementations for dimensional operations
-fn max_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn max_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let layout = reduction_layout(tensor, dim, keepdim)?;
     let mut result_data =
         TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
@@ -546,7 +557,7 @@ fn max_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     ))
 }
 
-fn min_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn min_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let layout = reduction_layout(tensor, dim, keepdim)?;
     let mut result_data =
         TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
@@ -676,7 +687,7 @@ fn min_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     ))
 }
 
-fn max_along_dim_with_indices(
+pub(crate) fn max_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
@@ -855,7 +866,7 @@ fn max_along_dim_with_indices(
     ))
 }
 
-fn nanmax_along_dim_with_indices(
+pub(crate) fn nanmax_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,

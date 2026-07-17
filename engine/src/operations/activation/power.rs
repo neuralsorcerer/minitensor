@@ -4,6 +4,18 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::autograd::AbsBackward;
+use crate::autograd::ClampBackward;
+use crate::autograd::NanToNumBackward;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
 /// Absolute value function
 pub fn abs(tensor: &Tensor) -> Result<Tensor> {
     let mut output_data =
@@ -132,7 +144,6 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     Ok(output)
 }
 
-
 /// Replace NaN and infinity values in floating point tensors.
 ///
 /// Exact tensors cannot contain NaN or infinity, so they are returned unchanged.
@@ -149,7 +160,9 @@ pub fn nan_to_num(
 
     let mut output_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-    let mut finite_mask = tensor.requires_grad().then(|| Vec::with_capacity(tensor.numel()));
+    let mut finite_mask = tensor
+        .requires_grad()
+        .then(|| Vec::with_capacity(tensor.numel()));
 
     match tensor.dtype() {
         DataType::Float32 => nan_to_num_f32(
@@ -523,7 +536,6 @@ fn clip_i64(
     Ok(())
 }
 
-
 fn nan_to_num_f32(
     tensor: &Tensor,
     output_data: &mut TensorData,
@@ -591,10 +603,8 @@ fn replace_non_finite<T>(
         Some(mask) => {
             mask.resize(input.len(), false);
             if input.len() < PAR_THRESHOLD {
-                for ((&val, out), is_finite) in input
-                    .iter()
-                    .zip(output.iter_mut())
-                    .zip(mask.iter_mut())
+                for ((&val, out), is_finite) in
+                    input.iter().zip(output.iter_mut()).zip(mask.iter_mut())
                 {
                     *is_finite = val.is_finite_value();
                     *out = classify_nan_to_num(val, nan, posinf, neginf);
@@ -610,7 +620,9 @@ fn replace_non_finite<T>(
                     });
             }
         }
-        None => unary_apply(input, output, |val| classify_nan_to_num(val, nan, posinf, neginf)),
+        None => unary_apply(input, output, |val| {
+            classify_nan_to_num(val, nan, posinf, neginf)
+        }),
     }
 }
 

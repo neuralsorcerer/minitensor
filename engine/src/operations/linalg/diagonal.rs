@@ -4,6 +4,17 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::autograd::TransposeBackward;
+use crate::operations::reduction;
+use crate::{
+    autograd::add_to_graph,
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use std::sync::Arc;
+
 /// Transpose operation with gradient support
 pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     let ndim = tensor.ndim() as isize;
@@ -397,7 +408,7 @@ fn copy_and_mask<T: Copy + Default>(
 
 // Helper functions for matrix multiplication
 
-fn matmul_f32(
+pub(crate) fn matmul_f32(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
@@ -417,7 +428,7 @@ fn matmul_f32(
     optimized_matmul_f32(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
-fn matmul_f64(
+pub(crate) fn matmul_f64(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
@@ -437,7 +448,7 @@ fn matmul_f64(
     optimized_matmul_f64(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
-fn matmul_i32(
+pub(crate) fn matmul_i32(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
@@ -464,7 +475,7 @@ fn matmul_i32(
     )
 }
 
-fn matmul_i64(
+pub(crate) fn matmul_i64(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,

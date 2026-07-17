@@ -4,9 +4,18 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::error::MinitensorError;
+use crate::error::Result;
+use crate::tensor::Shape;
+use crate::tensor::Strides;
+use crate::tensor::Tensor;
+use crate::tensor::TensorData;
+use rayon::prelude::*;
+
 use num_traits::Float;
 
-fn logaddexp_f32(
+pub(crate) fn logaddexp_f32(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
@@ -47,7 +56,7 @@ fn logaddexp_f32(
     )
 }
 
-fn logaddexp_f64(
+pub(crate) fn logaddexp_f64(
     lhs: &Tensor,
     rhs: &Tensor,
     output_data: &mut TensorData,
@@ -88,7 +97,7 @@ fn logaddexp_f64(
     )
 }
 
-fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
@@ -100,7 +109,7 @@ fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn tanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn tanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -112,7 +121,7 @@ fn tanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
@@ -124,7 +133,7 @@ fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     Ok(())
 }
 
-fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -158,7 +167,7 @@ fn stable_sigmoid_f64(val: f64) -> f64 {
     }
 }
 
-fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
@@ -202,7 +211,7 @@ fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
     Ok(mask)
 }
 
-fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -246,7 +255,7 @@ fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
     Ok(mask)
 }
 
-fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
@@ -286,7 +295,7 @@ fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
     Ok(mask)
 }
 
-fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
     let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
@@ -326,7 +335,7 @@ fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> 
     Ok(mask)
 }
 
-fn hardshrink_f32(
+pub(crate) fn hardshrink_f32(
     tensor: &Tensor,
     output_data: &mut TensorData,
     lambd: f32,
@@ -357,7 +366,7 @@ fn hardshrink_f32(
     Ok(mask)
 }
 
-fn hardshrink_f64(
+pub(crate) fn hardshrink_f64(
     tensor: &Tensor,
     output_data: &mut TensorData,
     lambd: f64,
@@ -388,7 +397,7 @@ fn hardshrink_f64(
     Ok(mask)
 }
 
-fn leaky_relu_f32(
+pub(crate) fn leaky_relu_f32(
     tensor: &Tensor,
     output_data: &mut TensorData,
     negative_slope: f32,
@@ -421,7 +430,7 @@ fn leaky_relu_f32(
     Ok(mask)
 }
 
-fn leaky_relu_f64(
+pub(crate) fn leaky_relu_f64(
     tensor: &Tensor,
     output_data: &mut TensorData,
     negative_slope: f64,
@@ -454,7 +463,7 @@ fn leaky_relu_f64(
     Ok(mask)
 }
 
-fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
@@ -514,7 +523,7 @@ fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Res
     Ok(())
 }
 
-fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -603,7 +612,7 @@ fn broadcast_mask_index(
     mask_index
 }
 
-fn masked_softmax_f32(
+pub(crate) fn masked_softmax_f32(
     tensor: &Tensor,
     mask: &Tensor,
     output_data: &mut TensorData,
@@ -724,7 +733,7 @@ fn masked_softmax_f32(
     Ok(())
 }
 
-fn masked_softmax_f64(
+pub(crate) fn masked_softmax_f64(
     tensor: &Tensor,
     mask: &Tensor,
     output_data: &mut TensorData,
@@ -1109,7 +1118,7 @@ macro_rules! log_softmax_impl {
     }};
 }
 
-fn masked_log_softmax_f32(
+pub(crate) fn masked_log_softmax_f32(
     tensor: &Tensor,
     mask: &Tensor,
     output_data: &mut TensorData,
@@ -1127,7 +1136,7 @@ fn masked_log_softmax_f32(
     )
 }
 
-fn masked_log_softmax_f64(
+pub(crate) fn masked_log_softmax_f64(
     tensor: &Tensor,
     mask: &Tensor,
     output_data: &mut TensorData,
@@ -1145,7 +1154,11 @@ fn masked_log_softmax_f64(
     )
 }
 
-fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn log_softmax_f32(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     log_softmax_impl!(
         tensor,
         output_data,
@@ -1157,7 +1170,11 @@ fn log_softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) ->
     )
 }
 
-fn log_softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
+pub(crate) fn log_softmax_f64(
+    tensor: &Tensor,
+    output_data: &mut TensorData,
+    dim: usize,
+) -> Result<()> {
     log_softmax_impl!(
         tensor,
         output_data,

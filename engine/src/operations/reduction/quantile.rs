@@ -4,7 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn quantile_along_dim(
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use std::sync::Arc;
+
+pub(crate) fn quantile_along_dim(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
@@ -139,7 +146,7 @@ fn quantile_along_dim(
     ))
 }
 
-fn nanquantile_along_dim(
+pub(crate) fn nanquantile_along_dim(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
@@ -270,7 +277,7 @@ fn nanquantile_along_dim(
     ))
 }
 
-fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
     let output_dims = if keepdim && tensor.ndim() > 0 {
         vec![1; tensor.ndim()]
     } else {
@@ -323,7 +330,7 @@ fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
     ))
 }
 
-fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let dims = tensor.shape().dims();
     let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
 
@@ -380,11 +387,7 @@ fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Ten
                     values[out_idx] = if buffer.is_empty() {
                         f32::NAN
                     } else {
-                        quantile_from_unsorted_f32(
-                            &mut buffer,
-                            0.5,
-                            QuantileInterpolation::Linear,
-                        )
+                        quantile_from_unsorted_f32(&mut buffer, 0.5, QuantileInterpolation::Linear)
                     };
                 }
             }
@@ -411,11 +414,7 @@ fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Ten
                     values[out_idx] = if buffer.is_empty() {
                         f64::NAN
                     } else {
-                        quantile_from_unsorted_f64(
-                            &mut buffer,
-                            0.5,
-                            QuantileInterpolation::Linear,
-                        )
+                        quantile_from_unsorted_f64(&mut buffer, 0.5, QuantileInterpolation::Linear)
                     };
                 }
             }
@@ -432,7 +431,7 @@ fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Ten
     ))
 }
 
-fn quantiles_all(
+pub(crate) fn quantiles_all(
     tensor: &Tensor,
     qs: &[f64],
     keepdim: bool,
@@ -559,7 +558,7 @@ fn copy_or_none_if_nan<T: num_traits::Float>(data: &[T]) -> Option<Vec<T>> {
     Some(out)
 }
 
-fn nanquantiles_all(
+pub(crate) fn nanquantiles_all(
     tensor: &Tensor,
     qs: &[f64],
     keepdim: bool,
@@ -683,7 +682,7 @@ fn quantiles_output_dims(tensor_ndim: usize, q_len: usize, keepdim: bool) -> Vec
     }
 }
 
-fn quantiles_along_dim(
+pub(crate) fn quantiles_along_dim(
     tensor: &Tensor,
     dim: usize,
     qs: &[f64],
@@ -796,8 +795,11 @@ fn quantiles_along_dim(
                             buffer.sort_by(|a, b| a.total_cmp(b));
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                values[out_idx] =
-                                    quantile_from_sorted_position_f32(&buffer, position, interpolation);
+                                values[out_idx] = quantile_from_sorted_position_f32(
+                                    &buffer,
+                                    position,
+                                    interpolation,
+                                );
                             }
                         }
                     }
@@ -870,8 +872,11 @@ fn quantiles_along_dim(
                             buffer.sort_by(|a, b| a.total_cmp(b));
                             for (qi, position) in positions.iter().enumerate() {
                                 let out_idx = ((qi * outer) + o) * inner + r;
-                                values[out_idx] =
-                                    quantile_from_sorted_position_f64(&buffer, position, interpolation);
+                                values[out_idx] = quantile_from_sorted_position_f64(
+                                    &buffer,
+                                    position,
+                                    interpolation,
+                                );
                             }
                         }
                     }
