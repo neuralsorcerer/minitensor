@@ -180,3 +180,68 @@ def test_gradcheck_mse_loss_predictions_only():
     fn = lambda x: mse(x, tgt)  # noqa: E731
     src = np.random.randn(3, 4).astype(np.float32) * 0.5
     assert_close(_analytic_grad(fn, src), _numeric_grad(fn, src), rtol=3e-2, atol=3e-2)
+
+
+# --------------------------------------------------------------------------- #
+# Gradcheck of the paths this branch changed most:
+# reduce_gradient_for_broadcasting, the accumulate_grad path, reduction and
+# shape backward. A regression in the frozen-input gating or broadcast
+# reduction would surface here as an analytic/numeric mismatch.
+# --------------------------------------------------------------------------- #
+
+
+def test_gradcheck_broadcasting_backward():
+    # Gradient must be reduced back to the broadcast operand's shape.
+    row = mt.from_numpy(np.random.randn(1, 4).astype(np.float32))
+    col = mt.from_numpy(np.random.randn(3, 1).astype(np.float32))
+    base = np.random.randn(3, 4).astype(np.float32) * 0.5
+    for fn in (lambda x: x + row, lambda x: x * col):
+        assert_close(
+            _analytic_grad(fn, base), _numeric_grad(fn, base), rtol=3e-2, atol=3e-2
+        )
+
+
+def test_gradcheck_grad_of_broadcast_operand():
+    # The differentiated tensor is itself the broadcast (1x4) operand.
+    other = mt.from_numpy(np.random.randn(3, 4).astype(np.float32))
+    src = np.random.randn(1, 4).astype(np.float32) * 0.5
+    fn = lambda x: x * other  # noqa: E731
+    assert_close(_analytic_grad(fn, src), _numeric_grad(fn, src), rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.parametrize(
+    "name,fn",
+    [
+        ("x_times_x", lambda x: x * x),
+        ("x_plus_x", lambda x: x + x),
+        ("x_times_x_plus_x", lambda x: x * x + x),
+    ],
+)
+def test_gradcheck_shared_input_accumulation(name, fn):
+    # A tensor used as both operands must accumulate both contributions.
+    src = np.random.randn(3, 3).astype(np.float32) * 0.5
+    assert_close(_analytic_grad(fn, src), _numeric_grad(fn, src), rtol=3e-2, atol=3e-2)
+
+
+@pytest.mark.parametrize(
+    "name,fn",
+    [
+        ("sum_dim1", lambda x: x.sum(dim=1)),
+        ("mean_dim2", lambda x: x.mean(dim=2)),
+        ("sum_all", lambda x: x.sum()),
+        ("reshape", lambda x: x.reshape(24)),
+        ("transpose", lambda x: x.transpose(0, 2)),
+    ],
+)
+def test_gradcheck_reduction_and_shape_backward(name, fn):
+    src = np.random.randn(2, 3, 4).astype(np.float32) * 0.5
+    assert_close(_analytic_grad(fn, src), _numeric_grad(fn, src), rtol=3e-2, atol=3e-2)
+
+
+def test_gradcheck_composite_mlp_layer():
+    # (x @ W).tanh() end to end — chains matmul, activation, and reduction
+    # backward through one graph.
+    w = mt.from_numpy(np.random.randn(4, 3).astype(np.float32))
+    fn = lambda x: x.matmul(w).tanh()  # noqa: E731
+    src = np.random.randn(2, 4).astype(np.float32) * 0.3
+    assert_close(_analytic_grad(fn, src), _numeric_grad(fn, src), rtol=3e-2, atol=3e-2)
