@@ -144,6 +144,9 @@ pub struct MSELossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Targets
+    /// almost never do, so their gradient chain is skipped entirely.
+    pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub diff: Tensor,
 }
@@ -175,10 +178,13 @@ impl GradientFunction for MSELossBackward {
 
         // Multiply by upstream gradient
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let target_grad = arithmetic::neg(&pred_grad)?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if self.input_requires_grad[1] {
+            let target_grad = arithmetic::neg(&pred_grad)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if self.input_requires_grad[0] {
+            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -193,6 +199,9 @@ pub struct MAELossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Targets
+    /// almost never do, so their gradient chain is skipped entirely.
+    pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub sign: Tensor,
 }
@@ -219,10 +228,13 @@ impl GradientFunction for MAELossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let target_grad = arithmetic::neg(&pred_grad)?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if self.input_requires_grad[1] {
+            let target_grad = arithmetic::neg(&pred_grad)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if self.input_requires_grad[0] {
+            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -237,6 +249,9 @@ pub struct HuberLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Targets
+    /// almost never do, so their gradient chain is skipped entirely.
+    pub input_requires_grad: [bool; 2],
     pub delta: f64,
     pub reduction: String,
     pub diff: Tensor,
@@ -338,10 +353,13 @@ impl GradientFunction for HuberLossBackward {
         }
 
         let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
-        let target_grad = arithmetic::neg(&pred_grad)?;
-
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        if self.input_requires_grad[1] {
+            let target_grad = arithmetic::neg(&pred_grad)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
+        }
+        if self.input_requires_grad[0] {
+            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
+        }
 
         Ok(gradients)
     }
@@ -356,6 +374,9 @@ pub struct CrossEntropyLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Only the
+    /// prediction gradient is ever produced; it is skipped when frozen.
+    pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub softmax_predictions: Tensor,
     pub targets: Tensor,
@@ -364,6 +385,9 @@ pub struct CrossEntropyLossBackward {
 impl GradientFunction for CrossEntropyLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
         gradients.reserve(1);
 
         // Compute base gradient: softmax(predictions) - targets
@@ -436,6 +460,9 @@ pub struct BCELossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Only the
+    /// prediction gradient is ever produced; it is skipped when frozen.
+    pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub predictions: Tensor,
     pub targets: Tensor,
@@ -444,6 +471,9 @@ pub struct BCELossBackward {
 impl GradientFunction for BCELossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
         gradients.reserve(1);
 
         // BCE gradient: (predictions - targets) / (predictions * (1 - predictions))
@@ -480,6 +510,9 @@ pub struct KLDivLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Targets
+    /// almost never do, so their gradient chain is skipped entirely.
+    pub input_requires_grad: [bool; 2],
     pub reduction: String,
     pub predictions: Tensor,
     pub targets: Tensor,
@@ -491,34 +524,39 @@ impl GradientFunction for KLDivLossBackward {
         gradients.reserve(2);
 
         // Gradient w.r.t predictions: -(targets / predictions)
-        let mut pred_grad = arithmetic::div(&self.targets, &self.predictions)?;
-        pred_grad = arithmetic::neg(&pred_grad)?;
-        if self.reduction == "mean" {
-            let n = self.predictions.numel() as f64;
-            let scale = create_scalar_tensor(1.0 / n, pred_grad.dtype(), pred_grad.device())?;
-            pred_grad = arithmetic::mul(&pred_grad, &scale)?;
+        if self.input_requires_grad[0] {
+            let mut pred_grad = arithmetic::div(&self.targets, &self.predictions)?;
+            pred_grad = arithmetic::neg(&pred_grad)?;
+            if self.reduction == "mean" {
+                let n = self.predictions.numel() as f64;
+                let scale = create_scalar_tensor(1.0 / n, pred_grad.dtype(), pred_grad.device())?;
+                pred_grad = arithmetic::mul(&pred_grad, &scale)?;
+            }
+            let pred_grad = arithmetic::mul(&pred_grad, grad_output)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
         }
-        let pred_grad = arithmetic::mul(&pred_grad, grad_output)?;
-        accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;
 
         // Gradient w.r.t targets: log(targets) - log(predictions) + 1
-        let log_targets = activation::log(&self.targets)?;
-        let log_preds = activation::log(&self.predictions)?;
-        let diff = arithmetic::sub(&log_targets, &log_preds)?;
-        let one = Tensor::ones(
-            self.targets.shape().clone(),
-            self.targets.dtype(),
-            self.targets.device(),
-            false,
-        );
-        let mut target_grad = arithmetic::add(&diff, &one)?;
-        if self.reduction == "mean" {
-            let n = self.predictions.numel() as f64;
-            let scale = create_scalar_tensor(1.0 / n, target_grad.dtype(), target_grad.device())?;
-            target_grad = arithmetic::mul(&target_grad, &scale)?;
+        if self.input_requires_grad[1] {
+            let log_targets = activation::log(&self.targets)?;
+            let log_preds = activation::log(&self.predictions)?;
+            let diff = arithmetic::sub(&log_targets, &log_preds)?;
+            let one = Tensor::ones(
+                self.targets.shape().clone(),
+                self.targets.dtype(),
+                self.targets.device(),
+                false,
+            );
+            let mut target_grad = arithmetic::add(&diff, &one)?;
+            if self.reduction == "mean" {
+                let n = self.predictions.numel() as f64;
+                let scale =
+                    create_scalar_tensor(1.0 / n, target_grad.dtype(), target_grad.device())?;
+                target_grad = arithmetic::mul(&target_grad, &scale)?;
+            }
+            let target_grad = arithmetic::mul(&target_grad, grad_output)?;
+            accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
         }
-        let target_grad = arithmetic::mul(&target_grad, grad_output)?;
-        accumulate_grad(&mut gradients, self.input_ids[1], target_grad)?;
 
         Ok(gradients)
     }
@@ -533,6 +571,9 @@ pub struct FocalLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
     pub input_ids: [TensorId; 2],
+    /// Which of [predictions, targets] actually need a gradient. Only the
+    /// prediction gradient is ever produced; it is skipped when frozen.
+    pub input_requires_grad: [bool; 2],
     pub alpha: f64,
     pub gamma: f64,
     pub reduction: String,
@@ -543,6 +584,9 @@ pub struct FocalLossBackward {
 impl GradientFunction for FocalLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
         gradients.reserve(1);
 
         // Exact gradient of FL = -alpha * (1 - p_t)^gamma * log(p_t) wrt the

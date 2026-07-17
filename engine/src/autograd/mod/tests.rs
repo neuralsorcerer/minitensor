@@ -639,4 +639,47 @@ mod tests {
             clear_graph().unwrap();
         }
     }
+
+    #[test]
+    fn test_loss_targets_receive_no_gradient() {
+        clear_graph().unwrap();
+
+        let predictions = Tensor::ones(
+            Shape::new(vec![4, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let targets = Tensor::ones(
+            Shape::new(vec![4, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let loss = crate::operations::loss::mse_loss(&predictions, &targets, "mean").unwrap();
+        let grads = backward_collect(&loss, None).unwrap();
+        assert!(
+            grads.contains_key(&predictions.id()),
+            "predictions must receive a gradient"
+        );
+        assert!(
+            !grads.contains_key(&targets.id()),
+            "frozen targets must not receive a gradient"
+        );
+        clear_graph().unwrap();
+
+        // When targets DO require grad, both gradients flow.
+        let targets_rg = Tensor::ones(
+            Shape::new(vec![4, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let loss = crate::operations::loss::mse_loss(&predictions, &targets_rg, "mean").unwrap();
+        let grads = backward_collect(&loss, None).unwrap();
+        assert!(grads.contains_key(&predictions.id()));
+        assert!(grads.contains_key(&targets_rg.id()));
+        clear_graph().unwrap();
+    }
 }

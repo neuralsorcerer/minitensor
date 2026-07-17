@@ -304,6 +304,18 @@ Completed in the fourth change set:
   anything that depended on `engine::operations::fusion` should pin
   `engine 0.2.1` or vendor the module from git history.
 
+Completed in the fifth change set:
+
+- **Loss functions no longer compute gradients for frozen targets.** All
+  seven loss backward functions (MSE, MAE, Huber, CrossEntropy, BCE,
+  KLDiv, Focal) carry per-input `requires_grad` flags. Previously
+  MSE/MAE/Huber allocated and negated a full-size target gradient on
+  *every training step*, and KLDiv ran an entire `log`/`sub`/`add`/`mul`
+  chain for the target distribution — all discarded work whenever targets
+  are constants (the overwhelmingly common case). Prediction gradients are
+  likewise skipped when predictions are frozen. Regression test:
+  `test_loss_targets_receive_no_gradient`.
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the accessor
@@ -322,10 +334,9 @@ Still open, in priority order:
    (`calloc` must memset reused allocations, doubling output write
    traffic), so it was reverted. The proper fix is writing through
    `MaybeUninit` in the kernels, which is sound without the extra pass.
-5. **`requires_grad` flags for the remaining single-flag gradient
-   functions** — reductions/activations still compute gradients
-   unconditionally when reached; auditing them buys the same frozen-input
-   savings ops-wide.
+5. **Audit remaining multi-input gradient functions** (concat, pow,
+   normalization) for the same per-input gating; single-input functions
+   need no flags (they are only reached when their input requires grad).
 
 ## 8-11. Implementation, tests, validation, benchmarks
 
