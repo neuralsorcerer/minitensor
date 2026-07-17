@@ -353,14 +353,22 @@ Completed in the seventh change set:
 
 Still open, in priority order:
 
-1. **dtype dispatch macro for the remaining ops files** — the uniform
-   float-unary activation kernels in `activation/hyperbolic.rs` are done
-   (34 fetch/`unary_apply` wrappers collapsed into one
-   `float_unary_kernel!` macro parameterised by the mapping closure, ~300
-   lines removed; closures were extracted verbatim, so behavior is
-   byte-identical, confirmed by the suite plus a numerical spot-check).
-   Reduction kernels and the non-uniform activation kernels (softplus/
-   gelu/elu, which take extra parameters) still carry per-dtype copies.
+1. **dtype dispatch macro for the remaining ops files** — the activation
+   kernels in `activation/hyperbolic.rs` are done. The uniform float-unary
+   ones collapsed into `float_unary_kernel!` (34 fetch/`unary_apply`
+   wrappers → one macro parameterised by the mapping closure, ~300 lines
+   removed). The parameterised ones (`softplus` with `beta`/`threshold`,
+   `elu` with `alpha`) now use a sibling `float_unary_kernel_param!` macro
+   that threads the runtime parameters through and lets the closure capture
+   them; `selu` moved onto the plain macro (its per-dtype constants live in
+   the closure). Closures were extracted verbatim, so behavior is
+   byte-identical — confirmed by the suite plus a numerical spot-check
+   (elu/softplus/selu/gelu all match a NumPy reference to float32 eps).
+   `gelu` is a deliberate exception: it selects between two closures once
+   (the `approximate` flag) outside the element loop, and folding that into
+   a single captured closure would push the branch into the hot path, so it
+   stays hand-written. Reduction kernels still carry per-dtype copies (the
+   larger, non-`unary_apply` surface — future work).
 2. **`include!` layout migration — complete.** Every `include!` cluster in
    the codebase is now real modules: `autograd`, `tensor`, all seven
    `operations` clusters (27 files), the bindings (`tensor.rs`: 19 files

@@ -302,6 +302,40 @@ macro_rules! float_unary_kernel {
     };
 }
 
+/// Same as [`float_unary_kernel!`] but for activations that take extra runtime
+/// parameters (e.g. `alpha`, `beta`). The generated function exposes the
+/// parameters after `output_data`, and the mapping closure captures them from
+/// scope. Only usable when a single closure covers the whole tensor — kernels
+/// that select between closures once (like `gelu`'s `approximate` branch) must
+/// stay hand-written so the branch is not pushed into the per-element loop.
+macro_rules! float_unary_kernel_param {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal,
+     ($($pname:ident : $pty:ty),* $(,)?), $f:expr) => {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            output_data: &mut TensorData,
+            $($pname: $pty),*
+        ) -> Result<()> {
+            let input_data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input tensor"
+                ))
+            })?;
+            let output_slice = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from output data"
+                ))
+            })?;
+            unary_apply(input_data, output_slice, $f);
+            Ok(())
+        }
+    };
+}
+
 float_unary_kernel!(exp_f32, as_f32_slice, as_f32_slice_mut, "f32", f32::exp);
 
 float_unary_kernel!(exp_f64, as_f64_slice, as_f64_slice_mut, "f64", f64::exp);
@@ -402,55 +436,37 @@ float_unary_kernel!(atanh_f32, as_f32_slice, as_f32_slice_mut, "f32", f32::atanh
 
 float_unary_kernel!(atanh_f64, as_f64_slice, as_f64_slice_mut, "f64", f64::atanh);
 
-pub(crate) fn softplus_f32(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    beta: f32,
-    threshold: f32,
-) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    unary_apply(input_data, output_slice, |val: f32| {
+float_unary_kernel_param!(
+    softplus_f32,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    (beta: f32, threshold: f32),
+    |val: f32| {
         let scaled = beta * val;
         if scaled > threshold {
             val
         } else {
             scaled.exp().ln_1p() / beta
         }
-    });
-    Ok(())
-}
+    }
+);
 
-pub(crate) fn softplus_f64(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    beta: f64,
-    threshold: f64,
-) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    unary_apply(input_data, output_slice, |val: f64| {
+float_unary_kernel_param!(
+    softplus_f64,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    (beta: f64, threshold: f64),
+    |val: f64| {
         let scaled = beta * val;
         if scaled > threshold {
             val
         } else {
             scaled.exp().ln_1p() / beta
         }
-    });
-    Ok(())
-}
+    }
+);
 
 pub(crate) fn gelu_f32(
     tensor: &Tensor,
@@ -510,77 +526,47 @@ pub(crate) fn gelu_f64(
     Ok(())
 }
 
-pub(crate) fn elu_f32(tensor: &Tensor, output_data: &mut TensorData, alpha: f32) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    unary_apply(input_data, output_slice, |x: f32| {
+float_unary_kernel_param!(
+    elu_f32,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    (alpha: f32),
+    |x: f32| {
         if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
-    });
-    Ok(())
-}
+    }
+);
 
-pub(crate) fn elu_f64(tensor: &Tensor, output_data: &mut TensorData, alpha: f64) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    unary_apply(input_data, output_slice, |x: f64| {
+float_unary_kernel_param!(
+    elu_f64,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    (alpha: f64),
+    |x: f64| {
         if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
-    });
-    Ok(())
-}
+    }
+);
 
-pub(crate) fn selu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
+float_unary_kernel!(selu_f32, as_f32_slice, as_f32_slice_mut, "f32", |x: f32| {
     const ALPHA: f32 = 1.6732632;
     const SCALE: f32 = 1.050701;
-    unary_apply(input_data, output_slice, |x: f32| {
-        if x > 0.0 {
-            SCALE * x
-        } else {
-            SCALE * ALPHA * (x.exp() - 1.0)
-        }
-    });
-    Ok(())
-}
+    if x > 0.0 {
+        SCALE * x
+    } else {
+        SCALE * ALPHA * (x.exp() - 1.0)
+    }
+});
 
-pub(crate) fn selu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
+float_unary_kernel!(selu_f64, as_f64_slice, as_f64_slice_mut, "f64", |x: f64| {
     const ALPHA: f64 = 1.6732632423543772848170429916717;
     const SCALE: f64 = 1.0507009873554804934193349852946;
-    unary_apply(input_data, output_slice, |x: f64| {
-        if x > 0.0 {
-            SCALE * x
-        } else {
-            SCALE * ALPHA * (x.exp() - 1.0)
-        }
-    });
-    Ok(())
-}
+    if x > 0.0 {
+        SCALE * x
+    } else {
+        SCALE * ALPHA * (x.exp() - 1.0)
+    }
+});
 
 float_unary_kernel!(silu_f32, as_f32_slice, as_f32_slice_mut, "f32", |x: f32| {
     let sigmoid = 1.0 / (1.0 + (-x).exp());
