@@ -555,122 +555,75 @@ pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tens
     ))
 }
 
-fn prod_along_dim_f32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-    let input_shape = tensor.shape().dims();
-    let dim_size = input_shape[dim];
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let outer_stride = dim_size * inner;
-    result_slice
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
-            let o = idx / inner;
-            let r = idx % inner;
-            let mut prod_val = 1f32;
-            let mut base = o * outer_stride + r;
-            for _ in 0..dim_size {
-                prod_val *= input_data[base];
-                base += inner;
-            }
-            *out = prod_val;
-        });
-    Ok(())
+/// Generates a product-along-dim reduction kernel. Body is identical across
+/// numeric dtypes; only the element type and multiplicative identity differ.
+macro_rules! prod_along_dim_kernel {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $one:expr) => {
+        fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
+            let input_data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+            let result_slice = result_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
+            let input_shape = tensor.shape().dims();
+            let dim_size = input_shape[dim];
+            let inner = input_shape[dim + 1..].iter().product::<usize>();
+            let outer_stride = dim_size * inner;
+            result_slice
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(idx, out)| {
+                    let o = idx / inner;
+                    let r = idx % inner;
+                    let mut prod_val = $one;
+                    let mut base = o * outer_stride + r;
+                    for _ in 0..dim_size {
+                        prod_val *= input_data[base];
+                        base += inner;
+                    }
+                    *out = prod_val;
+                });
+            Ok(())
+        }
+    };
 }
 
-fn prod_along_dim_f64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-    let input_shape = tensor.shape().dims();
-    let dim_size = input_shape[dim];
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let outer_stride = dim_size * inner;
-    result_slice
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
-            let o = idx / inner;
-            let r = idx % inner;
-            let mut prod_val = 1f64;
-            let mut base = o * outer_stride + r;
-            for _ in 0..dim_size {
-                prod_val *= input_data[base];
-                base += inner;
-            }
-            *out = prod_val;
-        });
-    Ok(())
-}
+prod_along_dim_kernel!(
+    prod_along_dim_f32,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    1f32
+);
 
-fn prod_along_dim_i32(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_i32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-    let result_slice = result_data
-        .as_i32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
-    let input_shape = tensor.shape().dims();
-    let dim_size = input_shape[dim];
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let outer_stride = dim_size * inner;
-    result_slice
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
-            let o = idx / inner;
-            let r = idx % inner;
-            let mut prod_val = 1i32;
-            let mut base = o * outer_stride + r;
-            for _ in 0..dim_size {
-                prod_val *= input_data[base];
-                base += inner;
-            }
-            *out = prod_val;
-        });
-    Ok(())
-}
+prod_along_dim_kernel!(
+    prod_along_dim_f64,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    1f64
+);
 
-fn prod_along_dim_i64(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_i64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-    let result_slice = result_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-    let input_shape = tensor.shape().dims();
-    let dim_size = input_shape[dim];
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let outer_stride = dim_size * inner;
-    result_slice
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
-            let o = idx / inner;
-            let r = idx % inner;
-            let mut prod_val = 1i64;
-            let mut base = o * outer_stride + r;
-            for _ in 0..dim_size {
-                prod_val *= input_data[base];
-                base += inner;
-            }
-            *out = prod_val;
-        });
+prod_along_dim_kernel!(
+    prod_along_dim_i32,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    1i32
+);
 
-    Ok(())
-}
+prod_along_dim_kernel!(
+    prod_along_dim_i64,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    1i64
+);
 
 fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
     let input_data = tensor
