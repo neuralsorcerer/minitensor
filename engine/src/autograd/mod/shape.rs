@@ -4,6 +4,17 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    operations::reduction,
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+use std::sync::Arc;
+
 /// Map an output tap `(oh, ow, kh, kw)` to the input coordinate it reads, or
 /// `None` when it lands in the zero padding. The padding bound already forces
 /// `0 <= ih < in_h` (and likewise for `iw`), so no second range check is needed.
@@ -20,7 +31,8 @@ fn conv_input_coord(
 ) -> Option<(usize, usize)> {
     let h_in = oh * stride.0 + kh;
     let w_in = ow * stride.1 + kw;
-    if h_in < padding.0 || w_in < padding.1 || h_in >= in_h + padding.0 || w_in >= in_w + padding.1 {
+    if h_in < padding.0 || w_in < padding.1 || h_in >= in_h + padding.0 || w_in >= in_w + padding.1
+    {
         None
     } else {
         Some((h_in - padding.0, w_in - padding.1))
@@ -65,16 +77,14 @@ impl GradientFunction for Conv2dBackward {
         let stride = self.stride;
         let padding = self.padding;
 
-        let input = self
-            .input
-            .data()
-            .as_f32_slice()
-            .ok_or_else(|| MinitensorError::internal_error("conv2d backward expects f32 input"))?;
-        let weight = self
-            .weight
-            .data()
-            .as_f32_slice()
-            .ok_or_else(|| MinitensorError::internal_error("conv2d backward expects f32 weight"))?;
+        let input =
+            self.input.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("conv2d backward expects f32 input")
+            })?;
+        let weight =
+            self.weight.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("conv2d backward expects f32 weight")
+            })?;
         let go = grad_output.data().as_f32_slice().ok_or_else(|| {
             MinitensorError::internal_error("conv2d backward expects f32 grad_output")
         })?;
@@ -94,8 +104,7 @@ impl GradientFunction for Conv2dBackward {
                         let w_base = oc * in_channels * kernel_h * kernel_w;
                         for oh in 0..out_h {
                             for ow in 0..out_w {
-                                let g =
-                                    go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
+                                let g = go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
                                 for kh in 0..kernel_h {
                                     for kw in 0..kernel_w {
                                         if let Some((ih, iw)) = conv_input_coord(
@@ -103,11 +112,9 @@ impl GradientFunction for Conv2dBackward {
                                         ) {
                                             let spatial = ih * in_w + iw;
                                             for ic in 0..in_channels {
-                                                let w_idx = w_base
-                                                    + (ic * kernel_h + kh) * kernel_w
-                                                    + kw;
-                                                gi[ic * in_h * in_w + spatial] +=
-                                                    g * weight[w_idx];
+                                                let w_idx =
+                                                    w_base + (ic * kernel_h + kh) * kernel_w + kw;
+                                                gi[ic * in_h * in_w + spatial] += g * weight[w_idx];
                                             }
                                         }
                                     }
@@ -137,8 +144,7 @@ impl GradientFunction for Conv2dBackward {
                     for n in 0..batch {
                         for oh in 0..out_h {
                             for ow in 0..out_w {
-                                let g =
-                                    go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
+                                let g = go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
                                 for kh in 0..kernel_h {
                                     for kw in 0..kernel_w {
                                         if let Some((ih, iw)) = conv_input_coord(
@@ -146,8 +152,8 @@ impl GradientFunction for Conv2dBackward {
                                         ) {
                                             let spatial = ih * in_w + iw;
                                             for ic in 0..in_channels {
-                                                let in_idx = (n * in_channels + ic) * in_h * in_w
-                                                    + spatial;
+                                                let in_idx =
+                                                    (n * in_channels + ic) * in_h * in_w + spatial;
                                                 gw[(ic * kernel_h + kh) * kernel_w + kw] +=
                                                     g * input[in_idx];
                                             }
@@ -170,27 +176,28 @@ impl GradientFunction for Conv2dBackward {
 
         // grad_bias: parallel over output channels.
         if self.bias_requires_grad
-            && let Some(bias_id) = self.bias_id {
-                let mut grad_bias = vec![0f32; out_channels];
-                grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
-                    let mut sum = 0f32;
-                    for n in 0..batch {
-                        let base = (n * out_channels + oc) * out_h * out_w;
-                        for k in 0..out_h * out_w {
-                            sum += go[base + k];
-                        }
+            && let Some(bias_id) = self.bias_id
+        {
+            let mut grad_bias = vec![0f32; out_channels];
+            grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
+                let mut sum = 0f32;
+                for n in 0..batch {
+                    let base = (n * out_channels + oc) * out_h * out_w;
+                    for k in 0..out_h * out_w {
+                        sum += go[base + k];
                     }
-                    *gb = sum;
-                });
-                let grad = Tensor::new(
-                    Arc::new(TensorData::from_vec_f32(grad_bias, device)),
-                    Shape::new(vec![out_channels]),
-                    DataType::Float32,
-                    device,
-                    false,
-                );
-                accumulate_grad(&mut gradients, bias_id, grad)?;
-            }
+                }
+                *gb = sum;
+            });
+            let grad = Tensor::new(
+                Arc::new(TensorData::from_vec_f32(grad_bias, device)),
+                Shape::new(vec![out_channels]),
+                DataType::Float32,
+                device,
+                false,
+            );
+            accumulate_grad(&mut gradients, bias_id, grad)?;
+        }
 
         Ok(gradients)
     }
@@ -708,7 +715,11 @@ where
     let len = grad.len();
     if len < PAR_THRESHOLD {
         for i in 0..len {
-            output[i] = if finite_mask[i] { grad[i] } else { T::default() };
+            output[i] = if finite_mask[i] {
+                grad[i]
+            } else {
+                T::default()
+            };
         }
     } else {
         grad.par_iter()
@@ -1173,7 +1184,9 @@ fn gather_backward_grad(
         macro_rules! fill {
             ($slice:ident, $mut_slice:ident) => {{
                 let go = grad_output.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to read grad_output for gather backward")
+                    MinitensorError::internal_error(
+                        "Failed to read grad_output for gather backward",
+                    )
                 })?;
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for gather backward")
@@ -1344,8 +1357,7 @@ impl GradientFunction for RepeatBackward {
             split_shape.push(self.repeats[axis]);
             split_shape.push(aligned[axis]);
         }
-        let reshaped =
-            crate::operations::shape_ops::reshape(grad_output, Shape::new(split_shape))?;
+        let reshaped = crate::operations::shape_ops::reshape(grad_output, Shape::new(split_shape))?;
         let rep_axes: Vec<isize> = (0..out_ndim).map(|axis| (2 * axis) as isize).collect();
         let summed = reduction::sum(&reshaped, Some(rep_axes), false)?;
         let grad_input =

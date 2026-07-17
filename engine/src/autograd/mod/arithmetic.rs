@@ -4,7 +4,17 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn expand_reduction_grad(
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    operations::{arithmetic, reduction, shape_ops},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+pub(crate) fn expand_reduction_grad(
     grad_output: &Tensor,
     input_shape: &[usize],
     dims: &Option<Vec<usize>>,
@@ -270,7 +280,8 @@ impl GradientFunction for ProdBackward {
 
         let one_scalar = create_scalar_tensor(1.0, dtype, device)?;
         let no_zero = crate::operations::comparison::eq(&zero_count, &zero)?.astype(dtype)?;
-        let one_zero = crate::operations::comparison::eq(&zero_count, &one_scalar)?.astype(dtype)?;
+        let one_zero =
+            crate::operations::comparison::eq(&zero_count, &one_scalar)?.astype(dtype)?;
 
         // Contribution at the (unique) zero position: product of the others.
         let zero_term = arithmetic::mul(&is_zero_f, &one_zero)?;

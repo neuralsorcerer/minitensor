@@ -4,7 +4,18 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn repeat_interleave_backward_impl(
+use super::*;
+use crate::{
+    device::Device,
+    error::{MinitensorError, Result},
+    operations::{activation, arithmetic, reduction},
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+pub(crate) fn repeat_interleave_backward_impl(
     grad_output: &Tensor,
     input_shape: &[usize],
     repeats: &[usize],
@@ -612,7 +623,8 @@ impl GradientFunction for FocalLossBackward {
             &one_minus_pt,
             &arithmetic::mul(&arithmetic::mul(&gamma_scalar, &pt)?, &log_pt)?,
         )?;
-        let modulating = arithmetic::mul(&tensor_power(&one_minus_pt, self.gamma - 1.0)?, &bracket)?;
+        let modulating =
+            arithmetic::mul(&tensor_power(&one_minus_pt, self.gamma - 1.0)?, &bracket)?;
         let alpha_tensor = create_scalar_tensor(self.alpha, dtype, device)?;
         let weight = arithmetic::mul(&modulating, &alpha_tensor)?; // per-sample scalar
 
@@ -638,7 +650,7 @@ impl GradientFunction for FocalLossBackward {
 }
 
 /// Create a scalar tensor with the given value
-fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
+pub(crate) fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
     let mut data = TensorData::zeros_on_device(1, dtype, device);
     match dtype {
         DataType::Float32 => {

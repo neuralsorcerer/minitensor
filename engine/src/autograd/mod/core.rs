@@ -5,20 +5,17 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    device::Device,
     error::{MinitensorError, Result},
-    operations::{activation, arithmetic, linalg, minmax, reduction, selection, shape_ops},
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    operations::{arithmetic, linalg, minmax, reduction, selection},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
-use libm::{erf, erff};
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
 /// Unique identifier for tensors in the computation graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,7 +59,7 @@ pub trait GradientFunction: Send + Sync {
     }
 }
 
-pub use graph::{BackwardStep, ComputationGraph, execute_backward_plan};
+pub use super::graph::{BackwardStep, ComputationGraph, execute_backward_plan};
 
 // Thread-local computation graph to avoid cross-test interference
 thread_local! {
@@ -247,6 +244,72 @@ pub fn is_graph_consumed() -> bool {
     GRAPH_CONSUMED.with(|flag| flag.get())
 }
 
+/// Helper function to reduce gradients for broadcasting
+pub(crate) fn reduce_gradient_for_broadcasting(
+    grad_output: &Tensor,
+    target_shape: &Shape,
+) -> Result<Tensor> {
+    if grad_output.shape() == target_shape {
+        return Ok(grad_output.clone());
+    }
+
+    let grad_dims = grad_output.shape().dims();
+    let target_dims = target_shape.dims();
+    if target_dims.len() > grad_dims.len() {
+        return Err(MinitensorError::BroadcastError {
+            shape1: grad_dims.to_vec(),
+            shape2: target_dims.to_vec(),
+            suggestion: Some(
+                "Ensure the target shape has no more dimensions than the gradient output."
+                    .to_string(),
+            ),
+            context: Some("reduce_gradient_for_broadcasting".to_string()),
+        });
+    }
+    let extra = grad_dims.len() - target_dims.len();
+
+    // Use a stack-allocated small vector and pre-allocate enough capacity to
+    // hold all potential broadcast axes. This avoids repeated reallocations for
+    // higher dimensional tensors.
+    let mut axes_to_sum: SmallVec<[usize; 8]> = SmallVec::with_capacity(grad_dims.len());
+    axes_to_sum.extend(0..extra);
+    for i in 0..target_dims.len() {
+        let gdim = grad_dims[extra + i];
+        let tdim = target_dims[i];
+        if tdim == 1 {
+            if gdim != 1 {
+                axes_to_sum.push(extra + i);
+            }
+        } else if gdim != tdim {
+            return Err(MinitensorError::BroadcastError {
+                shape1: grad_dims.to_vec(),
+                shape2: target_dims.to_vec(),
+                suggestion: Some(
+                    "Ensure each target dimension is 1 or matches the gradient dimension."
+                        .to_string(),
+                ),
+                context: Some("reduce_gradient_for_broadcasting".to_string()),
+            });
+        }
+    }
+
+    if axes_to_sum.is_empty() {
+        return Ok(grad_output.clone());
+    }
+
+    let mut axes = Vec::with_capacity(axes_to_sum.len());
+    for axis in axes_to_sum {
+        axes.push(axis as isize);
+    }
+    let mut grad = reduction::sum(grad_output, Some(axes), true)?;
+
+    if grad.shape() != target_shape {
+        grad = grad.view(target_shape.clone())?;
+    }
+
+    Ok(grad)
+}
+
 // Gradient function implementations for common operations
 
 /// Accumulate a gradient contribution for `input_id` into `gradients`.
@@ -259,7 +322,7 @@ pub fn is_graph_consumed() -> bool {
 /// the gradient. Summing on collision matches the mathematically correct result
 /// and mirrors the cross-node accumulation performed by the graph itself.
 #[inline]
-fn accumulate_grad(
+pub(crate) fn accumulate_grad(
     gradients: &mut FxHashMap<TensorId, Tensor>,
     input_id: TensorId,
     grad: Tensor,

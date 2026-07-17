@@ -330,14 +330,26 @@ Completed in the sixth change set:
   helpers collapsed into one `cmp_kernel!` macro, continuing the pattern
   from the storage accessors and arithmetic kernels.
 
+Completed in the seventh change set:
+
+- **Autograd converted from `include!` to real modules.** The seven
+  merged files under `autograd/mod/` are now proper submodules with their
+  own imports and explicit `pub(crate)` boundaries for shared helpers,
+  re-exported through `autograd/mod.rs` so every `crate::autograd::X`
+  path is unchanged. The conversion also surfaced layout artifacts the
+  merged namespace had been hiding: the shared broadcast-reduction helper
+  lived in the *tests* include file (now in `core`), and
+  `PowBackward`'s trait impl lives in a different file than its struct.
+  This is the template for converting the remaining `include!` clusters.
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — activation and
    reduction kernels still carry per-dtype copies (storage accessors,
    arithmetic, and comparison are done).
-2. **Replace `include!` layout with real modules** — mechanical, improves
-   tooling and visibility control (also re-enables
-   `items_after_test_module`).
+2. **Convert the remaining `include!` clusters** (`tensor/mod/*`,
+   `operations/*`, bindings `pytensor/*`) following the autograd
+   template; then drop the crate-wide `items_after_test_module` allow.
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.

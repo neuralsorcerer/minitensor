@@ -4,6 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    operations::arithmetic,
+    tensor::{DataType, Shape, Tensor, TensorData},
+};
+use libm::{erf, erff};
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
 impl GradientFunction for SoftplusBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();

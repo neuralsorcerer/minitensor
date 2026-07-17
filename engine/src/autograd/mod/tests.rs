@@ -4,74 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-/// Helper function to reduce gradients for broadcasting
-fn reduce_gradient_for_broadcasting(grad_output: &Tensor, target_shape: &Shape) -> Result<Tensor> {
-    if grad_output.shape() == target_shape {
-        return Ok(grad_output.clone());
-    }
+#![allow(clippy::module_inception)]
 
-    let grad_dims = grad_output.shape().dims();
-    let target_dims = target_shape.dims();
-    if target_dims.len() > grad_dims.len() {
-        return Err(MinitensorError::BroadcastError {
-            shape1: grad_dims.to_vec(),
-            shape2: target_dims.to_vec(),
-            suggestion: Some(
-                "Ensure the target shape has no more dimensions than the gradient output."
-                    .to_string(),
-            ),
-            context: Some("reduce_gradient_for_broadcasting".to_string()),
-        });
-    }
-    let extra = grad_dims.len() - target_dims.len();
-
-    // Use a stack-allocated small vector and pre-allocate enough capacity to
-    // hold all potential broadcast axes. This avoids repeated reallocations for
-    // higher dimensional tensors.
-    let mut axes_to_sum: SmallVec<[usize; 8]> = SmallVec::with_capacity(grad_dims.len());
-    axes_to_sum.extend(0..extra);
-    for i in 0..target_dims.len() {
-        let gdim = grad_dims[extra + i];
-        let tdim = target_dims[i];
-        if tdim == 1 {
-            if gdim != 1 {
-                axes_to_sum.push(extra + i);
-            }
-        } else if gdim != tdim {
-            return Err(MinitensorError::BroadcastError {
-                shape1: grad_dims.to_vec(),
-                shape2: target_dims.to_vec(),
-                suggestion: Some(
-                    "Ensure each target dimension is 1 or matches the gradient dimension."
-                        .to_string(),
-                ),
-                context: Some("reduce_gradient_for_broadcasting".to_string()),
-            });
-        }
-    }
-
-    if axes_to_sum.is_empty() {
-        return Ok(grad_output.clone());
-    }
-
-    let mut axes = Vec::with_capacity(axes_to_sum.len());
-    for axis in axes_to_sum {
-        axes.push(axis as isize);
-    }
-    let mut grad = reduction::sum(grad_output, Some(axes), true)?;
-
-    if grad.shape() != target_shape {
-        grad = grad.view(target_shape.clone())?;
-    }
-
-    Ok(grad)
-}
-
-#[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::autograd::*;
     use crate::device::Device;
+    use crate::error::{MinitensorError, Result};
+    use crate::operations::{activation, arithmetic, reduction};
     use crate::tensor::DataType;
+    use crate::tensor::{Shape, Tensor, TensorData};
+    use std::sync::Arc;
 
     #[test]
     fn test_tensor_id_generation() {
@@ -125,7 +67,8 @@ mod tests {
             input_requires_grad: [true, true],
         };
 
-        let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let grad_output =
+            Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
         let gradients = grad_fn.backward(&grad_output).unwrap();
 
         assert_eq!(gradients.len(), 1);
@@ -154,7 +97,8 @@ mod tests {
             input_requires_grad: [true, true],
         };
 
-        let grad_output = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let grad_output =
+            Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
         let gradients = grad_fn.backward(&grad_output).unwrap();
 
         assert_eq!(gradients.len(), 1);
@@ -562,12 +506,7 @@ mod tests {
             assert!(!is_grad_enabled());
 
             // New tensors created inside the scope never require gradients.
-            let c = Tensor::ones(
-                Shape::new(vec![2]),
-                DataType::Float32,
-                Device::cpu(),
-                true,
-            );
+            let c = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
             assert!(!c.requires_grad());
 
             // Operation results are detached leaves.

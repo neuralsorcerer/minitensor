@@ -4,6 +4,17 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    error::{MinitensorError, Result},
+    operations::{arithmetic, reduction},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+use std::sync::Arc;
+
 impl GradientFunction for MaskedLogSoftmaxBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
@@ -148,25 +159,27 @@ impl GradientFunction for LayerNormBackward {
                 accumulate_grad(&mut gradients, self.input_id, zero)?;
             }
             if self.weight_requires_grad
-                && let Some(weight_id) = self.weight_id {
-                    let zero = Tensor::zeros(
-                        Shape::new(self.normalized_shape.clone()),
-                        grad_output.dtype(),
-                        grad_output.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, weight_id, zero)?;
-                }
+                && let Some(weight_id) = self.weight_id
+            {
+                let zero = Tensor::zeros(
+                    Shape::new(self.normalized_shape.clone()),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                );
+                accumulate_grad(&mut gradients, weight_id, zero)?;
+            }
             if self.bias_requires_grad
-                && let Some(bias_id) = self.bias_id {
-                    let zero = Tensor::zeros(
-                        Shape::new(self.normalized_shape.clone()),
-                        grad_output.dtype(),
-                        grad_output.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, bias_id, zero)?;
-                }
+                && let Some(bias_id) = self.bias_id
+            {
+                let zero = Tensor::zeros(
+                    Shape::new(self.normalized_shape.clone()),
+                    grad_output.dtype(),
+                    grad_output.device(),
+                    false,
+                );
+                accumulate_grad(&mut gradients, bias_id, zero)?;
+            }
 
             return Ok(gradients);
         }
@@ -199,30 +212,32 @@ impl GradientFunction for LayerNormBackward {
         }
 
         if self.weight_requires_grad
-            && let Some(weight_id) = self.weight_id {
-                let mut grad_weight = arithmetic::mul(&grad_output_detached, &normalized)?;
-                if self.axis_start > 0 {
-                    let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
-                    grad_weight = reduction::sum(&grad_weight, Some(axes), false)?;
-                }
-                if grad_weight.shape().dims() != self.normalized_shape.as_slice() {
-                    grad_weight = grad_weight.view(Shape::new(self.normalized_shape.clone()))?;
-                }
-                accumulate_grad(&mut gradients, weight_id, grad_weight)?;
+            && let Some(weight_id) = self.weight_id
+        {
+            let mut grad_weight = arithmetic::mul(&grad_output_detached, &normalized)?;
+            if self.axis_start > 0 {
+                let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
+                grad_weight = reduction::sum(&grad_weight, Some(axes), false)?;
             }
+            if grad_weight.shape().dims() != self.normalized_shape.as_slice() {
+                grad_weight = grad_weight.view(Shape::new(self.normalized_shape.clone()))?;
+            }
+            accumulate_grad(&mut gradients, weight_id, grad_weight)?;
+        }
 
         if self.bias_requires_grad
-            && let Some(bias_id) = self.bias_id {
-                let mut grad_bias = grad_output_detached.clone();
-                if self.axis_start > 0 {
-                    let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
-                    grad_bias = reduction::sum(&grad_bias, Some(axes), false)?;
-                }
-                if grad_bias.shape().dims() != self.normalized_shape.as_slice() {
-                    grad_bias = grad_bias.view(Shape::new(self.normalized_shape.clone()))?;
-                }
-                accumulate_grad(&mut gradients, bias_id, grad_bias)?;
+            && let Some(bias_id) = self.bias_id
+        {
+            let mut grad_bias = grad_output_detached.clone();
+            if self.axis_start > 0 {
+                let axes: Vec<isize> = (0..self.axis_start).map(|d| d as isize).collect();
+                grad_bias = reduction::sum(&grad_bias, Some(axes), false)?;
             }
+            if grad_bias.shape().dims() != self.normalized_shape.as_slice() {
+                grad_bias = grad_bias.view(Shape::new(self.normalized_shape.clone()))?;
+            }
+            accumulate_grad(&mut gradients, bias_id, grad_bias)?;
+        }
 
         Ok(gradients)
     }
@@ -232,7 +247,7 @@ impl GradientFunction for LayerNormBackward {
     }
 }
 
-fn softmax_backward_f32(
+pub(crate) fn softmax_backward_f32(
     grad_output: &[f32],
     y: &[f32],
     grad_input: &mut [f32],
@@ -297,7 +312,7 @@ fn softmax_backward_f32(
     }
 }
 
-fn softmax_backward_f64(
+pub(crate) fn softmax_backward_f64(
     grad_output: &[f64],
     y: &[f64],
     grad_input: &mut [f64],
@@ -362,7 +377,7 @@ fn softmax_backward_f64(
     }
 }
 
-fn log_softmax_backward_f32(
+pub(crate) fn log_softmax_backward_f32(
     grad_output: &[f32],
     log_y: &[f32],
     grad_input: &mut [f32],
@@ -430,7 +445,7 @@ fn log_softmax_backward_f32(
     }
 }
 
-fn log_softmax_backward_f64(
+pub(crate) fn log_softmax_backward_f64(
     grad_output: &[f64],
     log_y: &[f64],
     grad_input: &mut [f64],
@@ -1052,7 +1067,9 @@ impl GradientFunction for QuantileBackward {
             macro_rules! scatter {
                 ($slice:ident, $mut_slice:ident, $ty:ty) => {{
                     let x = input.data().$slice().ok_or_else(|| {
-                        MinitensorError::internal_error("Failed to read input for quantile backward")
+                        MinitensorError::internal_error(
+                            "Failed to read input for quantile backward",
+                        )
                     })?;
                     let go = grad_output.data().$slice().ok_or_else(|| {
                         MinitensorError::internal_error(
@@ -1060,7 +1077,9 @@ impl GradientFunction for QuantileBackward {
                         )
                     })?;
                     let gi = grad_data.$mut_slice().ok_or_else(|| {
-                        MinitensorError::internal_error("Failed to write grad for quantile backward")
+                        MinitensorError::internal_error(
+                            "Failed to write grad for quantile backward",
+                        )
                     })?;
                     let mut buffer: Vec<(usize, $ty)> = Vec::with_capacity(dim_size);
                     for o in 0..outer {
@@ -1090,9 +1109,8 @@ impl GradientFunction for QuantileBackward {
                             // (adjacent) are needed, so select them in O(n) rather
                             // than fully sorting. NaN is already filtered, so the
                             // comparator never sees an incomparable value.
-                            let cmp = |a: &(usize, $ty), b: &(usize, $ty)| {
-                                a.1.partial_cmp(&b.1).unwrap()
-                            };
+                            let cmp =
+                                |a: &(usize, $ty), b: &(usize, $ty)| a.1.partial_cmp(&b.1).unwrap();
                             buffer.select_nth_unstable_by(up, cmp);
                             let d_up = buffer[up].0;
                             let d_lo = if lo == up {
