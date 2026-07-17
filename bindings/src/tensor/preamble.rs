@@ -4,6 +4,50 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+// Child modules hosting the PyTensor method impls and interop helpers. They
+// are children (not siblings) so they retain access to the private `inner`
+// field and inherit this file's imports via `use super::*`.
+#[path = "pytensor/arithmetic.rs"]
+mod arithmetic;
+#[path = "pytensor/comparison.rs"]
+mod comparison;
+#[path = "pytensor/comparison_dunder.rs"]
+mod comparison_dunder;
+#[path = "pytensor/concat_split.rs"]
+mod concat_split;
+#[path = "pytensor/creation/basic.rs"]
+mod creation_basic;
+#[path = "pytensor/creation/like.rs"]
+mod creation_like;
+#[path = "pytensor/creation/range.rs"]
+mod creation_range;
+#[path = "pytensor/grad.rs"]
+mod grad;
+#[path = "pytensor/isclose.rs"]
+mod isclose;
+#[path = "pytensor/math.rs"]
+mod math;
+#[path = "pytensor/operations.rs"]
+mod operations;
+#[path = "pytensor/properties.rs"]
+mod properties;
+#[path = "python/args.rs"]
+mod py_args;
+#[path = "python/convert.rs"]
+mod py_convert;
+#[path = "pytensor/numpy.rs"]
+mod py_numpy;
+#[path = "python/numpy.rs"]
+mod py_numpy_interop;
+#[path = "pytensor/reduction.rs"]
+mod reduction;
+#[path = "pytensor/repr.rs"]
+mod repr_impl;
+
+pub(crate) use self::py_args::*;
+pub(crate) use self::py_convert::*;
+pub(crate) use self::py_numpy_interop::*;
+
 use crate::device::PyDevice;
 use crate::dtype;
 use crate::error::_convert_error;

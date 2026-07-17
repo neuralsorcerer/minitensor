@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Comparison operations
@@ -31,42 +32,42 @@ impl PyTensor {
         self.ge_from_py(other)
     }
 
-    fn eq_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn eq_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.eq(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn ne_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn ne_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.ne(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn lt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn lt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.lt(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn le_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn le_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.le(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn gt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn gt_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.gt(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn ge_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+    pub(crate) fn ge_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.ge(&rhs).map_err(_convert_error)?;
@@ -77,9 +78,8 @@ impl PyTensor {
         if self.inner.shape() != other.inner.shape() {
             return Ok(false);
         }
-        let (lhs, rhs, _) =
-            coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-                .map_err(_convert_error)?;
+        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+            .map_err(_convert_error)?;
         Ok(lhs.array_equal(&rhs))
     }
 
@@ -98,9 +98,8 @@ impl PyTensor {
                 "rtol and atol must be non-negative, finite values",
             ));
         }
-        let (lhs, rhs, _) =
-            coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-                .map_err(_convert_error)?;
+        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+            .map_err(_convert_error)?;
         Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
     }
 }

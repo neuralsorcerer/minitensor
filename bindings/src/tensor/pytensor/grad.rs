@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Gradient operations
@@ -105,5 +106,4 @@ impl PyTensor {
     fn zero_grad(&mut self, set_to_none: bool) {
         self.inner.zero_grad(set_to_none);
     }
-
 }

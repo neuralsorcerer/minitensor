@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 fn convert_dimension(value: isize, arg_name: &str) -> PyResult<usize> {
     if value < 0 {
         return Err(PyValueError::new_err(format!(
@@ -24,7 +25,10 @@ fn convert_dimensions(values: Vec<isize>, arg_name: &str) -> PyResult<Vec<usize>
     Ok(dims)
 }
 
-fn normalize_variadic_isize_args(tuple: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<isize>> {
+pub(crate) fn normalize_variadic_isize_args(
+    tuple: &Bound<PyTuple>,
+    arg_name: &str,
+) -> PyResult<Vec<isize>> {
     if tuple.is_empty() {
         return Ok(Vec::new());
     }
@@ -88,7 +92,7 @@ fn convert_usize_to_isize(value: usize, arg_name: &str) -> PyResult<isize> {
     })
 }
 
-fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
+pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
     if shape.is_empty() {
         return Ok(Vec::new());
     }
@@ -125,7 +129,7 @@ fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usi
     Ok(dims)
 }
 
-fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
+pub(crate) fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
     if let Ok(tuple) = obj.cast::<PyTuple>() {
         return parse_shape_tuple(tuple, arg_name);
     }
@@ -156,11 +160,14 @@ fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> 
     )))
 }
 
-fn normalize_roll_shifts(shifts: &Bound<PyAny>) -> PyResult<Vec<isize>> {
+pub(crate) fn normalize_roll_shifts(shifts: &Bound<PyAny>) -> PyResult<Vec<isize>> {
     normalize_required_axes(shifts, "shifts")
 }
 
-fn normalize_required_axes<'py>(dim: &'py Bound<'py, PyAny>, name: &str) -> PyResult<Vec<isize>> {
+pub(crate) fn normalize_required_axes<'py>(
+    dim: &'py Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Vec<isize>> {
     match normalize_optional_axes(Some(dim))? {
         Some(values) => Ok(values),
         None => Err(PyTypeError::new_err(format!(
@@ -170,7 +177,7 @@ fn normalize_required_axes<'py>(dim: &'py Bound<'py, PyAny>, name: &str) -> PyRe
     }
 }
 
-fn normalize_optional_axes(dim: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<isize>>> {
+pub(crate) fn normalize_optional_axes(dim: Option<&Bound<PyAny>>) -> PyResult<Option<Vec<isize>>> {
     let Some(obj) = dim else {
         return Ok(None);
     };
@@ -235,7 +242,7 @@ fn is_bool_axis(obj: &Bound<PyAny>) -> PyResult<bool> {
     Ok(false)
 }
 
-fn normalize_repeat_spec(repeats: &Bound<PyAny>) -> PyResult<Vec<usize>> {
+pub(crate) fn normalize_repeat_spec(repeats: &Bound<PyAny>) -> PyResult<Vec<usize>> {
     if repeats.is_instance_of::<PyString>() {
         return Ok(vec![extract_repeat_element(repeats)?]);
     }

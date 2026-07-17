@@ -15,7 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PyTuple};
 use std::sync::Arc;
 
-fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
+pub(crate) fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
         return Ok(tensor);
     }

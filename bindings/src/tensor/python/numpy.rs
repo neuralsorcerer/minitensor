@@ -4,7 +4,12 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, _force_copy: bool) -> PyResult<Py<PyAny>> {
+use super::*;
+pub(crate) fn convert_tensor_to_numpy(
+    tensor: &Tensor,
+    py: Python,
+    _force_copy: bool,
+) -> PyResult<Py<PyAny>> {
     if tensor.device() != Device::cpu() {
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Cannot convert GPU tensor to NumPy array. Use .cpu() first.",
@@ -52,7 +57,7 @@ fn convert_tensor_to_numpy(tensor: &Tensor, py: Python, _force_copy: bool) -> Py
     array
 }
 
-fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
+pub(crate) fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     let shape: Vec<usize> = tensor.shape().dims().to_vec();
     match tensor.dtype() {
         DataType::Float32 => {
@@ -88,7 +93,7 @@ fn convert_tensor_to_python_list(tensor: &Tensor, py: Python) -> PyResult<Py<PyA
     }
 }
 
-fn convert_tensor_to_python_scalar(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
+pub(crate) fn convert_tensor_to_python_scalar(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     if tensor.numel() != 1 {
         return Err(PyErr::new::<PyRuntimeError, _>(format!(
             "a Tensor with {} elements cannot be converted to Scalar",
@@ -173,7 +178,7 @@ where
     list.into_py_any(py)
 }
 
-fn create_random_tensor(
+pub(crate) fn create_random_tensor(
     shape: Shape,
     dtype: DataType,
     device: Device,
@@ -276,7 +281,7 @@ fn create_random_tensor(
     ))
 }
 
-enum FanInitKind {
+pub(crate) enum FanInitKind {
     XavierUniform,
     XavierNormal,
     HeUniform,
@@ -333,7 +338,7 @@ fn ensure_valid_fan_shape(shape: &Shape, context: &str) -> PyResult<()> {
     }
 }
 
-fn create_fan_init_tensor(
+pub(crate) fn create_fan_init_tensor(
     shape: Shape,
     dtype: DataType,
     device: Device,
@@ -347,7 +352,7 @@ fn create_fan_init_tensor(
     tensor.map_err(_convert_error)
 }
 
-fn create_uniform_tensor(
+pub(crate) fn create_uniform_tensor(
     shape: Shape,
     dtype: DataType,
     device: Device,
@@ -373,7 +378,7 @@ fn create_uniform_tensor(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_truncated_normal_tensor(
+pub(crate) fn create_truncated_normal_tensor(
     shape: Shape,
     dtype: DataType,
     device: Device,
@@ -429,7 +434,7 @@ fn create_truncated_normal_tensor(
     Ok(tensor)
 }
 
-fn prepare_new_tensor_from_existing(
+pub(crate) fn prepare_new_tensor_from_existing(
     source: &Tensor,
     dtype: DataType,
     device: Device,
@@ -454,7 +459,7 @@ fn prepare_new_tensor_from_existing(
     Ok(tensor)
 }
 
-fn adapt_tensor_for_as_tensor(
+pub(crate) fn adapt_tensor_for_as_tensor(
     source: &Tensor,
     dtype: DataType,
     device: Device,
@@ -494,7 +499,7 @@ fn adapt_tensor_for_as_tensor(
     Ok(tensor)
 }
 
-fn create_randint_tensor(
+pub(crate) fn create_randint_tensor(
     shape: Shape,
     dtype: DataType,
     device: Device,
@@ -551,7 +556,7 @@ fn create_randint_tensor(
     ))
 }
 
-fn create_randperm_tensor(
+pub(crate) fn create_randperm_tensor(
     n: usize,
     dtype: DataType,
     device: Device,
@@ -604,7 +609,7 @@ fn create_randperm_tensor(
     ))
 }
 
-fn create_eye_tensor(
+pub(crate) fn create_eye_tensor(
     n: usize,
     m: usize,
     dtype: DataType,
@@ -661,7 +666,7 @@ fn create_eye_tensor(
     ))
 }
 
-fn create_full_tensor(
+pub(crate) fn create_full_tensor(
     shape: Vec<usize>,
     fill_value: f64,
     dtype: DataType,
@@ -707,7 +712,7 @@ fn create_full_tensor(
         requires_grad,
     ))
 }
-fn create_arange_tensor(
+pub(crate) fn create_arange_tensor(
     start: f64,
     end: f64,
     step: f64,
@@ -772,7 +777,7 @@ fn create_arange_tensor(
     ))
 }
 
-fn create_linspace_tensor(
+pub(crate) fn create_linspace_tensor(
     start: f64,
     end: f64,
     steps: usize,
@@ -867,7 +872,7 @@ fn create_linspace_tensor(
     ))
 }
 
-fn create_logspace_tensor(
+pub(crate) fn create_logspace_tensor(
     start: f64,
     end: f64,
     steps: usize,

@@ -4,6 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+// `layers` hosts the PyClass wrappers and the module registration function.
+// It is a child of this module so its `impl PyReLU`/`impl PyDenseLayer`
+// blocks and its `wrap_pyfunction!` calls can reach the pyclass structs and
+// `#[pyfunction]`s defined here.
+#[path = "layers.rs"]
+mod layers;
+pub use self::layers::*;
+
 use crate::device::PyDevice;
 use crate::dtype;
 use crate::error::_convert_error;
@@ -24,10 +32,10 @@ use engine::operations::conv2d as conv2d_op;
 use engine::operations::linalg::matmul as matmul_op;
 use engine::operations::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
+use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::PyClassInitializer;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // NumPy conversion methods
@@ -104,7 +105,7 @@ impl PyTensor {
         Ok(py_tensor.into_any())
     }
 
-    fn tolist(&self) -> PyResult<Py<PyAny>> {
+    pub(crate) fn tolist(&self) -> PyResult<Py<PyAny>> {
         if self.inner.ndim() == 0 {
             Python::attach(|py| convert_tensor_to_python_scalar(&self.inner, py))
         } else {
@@ -115,5 +116,4 @@ impl PyTensor {
     fn item(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| convert_tensor_to_python_scalar(&self.inner, py))
     }
-
 }

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Mathematical functions
@@ -114,12 +115,7 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (nan=0.0, posinf=None, neginf=None))]
-    pub fn nan_to_num(
-        &self,
-        nan: f64,
-        posinf: Option<f64>,
-        neginf: Option<f64>,
-    ) -> PyResult<Self> {
+    pub fn nan_to_num(&self, nan: f64, posinf: Option<f64>, neginf: Option<f64>) -> PyResult<Self> {
         let result = self
             .inner
             .nan_to_num(nan, posinf, neginf)
@@ -340,5 +336,4 @@ impl PyTensor {
         let result = self.inner.tanh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
-
 }

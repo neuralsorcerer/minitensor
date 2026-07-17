@@ -4,7 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-fn convert_python_data_to_tensor(
+use super::*;
+pub(crate) fn convert_python_data_to_tensor(
     data: &Bound<PyAny>,
     dtype: DataType,
     device: Device,
@@ -109,7 +110,11 @@ fn convert_python_data_to_tensor(
     ))
 }
 
-fn apply_binary_ufunc<F>(operands: &[Tensor], kind: BinaryOpKind, op: F) -> PyResult<Tensor>
+pub(crate) fn apply_binary_ufunc<F>(
+    operands: &[Tensor],
+    kind: BinaryOpKind,
+    op: F,
+) -> PyResult<Tensor>
 where
     F: Fn(&Tensor, &Tensor) -> Result<Tensor, MinitensorError>,
 {
@@ -134,7 +139,7 @@ where
     op(&lhs_tensor, &rhs_tensor).map_err(_convert_error)
 }
 
-fn apply_unary_ufunc<F>(operands: &[Tensor], op: F) -> PyResult<Tensor>
+pub(crate) fn apply_unary_ufunc<F>(operands: &[Tensor], op: F) -> PyResult<Tensor>
 where
     F: Fn(&Tensor) -> Result<Tensor, MinitensorError>,
 {
@@ -148,11 +153,16 @@ where
     op(&tensor).map_err(_convert_error)
 }
 
-fn py_not_implemented(py: Python) -> PyResult<Py<PyAny>> {
-    unsafe { Ok(pyo3::Bound::<pyo3::PyAny>::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented()).unbind()) }
+pub(crate) fn py_not_implemented(py: Python) -> PyResult<Py<PyAny>> {
+    unsafe {
+        Ok(
+            pyo3::Bound::<pyo3::PyAny>::from_borrowed_ptr(py, pyo3::ffi::Py_NotImplemented())
+                .unbind(),
+        )
+    }
 }
 
-fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
+pub(crate) fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
     if let Ok(name) = value.extract::<String>() {
         dtype::parse_dtype(&name)
     } else {
@@ -162,7 +172,7 @@ fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
     }
 }
 
-fn parse_device_like(value: &Bound<PyAny>) -> PyResult<Device> {
+pub(crate) fn parse_device_like(value: &Bound<PyAny>) -> PyResult<Device> {
     if let Ok(device) = value.extract::<PyDevice>() {
         return Ok(device.device());
     }
@@ -178,7 +188,10 @@ fn parse_device_like(value: &Bound<PyAny>) -> PyResult<Device> {
     ))
 }
 
-fn ensure_backward_gradient_compatible(reference: &Tensor, gradient: &mut Tensor) -> PyResult<()> {
+pub(crate) fn ensure_backward_gradient_compatible(
+    reference: &Tensor,
+    gradient: &mut Tensor,
+) -> PyResult<()> {
     let expected_shape = reference.shape().dims();
     let actual_shape = gradient.shape().dims();
     if expected_shape != actual_shape {
@@ -203,7 +216,7 @@ fn ensure_backward_gradient_compatible(reference: &Tensor, gradient: &mut Tensor
     Ok(())
 }
 
-fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {
+pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Tensor> {
     if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         return Ok(py_tensor.inner.clone());
     }
@@ -271,7 +284,7 @@ fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> PyResult<Te
     convert_python_data_to_tensor(value, dtype, reference.device(), false)
 }
 
-fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor> {
+pub(crate) fn tensor_bool_from_py(value: &Bound<PyAny>, device: Device) -> PyResult<Tensor> {
     if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         let mut tensor = py_tensor.inner.clone();
         if tensor.dtype() != DataType::Bool {
@@ -313,7 +326,7 @@ fn promote_dtypes(a: DataType, b: DataType) -> DataType {
     }
 }
 
-fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
+pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType> {
     if let Some(py_tensor) = extract_wrapped_pytensor(value) {
         return Some(py_tensor.inner.dtype());
     }
@@ -366,7 +379,7 @@ where
     dtype
 }
 
-fn prepare_binary_operands_from_py(
+pub(crate) fn prepare_binary_operands_from_py(
     reference: &Tensor,
     other: &Bound<PyAny>,
     reverse: bool,
@@ -644,7 +657,7 @@ fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
 /// Unlike [`parse_indices`], `None` does not consume an input dimension; it
 /// inserts a new length-1 axis at the corresponding output position.
 /// Integer indices drop their dimension, slices keep it.
-fn parse_getitem_indices(
+pub(crate) fn parse_getitem_indices(
     key: &Bound<PyAny>,
     shape: &[usize],
 ) -> PyResult<(Vec<TensorIndex>, Vec<usize>)> {
@@ -694,7 +707,7 @@ fn parse_getitem_indices(
     Ok((real_indices, newaxis_positions))
 }
 
-fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
+pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
     if let Ok(tup) = key.cast::<PyTuple>() {
         if tup.len() > shape.len() {
             return Err(PyIndexError::new_err("Too many indices"));
@@ -725,7 +738,10 @@ fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorInde
     }
 }
 
-fn convert_numpy_to_tensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Tensor> {
+pub(crate) fn convert_numpy_to_tensor(
+    array: &Bound<PyAny>,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
     if let Ok(array_f32) = array.cast::<PyArrayDyn<f32>>() {
         let readonly = array_f32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());

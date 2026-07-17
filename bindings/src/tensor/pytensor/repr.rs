@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // String representations
@@ -80,8 +81,7 @@ impl PyTensor {
     }
 
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
-        let (indices, newaxis_positions) =
-            parse_getitem_indices(key, self.inner.shape().dims())?;
+        let (indices, newaxis_positions) = parse_getitem_indices(key, self.inner.shape().dims())?;
         let mut result = self.inner.index(&indices).map_err(_convert_error)?;
         for &pos in &newaxis_positions {
             result = result.unsqueeze(pos as isize).map_err(_convert_error)?;
@@ -101,5 +101,4 @@ impl PyTensor {
             .map_err(_convert_error)?;
         Ok(())
     }
-
 }

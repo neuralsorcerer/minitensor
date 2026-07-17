@@ -4,17 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-// Three style lints are allowed crate-wide. `needless_range_loop` and
-// `too_many_arguments` fight numeric-kernel idioms: stencil loops whose index
-// feeds stride arithmetic (not just slice access), and kernel helpers that
-// take many scalar parameters. `items_after_test_module` is a false positive
-// of the current `include!`-based module layout (multiple files share one
-// module, so items legitimately follow an included test module); it can be
-// re-enabled once the layout migration in docs/architecture_review.md lands.
-// Every other clippy lint is enforced; CI runs `cargo clippy -- -D warnings`.
+// Two style lints are allowed crate-wide because they fight numeric-kernel
+// idioms: `needless_range_loop` (stencil loops whose index feeds stride
+// arithmetic, not just slice access) and `too_many_arguments` (kernel helpers
+// taking many scalar parameters). Every other clippy lint is enforced; CI runs
+// `cargo clippy -- -D warnings`.
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
-#![allow(clippy::items_after_test_module)]
 
 pub mod autograd;
 pub mod backends;

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     #[staticmethod]
@@ -564,5 +565,4 @@ impl PyTensor {
             convert_python_data_to_tensor(data, target_dtype, target_device, target_requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }
-
 }

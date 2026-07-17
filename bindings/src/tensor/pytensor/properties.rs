@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     #[classattr]
@@ -49,7 +50,7 @@ impl PyTensor {
     }
 
     #[getter]
-    fn device(&self) -> String {
+    pub(crate) fn device(&self) -> String {
         self.inner.device().to_string()
     }
 
@@ -72,7 +73,7 @@ impl PyTensor {
     }
 
     #[getter]
-    fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         self.inner.is_leaf()
     }
 

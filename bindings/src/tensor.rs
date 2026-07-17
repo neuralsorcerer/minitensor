@@ -1,25 +1,16 @@
-// Copyright (c) Soumyadip Sarkar.
+// Copyright (c) 2026 Soumyadip Sarkar.
 // All rights reserved.
 //
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-include!("tensor/preamble.rs");
-include!("tensor/pytensor/properties.rs");
-include!("tensor/pytensor/operations.rs");
-include!("tensor/pytensor/grad.rs");
-include!("tensor/pytensor/arithmetic.rs");
-include!("tensor/pytensor/comparison_dunder.rs");
-include!("tensor/pytensor/comparison.rs");
-include!("tensor/pytensor/isclose.rs");
-include!("tensor/pytensor/reduction.rs");
-include!("tensor/pytensor/math.rs");
-include!("tensor/pytensor/numpy.rs");
-include!("tensor/pytensor/repr.rs");
-include!("tensor/pytensor/creation/basic.rs");
-include!("tensor/pytensor/creation/like.rs");
-include!("tensor/pytensor/creation/range.rs");
-include!("tensor/pytensor/concat_split.rs");
-include!("tensor/python/args.rs");
-include!("tensor/python/convert.rs");
-include!("tensor/python/numpy.rs");
+//! Python tensor bindings.
+//!
+//! `preamble` declares `PyTensor` and the shared conversion helpers; the
+//! method impls and creation/interop functions live in its child modules so
+//! they keep access to the private `inner` field and the shared imports.
+
+#[path = "tensor/preamble.rs"]
+mod preamble;
+
+pub use self::preamble::*;

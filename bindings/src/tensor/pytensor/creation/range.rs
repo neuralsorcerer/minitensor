@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     #[staticmethod]
@@ -88,5 +89,4 @@ impl PyTensor {
         // Currently delegates to from_numpy; true zero-copy requires more complex memory management.
         Self::from_numpy(array, requires_grad)
     }
-
 }

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Comparison operators as Python dunder methods
@@ -233,5 +234,4 @@ impl PyTensor {
             PyTensor::from_tensor(rhs_tensor),
         ))
     }
-
 }

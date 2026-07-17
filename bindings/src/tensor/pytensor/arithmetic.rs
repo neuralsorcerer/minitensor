@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Arithmetic operations
@@ -74,5 +75,4 @@ impl PyTensor {
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
-
 }

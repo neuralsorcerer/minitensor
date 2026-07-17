@@ -30,7 +30,7 @@ impl PyTensorInfo {
 
     /// Get tensor device
     #[getter]
-    fn device(&self) -> String {
+    pub(crate) fn device(&self) -> String {
         format!("{:?}", self.inner.device)
     }
 
@@ -48,7 +48,7 @@ impl PyTensorInfo {
 
     /// Check if is leaf node
     #[getter]
-    fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         self.inner.is_leaf
     }
 

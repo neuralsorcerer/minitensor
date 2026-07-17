@@ -347,17 +347,26 @@ Still open, in priority order:
 1. **dtype dispatch macro for the remaining ops files** — activation and
    reduction kernels still carry per-dtype copies (storage accessors,
    arithmetic, and comparison are done).
-2. **Convert the remaining `include!` clusters** — engine-side conversion
-   is complete: `autograd`, `tensor`, and all seven `operations` clusters
-   (27 files) are real modules. Kernel-only submodules re-export at
-   `pub(crate)` so internal helpers stop leaking into the public API. The
-   `tensor` conversion uses a children-of-core layout (`ops`/`indexing`/
-   `autograd`/`utils` are child modules of the module declaring `Tensor`),
-   preserving the struct's field privacy — no field had to become
-   `pub(crate)`. Left: the feature-gated `backends/opencl` pair (not
-   compiled by default, so a conversion could not be validated here) and
-   the bindings clusters (`tensor.rs`: 19 files, `nn.rs`: 2); then drop
-   the crate-wide `items_after_test_module` allow.
+2. **`include!` layout migration — done** (except one feature-gated pair).
+   Every `include!` cluster in the default build is now real modules:
+   `autograd`, `tensor`, all seven `operations` clusters (27 files), and
+   the bindings (`tensor.rs`: 19 files across `pytensor`/`python`/
+   `creation`; `nn.rs`: 2). Both structural patterns are used depending on
+   privacy needs:
+   - **siblings + `pub(crate)` re-exports** where files only share
+     free functions (operations, autograd);
+   - **children-of-core** where files carry `impl` blocks that touch a
+     struct's private fields or private methods — `tensor`'s method files
+     are children of the `Tensor`-declaring module, and `nn`'s `layers`
+     (pyclass impls + registration) is a child of `module` (pyclass
+     structs + `#[pyfunction]`s). This preserved every field's privacy;
+     only genuinely cross-file helpers/methods were widened to
+     `pub(crate)`.
+   The `items_after_test_module` crate-wide allow — an artifact of the old
+   layout — has been removed; clippy passes without it under
+   `-D warnings`. Only `backends/opencl` (behind the `opencl` feature,
+   off by default) still uses `include!`; it is untouched because a
+   conversion cannot be compiled/validated in this environment.
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.

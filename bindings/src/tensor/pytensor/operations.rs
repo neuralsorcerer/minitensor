@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 #[pymethods]
 impl PyTensor {
     // Tensor operations
@@ -194,5 +195,4 @@ impl PyTensor {
         let result = self.inner.astype(dtype).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
-
 }
