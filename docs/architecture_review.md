@@ -367,8 +367,18 @@ Still open, in priority order:
    `gelu` is a deliberate exception: it selects between two closures once
    (the `approximate` flag) outside the element loop, and folding that into
    a single captured closure would push the branch into the hot path, so it
-   stays hand-written. Reduction kernels still carry per-dtype copies (the
-   larger, non-`unary_apply` surface — future work).
+   stays hand-written. On the reduction side, `prod`/`sum`/`nansum` along a
+   dim are now macro-generated (`prod_along_dim_kernel!`,
+   `sum_along_dim_kernel!` across the four numeric dtypes, and
+   `nansum_along_dim_kernel!` for the two float dtypes) — six more
+   hand-copied `sum`/`nansum` bodies (~500 lines) collapsed with byte-identical
+   behavior, verified against NumPy across every dtype and reduction axis
+   (0–2, keepdim on/off) plus the Rust reduction suite. The remaining
+   reductions (min/max with index tracking, argmin/argmax, quantile, sort)
+   have per-dtype bodies with genuinely different control flow (index
+   book-keeping, partial sorts) and are not a uniform `unary_apply`/
+   fold-reduce template, so they are left as-is rather than forced under a
+   macro that would obscure them.
 2. **`include!` layout migration — complete.** Every `include!` cluster in
    the codebase is now real modules: `autograd`, `tensor`, all seven
    `operations` clusters (27 files), the bindings (`tensor.rs`: 19 files
