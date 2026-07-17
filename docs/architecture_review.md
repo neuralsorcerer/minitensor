@@ -344,9 +344,14 @@ Completed in the seventh change set:
 
 Still open, in priority order:
 
-1. **dtype dispatch macro for the remaining ops files** — activation and
-   reduction kernels still carry per-dtype copies (storage accessors,
-   arithmetic, and comparison are done).
+1. **dtype dispatch macro for the remaining ops files** — the uniform
+   float-unary activation kernels in `activation/hyperbolic.rs` are done
+   (34 fetch/`unary_apply` wrappers collapsed into one
+   `float_unary_kernel!` macro parameterised by the mapping closure, ~300
+   lines removed; closures were extracted verbatim, so behavior is
+   byte-identical, confirmed by the suite plus a numerical spot-check).
+   Reduction kernels and the non-uniform activation kernels (softplus/
+   gelu/elu, which take extra parameters) still carry per-dtype copies.
 2. **`include!` layout migration — done** (except one feature-gated pair).
    Every `include!` cluster in the default build is now real modules:
    `autograd`, `tensor`, all seven `operations` clusters (27 files), and
