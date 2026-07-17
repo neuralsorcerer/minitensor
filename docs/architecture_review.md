@@ -124,14 +124,23 @@ refactor; the rest are documented with a migration path in section 7.
     `tensor/mod/*.rs`, bindings `pytensor/*.rs`) merges many files into one
     module, defeating visibility boundaries, slowing incremental compiles,
     and confusing tools. (Documented.)
-16. **[PARTIALLY FIXED] Uninitialized `Vec<u8>` buffers** (`set_len` before
-    write) were relied on throughout. The genuinely dangerous cases are
-    fixed: `nn/init.rs` no longer creates `&mut` slices over uninitialized
-    values, `bool` storage is always zero-initialized, and `clone_data`
-    copies safely. Op *output* buffers remain uninitialized behind one
-    documented helper because full zero-initialization measured 30–35%
-    slower on large element-wise ops; the tracked fix is `MaybeUninit`-typed
-    kernel writes (section 7).
+16. **[FIXED] Uninitialized `Vec<u8>` buffers** (`set_len` before write) were
+    relied on throughout. `nn/init.rs` no longer creates `&mut` slices over
+    uninitialized values, `bool` storage is always zero-initialized, and
+    `clone_data` copies safely. The op *output* buffers — which were the
+    last uninitialized path — are now zero-initialized too: allocating them
+    uninitialized and handing them out as `&mut [f32]`/`&mut [i64]`/… (which
+    every kernel does) forms a reference to invalid values, i.e. undefined
+    behavior, even though every bit pattern is a representable float/int.
+    Per the project's stated priority order (correctness before
+    performance), soundness wins. The measured cost is confined to
+    allocation-bound cases: interleaved A/B on release wheels shows ~25–35%
+    on the pure element-wise microbenchmark (`add`+`sum` over 2000×2000,
+    where the extra `memset` raises output write traffic from ~3N to ~4N)
+    and noise on the matmul-dominated training step. The zero-cost
+    alternative (`MaybeUninit`-typed kernel writes) is retained as tracked
+    future work in section 7 for anyone who wants the throughput back
+    without the unsoundness.
 17. **[PARTIALLY FIXED] API-inconsistencies at the Python layer.**
     `requires_grad_()` now returns `self` (chaining works, matching
     PyTorch). Still open: `expand` materializes at the FFI boundary, so it
@@ -352,36 +361,39 @@ Still open, in priority order:
    byte-identical, confirmed by the suite plus a numerical spot-check).
    Reduction kernels and the non-uniform activation kernels (softplus/
    gelu/elu, which take extra parameters) still carry per-dtype copies.
-2. **`include!` layout migration — done** (except one feature-gated pair).
-   Every `include!` cluster in the default build is now real modules:
-   `autograd`, `tensor`, all seven `operations` clusters (27 files), and
-   the bindings (`tensor.rs`: 19 files across `pytensor`/`python`/
-   `creation`; `nn.rs`: 2). Both structural patterns are used depending on
+2. **`include!` layout migration — complete.** Every `include!` cluster in
+   the codebase is now real modules: `autograd`, `tensor`, all seven
+   `operations` clusters (27 files), the bindings (`tensor.rs`: 19 files
+   across `pytensor`/`python`/`creation`; `nn.rs`: 2), and the
+   feature-gated `backends/opencl` pair (validated under `--features
+   opencl`, which does build in this environment; the conversion also
+   fixed pre-existing latent test bugs — a private-field access and a
+   missing `CL_MEM_*` import — that had never compiled because CI only
+   builds default features). Both structural patterns are used depending on
    privacy needs:
    - **siblings + `pub(crate)` re-exports** where files only share
      free functions (operations, autograd);
    - **children-of-core** where files carry `impl` blocks that touch a
      struct's private fields or private methods — `tensor`'s method files
-     are children of the `Tensor`-declaring module, and `nn`'s `layers`
-     (pyclass impls + registration) is a child of `module` (pyclass
-     structs + `#[pyfunction]`s). This preserved every field's privacy;
-     only genuinely cross-file helpers/methods were widened to
-     `pub(crate)`.
+     are children of the `Tensor`-declaring module, `nn`'s `layers`
+     (pyclass impls + registration) is a child of `module`, and opencl's
+     `ops_impl` (`impl OpenCLOps`) is a child of `context` (the type
+     declarations). This preserved every field's privacy; only genuinely
+     cross-file helpers/methods were widened to `pub(crate)`.
    The `items_after_test_module` crate-wide allow — an artifact of the old
-   layout — has been removed; clippy passes without it under
-   `-D warnings`. Only `backends/opencl` (behind the `opencl` feature,
-   off by default) still uses `include!`; it is untouched because a
-   conversion cannot be compiled/validated in this environment.
+   layout — has been removed; clippy passes without it under `-D warnings`,
+   both for the default build and for `--features opencl`.
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.
-4. **`MaybeUninit`-typed kernel output writes** — the op output buffers are
-   still allocated uninitialized behind a single documented helper
-   (`TensorData::owned_output_buffer`). Zero-initializing them instead was
-   implemented and measured: 30–35% slower on large element-wise ops
-   (`calloc` must memset reused allocations, doubling output write
-   traffic), so it was reverted. The proper fix is writing through
-   `MaybeUninit` in the kernels, which is sound without the extra pass.
+4. **`MaybeUninit`-typed kernel output writes (optional throughput
+   recovery).** Op output buffers are now zero-initialized for soundness
+   (finding 16), which the A/B measured at ~25–35% on the allocation-bound
+   element-wise microbenchmark and noise on realistic training. A maintainer
+   who wants that throughput back without reintroducing the UB can thread
+   `MaybeUninit`-typed writes through the ~71 output-producing kernels; the
+   uniform write pattern makes this mechanical, but it is a large surface,
+   so it is left as opt-in future work rather than done under time pressure.
 
 ## 8-11. Implementation, tests, validation, benchmarks
 

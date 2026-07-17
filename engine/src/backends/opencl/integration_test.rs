@@ -23,7 +23,7 @@ mod tests {
         let backend = backend.unwrap();
         assert!(backend.device().is_gpu());
         assert_eq!(
-            backend.device().device_type,
+            backend.device().device_type(),
             crate::device::DeviceType::OpenCL
         );
     }
@@ -96,7 +96,7 @@ mod tests {
         let mut result_data = vec![0.0f32; 4];
         backend.read_buffer(&c_buffer, &mut result_data).unwrap();
 
-        let expected = vec![6.0f32, 8.0, 10.0, 12.0];
+        let expected = [6.0f32, 8.0, 10.0, 12.0];
         for (r, e) in result_data.iter().zip(expected.iter()) {
             assert!(
                 (r - e).abs() < 1e-6,
@@ -147,7 +147,7 @@ mod tests {
         backend.read_buffer(&c_buffer, &mut result_data).unwrap();
 
         // Expected result: [1*5+2*7, 1*6+2*8, 3*5+4*7, 3*6+4*8] = [19, 22, 43, 50]
-        let expected = vec![19.0f32, 22.0, 43.0, 50.0];
+        let expected = [19.0f32, 22.0, 43.0, 50.0];
         for (r, e) in result_data.iter().zip(expected.iter()) {
             assert!(
                 (r - e).abs() < 1e-6,
@@ -192,7 +192,7 @@ mod tests {
             .read_buffer(&output_buffer, &mut result_data)
             .unwrap();
 
-        let expected = vec![0.0f32, 0.0, 0.0, 1.0, 2.0];
+        let expected = [0.0f32, 0.0, 0.0, 1.0, 2.0];
         for (r, e) in result_data.iter().zip(expected.iter()) {
             assert!((r - e).abs() < 1e-6, "ReLU result mismatch: {} != {}", r, e);
         }

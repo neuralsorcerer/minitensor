@@ -172,7 +172,7 @@ impl OpenCLAllocator {
 
 #[cfg(feature = "opencl")]
 impl Allocator for OpenCLAllocator {
-    fn allocate(&mut self, size: usize) -> Result<*mut u8> {
+    fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
         Err(crate::error::MinitensorError::backend_error(
             "OpenCL",
             "OpenCL allocator not yet implemented",

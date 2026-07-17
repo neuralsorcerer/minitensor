@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
 impl OpenCLOps {
     /// Create new OpenCL operations instance
     pub fn new(backend: Arc<OpenCLBackend>) -> Result<Self> {
@@ -329,11 +330,13 @@ impl OpenCLOps {
 }
 
 #[cfg(test)]
+#[path = "../integration_test.rs"]
 mod integration_test;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencl3::memory::{CL_MEM_READ_ONLY, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY};
 
     #[test]
     fn test_opencl_availability() {
@@ -390,7 +393,7 @@ mod tests {
         let mut result = vec![0.0f32; 4];
         backend.read_buffer(&c_buffer, &mut result).unwrap();
 
-        let expected = vec![6.0f32, 8.0, 10.0, 12.0];
+        let expected = [6.0f32, 8.0, 10.0, 12.0];
         for (r, e) in result.iter().zip(expected.iter()) {
             assert!((r - e).abs() < 1e-6);
         }

@@ -4,7 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::Backend;
+// `ops_impl` holds the `impl OpenCLOps` block (kept out of the inline
+// `kernels` module below, which holds OpenCL source strings); it is a child of this module so
+// it keeps access to the OpenCL types declared here.
+#[path = "kernels.rs"]
+mod ops_impl; // impl-only module; nothing to re-export
+
+use crate::backends::Backend;
 use crate::{device::Device, error::Result};
 use opencl3::command_queue::{CL_QUEUE_PROFILING_ENABLE, CommandQueue};
 use opencl3::context::Context;
@@ -289,16 +295,21 @@ impl Backend for OpenCLBackend {
             for platform in platforms {
                 if let Ok(devices) =
                     opencl3::device::get_device_ids(platform.id(), CL_DEVICE_TYPE_GPU)
+                    && !devices.is_empty()
                 {
-                    if !devices.is_empty() {
-                        return true;
-                    }
+                    return true;
                 }
             }
         }
         false
     }
 
+    // The OpenCL handles cached in these `Arc<RwLock<..>>` fields are not
+    // `Send`/`Sync` — the OpenCL backend is single-threaded by design (all
+    // access is serialized through the owning backend). The `Arc` is for
+    // shared ownership within that single thread, so the lint's concern
+    // (cross-thread sharing of a non-thread-safe value) does not apply.
+    #[allow(clippy::arc_with_non_send_sync)]
     #[inline(always)]
     fn initialize() -> Result<Self> {
         // Get the first available GPU device
@@ -370,8 +381,7 @@ impl Backend for OpenCLBackend {
             if let Some(buf) = pool.get_mut(&size_bytes).and_then(|v| v.pop()) {
                 buf
             } else {
-                let size_floats =
-                    (size_bytes + std::mem::size_of::<f32>() - 1) / std::mem::size_of::<f32>();
+                let size_floats = size_bytes.div_ceil(std::mem::size_of::<f32>());
                 drop(pool);
                 self.create_buffer(size_floats, CL_MEM_READ_WRITE)?
             }

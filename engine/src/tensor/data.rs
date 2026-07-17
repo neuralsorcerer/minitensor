@@ -177,35 +177,27 @@ impl TensorData {
         vec![0u8; size_bytes]
     }
 
-    /// Allocate an output buffer whose contents are unspecified.
+    /// Allocate a CPU buffer for an operation output.
     ///
-    /// SAFETY CONTRACT: callers must completely overwrite the buffer before
-    /// any element is read (every kernel writes its full output before the
-    /// tensor escapes). Zero-initializing here instead was measured at a
-    /// 30–35% slowdown on large element-wise ops (the extra memset doubles
-    /// write traffic on reused allocations), so the uninitialized pattern is
-    /// kept deliberately; the tracked fix is `MaybeUninit`-typed kernel
-    /// writes (see docs/architecture_review.md).
+    /// This is always zero-initialized. The kernels immediately overwrite it,
+    /// so the zeros are never observed — but allocating it uninitialized and
+    /// handing it out as `&mut [f32]`/`&mut [i64]`/… (which every kernel does)
+    /// is undefined behavior: a reference of type `&mut T` must point to a
+    /// *valid* `T`, and a float/integer read from uninitialized memory is not
+    /// a valid value even though every bit pattern is representable. Per the
+    /// project's stated priority order (correctness before performance),
+    /// soundness wins here.
+    ///
+    /// Measured cost (interleaved A/B, release, this machine): the extra
+    /// `memset` adds ~25–35% to the pure element-wise microbenchmark
+    /// (`add`+`sum` over a 2000×2000 tensor — bound by output write traffic,
+    /// which the zeroing roughly increases from 3N to 4N), and is within
+    /// noise on the matmul-dominated training-step benchmark. The zero-cost
+    /// alternative is `MaybeUninit`-typed writes threaded through every
+    /// kernel; it is tracked in docs/architecture_review.md as future work.
     #[inline(always)]
-    fn owned_output_buffer(size_bytes: usize) -> Vec<u8> {
-        let mut vec = Vec::with_capacity(size_bytes);
-        #[allow(clippy::uninit_vec)]
-        unsafe {
-            vec.set_len(size_bytes);
-        }
-        vec
-    }
-
-    #[inline(always)]
-    fn owned_buffer_for_dtype(size_bytes: usize, dtype: DataType) -> Vec<u8> {
-        // Bool has strict valid bit-pattern requirements (0 or 1). Creating
-        // `&mut [bool]` over arbitrary bytes is instant UB, so bool storage
-        // is always zero-initialized even for "uninitialized" constructors.
-        if dtype == DataType::Bool {
-            Self::owned_zeroed_buffer(size_bytes)
-        } else {
-            Self::owned_output_buffer(size_bytes)
-        }
+    fn owned_buffer_for_dtype(size_bytes: usize, _dtype: DataType) -> Vec<u8> {
+        Self::owned_zeroed_buffer(size_bytes)
     }
 
     #[inline(always)]
