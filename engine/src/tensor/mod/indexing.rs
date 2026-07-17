@@ -4,6 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    autograd::{self},
+    error::{MinitensorError, Result},
+};
+use std::sync::Arc;
+
 impl Tensor {
     /// Squeeze dimensions of size 1
     #[inline(always)]
@@ -297,7 +304,14 @@ impl Tensor {
                 self.device,
                 self.requires_grad,
             );
-            return self.wrap_index_grad(output, offset, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            return self.wrap_index_grad(
+                output,
+                offset,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
         }
 
         let out_shape = Shape::new(out_dims.clone());
@@ -852,7 +866,7 @@ impl Tensor {
     }
 }
 
-fn copy_strided_to_contiguous<T: Copy>(
+pub(super) fn copy_strided_to_contiguous<T: Copy>(
     src: &[T],
     dst: &mut [T],
     shape: &[usize],

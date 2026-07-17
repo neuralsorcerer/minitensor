@@ -4,6 +4,13 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use super::*;
+use crate::{
+    autograd::{self},
+    error::{MinitensorError, Result},
+};
+use std::sync::Arc;
+
 #[inline(always)]
 fn allclose_f32(a: f32, b: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
     if a == b {
@@ -72,11 +79,12 @@ impl Tensor {
     #[inline(always)]
     pub fn clip(&self, min_val: Option<f64>, max_val: Option<f64>) -> Result<Self> {
         if let (Some(min), Some(max)) = (min_val, max_val)
-            && min > max {
-                return Err(MinitensorError::invalid_argument(format!(
-                    "clip minimum {min} cannot be greater than maximum {max}",
-                )));
-            }
+            && min > max
+        {
+            return Err(MinitensorError::invalid_argument(format!(
+                "clip minimum {min} cannot be greater than maximum {max}",
+            )));
+        }
 
         use crate::operations::activation::clip;
         clip(self, min_val, max_val)
@@ -103,12 +111,7 @@ impl Tensor {
     /// Replace NaN with `nan`, positive infinity with `posinf` or dtype max,
     /// and negative infinity with `neginf` or dtype min.
     #[inline(always)]
-    pub fn nan_to_num(
-        &self,
-        nan: f64,
-        posinf: Option<f64>,
-        neginf: Option<f64>,
-    ) -> Result<Self> {
+    pub fn nan_to_num(&self, nan: f64, posinf: Option<f64>, neginf: Option<f64>) -> Result<Self> {
         use crate::operations::activation::nan_to_num;
         nan_to_num(self, nan, posinf, neginf)
     }
@@ -678,9 +681,10 @@ impl Tensor {
             && self.is_contiguous()
             && other.is_contiguous()
             && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes())
-                && a == b {
-                    return true;
-                }
+            && a == b
+        {
+            return true;
+        }
 
         let numel = self.numel();
         match self.dtype {
@@ -738,9 +742,10 @@ impl Tensor {
             && other.device.is_cpu()
             && self.is_contiguous()
             && other.is_contiguous()
-            && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes()) {
-                return a == b;
-            }
+            && let (Some(a), Some(b)) = (self.data.as_bytes(), other.data.as_bytes())
+        {
+            return a == b;
+        }
 
         let numel = self.numel();
         match self.dtype {

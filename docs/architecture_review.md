@@ -347,9 +347,12 @@ Still open, in priority order:
 1. **dtype dispatch macro for the remaining ops files** — activation and
    reduction kernels still carry per-dtype copies (storage accessors,
    arithmetic, and comparison are done).
-2. **Convert the remaining `include!` clusters** (`tensor/mod/*`,
-   `operations/*`, bindings `pytensor/*`) following the autograd
-   template; then drop the crate-wide `items_after_test_module` allow.
+2. **Convert the remaining `include!` clusters** (`operations/*`, bindings
+   `pytensor/*`) — `autograd` and `tensor` are done; then drop the
+   crate-wide `items_after_test_module` allow. The `tensor` conversion
+   uses a children-of-core layout (`ops`/`indexing`/`autograd`/`utils` are
+   child modules of the module declaring `Tensor`), which preserves the
+   struct's field privacy — no field had to become `pub(crate)`.
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.

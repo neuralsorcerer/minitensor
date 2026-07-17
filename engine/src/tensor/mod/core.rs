@@ -4,9 +4,22 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-pub use data::{DataMut, TensorData};
-pub use dtype::DataType;
-pub use shape::{Shape, Strides};
+pub use super::data::{DataMut, TensorData};
+pub use super::dtype::DataType;
+pub use super::shape::{Shape, Strides};
+
+// Method impls split by concern. They are children of this module (rather
+// than siblings) so they keep access to `Tensor`'s private fields.
+#[path = "autograd.rs"]
+mod autograd_methods;
+#[path = "indexing.rs"]
+mod indexing_methods;
+#[path = "ops.rs"]
+mod ops_methods;
+#[path = "utils.rs"]
+mod utils_methods;
+
+use self::indexing_methods::copy_strided_to_contiguous;
 
 use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
@@ -200,9 +213,7 @@ impl Tensor {
         }
         // Take the exclusive path whenever the storage is uniquely owned.
         if Arc::get_mut(&mut self.data).is_some() {
-            return DataMut::Unique(
-                Arc::get_mut(&mut self.data).expect("uniqueness just checked"),
-            );
+            return DataMut::Unique(Arc::get_mut(&mut self.data).expect("uniqueness just checked"));
         }
         DataMut::Shared(self.data.as_ref())
     }
