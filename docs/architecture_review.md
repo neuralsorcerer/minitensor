@@ -411,8 +411,23 @@ finite-difference-checked for both operands including broadcast reduction);
 `floor_div` deliberately never carries a gradient (derivative zero a.e.,
 undefined at jumps — PyTorch refuses it too).
 
-Known remaining protocol gap (needs new engine ops, not rushed in here):
-boolean-mask and integer-list fancy indexing (`masked_select`/`nonzero`).
+Boolean-mask and integer-list fancy indexing are now implemented, closing
+the final protocol gap. A new `selection::masked_index` engine op follows
+NumPy's rule — the mask's shape must equal the tensor's leading `mask.ndim`
+dims and selection stacks the trailing blocks, so a full-shape mask yields
+1-D elements (PyTorch's `masked_select`) and a 1-D mask over a matrix
+yields rows; 0-d masks add a leading axis like NumPy. It is differentiable
+(`MaskedIndexBackward` scatters selected blocks back, zeros elsewhere —
+verified against finite differences and exact expected gradients).
+`__getitem__` dispatches bool tensors/ndarrays/(nested) bool lists to it,
+and 1-D integer lists/ndarrays/tensors to `index_select` on dim 0 with
+NumPy negative-index wrapping (empty lists select zero rows). `__setitem__`
+supports `t[mask] = scalar` by padding the mask with trailing length-1 axes
+and routing through `masked_fill_scalar` + in-place `copy_`, preserving
+tensor identity; tensor-valued right-hand sides raise a clear TypeError
+(masked_scatter is future work, documented rather than half-built).
+Mixed advanced+basic keys (a mask inside a tuple) remain unsupported and
+error clearly.
 
 Deliberate, tested divergences confirmed intentional during the audit (left
 as-is; flagged for the maintainer): `chunk` requires even divisibility

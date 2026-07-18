@@ -102,6 +102,11 @@ impl PyTensor {
     }
 
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
+        // NumPy-style fancy forms first: boolean masks select blocks along
+        // the leading dims, 1-D integer keys select rows along dim 0.
+        if let Some(result) = try_fancy_index_tensor(&self.inner, key)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (indices, newaxis_positions) = parse_getitem_indices(key, self.inner.shape().dims())?;
         let mut result = self.inner.index(&indices).map_err(_convert_error)?;
         for &pos in &newaxis_positions {
@@ -111,6 +116,41 @@ impl PyTensor {
     }
 
     fn __setitem__(&mut self, key: &Bound<PyAny>, value: &Bound<PyAny>) -> PyResult<()> {
+        // Boolean-mask assignment (`t[mask] = scalar`): the mask must match
+        // the leading dimensions; it is padded with trailing length-1 axes so
+        // masked_fill's broadcasting applies it to whole blocks.
+        if let Some(mask) = try_bool_mask_key(key)? {
+            let in_dims = self.inner.shape().dims();
+            let m_dims = mask.shape().dims().to_vec();
+            if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
+                    m_dims, in_dims
+                )));
+            }
+            let scalar = if let Ok(b) = value.extract::<bool>() {
+                b as u8 as f64
+            } else if let Ok(v) = value.extract::<f64>() {
+                v
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "boolean-mask assignment currently supports scalar values only",
+                ));
+            };
+            let mut padded = m_dims;
+            padded.resize(in_dims.len(), 1);
+            let mask_padded =
+                engine::operations::shape_ops::reshape(&mask, engine::tensor::Shape::new(padded))
+                    .map_err(_convert_error)?;
+            let filled = engine::operations::selection::masked_fill_scalar(
+                &self.inner,
+                &mask_padded,
+                scalar,
+            )
+            .map_err(_convert_error)?;
+            self.inner.copy_(&filled).map_err(_convert_error)?;
+            return Ok(());
+        }
         let indices = parse_indices(key, self.inner.shape().dims())?;
         let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner

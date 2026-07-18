@@ -538,6 +538,85 @@ impl GradientFunction for RemainderBackward {
     }
 }
 
+/// Gradient function for NumPy-style boolean indexing (`masked_index`)
+pub struct MaskedIndexBackward {
+    /// The (contiguous, detached) boolean mask that produced the selection.
+    pub mask: Tensor,
+    pub input_shape: crate::tensor::Shape,
+    /// Elements per selected block (product of the trailing input dims).
+    pub inner: usize,
+    pub input_id: TensorId,
+}
+
+impl GradientFunction for MaskedIndexBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+
+        // Scatter the selected blocks back to their positions; unselected
+        // positions receive zero.
+        let mut grad_input = Tensor::zeros(
+            self.input_shape.clone(),
+            grad_output.dtype(),
+            grad_output.device(),
+            false,
+        );
+        let mask_slice = self.mask.data().as_bool_slice().ok_or_else(|| {
+            crate::error::MinitensorError::internal_error("Failed to get bool slice from mask")
+        })?;
+        let grad_c = grad_output.contiguous()?;
+
+        macro_rules! scatter_arm {
+            ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+                let src = grad_c.data().$accessor().ok_or_else(|| {
+                    crate::error::MinitensorError::internal_error(concat!(
+                        "Failed to get ",
+                        $tyname,
+                        " slice from gradient"
+                    ))
+                })?;
+                let dst = grad_input.data_mut().$accessor_mut().ok_or_else(|| {
+                    crate::error::MinitensorError::internal_error(concat!(
+                        "Failed to get mutable ",
+                        $tyname,
+                        " slice for input gradient"
+                    ))
+                })?;
+                let mut k = 0usize;
+                for (blk, &selected) in mask_slice.iter().enumerate() {
+                    if selected {
+                        dst[blk * self.inner..(blk + 1) * self.inner]
+                            .copy_from_slice(&src[k * self.inner..(k + 1) * self.inner]);
+                        k += 1;
+                    }
+                }
+            }};
+        }
+
+        if self.inner > 0 {
+            match grad_output.dtype() {
+                crate::tensor::DataType::Float32 => {
+                    scatter_arm!(as_f32_slice, as_f32_slice_mut, "f32")
+                }
+                crate::tensor::DataType::Float64 => {
+                    scatter_arm!(as_f64_slice, as_f64_slice_mut, "f64")
+                }
+                dtype => {
+                    return Err(crate::error::MinitensorError::invalid_operation(format!(
+                        "masked_index backward not supported for {dtype:?} gradients"
+                    )));
+                }
+            }
+        }
+
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for where/select operation
 pub struct WhereBackward {
     pub condition: Tensor,

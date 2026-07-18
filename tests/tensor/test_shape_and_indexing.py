@@ -438,17 +438,21 @@ def test_multi_dim_slice():
     )
 
 
-def test_boolean_mask_indexing_error():
+def test_boolean_mask_indexing():
+    # Formerly unsupported (this test asserted a TypeError); boolean masks now
+    # follow NumPy semantics. Full coverage lives in test_fancy_indexing.py.
     t = mt.Tensor([0.0, 1.0, 2.0, 3.0])
     mask = t.gt(mt.Tensor([1.0]))
-    with pytest.raises(TypeError):
-        _ = t[mask]
+    np.testing.assert_allclose(t[mask].numpy(), np.array([2.0, 3.0], dtype=np.float32))
 
 
-def test_integer_array_indexing_error():
+def test_integer_array_indexing():
+    # Formerly unsupported (this test asserted a TypeError); integer lists now
+    # select rows along dim 0 like NumPy.
     t = mt.Tensor([10.0, 20.0, 30.0, 40.0])
-    with pytest.raises(TypeError):
-        _ = t[[2, 0]]
+    np.testing.assert_allclose(
+        t[[2, 0]].numpy(), np.array([30.0, 10.0], dtype=np.float32)
+    )
 
 
 def test_tensor_index_select_dim0():

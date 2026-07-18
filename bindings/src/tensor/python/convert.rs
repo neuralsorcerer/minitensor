@@ -619,6 +619,132 @@ fn is_ellipsis(item: &Bound<PyAny>) -> bool {
     item.is_instance_of::<pyo3::types::PyEllipsis>()
 }
 
+/// Recursively find the first scalar leaf of a (possibly nested) list.
+fn first_list_leaf<'py>(item: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if let Ok(list) = item.cast::<PyList>() {
+        match list.iter().next() {
+            Some(inner) => first_list_leaf(&inner),
+            None => Ok(None),
+        }
+    } else {
+        Ok(Some(item.clone()))
+    }
+}
+
+/// Select rows along dim 0 for integer fancy indexing, wrapping negative
+/// indices like NumPy.
+fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
+    if reference.ndim() == 0 {
+        return Err(PyIndexError::new_err("too many indices for a 0-d tensor"));
+    }
+    let dim0 = reference.shape().dims()[0] as i64;
+    let mut idx = Vec::with_capacity(vals.len());
+    for &v in vals {
+        let r = if v < 0 { v + dim0 } else { v };
+        if r < 0 || r >= dim0 {
+            return Err(PyIndexError::new_err(format!(
+                "index {v} is out of bounds for dimension 0 with size {dim0}"
+            )));
+        }
+        idx.push(r as usize);
+    }
+    engine::operations::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
+}
+
+/// Extract a boolean mask tensor from a `__getitem__`/`__setitem__` key when
+/// the key is a bool tensor, a bool ndarray, or a (nested) list of bools.
+pub(crate) fn try_bool_mask_key(key: &Bound<PyAny>) -> PyResult<Option<Tensor>> {
+    if let Some(pt) = extract_wrapped_pytensor(key) {
+        if pt.tensor().dtype() == DataType::Bool {
+            return Ok(Some(pt.tensor().clone()));
+        }
+        return Ok(None);
+    }
+    if key.cast::<PyArrayDyn<bool>>().is_ok() {
+        return Ok(Some(convert_numpy_to_tensor(key, false)?));
+    }
+    if key.cast::<PyList>().is_ok()
+        && let Some(leaf) = first_list_leaf(key)?
+        && leaf.is_instance_of::<pyo3::types::PyBool>()
+    {
+        let mask = convert_python_data_to_tensor(key, DataType::Bool, Device::cpu(), false)?;
+        return Ok(Some(mask));
+    }
+    Ok(None)
+}
+
+/// NumPy-style fancy `__getitem__` forms: a boolean mask selects blocks along
+/// the leading dimensions (`masked_index`); a 1-D integer tensor/ndarray/list
+/// selects rows along dim 0 (negative indices wrap). Returns `Ok(None)` when
+/// `key` is not a fancy index so basic indexing can proceed.
+pub(crate) fn try_fancy_index_tensor(
+    reference: &Tensor,
+    key: &Bound<PyAny>,
+) -> PyResult<Option<Tensor>> {
+    if let Some(mask) = try_bool_mask_key(key)? {
+        return engine::operations::selection::masked_index(reference, &mask)
+            .map(Some)
+            .map_err(_convert_error);
+    }
+
+    if let Some(pt) = extract_wrapped_pytensor(key) {
+        let t = pt.tensor();
+        if matches!(t.dtype(), DataType::Int32 | DataType::Int64) && t.ndim() == 1 {
+            let t = t.contiguous().map_err(_convert_error)?;
+            let vals: Vec<i64> = match t.dtype() {
+                DataType::Int32 => t
+                    .data()
+                    .as_i32_slice()
+                    .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
+                    .iter()
+                    .map(|&v| v as i64)
+                    .collect(),
+                _ => t
+                    .data()
+                    .as_i64_slice()
+                    .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
+                    .to_vec(),
+            };
+            return select_rows(reference, &vals).map(Some);
+        }
+        return Ok(None);
+    }
+
+    if let Ok(arr) = key.cast::<PyArrayDyn<i64>>() {
+        let ro = arr.readonly();
+        if ro.ndim() == 1 {
+            return select_rows(reference, ro.as_slice()?).map(Some);
+        }
+        return Ok(None);
+    }
+    if let Ok(arr) = key.cast::<PyArrayDyn<i32>>() {
+        let ro = arr.readonly();
+        if ro.ndim() == 1 {
+            let vals: Vec<i64> = ro.as_slice()?.iter().map(|&v| v as i64).collect();
+            return select_rows(reference, &vals).map(Some);
+        }
+        return Ok(None);
+    }
+
+    if let Ok(list) = key.cast::<PyList>() {
+        // Bool lists were handled above; a flat list of ints selects rows.
+        // (An empty list selects zero rows, like NumPy.)
+        let mut vals = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            if item.is_instance_of::<pyo3::types::PyBool>() || item.cast::<PyList>().is_ok() {
+                return Ok(None);
+            }
+            match item.extract::<i64>() {
+                Ok(v) => vals.push(v),
+                Err(_) => return Ok(None),
+            }
+        }
+        return select_rows(reference, &vals).map(Some);
+    }
+
+    Ok(None)
+}
+
 fn full_slice(dim: usize) -> TensorIndex {
     TensorIndex::Slice {
         start: 0,

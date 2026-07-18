@@ -217,6 +217,111 @@ pub fn masked_fill_scalar(input: &Tensor, mask: &Tensor, value: f64) -> Result<T
     masked_fill(input, mask, &scalar)
 }
 
+/// NumPy-style boolean indexing: `mask`'s shape must equal `input`'s leading
+/// `mask.ndim()` dimensions, and the result stacks the selected trailing
+/// blocks — shape `[n_true] + input.shape[mask.ndim():]`. A full-shape mask
+/// therefore selects individual elements into a 1-D tensor (PyTorch's
+/// `masked_select`), while a 1-D mask over a matrix selects rows.
+pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
+    if mask.dtype() != DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "boolean index mask must have bool dtype",
+        ));
+    }
+    if input.device() != mask.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", input.device()),
+            format!("{:?}", mask.device()),
+        ));
+    }
+
+    let in_dims = input.shape().dims();
+    let m_dims = mask.shape().dims();
+    if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {
+        return Err(MinitensorError::invalid_argument(format!(
+            "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
+            m_dims, in_dims
+        )));
+    }
+
+    let inner: usize = in_dims[m_dims.len()..].iter().product();
+    let input_c = input.contiguous()?;
+    let mask_c = mask.contiguous()?;
+    let mask_slice = mask_c
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from mask"))?;
+
+    let selected: Vec<usize> = mask_slice
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| m.then_some(i))
+        .collect();
+
+    let mut out_dims = vec![selected.len()];
+    out_dims.extend_from_slice(&in_dims[m_dims.len()..]);
+    let out_shape = Shape::new(out_dims);
+
+    let mut output_data =
+        TensorData::zeros_on_device(out_shape.numel(), input.dtype(), input.device());
+
+    /// Copies the selected trailing blocks for one dtype.
+    macro_rules! gather_arm {
+        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+            let src = input_c.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input"
+                ))
+            })?;
+            let dst = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice for output"
+                ))
+            })?;
+            for (k, &blk) in selected.iter().enumerate() {
+                dst[k * inner..(k + 1) * inner]
+                    .copy_from_slice(&src[blk * inner..(blk + 1) * inner]);
+            }
+        }};
+    }
+
+    if inner > 0 {
+        match input.dtype() {
+            DataType::Float32 => gather_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
+            DataType::Float64 => gather_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
+            DataType::Int32 => gather_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
+            DataType::Int64 => gather_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+            DataType::Bool => gather_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
+        }
+    }
+
+    let requires_grad = input.requires_grad() && input.dtype() != DataType::Bool;
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        out_shape,
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+
+    if requires_grad {
+        let grad_fn = Arc::new(crate::autograd::MaskedIndexBackward {
+            mask: mask_c.detach(),
+            input_shape: input.shape().clone(),
+            inner,
+            input_id: input.id(),
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
 fn where_kernel<T: Copy>(
     condition: &[bool],
     input: &[T],
@@ -429,5 +534,36 @@ mod tests {
         let result = masked_fill(&input, &mask, &fill).unwrap();
         let values = result.data().as_i32_slice().unwrap();
         assert_eq!(values, &[9, 2, 9, 4]);
+    }
+
+    #[test]
+    fn test_masked_index_full_and_prefix() {
+        let input = tensor_from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+
+        // Full-shape mask selects individual elements into a 1-D tensor.
+        let full = tensor_from_vec_bool(vec![true, false, true, false, false, true], vec![2, 3]);
+        let out = masked_index(&input, &full).unwrap();
+        assert_eq!(out.shape().dims(), &[3]);
+        assert_eq!(out.data().as_f32_slice().unwrap(), &[1.0, 3.0, 6.0]);
+
+        // A 1-D prefix mask selects rows.
+        let rows = tensor_from_vec_bool(vec![false, true], vec![2]);
+        let out = masked_index(&input, &rows).unwrap();
+        assert_eq!(out.shape().dims(), &[1, 3]);
+        assert_eq!(out.data().as_f32_slice().unwrap(), &[4.0, 5.0, 6.0]);
+
+        // All-false masks give an empty leading dim.
+        let none = tensor_from_vec_bool(vec![false, false], vec![2]);
+        let out = masked_index(&input, &none).unwrap();
+        assert_eq!(out.shape().dims(), &[0, 3]);
+    }
+
+    #[test]
+    fn test_masked_index_rejects_bad_masks() {
+        let input = tensor_from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let wrong_len = tensor_from_vec_bool(vec![true, false, true], vec![3]);
+        assert!(masked_index(&input, &wrong_len).is_err());
+        let not_bool = tensor_from_vec_f32(vec![1.0, 0.0], vec![2]);
+        assert!(masked_index(&input, &not_bool).is_err());
     }
 }
