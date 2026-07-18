@@ -360,6 +360,17 @@ NumPy references):
 - **`logsumexp` returned NaN for rows with a non-finite max** (`inf - inf`
   in the stable shift). Non-finite rows now short-circuit to the row max:
   `+inf` rows → `+inf`, all-`-inf` rows → `-inf`, NaN propagates.
+- **`load_state_dict`, `Adam`, and `AdamW` had required "optional"
+  arguments (second pass).** A later end-to-end serialization round-trip
+  check surfaced three the first signature sweep missed: `Module.
+  load_state_dict(sd)` required a `device` (breaking the common same-device
+  reload), and `Adam`/`AdamW` required `lr` even though their signatures
+  already defaulted every other hyperparameter — PyTorch defaults `lr=1e-3`.
+  All three now default correctly (SGD keeps its required `lr` on purpose: a
+  wrong default is dangerous there, matching classic PyTorch). Serialization
+  itself was verified bit-exact: parameters and forward outputs round-trip
+  identically across json/bin/msgpack/auto formats, including a
+  Conv2d+BatchNorm model (`tests/test_serialization_roundtrip.py`).
 - **A class of broken Python signatures.** PyO3 treats `Option`-typed
   parameters without `#[pyo3(signature)]` as *required*; sixteen call
   forms documented as optional raised TypeError:

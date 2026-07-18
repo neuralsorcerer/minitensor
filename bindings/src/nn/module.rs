@@ -700,6 +700,7 @@ impl PyModule {
     }
 
     /// Load a provided StateDict into this module
+    #[pyo3(signature = (state, device=None))]
     fn load_state_dict(&mut self, state: &PyStateDict, device: Option<&PyDevice>) -> PyResult<()> {
         use engine::nn::Module as _;
         let dev = device.map(|d| d.device());

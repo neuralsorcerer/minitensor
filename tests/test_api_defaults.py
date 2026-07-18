@@ -84,3 +84,26 @@ def test_numeric_protocol_dunders(t22):
         float(t22)
     with pytest.raises(TypeError):
         int(t22)
+
+
+def test_adam_adamw_default_learning_rate():
+    # Adam/AdamW default every hyperparameter except lr in their signature;
+    # lr was required (unlike PyTorch, which defaults it to 1e-3).
+    from minitensor import optim
+
+    for cls in (optim.Adam, optim.AdamW):
+        opt = cls(nn.DenseLayer(4, 2).parameters())
+        assert opt is not None
+
+
+def test_module_load_state_dict_default_device(tmp_path):
+    # load_state_dict's device argument was required, breaking the common
+    # in-memory / same-device reload path.
+    mt.manual_seed(1)
+    model = nn.DenseLayer(4, 3)
+    sd = model.state_dict()
+    mt.manual_seed(2)
+    other = nn.DenseLayer(4, 3)
+    other.load_state_dict(sd)  # no device argument
+    x = mt.from_numpy(np.random.RandomState(0).randn(2, 4).astype(np.float32))
+    np.testing.assert_allclose(model(x).numpy(), other(x).numpy(), rtol=1e-6)

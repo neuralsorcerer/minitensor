@@ -362,7 +362,7 @@ impl PyAdam {
     #[pyo3(
         signature = (
             parameters,
-            lr,
+            lr=1e-3,
             betas=None,
             beta1=None,
             beta2=None,
@@ -463,7 +463,7 @@ impl PyAdamW {
     #[pyo3(
         signature = (
             parameters,
-            lr,
+            lr=1e-3,
             betas=None,
             beta1=None,
             beta2=None,
