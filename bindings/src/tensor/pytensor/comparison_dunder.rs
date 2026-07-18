@@ -207,6 +207,8 @@ impl PyTensor {
             "__sub__" | "sub" => BinaryOpKind::Sub,
             "__mul__" | "mul" => BinaryOpKind::Mul,
             "__truediv__" | "div" => BinaryOpKind::Div,
+            "__floordiv__" | "floor_divide" => BinaryOpKind::FloorDiv,
+            "__mod__" | "remainder" => BinaryOpKind::Rem,
             "maximum" => BinaryOpKind::Maximum,
             "minimum" => BinaryOpKind::Minimum,
             _ => {

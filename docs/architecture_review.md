@@ -396,10 +396,23 @@ pairs). Fixed from that sweep:
 - **Missing numeric dunders** — `abs(t)`, `+t`, `float(t)`, `int(t)` now
   work (`float`/`int` require one element, matching `__bool__`).
 
-Known remaining protocol gaps (need new engine ops, not rushed in here):
-boolean-mask and integer-list fancy indexing (`masked_select`/`nonzero`),
-and the `//`, `%`, `~` operators (`floor_divide`, `remainder`,
-`logical_not`).
+The `//`, `%`, and `~` operators are now implemented as real engine ops
+(`floor_div`, `remainder`, `bitwise_not` in `operations::arithmetic`, plus
+the matching Tensor methods and all five dunders including the reflected
+forms). Semantics are Python's: `//` rounds toward negative infinity, `%`
+takes the divisor's sign, and `a == (a // b) * b + a % b` holds for every
+dtype; integer operands stay integral (exact beyond float32's 2^24 —
+verified at 2^40), integer zero divisors raise while float ones produce
+NaN/inf per IEEE, `MIN // -1` wraps instead of panicking (wrapping kernels),
+and bool operands are rejected. `~` is PyTorch's: logical NOT for bool,
+two's complement NOT for ints, rejected for floats. `remainder` is
+differentiable for float dtypes (`d/dx = 1`, `d/dy = -floor(x/y)`,
+finite-difference-checked for both operands including broadcast reduction);
+`floor_div` deliberately never carries a gradient (derivative zero a.e.,
+undefined at jumps — PyTorch refuses it too).
+
+Known remaining protocol gap (needs new engine ops, not rushed in here):
+boolean-mask and integer-list fancy indexing (`masked_select`/`nonzero`).
 
 Deliberate, tested divergences confirmed intentional during the audit (left
 as-is; flagged for the maintainer): `chunk` requires even divisibility

@@ -75,4 +75,57 @@ impl PyTensor {
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
+
+    fn __floordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        use engine::operations::arithmetic::floor_div;
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::FloorDiv)?;
+        let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __rfloordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        use engine::operations::arithmetic::floor_div;
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::FloorDiv)?;
+        let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __mod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        use engine::operations::arithmetic::remainder;
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Rem)?;
+        let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __rmod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        use engine::operations::arithmetic::remainder;
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Rem)?;
+        let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __invert__(&self) -> PyResult<Self> {
+        use engine::operations::arithmetic::bitwise_not;
+        let result = bitwise_not(&self.inner).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Floor division (Python `//` semantics; integer operands stay integral)
+    pub fn floor_divide(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        self.__floordiv__(other)
+    }
+
+    /// Python-style remainder (`%`; the result has the divisor's sign)
+    pub fn remainder(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        self.__mod__(other)
+    }
+
+    /// Bitwise NOT (`~`): logical NOT for bool, two's complement NOT for ints
+    pub fn bitwise_not(&self) -> PyResult<Self> {
+        self.__invert__()
+    }
 }

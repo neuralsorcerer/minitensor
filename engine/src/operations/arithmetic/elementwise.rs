@@ -7,7 +7,10 @@
 use super::*;
 
 use crate::{
-    autograd::{AddBackward, DivBackward, MulBackward, NegBackward, SubBackward, add_to_graph},
+    autograd::{
+        AddBackward, DivBackward, MulBackward, NegBackward, RemainderBackward, SubBackward,
+        add_to_graph,
+    },
     error::{MinitensorError, Result},
     operations::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Tensor, TensorData},
@@ -502,6 +505,225 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
     } else {
         Ok(output)
     }
+}
+
+/// Reject zero divisors for integer floor division / remainder. The integer
+/// kernels would otherwise hit a hardware divide-by-zero; floats produce
+/// inf/NaN per IEEE and are not checked.
+fn ensure_no_integer_zero_divisor(rhs: &Tensor) -> Result<()> {
+    let has_zero = match rhs.dtype() {
+        DataType::Int32 => rhs
+            .data()
+            .as_i32_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 divisor slice"))?
+            .contains(&0),
+        DataType::Int64 => rhs
+            .data()
+            .as_i64_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 divisor slice"))?
+            .contains(&0),
+        _ => false,
+    };
+    if has_zero {
+        Err(MinitensorError::invalid_operation(
+            "integer floor division or remainder by zero",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Element-wise floor division with broadcasting (Python `//` semantics: the
+/// quotient rounded toward negative infinity; integer operands stay integral).
+///
+/// The result never carries a gradient: the derivative is zero almost
+/// everywhere and undefined at the jumps, so like PyTorch this op does not
+/// participate in autograd.
+pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, result_dtype) =
+        coerce_binary_operands(lhs, rhs, BinaryOpKind::FloorDiv)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
+
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    if output_shape.numel() == 0 {
+        return Ok(Tensor::empty(
+            output_shape,
+            result_dtype,
+            lhs.device(),
+            false,
+        ));
+    }
+
+    ensure_no_integer_zero_divisor(rhs_ref)?;
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
+
+    match result_dtype {
+        DataType::Float32 => {
+            floordiv_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?
+        }
+        DataType::Float64 => {
+            floordiv_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?
+        }
+        DataType::Int32 => floordiv_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int64 => floordiv_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Bool => unreachable!("bool rejected during operand coercion"),
+    }
+
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        result_dtype,
+        lhs.device(),
+        false,
+    ))
+}
+
+/// Element-wise remainder with broadcasting (Python `%` semantics: the result
+/// has the divisor's sign, consistent with [`floor_div`] via
+/// `a == floor_div(a, b) * b + remainder(a, b)`).
+///
+/// Differentiable for float dtypes: `d/dx = 1`, `d/dy = -floor(x/y)`.
+pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Rem)?;
+    let lhs_ref = lhs_cast.as_ref();
+    let rhs_ref = rhs_cast.as_ref();
+
+    // Gradients only make sense for floating dtypes; an all-integer remainder
+    // is exact and non-differentiable.
+    let requires_grad = (lhs.requires_grad() || rhs.requires_grad())
+        && matches!(result_dtype, DataType::Float32 | DataType::Float64);
+
+    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    if output_shape.numel() == 0 {
+        let mut output = Tensor::empty(
+            output_shape.clone(),
+            result_dtype,
+            lhs.device(),
+            requires_grad,
+        );
+        if requires_grad {
+            let grad_fn = Arc::new(RemainderBackward {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+                input_ids: [lhs.id(), rhs.id()],
+                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            add_to_graph(&output, Some(grad_fn))?;
+        }
+        return Ok(output);
+    }
+
+    ensure_no_integer_zero_divisor(rhs_ref)?;
+
+    let mut output_data =
+        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
+
+    match result_dtype {
+        DataType::Float32 => rem_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Float64 => rem_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int32 => rem_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Int64 => rem_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+        DataType::Bool => unreachable!("bool rejected during operand coercion"),
+    }
+
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        result_dtype,
+        lhs.device(),
+        requires_grad,
+    );
+
+    if requires_grad {
+        let grad_fn = Arc::new(RemainderBackward {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
+/// Element-wise bitwise NOT (`~`): logical NOT for bool tensors, two's
+/// complement NOT for integer tensors, rejected for floats — PyTorch's `~`
+/// semantics. Non-differentiable by construction.
+pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
+    let mut output_data = TensorData::uninitialized_on_device(
+        tensor.shape().numel(),
+        tensor.dtype(),
+        tensor.device(),
+    );
+
+    /// Applies `!` for one dtype, parallel above `PAR_THRESHOLD`.
+    macro_rules! not_arm {
+        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from tensor"
+                ))
+            })?;
+            let output = output_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from output"
+                ))
+            })?;
+            if input.len() >= PAR_THRESHOLD {
+                output
+                    .par_iter_mut()
+                    .zip(input.par_iter())
+                    .for_each(|(o, &i)| *o = !i);
+            } else {
+                for (o, &i) in output.iter_mut().zip(input.iter()) {
+                    *o = !i;
+                }
+            }
+        }};
+    }
+
+    match tensor.dtype() {
+        DataType::Bool => not_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
+        DataType::Int32 => not_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
+        DataType::Int64 => not_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+        DataType::Float32 | DataType::Float64 => {
+            return Err(MinitensorError::invalid_operation(
+                "Bitwise NOT only supported for boolean and integer tensors",
+            ));
+        }
+    }
+
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
 }
 
 // Helper functions for type-specific operations

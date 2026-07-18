@@ -17,6 +17,8 @@ pub enum BinaryOpKind {
     Sub,
     Mul,
     Div,
+    FloorDiv,
+    Rem,
     Maximum,
     Minimum,
 }
@@ -55,6 +57,17 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
             }
         }
         Div => Ok(promote_division_dtype(lhs, rhs)),
+        // Unlike true division, floor division and remainder keep integer
+        // operands integral (Python/PyTorch semantics).
+        FloorDiv | Rem => {
+            if lhs == DataType::Bool || rhs == DataType::Bool {
+                Err(MinitensorError::invalid_operation(
+                    "Floor division and remainder not supported for boolean tensors",
+                ))
+            } else {
+                Ok(promote_arithmetic_dtype(lhs, rhs))
+            }
+        }
     }
 }
 
@@ -113,6 +126,34 @@ mod tests {
         assert_eq!(
             promote_division_dtype(DataType::Float64, DataType::Int64),
             DataType::Float64
+        );
+    }
+
+    #[test]
+    fn test_floor_div_and_rem_keep_integers_and_reject_bool() {
+        // Unlike true division, // and % keep integer operands integral.
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Int64, DataType::Int64, BinaryOpKind::FloorDiv)
+                .unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Int32, DataType::Int32, BinaryOpKind::Rem)
+                .unwrap(),
+            DataType::Int32
+        );
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Int64, DataType::Float32, BinaryOpKind::FloorDiv)
+                .unwrap(),
+            DataType::Float32
+        );
+        assert!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Int32, BinaryOpKind::FloorDiv)
+                .is_err()
+        );
+        assert!(
+            result_dtype_for_binary_op(DataType::Float32, DataType::Bool, BinaryOpKind::Rem)
+                .is_err()
         );
     }
 }

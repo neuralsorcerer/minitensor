@@ -235,6 +235,116 @@ binary_kernel_simd!(
     |a, b| a / b
 );
 
+// Floor division: quotient rounded toward negative infinity (Python
+// semantics). Integer closures use wrapping division so `MIN / -1` wraps
+// instead of panicking inside the parallel loops; the op layer rejects zero
+// divisors for integer dtypes before dispatching here.
+binary_kernel!(
+    floordiv_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    |a: f32, b: f32| (a / b).floor()
+);
+binary_kernel!(
+    floordiv_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    |a: f64, b: f64| (a / b).floor()
+);
+binary_kernel!(
+    floordiv_i32_direct,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    |a: i32, b: i32| {
+        let q = a.wrapping_div(b);
+        let r = a.wrapping_rem(b);
+        if r != 0 && ((r < 0) != (b < 0)) {
+            q - 1
+        } else {
+            q
+        }
+    }
+);
+binary_kernel!(
+    floordiv_i64_direct,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    |a: i64, b: i64| {
+        let q = a.wrapping_div(b);
+        let r = a.wrapping_rem(b);
+        if r != 0 && ((r < 0) != (b < 0)) {
+            q - 1
+        } else {
+            q
+        }
+    }
+);
+
+// Remainder with the sign of the divisor (Python semantics), consistent with
+// the floor division above: a == floor_div(a, b) * b + rem(a, b). Float
+// variants yield NaN for zero divisors like `%` itself; integer zero divisors
+// are rejected by the op layer.
+binary_kernel!(
+    rem_f32_direct,
+    as_f32_slice,
+    as_f32_slice_mut,
+    "f32",
+    |a: f32, b: f32| {
+        let r = a % b;
+        if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+            r + b
+        } else {
+            r
+        }
+    }
+);
+binary_kernel!(
+    rem_f64_direct,
+    as_f64_slice,
+    as_f64_slice_mut,
+    "f64",
+    |a: f64, b: f64| {
+        let r = a % b;
+        if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+            r + b
+        } else {
+            r
+        }
+    }
+);
+binary_kernel!(
+    rem_i32_direct,
+    as_i32_slice,
+    as_i32_slice_mut,
+    "i32",
+    |a: i32, b: i32| {
+        let r = a.wrapping_rem(b);
+        if r != 0 && ((r < 0) != (b < 0)) {
+            r + b
+        } else {
+            r
+        }
+    }
+);
+binary_kernel!(
+    rem_i64_direct,
+    as_i64_slice,
+    as_i64_slice_mut,
+    "i64",
+    |a: i64, b: i64| {
+        let r = a.wrapping_rem(b);
+        if r != 0 && ((r < 0) != (b < 0)) {
+            r + b
+        } else {
+            r
+        }
+    }
+);
+
 /// Generic broadcasting binary operation
 pub(crate) fn broadcast_binary_op<T, F>(
     lhs_data: &[T],

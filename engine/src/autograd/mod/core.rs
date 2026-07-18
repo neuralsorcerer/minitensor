@@ -502,6 +502,42 @@ impl GradientFunction for DivBackward {
     }
 }
 
+/// Gradient function for the Python-style remainder operation
+pub struct RemainderBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub input_ids: [TensorId; 2],
+    /// Which inputs actually need a gradient (see [`AddBackward`]).
+    pub input_requires_grad: [bool; 2],
+}
+
+impl GradientFunction for RemainderBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+
+        // rem(x, y) = x - floor(x/y) * y with floor(x/y) locally constant, so
+        // d/dx = 1 and d/dy = -floor(x/y).
+        if self.input_requires_grad[0] {
+            let lhs_grad = reduce_gradient_for_broadcasting(grad_output, self.lhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
+        }
+        if self.input_requires_grad[1] {
+            let quotient = arithmetic::floor_div(&self.lhs.detach(), &self.rhs.detach())?;
+            let rhs_term = arithmetic::mul(grad_output, &quotient)?;
+            let rhs_term = arithmetic::neg(&rhs_term)?;
+            let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
+            accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 /// Gradient function for where/select operation
 pub struct WhereBackward {
     pub condition: Tensor,
