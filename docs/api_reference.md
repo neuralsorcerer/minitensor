@@ -276,6 +276,12 @@ Conversion helpers:
 - `tensor.item()` → Python scalar (for 0-d tensors)
 - `tensor.tolist()` → Python list
 - `tensor.astype(dtype)` → dtype conversion
+- `float(tensor)` / `int(tensor)` → Python scalar (one-element tensors only;
+  `int` truncates, bool converts to 1/0)
+
+Python numeric protocol: tensors support `+`, `-`, `*`, `/`, `//`, `%`, `@`,
+`**`, unary `-`/`+`, `abs()`, `~` (bool/int only), the comparison operators,
+and the in-place forms (`+=`, `-=`, …), with scalars accepted on either side.
 
 ## 4) Tensor instance methods
 
@@ -294,6 +300,23 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 - `index_select`, `gather`, `narrow`
 - `flip`, `roll`
 
+`__getitem__` supports basic indexing (ints, slices with positive steps,
+`None`/`np.newaxis`, and `...`/Ellipsis) plus NumPy-style fancy forms:
+
+- **Boolean masks** — `t[mask]` where the mask's shape equals `t`'s leading
+  `mask.ndim` dimensions selects the trailing blocks: a full-shape mask
+  yields a 1-D tensor of elements, a 1-D mask over a matrix yields rows,
+  and a 0-d mask adds a leading axis. Masks may be bool tensors, bool
+  ndarrays, or (nested) lists of bools, and selection is differentiable.
+- **Integer lists** — `t[[2, 0, -1]]` (or a 1-D int ndarray/tensor) selects
+  rows along dim 0 with negative-index wrapping.
+
+`__setitem__` additionally supports `t[mask] = value` where `value` is a
+scalar or anything broadcastable to the selection shape
+`[n_true] + trailing`; values are cast to the tensor's dtype and written in
+place. Masks inside mixed index tuples (e.g. `t[0, mask]`) are not
+supported and raise.
+
 ### Linear algebra & matrix ops
 
 - `dot`, `bmm`
@@ -304,6 +327,7 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 ### Reductions, statistics, and equality
 
 - `sum`, `mean`, `median`, `nanmedian`, `quantile`, `nanquantile`
+  (the `nan*` reductions return NaN for all-NaN slices, matching NumPy)
 - `std(dim=None, unbiased=True, keepdim=False)`
 - `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
@@ -355,6 +379,14 @@ assert row_std.shape == (2, 3)
 - `maximum`, `minimum`
 - `softplus`, `gelu`, `elu`, `selu`, `silu`
 - `hardshrink`
+- `floor_divide` / `//` — Python floor division (rounds toward negative
+  infinity; integer operands stay integral, integer zero divisors raise,
+  not differentiable)
+- `remainder` / `%` — Python-style remainder (takes the divisor's sign;
+  `a == (a // b) * b + a % b` holds for every dtype; differentiable for
+  float dtypes)
+- `bitwise_not` / `~` — logical NOT for bool, two's complement NOT for
+  ints; rejected for floats
 
 ### Normalization
 
