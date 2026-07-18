@@ -152,6 +152,62 @@ def test_logsumexp_keepdim_and_all_dims():
         _ = tensor.astype("int32").logsumexp(dim=1)
 
 
+def test_logsumexp_non_finite_rows():
+    # The stable formula max + log(sum(exp(x - max))) degenerates to
+    # inf - inf = NaN when the row max is not finite; the correct limits are
+    # +inf for rows containing +inf, -inf for all--inf rows, NaN for NaN rows.
+    data = np.array(
+        [[0.0, -np.inf, 1.0], [-np.inf, -np.inf, -np.inf], [np.inf, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    out = mt.Tensor(data).logsumexp(dim=1).numpy()
+    np.testing.assert_allclose(out[0], np.logaddexp(0.0, 1.0), rtol=1e-6)
+    assert out[1] == -np.inf
+    assert out[2] == np.inf
+
+    nan_row = mt.Tensor(np.array([[np.nan, 1.0]], dtype=np.float32))
+    assert np.isnan(nan_row.logsumexp(dim=1).numpy()).all()
+
+    data64 = np.array([[-np.inf, -np.inf], [np.inf, 1.0]], dtype=np.float64)
+    out64 = mt.Tensor(data64).logsumexp(dim=1).numpy()
+    assert out64[0] == -np.inf and out64[1] == np.inf
+
+    multi = np.full((2, 2, 2), -np.inf, dtype=np.float32)
+    multi[0] = 1.0
+    out_multi = mt.Tensor(multi).logsumexp(dim=(1, 2), keepdim=True).numpy().ravel()
+    np.testing.assert_allclose(out_multi[0], 1.0 + np.log(4.0), rtol=1e-6)
+    assert out_multi[1] == -np.inf
+
+
+def test_activation_methods_have_pytorch_defaults():
+    # These pymethods take Option-typed parameters; without an explicit
+    # #[pyo3(signature)] PyO3 makes them required, breaking no-arg calls.
+    data = np.array([[1.0, -2.0], [3.0, -0.25]], dtype=np.float32)
+    t = mt.Tensor(data)
+
+    np.testing.assert_allclose(t.softplus().numpy(), np.log1p(np.exp(data)), rtol=1e-5)
+    np.testing.assert_allclose(
+        t.elu().numpy(), np.where(data > 0, data, np.expm1(data)), rtol=1e-5
+    )
+    from math import erf
+
+    np.testing.assert_allclose(
+        t.gelu().numpy(),
+        0.5 * data * (1.0 + np.vectorize(erf)(data / np.sqrt(2.0))),
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        t.hardshrink().numpy(), np.where(np.abs(data) > 0.5, data, 0.0), rtol=1e-6
+    )
+
+    stacked = mt.Tensor.stack([t, t])
+    assert tuple(stacked.shape) == (2, 2, 2)
+    joined = mt.Tensor.concatenate([t, t])
+    assert tuple(joined.shape) == (4, 2)
+    joined_axis = mt.Tensor.concatenate([t, t], axis=1)
+    assert tuple(joined_axis.shape) == (2, 4)
+
+
 def test_softplus_matches_numpy_and_grad():
     data = np.array([-5.0, 0.0, 5.0, 50.0], dtype=np.float32)
     tensor = mt.Tensor(data, requires_grad=True)

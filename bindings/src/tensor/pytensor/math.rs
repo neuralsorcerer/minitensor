@@ -153,6 +153,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (lambd=None))]
     pub fn hardshrink(&self, lambd: Option<f64>) -> PyResult<Self> {
         let result = self
             .inner
@@ -280,6 +281,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (approximate=None))]
     pub fn gelu(&self, approximate: Option<&str>) -> PyResult<Self> {
         let approx_mode = approximate.unwrap_or("none");
         let approximate = if approx_mode.eq_ignore_ascii_case("none") {
@@ -301,6 +303,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (beta=None, threshold=None))]
     pub fn softplus(&self, beta: Option<f64>, threshold: Option<f64>) -> PyResult<Self> {
         let result = self
             .inner
@@ -309,6 +312,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (alpha=None))]
     pub fn elu(&self, alpha: Option<f64>) -> PyResult<Self> {
         let result = self
             .inner

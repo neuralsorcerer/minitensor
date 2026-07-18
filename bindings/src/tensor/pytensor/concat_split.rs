@@ -9,14 +9,15 @@ use super::*;
 impl PyTensor {
     /// Concatenate tensors along an axis
     #[staticmethod]
-    pub fn concatenate(tensors: &Bound<PyList>, _axis: Option<isize>) -> PyResult<PyTensor> {
+    #[pyo3(signature = (tensors, axis=None))]
+    pub fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot concatenate empty list of tensors",
             ));
         }
 
-        let axis = _axis.unwrap_or(0);
+        let axis = axis.unwrap_or(0);
 
         let tensor_vec: Vec<Tensor> = tensors
             .iter()
@@ -31,14 +32,15 @@ impl PyTensor {
 
     /// Stack tensors along a new axis
     #[staticmethod]
-    pub fn stack(tensors: &Bound<PyList>, _axis: Option<isize>) -> PyResult<PyTensor> {
+    #[pyo3(signature = (tensors, axis=None))]
+    pub fn stack(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot stack empty list of tensors",
             ));
         }
 
-        let axis = _axis.unwrap_or(0);
+        let axis = axis.unwrap_or(0);
 
         let unsqueezed: Vec<Tensor> = tensors
             .iter()

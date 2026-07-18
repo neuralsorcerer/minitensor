@@ -68,6 +68,51 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     let log_sum = activation::log(&sum_exp)?;
     let mut result = arithmetic::add(&max_tensor, &log_sum)?;
 
+    // A non-finite row max poisons the shifted sum with `inf - inf = NaN`.
+    // The correct limit for those rows is the max itself: +inf rows reduce to
+    // +inf, all--inf rows to -inf, and NaN propagates as NaN.
+    match tensor.dtype() {
+        DataType::Float32 => {
+            let max_slice = max_tensor.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from max tensor")
+            })?;
+            if max_slice.iter().any(|v| !v.is_finite()) {
+                let non_finite: Vec<(usize, f32)> = max_slice
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| !v.is_finite())
+                    .map(|(i, &v)| (i, v))
+                    .collect();
+                let out = result.data_mut().as_f32_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable f32 slice from result")
+                })?;
+                for (i, m) in non_finite {
+                    out[i] = m;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let max_slice = max_tensor.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from max tensor")
+            })?;
+            if max_slice.iter().any(|v| !v.is_finite()) {
+                let non_finite: Vec<(usize, f64)> = max_slice
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| !v.is_finite())
+                    .map(|(i, &v)| (i, v))
+                    .collect();
+                let out = result.data_mut().as_f64_slice_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get mutable f64 slice from result")
+                })?;
+                for (i, m) in non_finite {
+                    out[i] = m;
+                }
+            }
+        }
+        _ => unreachable!("logsumexp dtype checked above"),
+    }
+
     if !keepdim {
         let mut new_dims = Vec::with_capacity(result.ndim() - dims.len());
         for (idx, &size) in result.shape().dims().iter().enumerate() {
