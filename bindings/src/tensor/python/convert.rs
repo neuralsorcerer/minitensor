@@ -615,6 +615,18 @@ fn tensor_from_flat_scalars(
     let dtype = tensor.dtype();
     Ok((tensor, dtype))
 }
+fn is_ellipsis(item: &Bound<PyAny>) -> bool {
+    item.is_instance_of::<pyo3::types::PyEllipsis>()
+}
+
+fn full_slice(dim: usize) -> TensorIndex {
+    TensorIndex::Slice {
+        start: 0,
+        end: dim,
+        step: 1,
+    }
+}
+
 fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
     if let Ok(i) = item.extract::<isize>() {
         let mut idx = i;
@@ -667,9 +679,17 @@ pub(crate) fn parse_getitem_indices(
         vec![key.clone()]
     };
 
-    // `None` entries add axes rather than selecting dimensions, so only the
-    // real (non-None) entries count against the tensor rank.
-    let real_count = items.iter().filter(|it| !it.is_none()).count();
+    // `None` entries add axes and `...` expands to full slices, so only the
+    // real entries count against the tensor rank.
+    if items.iter().filter(|it| is_ellipsis(it)).count() > 1 {
+        return Err(PyIndexError::new_err(
+            "an index can only have a single ellipsis ('...')",
+        ));
+    }
+    let real_count = items
+        .iter()
+        .filter(|it| !it.is_none() && !is_ellipsis(it))
+        .count();
     if real_count > shape.len() {
         return Err(PyIndexError::new_err("Too many indices"));
     }
@@ -685,6 +705,16 @@ pub(crate) fn parse_getitem_indices(
             out_dim += 1;
             continue;
         }
+        if is_ellipsis(item) {
+            // `...` stands for every dimension not consumed by the real
+            // entries, each taken in full.
+            for _ in 0..shape.len() - real_count {
+                real_indices.push(full_slice(shape[input_dim]));
+                input_dim += 1;
+                out_dim += 1;
+            }
+            continue;
+        }
         let idx = parse_index(item, shape[input_dim])?;
         // Integer indices remove the dimension; slices keep it in the output.
         let keeps_dim = matches!(idx, TensorIndex::Slice { .. });
@@ -697,45 +727,46 @@ pub(crate) fn parse_getitem_indices(
 
     // Any dimensions not addressed explicitly are taken in full.
     for &dim in &shape[input_dim..] {
-        real_indices.push(TensorIndex::Slice {
-            start: 0,
-            end: dim,
-            step: 1,
-        });
+        real_indices.push(full_slice(dim));
     }
 
     Ok((real_indices, newaxis_positions))
 }
 
 pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec<TensorIndex>> {
-    if let Ok(tup) = key.cast::<PyTuple>() {
-        if tup.len() > shape.len() {
-            return Err(PyIndexError::new_err("Too many indices"));
-        }
-        let mut result = Vec::new();
-        for (i, dim) in shape.iter().enumerate() {
-            if i < tup.len() {
-                result.push(parse_index(&tup.get_item(i)?, *dim)?);
-            } else {
-                result.push(TensorIndex::Slice {
-                    start: 0,
-                    end: *dim,
-                    step: 1,
-                });
-            }
-        }
-        Ok(result)
+    let items: Vec<Bound<PyAny>> = if let Ok(tup) = key.cast::<PyTuple>() {
+        tup.iter().collect()
     } else {
-        let mut result = vec![parse_index(key, shape[0])?];
-        for dim in &shape[1..] {
-            result.push(TensorIndex::Slice {
-                start: 0,
-                end: *dim,
-                step: 1,
-            });
-        }
-        Ok(result)
+        vec![key.clone()]
+    };
+
+    if items.iter().filter(|it| is_ellipsis(it)).count() > 1 {
+        return Err(PyIndexError::new_err(
+            "an index can only have a single ellipsis ('...')",
+        ));
     }
+    let real_count = items.iter().filter(|it| !is_ellipsis(it)).count();
+    if real_count > shape.len() {
+        return Err(PyIndexError::new_err("Too many indices"));
+    }
+
+    let mut result: Vec<TensorIndex> = Vec::with_capacity(shape.len());
+    let mut input_dim = 0usize;
+    for item in &items {
+        if is_ellipsis(item) {
+            for _ in 0..shape.len() - real_count {
+                result.push(full_slice(shape[input_dim]));
+                input_dim += 1;
+            }
+            continue;
+        }
+        result.push(parse_index(item, shape[input_dim])?);
+        input_dim += 1;
+    }
+    for &dim in &shape[input_dim..] {
+        result.push(full_slice(dim));
+    }
+    Ok(result)
 }
 
 pub(crate) fn convert_numpy_to_tensor(

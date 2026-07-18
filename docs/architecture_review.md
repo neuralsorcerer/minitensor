@@ -380,6 +380,27 @@ NumPy references):
   like `from_numpy`; the docstring and API reference now say so instead of
   implying aliasing.
 
+Protocol-surface round (same audit, continued): conv2d
+input/weight/bias gradients (incl. stride/padding), `masked_softmax` /
+`masked_log_softmax` gradients, and `Sequential` chains all pass
+finite-difference gradcheck; the Python operator protocol was fuzzed
+(`+=`-family, `@`, comparisons, indexing forms, `astype` across all dtype
+pairs). Fixed from that sweep:
+
+- **`...` (Ellipsis) indexing** — `t[..., 0]`, `t[0, ..., 2]`, and the
+  `__setitem__` forms now expand to full slices like NumPy/PyTorch
+  (single-ellipsis rule enforced); previously `TypeError: Invalid index
+  type`. The `parse_indices` rewrite also fixed a latent panic:
+  `__setitem__` on a 0-d tensor indexed `shape[0]` out of bounds — now a
+  clean IndexError.
+- **Missing numeric dunders** — `abs(t)`, `+t`, `float(t)`, `int(t)` now
+  work (`float`/`int` require one element, matching `__bool__`).
+
+Known remaining protocol gaps (need new engine ops, not rushed in here):
+boolean-mask and integer-list fancy indexing (`masked_select`/`nonzero`),
+and the `//`, `%`, `~` operators (`floor_divide`, `remainder`,
+`logical_not`).
+
 Deliberate, tested divergences confirmed intentional during the audit (left
 as-is; flagged for the maintainer): `chunk` requires even divisibility
 (PyTorch allows a smaller trailing chunk); `nanquantile` raises on all-NaN

@@ -69,3 +69,18 @@ def test_matmul_mismatch_reports_expected_rhs_shape(t22):
     other = mt.from_numpy(np.ones((3, 2), dtype=np.float32))
     with pytest.raises(Exception, match=r"expected \[2, 2\], got \[3, 2\]"):
         mt.from_numpy(np.ones((3, 2), dtype=np.float32)).matmul(other)
+
+
+def test_numeric_protocol_dunders(t22):
+    np.testing.assert_allclose(abs(t22).numpy(), np.abs(t22.numpy()), rtol=1e-6)
+    np.testing.assert_allclose((+t22).numpy(), t22.numpy(), rtol=1e-6)
+
+    scalar = mt.from_numpy(np.array([2.5], dtype=np.float32))
+    assert float(scalar) == 2.5
+    assert int(scalar) == 2
+    assert int(mt.from_numpy(np.array([True]))) == 1
+
+    with pytest.raises(TypeError):
+        float(t22)
+    with pytest.raises(TypeError):
+        int(t22)

@@ -80,6 +80,27 @@ impl PyTensor {
         }
     }
 
+    fn __abs__(&self) -> PyResult<Self> {
+        let result = self.inner.abs().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    fn __pos__(&self) -> Self {
+        // `+t` is the identity; the clone shares storage via Arc, matching
+        // torch's behavior of returning the input values unchanged.
+        self.clone()
+    }
+
+    fn __float__(&self) -> PyResult<f64> {
+        let value = self.scalar_as_f64()?;
+        Ok(value)
+    }
+
+    fn __int__(&self) -> PyResult<i64> {
+        let value = self.scalar_as_f64()?;
+        Ok(value as i64)
+    }
+
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
         let (indices, newaxis_positions) = parse_getitem_indices(key, self.inner.shape().dims())?;
         let mut result = self.inner.index(&indices).map_err(_convert_error)?;
@@ -100,5 +121,30 @@ impl PyTensor {
             .index_assign(&indices, &val_tensor)
             .map_err(_convert_error)?;
         Ok(())
+    }
+}
+
+impl PyTensor {
+    /// Extract the value of a one-element tensor as f64 for `__float__` /
+    /// `__int__`. Mirrors `__bool__`'s single-element requirement.
+    fn scalar_as_f64(&self) -> PyResult<f64> {
+        if self.inner.numel() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "only one element tensors can be converted to Python scalars",
+            ));
+        }
+        let err =
+            || PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to access tensor data");
+        match self.inner.dtype() {
+            DataType::Float32 => Ok(self.inner.data().as_f32_slice().ok_or_else(err)?[0] as f64),
+            DataType::Float64 => Ok(self.inner.data().as_f64_slice().ok_or_else(err)?[0]),
+            DataType::Int32 => Ok(self.inner.data().as_i32_slice().ok_or_else(err)?[0] as f64),
+            DataType::Int64 => Ok(self.inner.data().as_i64_slice().ok_or_else(err)?[0] as f64),
+            DataType::Bool => Ok(if self.inner.data().as_bool_slice().ok_or_else(err)?[0] {
+                1.0
+            } else {
+                0.0
+            }),
+        }
     }
 }

@@ -630,3 +630,42 @@ def test_expand_adds_leading_dimensions():
 
     with pytest.raises(ValueError):
         tx.expand(-1, 4)
+
+
+def test_ellipsis_indexing_matches_numpy():
+    src = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    t = mt.Tensor(src)
+
+    np.testing.assert_allclose(t[..., 0].numpy(), src[..., 0])
+    np.testing.assert_allclose(t[..., 1:3].numpy(), src[..., 1:3])
+    np.testing.assert_allclose(t[0, ...].numpy(), src[0, ...])
+    np.testing.assert_allclose(t[0, ..., 2].numpy(), src[0, ..., 2])
+    np.testing.assert_allclose(t[...].numpy(), src)
+    np.testing.assert_allclose(t[None, ..., 0].numpy(), src[None][..., 0])
+
+    with pytest.raises(IndexError):
+        _ = t[..., ..., 0]
+
+
+def test_ellipsis_setitem_matches_numpy():
+    src = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+
+    t = mt.Tensor(src.copy())
+    t[..., 0] = 0.0
+    ref = src.copy()
+    ref[..., 0] = 0.0
+    np.testing.assert_allclose(t.numpy(), ref)
+
+    t = mt.Tensor(src.copy())
+    t[0, ...] = 7.0
+    ref = src.copy()
+    ref[0, ...] = 7.0
+    np.testing.assert_allclose(t.numpy(), ref)
+
+
+def test_scalar_tensor_setitem_raises_cleanly():
+    # Previously reached shape[0] on a 0-d tensor and panicked; must be a
+    # regular IndexError now.
+    t = mt.Tensor(np.array(1.0, dtype=np.float32))
+    with pytest.raises(IndexError):
+        t[0] = 2.0
