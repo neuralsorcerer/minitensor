@@ -75,6 +75,7 @@ fn borrow_optional_tensor_mut<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, weight, bias=None))]
 fn dense_layer(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
@@ -259,6 +260,7 @@ fn dropout2d_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResul
 }
 
 #[pyfunction(name = "mse_loss")]
+#[pyo3(signature = (input, target, reduction=None))]
 fn mse_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
@@ -275,6 +277,7 @@ fn mse_loss_functional(
 }
 
 #[pyfunction(name = "smooth_l1_loss")]
+#[pyo3(signature = (input, target, reduction=None))]
 fn smooth_l1_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
@@ -291,6 +294,7 @@ fn smooth_l1_loss_functional(
 }
 
 #[pyfunction(name = "log_cosh_loss")]
+#[pyo3(signature = (input, target, reduction=None))]
 fn log_cosh_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
@@ -615,6 +619,7 @@ impl PyModule {
     }
 
     /// Save module state to a file (basic implementation)
+    #[pyo3(signature = (path, format=None))]
     fn save(&self, path: &str, format: Option<&str>) -> PyResult<()> {
         // Build a SerializedModel with metadata and engine state_dict
         use engine::nn::Module as _;
@@ -654,6 +659,7 @@ impl PyModule {
 
     /// Load module state from a file (basic implementation)
     #[staticmethod]
+    #[pyo3(signature = (path, format=None))]
     fn load_state_from(path: &str, format: Option<&str>) -> PyResult<PyStateDict> {
         let model = match format.map(|s| s.to_lowercase()) {
             Some(ref s) if s == "json" => ModelSerializer::load(path, SerializationFormat::Json),

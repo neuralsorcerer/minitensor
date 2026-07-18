@@ -182,12 +182,14 @@ fn full_like(tensor: &Bound<PyAny>, fill_value: f64, dtype: Option<&str>) -> PyR
 
 /// Concatenate tensors along an axis
 #[pyfunction]
+#[pyo3(signature = (tensors, axis=None))]
 fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, axis)
 }
 
 /// Stack tensors along a new axis
 #[pyfunction]
+#[pyo3(signature = (tensors, axis=None))]
 fn stack(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, axis)
 }
@@ -206,6 +208,7 @@ fn hstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
 
 /// Split tensor into multiple sub-tensors
 #[pyfunction]
+#[pyo3(signature = (tensor, sections, axis=None))]
 fn split(tensor: &PyTensor, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
     let dim = axis.unwrap_or(0);
     tensor.chunk(sections, dim)

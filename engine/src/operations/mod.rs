@@ -17,6 +17,7 @@ pub mod reduction;
 pub mod selection;
 pub mod shape_ops;
 pub mod simd;
+pub(crate) mod util;
 
 // Re-export common operations
 pub use activation::*;

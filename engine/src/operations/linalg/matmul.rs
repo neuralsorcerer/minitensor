@@ -29,14 +29,7 @@ pub(crate) struct DiagonalSpec {
     pub output_dims: Vec<usize>,
 }
 
-pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
-    let dim = if dim < 0 { dim + ndim as isize } else { dim };
-    if dim < 0 || dim >= ndim as isize {
-        Err(MinitensorError::index_error(dim, 0, ndim))
-    } else {
-        Ok(dim as usize)
-    }
-}
+pub(crate) use crate::operations::util::normalize_dim;
 
 pub(crate) fn compute_diagonal_spec(
     dims: &[usize],
@@ -378,8 +371,11 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_cols = rhs_shape[rhs_shape.len() - 1];
 
     if lhs_cols != rhs_rows {
+        // "expected" is the rhs shape that would make the inner dimensions
+        // agree; reporting the lhs shape here made the message claim a
+        // mismatch between two identical shapes for (n,k)@(n,k) inputs.
         return Err(MinitensorError::shape_mismatch(
-            vec![lhs_rows, lhs_cols],
+            vec![lhs_cols, rhs_cols],
             vec![rhs_rows, rhs_cols],
         ));
     }

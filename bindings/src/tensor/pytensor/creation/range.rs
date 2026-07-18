@@ -83,10 +83,15 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Create a tensor from a NumPy array.
+    ///
+    /// Note: despite the name, this currently COPIES the array's data, exactly
+    /// like ``from_numpy`` — later writes to the NumPy array are not visible
+    /// through the tensor. True zero-copy sharing requires memory-lifetime
+    /// management that is not implemented yet.
     #[staticmethod]
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
-        // Currently delegates to from_numpy; true zero-copy requires more complex memory management.
         Self::from_numpy(array, requires_grad)
     }
 }

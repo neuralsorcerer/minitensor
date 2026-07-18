@@ -247,6 +247,7 @@ impl PyModelSerializer {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (model, path, format=None))]
     fn save(
         model: &PySerializedModel,
         path: &str,
@@ -260,6 +261,7 @@ impl PyModelSerializer {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (path, format=None))]
     fn load(path: &str, format: Option<&PySerializationFormat>) -> PyResult<PySerializedModel> {
         let format = format
             .map(|f| f.inner)
@@ -468,6 +470,7 @@ impl PyDeploymentModel {
 
 /// Register serialization module with Python
 #[pyfunction]
+#[pyo3(signature = (model, path, format=None))]
 fn save_model(model: &PySerializedModel, path: &str, format: Option<&str>) -> PyResult<()> {
     let format = if let Some(fmt_str) = format {
         Some(PySerializationFormat::new(fmt_str)?)
@@ -478,6 +481,7 @@ fn save_model(model: &PySerializedModel, path: &str, format: Option<&str>) -> Py
 }
 
 #[pyfunction]
+#[pyo3(signature = (path, format=None))]
 fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
     let format = if let Some(fmt_str) = format {
         Some(PySerializationFormat::new(fmt_str)?)

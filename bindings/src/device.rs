@@ -35,6 +35,7 @@ impl PyDevice {
 
     /// Create a CUDA device
     #[staticmethod]
+    #[pyo3(signature = (device_id=None))]
     fn cuda(device_id: Option<usize>) -> Self {
         Self {
             inner: Device::cuda(device_id),
@@ -51,6 +52,7 @@ impl PyDevice {
 
     /// Create an OpenCL device
     #[staticmethod]
+    #[pyo3(signature = (device_id=None))]
     fn opencl(device_id: Option<usize>) -> Self {
         Self {
             inner: Device::opencl(device_id),

@@ -257,7 +257,8 @@ Every creation helper is available as either `mt.<name>(...)` or
 ### NumPy interop
 
 - `from_numpy(array)`
-- `from_numpy_shared(array)`
+- `from_numpy_shared(array)` — currently copies like `from_numpy`; writes to
+  the source array after construction are not visible through the tensor
 - `as_tensor(obj, dtype=None, requires_grad=None, copy=False)`
 
 ## 3) Tensor properties & conversion helpers

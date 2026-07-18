@@ -351,6 +351,44 @@ Completed in the seventh change set:
   `PowBackward`'s trait impl lives in a different file than its struct.
   This is the template for converting the remaining `include!` clusters.
 
+Completed in the differential-audit change set (full-surface correctness
+sweep: 478 forward checks against NumPy across dtypes/dims/keepdim/NaN
+paths/empty tensors, 83 finite-difference gradchecks, 102 edge-case checks,
+optimizer trajectories vs a NumPy reference, Conv2d/BatchNorm/Dropout vs
+NumPy references):
+
+- **`logsumexp` returned NaN for rows with a non-finite max** (`inf - inf`
+  in the stable shift). Non-finite rows now short-circuit to the row max:
+  `+inf` rows → `+inf`, all-`-inf` rows → `-inf`, NaN propagates.
+- **A class of broken Python signatures.** PyO3 treats `Option`-typed
+  parameters without `#[pyo3(signature)]` as *required*; sixteen call
+  forms documented as optional raised TypeError:
+  `Tensor.softplus/elu/gelu/hardshrink`, `Tensor.concatenate/stack`
+  (whose keyword was also the accidental `_axis`),
+  `numpy_compat.concatenate/stack/split`, `Device.cuda/opencl`,
+  `nn.mse_loss/smooth_l1_loss/log_cosh_loss`, `nn.dense_layer`,
+  `Module.save/load_state_from`, `ModelSerializer.save/load`,
+  `serialization.save_model/load_model`, and `debug.timer`. All now have
+  explicit signatures with PyTorch-matching defaults; regression tests in
+  `tests/test_api_defaults.py` and `tests/nn/test_functional.py`.
+- **`matmul` inner-dimension errors were self-contradictory** for equal
+  operand shapes ("expected [3, 2], got [3, 2]"); the message now reports
+  the rhs shape that would make the inner dimensions agree.
+- **Triplicated `normalize_dim`** (reshape/matmul/nanquantile) collapsed
+  into `operations::util`, re-exported so call sites are unchanged.
+- **`from_numpy_shared` documented honestly**: it currently copies exactly
+  like `from_numpy`; the docstring and API reference now say so instead of
+  implying aliasing.
+
+Deliberate, tested divergences confirmed intentional during the audit (left
+as-is; flagged for the maintainer): `chunk` requires even divisibility
+(PyTorch allows a smaller trailing chunk); `nanquantile` raises on all-NaN
+slices while `nanmedian` returns NaN for them (internally inconsistent —
+worth unifying one way); boolean tensors reject arithmetic (`sum`, `sub`,
+`neg`, `matmul`, …) as a policy; `softmax` of an all-`-inf` row returns
+zeros (PyTorch returns NaN) consistent with `masked_softmax`'s
+fully-masked-row convention.
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation

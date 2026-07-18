@@ -255,6 +255,7 @@ pub struct PyTimer {
 #[pymethods]
 impl PyTimer {
     #[new]
+    #[pyo3(signature = (operation, profiler=None))]
     fn new(operation: String, profiler: Option<Py<PyOperationProfiler>>) -> Self {
         Self {
             start_time: std::time::Instant::now(),
@@ -296,6 +297,7 @@ impl PyTimer {
 
 /// Helper function to create a timer context manager
 #[pyfunction]
+#[pyo3(signature = (operation, profiler=None))]
 fn timer(operation: String, profiler: Option<Py<PyOperationProfiler>>) -> PyTimer {
     PyTimer::new(operation, profiler)
 }

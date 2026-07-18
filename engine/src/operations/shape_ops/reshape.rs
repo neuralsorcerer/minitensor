@@ -16,14 +16,7 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
-    let dim = if dim < 0 { dim + ndim as isize } else { dim };
-    if dim < 0 || dim >= ndim as isize {
-        Err(MinitensorError::index_error(dim, 0, ndim))
-    } else {
-        Ok(dim as usize)
-    }
-}
+pub(crate) use crate::operations::util::normalize_dim;
 
 fn empty_tensor(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Tensor {
     Tensor::new(
