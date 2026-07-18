@@ -115,49 +115,54 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    fn __setitem__(&mut self, key: &Bound<PyAny>, value: &Bound<PyAny>) -> PyResult<()> {
-        // Boolean-mask assignment (`t[mask] = scalar`): the mask must match
-        // the leading dimensions; it is padded with trailing length-1 axes so
-        // masked_fill's broadcasting applies it to whole blocks.
+    fn __setitem__(
+        slf: &Bound<'_, Self>,
+        key: &Bound<PyAny>,
+        value: &Bound<PyAny>,
+    ) -> PyResult<()> {
+        // Resolve everything that needs to read `self` or `value` BEFORE
+        // taking the mutable borrow: with a `&mut self` receiver, a
+        // self-referential assignment like `t[mask] = t` would hit an
+        // "already mutably borrowed" error when extracting the value.
+        let (dtype, device, in_dims) = {
+            let this = slf.borrow();
+            (
+                this.inner.dtype(),
+                this.inner.device(),
+                this.inner.shape().dims().to_vec(),
+            )
+        };
+
+        // Boolean-mask assignment (`t[mask] = value`): the mask must match
+        // the leading dimensions; `value` may be a scalar or anything that
+        // broadcasts to the selection shape (NumPy semantics).
         if let Some(mask) = try_bool_mask_key(key)? {
-            let in_dims = self.inner.shape().dims();
-            let m_dims = mask.shape().dims().to_vec();
+            let m_dims = mask.shape().dims();
             if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                     "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
                     m_dims, in_dims
                 )));
             }
-            let scalar = if let Ok(b) = value.extract::<bool>() {
-                b as u8 as f64
-            } else if let Ok(v) = value.extract::<f64>() {
-                v
+            let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
+                t.inner
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "boolean-mask assignment currently supports scalar values only",
-                ));
+                convert_python_data_to_tensor(value, dtype, device, false)?
             };
-            let mut padded = m_dims;
-            padded.resize(in_dims.len(), 1);
-            let mask_padded =
-                engine::operations::shape_ops::reshape(&mask, engine::tensor::Shape::new(padded))
-                    .map_err(_convert_error)?;
-            let filled = engine::operations::selection::masked_fill_scalar(
-                &self.inner,
-                &mask_padded,
-                scalar,
-            )
-            .map_err(_convert_error)?;
-            self.inner.copy_(&filled).map_err(_convert_error)?;
+            let mut this = slf.borrow_mut();
+            engine::operations::selection::masked_index_assign(&mut this.inner, &mask, &val_tensor)
+                .map_err(_convert_error)?;
             return Ok(());
         }
-        let indices = parse_indices(key, self.inner.shape().dims())?;
+
+        let indices = parse_indices(key, &in_dims)?;
         let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner
         } else {
-            convert_python_data_to_tensor(value, self.inner.dtype(), self.inner.device(), false)?
+            convert_python_data_to_tensor(value, dtype, device, false)?
         };
-        self.inner
+        let mut this = slf.borrow_mut();
+        this.inner
             .index_assign(&indices, &val_tensor)
             .map_err(_convert_error)?;
         Ok(())

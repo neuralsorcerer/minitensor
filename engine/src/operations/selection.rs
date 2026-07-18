@@ -322,6 +322,118 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
+/// NumPy-style boolean-mask assignment: writes `values` into the blocks of
+/// `input` selected by `mask` (same leading-dimensions rule as
+/// [`masked_index`]). `values` is cast to `input`'s dtype and must broadcast
+/// to the selection shape `[n_true] + input.shape[mask.ndim():]` — so a
+/// scalar fills every selected block, a trailing-shaped tensor is copied to
+/// each block, and a `[n_true, ...]` tensor assigns block-by-block. This is
+/// an in-place data mutation and does not participate in autograd, mirroring
+/// `index_assign`.
+pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -> Result<()> {
+    if mask.dtype() != DataType::Bool {
+        return Err(MinitensorError::invalid_operation(
+            "boolean index mask must have bool dtype",
+        ));
+    }
+    if input.device() != mask.device() || input.device() != values.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", input.device()),
+            format!("{:?}", mask.device()),
+        ));
+    }
+
+    let in_dims = input.shape().dims().to_vec();
+    let m_dims = mask.shape().dims();
+    if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {
+        return Err(MinitensorError::invalid_argument(format!(
+            "boolean index mask shape {:?} must match the leading dimensions of tensor shape {:?}",
+            m_dims, in_dims
+        )));
+    }
+
+    let inner: usize = in_dims[m_dims.len()..].iter().product();
+    let mask_c = mask.contiguous()?;
+    let mask_slice = mask_c
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice from mask"))?;
+    let selected: Vec<usize> = mask_slice
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| m.then_some(i))
+        .collect();
+
+    let mut sel_dims = vec![selected.len()];
+    sel_dims.extend_from_slice(&in_dims[m_dims.len()..]);
+    let sel_shape = Shape::new(sel_dims);
+
+    let values_cast = if values.dtype() == input.dtype() {
+        values.clone()
+    } else {
+        values.astype(input.dtype())?
+    };
+    let values_b = if values_cast.shape() == &sel_shape {
+        values_cast.contiguous()?
+    } else {
+        let target = values_cast.shape().broadcast_with(&sel_shape)?;
+        if target != sel_shape {
+            return Err(MinitensorError::invalid_argument(format!(
+                "cannot broadcast values of shape {:?} to boolean-mask selection shape {:?}",
+                values_cast.shape().dims(),
+                sel_shape.dims()
+            )));
+        }
+        let dims: Vec<isize> = sel_shape.dims().iter().map(|&d| d as isize).collect();
+        values_cast.expand(dims)?.contiguous()?
+    };
+
+    if inner == 0 || selected.is_empty() {
+        return Ok(());
+    }
+
+    /// Writes the selected trailing blocks for one dtype.
+    macro_rules! scatter_assign_arm {
+        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+            // Read the source first: with self-aliasing assignments
+            // (`t[mask] = t`) `data_mut`'s copy-on-write would otherwise race
+            // the read view. Copying the source up front keeps it sound.
+            let src: Vec<_> = values_b
+                .data()
+                .$accessor()
+                .ok_or_else(|| {
+                    MinitensorError::internal_error(concat!(
+                        "Failed to get ",
+                        $tyname,
+                        " slice from values"
+                    ))
+                })?
+                .to_vec();
+            let dst = input.data_mut().$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice from input"
+                ))
+            })?;
+            for (k, &blk) in selected.iter().enumerate() {
+                dst[blk * inner..(blk + 1) * inner]
+                    .copy_from_slice(&src[k * inner..(k + 1) * inner]);
+            }
+        }};
+    }
+
+    match input.dtype() {
+        DataType::Float32 => scatter_assign_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
+        DataType::Float64 => scatter_assign_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
+        DataType::Int32 => scatter_assign_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
+        DataType::Int64 => scatter_assign_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+        DataType::Bool => scatter_assign_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
+    }
+
+    Ok(())
+}
+
 fn where_kernel<T: Copy>(
     condition: &[bool],
     input: &[T],

@@ -421,13 +421,18 @@ yields rows; 0-d masks add a leading axis like NumPy. It is differentiable
 verified against finite differences and exact expected gradients).
 `__getitem__` dispatches bool tensors/ndarrays/(nested) bool lists to it,
 and 1-D integer lists/ndarrays/tensors to `index_select` on dim 0 with
-NumPy negative-index wrapping (empty lists select zero rows). `__setitem__`
-supports `t[mask] = scalar` by padding the mask with trailing length-1 axes
-and routing through `masked_fill_scalar` + in-place `copy_`, preserving
-tensor identity; tensor-valued right-hand sides raise a clear TypeError
-(masked_scatter is future work, documented rather than half-built).
-Mixed advanced+basic keys (a mask inside a tuple) remain unsupported and
-error clearly.
+NumPy negative-index wrapping (empty lists select zero rows). `__setitem__` supports full NumPy mask assignment via a
+`masked_index_assign` engine op: `t[mask] = value` accepts scalars,
+per-element/per-block tensors, and anything broadcastable to the selection
+shape `[n_true] + trailing`, cast to the target dtype, written in place
+(identity preserved); non-broadcastable values raise ValueError with both
+shapes. The `__setitem__` receiver also changed from `&mut self` to
+`&Bound<Self>` with value resolution before the mutable borrow — the old
+form deadlocked (`Already mutably borrowed`) on self-referential
+assignments like `t[mask] = t` or `t[0] = t[1]`, a latent bug in the basic
+path too; the engine op snapshots the source before mutating so aliased
+storage stays sound. Mixed advanced+basic keys (a mask inside a tuple)
+remain unsupported and error clearly.
 
 Deliberate, tested divergences confirmed intentional during the audit (left
 as-is; flagged for the maintainer): `chunk` requires even divisibility

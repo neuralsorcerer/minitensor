@@ -130,10 +130,77 @@ def test_bool_mask_setitem_scalar(x):
     np.testing.assert_array_equal(it.numpy(), ref_i)
 
 
+def test_bool_mask_setitem_tensor_values(x):
+    # NumPy semantics: values broadcast to the selection shape
+    # [n_true] + trailing dims.
+    m = x > 0
+    n_true = int(m.sum())
+    vals = np.arange(n_true, dtype=np.float32)
+    t = mt.from_numpy(x.copy())
+    t[mt.from_numpy(m)] = mt.from_numpy(vals)
+    ref = x.copy()
+    ref[m] = vals
+    np.testing.assert_allclose(t.numpy(), ref)
+
+    # A row-shaped value is copied into every selected row.
+    rm = np.array([True, False, True, False])
+    row = np.array([9.0, 8.0, 7.0], dtype=np.float32)
+    t = mt.from_numpy(x.copy())
+    t[rm] = mt.from_numpy(row)
+    ref = x.copy()
+    ref[rm] = row
+    np.testing.assert_allclose(t.numpy(), ref)
+
+    # Exact [n_rows, trailing] values assign block-by-block.
+    rows = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    t = mt.from_numpy(x.copy())
+    t[rm] = mt.from_numpy(rows)
+    ref = x.copy()
+    ref[rm] = rows
+    np.testing.assert_allclose(t.numpy(), ref)
+
+    # Plain lists convert (and cast to the tensor's dtype).
+    t = mt.from_numpy(x.copy())
+    t[rm] = [1, 2, 3]
+    ref = x.copy()
+    ref[rm] = [1, 2, 3]
+    np.testing.assert_allclose(t.numpy(), ref)
+
+
 def test_bool_mask_setitem_rejections(x):
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         t = mt.from_numpy(x.copy())
-        t[mt.from_numpy(x > 0)] = mt.from_numpy(x)  # tensor values unsupported
+        # (4, 3) cannot broadcast to the (n_true,) selection shape.
+        t[mt.from_numpy(x > 0)] = mt.from_numpy(x)
+    with pytest.raises(ValueError):
+        t = mt.from_numpy(x.copy())
+        # Wrong number of per-element values.
+        t[mt.from_numpy(x > 0)] = mt.from_numpy(
+            np.array([1.0], dtype=np.float32).repeat(2)
+        )
     with pytest.raises(IndexError):
         t = mt.from_numpy(x.copy())
         t[mt.from_numpy(np.array([True]))] = 0.0  # mask shape mismatch
+
+
+def test_setitem_self_referential():
+    # `t[mask] = t` and `t[i] = t[j]` used to die with "Already mutably
+    # borrowed": the &mut receiver held the PyCell borrow while extracting
+    # the value. The engine op also snapshots the source before mutating, so
+    # aliased storage stays sound.
+    v = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    t = mt.from_numpy(v.copy())
+    t[mt.from_numpy(np.ones(3, dtype=bool))] = t
+    np.testing.assert_allclose(t.numpy(), v)
+
+    t = mt.from_numpy(v.copy())
+    t[0] = t[1]
+    np.testing.assert_allclose(t.numpy(), np.array([2.0, 2.0, 3.0], dtype=np.float32))
+
+
+def test_bool_mask_setitem_casts_value_dtype():
+    it = mt.from_numpy(np.arange(4, dtype=np.int64))
+    it[mt.from_numpy(np.array([True, False, True, False]))] = mt.from_numpy(
+        np.array([9.7, 8.2], dtype=np.float32)
+    )
+    np.testing.assert_array_equal(it.numpy(), np.array([9, 1, 8, 3]))
