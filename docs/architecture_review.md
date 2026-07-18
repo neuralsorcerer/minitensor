@@ -261,6 +261,18 @@ Completed in the second change set:
   with documented justification (`needless_range_loop`,
   `too_many_arguments`, `items_after_test_module` — the last is an artifact
   of the `include!` layout).
+- **Supply-chain auditing** — a `Security audit` workflow runs `cargo
+  audit` (RustSec advisory DB) on every `Cargo.toml`/`Cargo.lock` change
+  and weekly on a schedule, closing the gap between CodeQL (which analyzes
+  the repo's own code) and known-CVE scanning of the 235-crate dependency
+  tree. Verified locally before adding the gate: **zero known
+  vulnerabilities**; two non-failing *unmaintained* warnings —
+  `paste` 1.0.15 (transitive via `statrs → nalgebra → simba`, not
+  actionable here) and `bincode` 2.0.1 (RUSTSEC-2025-0141), which is a
+  *direct* dependency backing the binary model-serialization format.
+  Replacing bincode would change the on-disk `bin` format and break
+  previously saved models, so it is flagged as a maintainer decision
+  rather than swapped silently.
 - **Overflow-safe shape arithmetic** — `Shape::numel` and
   `Strides::from_shape` use checked multiplication in all build profiles; a
   wrapped element count could previously under-allocate storage while

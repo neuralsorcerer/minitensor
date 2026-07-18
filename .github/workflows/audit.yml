@@ -1,0 +1,30 @@
+name: Security audit
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # New advisories are published against unchanged code, so re-audit weekly.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
