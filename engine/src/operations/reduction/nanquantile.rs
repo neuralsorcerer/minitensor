@@ -71,7 +71,7 @@ pub(crate) fn nanquantiles_along_dim(
             })?;
 
             if dim_size == 1 {
-                fill_nanquantiles_single_f32(input, values, outer, inner, outer_stride, q_len)?;
+                fill_nanquantiles_single_f32(input, values, outer, inner, outer_stride, q_len);
             } else {
                 let mut buffer = Vec::with_capacity(dim_size);
                 let mut cached_positions: Option<(usize, Vec<QuantilePosition>)> = None;
@@ -88,15 +88,13 @@ pub(crate) fn nanquantiles_along_dim(
                                 }
                             }
 
-                            if buffer.is_empty() {
-                                return Err(MinitensorError::invalid_argument(
-                                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                                ));
-                            }
-
                             let out_idx = o * inner + r;
-                            values[out_idx] =
-                                quantile_from_unsorted_f32(&mut buffer, q_value, interpolation);
+                            // All-NaN slice -> NaN (NumPy/PyTorch semantics).
+                            values[out_idx] = if buffer.is_empty() {
+                                f32::NAN
+                            } else {
+                                quantile_from_unsorted_f32(&mut buffer, q_value, interpolation)
+                            };
                         }
                     }
                 } else {
@@ -112,9 +110,11 @@ pub(crate) fn nanquantiles_along_dim(
                             }
 
                             if buffer.is_empty() {
-                                return Err(MinitensorError::invalid_argument(
-                                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                                ));
+                                // All-NaN slice -> NaN for every quantile.
+                                for qi in 0..q_len {
+                                    values[((qi * outer) + o) * inner + r] = f32::NAN;
+                                }
+                                continue;
                             }
 
                             buffer.sort_by(|a, b| a.total_cmp(b));
@@ -149,7 +149,7 @@ pub(crate) fn nanquantiles_along_dim(
             })?;
 
             if dim_size == 1 {
-                fill_nanquantiles_single_f64(input, values, outer, inner, outer_stride, q_len)?;
+                fill_nanquantiles_single_f64(input, values, outer, inner, outer_stride, q_len);
             } else {
                 let mut buffer = Vec::with_capacity(dim_size);
                 let mut cached_positions: Option<(usize, Vec<QuantilePosition>)> = None;
@@ -166,15 +166,13 @@ pub(crate) fn nanquantiles_along_dim(
                                 }
                             }
 
-                            if buffer.is_empty() {
-                                return Err(MinitensorError::invalid_argument(
-                                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                                ));
-                            }
-
                             let out_idx = o * inner + r;
-                            values[out_idx] =
-                                quantile_from_unsorted_f64(&mut buffer, q_value, interpolation);
+                            // All-NaN slice -> NaN (NumPy/PyTorch semantics).
+                            values[out_idx] = if buffer.is_empty() {
+                                f64::NAN
+                            } else {
+                                quantile_from_unsorted_f64(&mut buffer, q_value, interpolation)
+                            };
                         }
                     }
                 } else {
@@ -190,9 +188,11 @@ pub(crate) fn nanquantiles_along_dim(
                             }
 
                             if buffer.is_empty() {
-                                return Err(MinitensorError::invalid_argument(
-                                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                                ));
+                                // All-NaN slice -> NaN for every quantile.
+                                for qi in 0..q_len {
+                                    values[((qi * outer) + o) * inner + r] = f64::NAN;
+                                }
+                                continue;
                             }
 
                             buffer.sort_by(|a, b| a.total_cmp(b));

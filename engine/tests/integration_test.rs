@@ -307,14 +307,16 @@ fn test_nanquantiles_keepdim_no_dim_layout() {
 }
 
 #[test]
-fn test_nanquantile_all_nan_errors() {
+fn test_nanquantile_all_nan_returns_nan() {
+    // NumPy/PyTorch (and this library's nanmedian) return NaN for an all-NaN
+    // slice rather than erroring.
     let tensor = create_test_tensor_f32(vec![f32::NAN, f32::NAN], vec![2], false);
 
-    let error = reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear)
-        .unwrap_err();
+    let result = reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear)
+        .unwrap();
 
-    let message = error.to_string();
-    assert!(message.contains("nanquantile() encountered an all-NaN slice"));
+    let values = result.data().as_f32_slice().unwrap();
+    assert!(values[0].is_nan());
 }
 
 #[test]

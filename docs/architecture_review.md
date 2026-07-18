@@ -445,13 +445,21 @@ path too; the engine op snapshots the source before mutating so aliased
 storage stays sound. Mixed advanced+basic keys (a mask inside a tuple)
 remain unsupported and error clearly.
 
+`nanquantile` no longer diverges: it previously *raised* on an all-NaN
+slice while `nanmedian` (and NumPy/PyTorch) return NaN. All ~20 raise
+sites across `reduction/{core,quantile,nanquantile}.rs` now write NaN
+instead (per-slice, per-quantile, full-reduction, and 0-d scalar paths),
+and the six single-element fill helpers became infallible since the NaN
+value simply flows through. Verified against `np.nanquantile` across
+dtypes, axes, all five interpolation modes, multi-q, 3-D, and mixed
+inputs with some all-NaN slices; regular `quantile` still propagates NaN
+unchanged.
+
 Deliberate, tested divergences confirmed intentional during the audit (left
 as-is; flagged for the maintainer): `chunk` requires even divisibility
-(PyTorch allows a smaller trailing chunk); `nanquantile` raises on all-NaN
-slices while `nanmedian` returns NaN for them (internally inconsistent —
-worth unifying one way); boolean tensors reject arithmetic (`sum`, `sub`,
-`neg`, `matmul`, …) as a policy; `softmax` of an all-`-inf` row returns
-zeros (PyTorch returns NaN) consistent with `masked_softmax`'s
+(PyTorch allows a smaller trailing chunk); boolean tensors reject arithmetic
+(`sum`, `sub`, `neg`, `matmul`, …) as a policy; `softmax` of an all-`-inf`
+row returns zeros (PyTorch returns NaN) consistent with `masked_softmax`'s
 fully-masked-row convention.
 
 Still open, in priority order:

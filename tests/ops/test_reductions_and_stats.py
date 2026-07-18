@@ -491,10 +491,21 @@ def test_functional_nanquantile_matches_numpy():
     np.testing.assert_allclose(values.numpy(), expected, rtol=1e-6, atol=1e-6)
 
 
-def test_nanquantile_all_nan_raises():
+def test_nanquantile_all_nan_returns_nan():
+    # NumPy/PyTorch (and this library's nanmedian) return NaN for an all-NaN
+    # slice rather than raising; nanquantile now matches.
     data = mt.tensor([np.nan, np.nan])
-    with pytest.raises(ValueError):
-        data.nanquantile(0.5)
+    assert np.isnan(data.nanquantile(0.5).numpy())
+
+    # Per-slice: rows that are all-NaN give NaN, valid rows compute normally.
+    mixed = mt.tensor([[1.0, 2.0, 3.0], [np.nan, np.nan, np.nan]])
+    out = mixed.nanquantile(0.5, dim=1).numpy()
+    assert out[0] == pytest.approx(2.0)
+    assert np.isnan(out[1])
+
+    # Multiple quantiles over an all-NaN slice are all NaN.
+    multi = mt.tensor([np.nan, np.nan]).nanquantile([0.25, 0.75]).numpy()
+    assert np.isnan(multi).all()
 
 
 def test_quantile_sequence_interpolation_modes_match_numpy():

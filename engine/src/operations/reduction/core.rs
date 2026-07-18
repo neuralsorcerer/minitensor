@@ -15,8 +15,6 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-pub(crate) const NANQUANTILE_ALL_NAN_ERR: &str = "nanquantile() encountered an all-NaN slice";
-
 /// Interpolation modes supported by the quantile reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuantileInterpolation {
@@ -579,26 +577,21 @@ pub(crate) fn fill_quantiles_single_f64(
     }
 }
 
+// A single-element reduction slice trivially equals its only value; when that
+// value is NaN it flows straight through, matching NumPy/PyTorch, which return
+// NaN for all-NaN slices rather than erroring.
 pub(crate) fn fill_nanquantile_single_f32(
     input: &[f32],
     values: &mut [f32],
     outer: usize,
     inner: usize,
     outer_stride: usize,
-) -> Result<()> {
+) {
     for o in 0..outer {
         for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            if value.is_nan() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
-            values[o * inner + r] = value;
+            values[o * inner + r] = input[o * outer_stride + r];
         }
     }
-    Ok(())
 }
 
 pub(crate) fn fill_nanquantile_single_f64(
@@ -607,20 +600,12 @@ pub(crate) fn fill_nanquantile_single_f64(
     outer: usize,
     inner: usize,
     outer_stride: usize,
-) -> Result<()> {
+) {
     for o in 0..outer {
         for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            if value.is_nan() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
-            values[o * inner + r] = value;
+            values[o * inner + r] = input[o * outer_stride + r];
         }
     }
-    Ok(())
 }
 
 pub(crate) fn fill_nanquantiles_single_f32(
@@ -630,23 +615,15 @@ pub(crate) fn fill_nanquantiles_single_f32(
     inner: usize,
     outer_stride: usize,
     q_len: usize,
-) -> Result<()> {
+) {
     for o in 0..outer {
         for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            if value.is_nan() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
+            let value = input[o * outer_stride + r];
             for qi in 0..q_len {
-                let out_idx = ((qi * outer) + o) * inner + r;
-                values[out_idx] = value;
+                values[((qi * outer) + o) * inner + r] = value;
             }
         }
     }
-    Ok(())
 }
 
 pub(crate) fn fill_nanquantiles_single_f64(
@@ -656,23 +633,15 @@ pub(crate) fn fill_nanquantiles_single_f64(
     inner: usize,
     outer_stride: usize,
     q_len: usize,
-) -> Result<()> {
+) {
     for o in 0..outer {
         for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            if value.is_nan() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
+            let value = input[o * outer_stride + r];
             for qi in 0..q_len {
-                let out_idx = ((qi * outer) + o) * inner + r;
-                values[out_idx] = value;
+                values[((qi * outer) + o) * inner + r] = value;
             }
         }
     }
-    Ok(())
 }
 
 pub(crate) fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
@@ -691,24 +660,14 @@ pub(crate) fn fill_quantiles_all_single_f64(value: f64, values: &mut [f64]) {
     }
 }
 
-pub(crate) fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) -> Result<()> {
-    if value.is_nan() {
-        return Err(MinitensorError::invalid_argument(
-            NANQUANTILE_ALL_NAN_ERR.to_string(),
-        ));
-    }
+pub(crate) fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) {
+    // A single-element tensor's quantile is its value for every q; NaN flows
+    // through (NumPy/PyTorch return NaN for all-NaN input).
     values.fill(value);
-    Ok(())
 }
 
-pub(crate) fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) -> Result<()> {
-    if value.is_nan() {
-        return Err(MinitensorError::invalid_argument(
-            NANQUANTILE_ALL_NAN_ERR.to_string(),
-        ));
-    }
+pub(crate) fn fill_nanquantiles_all_single_f64(value: f64, values: &mut [f64]) {
     values.fill(value);
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -931,37 +890,15 @@ fn nanquantile_all(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
+    // A 0-d tensor is its own quantile; a NaN scalar returns NaN.
     if tensor.ndim() == 0 {
-        match tensor.dtype() {
-            DataType::Float32 => {
-                let value = tensor
-                    .data()
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?[0];
-                if value.is_nan() {
-                    return Err(MinitensorError::invalid_argument(
-                        NANQUANTILE_ALL_NAN_ERR.to_string(),
-                    ));
-                }
-            }
-            DataType::Float64 => {
-                let value = tensor
-                    .data()
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?[0];
-                if value.is_nan() {
-                    return Err(MinitensorError::invalid_argument(
-                        NANQUANTILE_ALL_NAN_ERR.to_string(),
-                    ));
-                }
-            }
-            _ => unreachable!("dtype validated"),
-        }
         return Ok(tensor.clone());
     }
 
     let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
+    // An all-NaN input yields NaN (NumPy/PyTorch semantics) rather than an
+    // error.
     match tensor.dtype() {
         DataType::Float32 => {
             let data = tensor
@@ -969,12 +906,11 @@ fn nanquantile_all(
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
             let mut values: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            if values.is_empty() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
-            let quant = quantile_from_unsorted_f32(&mut values, q, interpolation);
+            let quant = if values.is_empty() {
+                f32::NAN
+            } else {
+                quantile_from_unsorted_f32(&mut values, q, interpolation)
+            };
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?[0] = quant;
@@ -985,12 +921,11 @@ fn nanquantile_all(
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
             let mut values: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            if values.is_empty() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
-            }
-            let quant = quantile_from_unsorted_f64(&mut values, q, interpolation);
+            let quant = if values.is_empty() {
+                f64::NAN
+            } else {
+                quantile_from_unsorted_f64(&mut values, q, interpolation)
+            };
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?[0] = quant;

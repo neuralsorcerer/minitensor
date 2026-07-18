@@ -203,7 +203,7 @@ pub(crate) fn nanquantile_along_dim(
             })?;
 
             if dim_size == 1 {
-                fill_nanquantile_single_f32(input, values, outer, inner, outer_stride)?;
+                fill_nanquantile_single_f32(input, values, outer, inner, outer_stride);
             } else {
                 let mut buffer = Vec::with_capacity(dim_size);
                 for o in 0..outer {
@@ -217,13 +217,12 @@ pub(crate) fn nanquantile_along_dim(
                             }
                         }
 
-                        if buffer.is_empty() {
-                            return Err(MinitensorError::invalid_argument(
-                                NANQUANTILE_ALL_NAN_ERR.to_string(),
-                            ));
-                        }
-
-                        let quant = quantile_from_unsorted_f32(&mut buffer, q, interpolation);
+                        // All-NaN slice -> NaN (NumPy/PyTorch semantics).
+                        let quant = if buffer.is_empty() {
+                            f32::NAN
+                        } else {
+                            quantile_from_unsorted_f32(&mut buffer, q, interpolation)
+                        };
                         values[o * inner + r] = quant;
                     }
                 }
@@ -239,7 +238,7 @@ pub(crate) fn nanquantile_along_dim(
             })?;
 
             if dim_size == 1 {
-                fill_nanquantile_single_f64(input, values, outer, inner, outer_stride)?;
+                fill_nanquantile_single_f64(input, values, outer, inner, outer_stride);
             } else {
                 let mut buffer = Vec::with_capacity(dim_size);
                 for o in 0..outer {
@@ -253,13 +252,12 @@ pub(crate) fn nanquantile_along_dim(
                             }
                         }
 
-                        if buffer.is_empty() {
-                            return Err(MinitensorError::invalid_argument(
-                                NANQUANTILE_ALL_NAN_ERR.to_string(),
-                            ));
-                        }
-
-                        let quant = quantile_from_unsorted_f64(&mut buffer, q, interpolation);
+                        // All-NaN slice -> NaN (NumPy/PyTorch semantics).
+                        let quant = if buffer.is_empty() {
+                            f64::NAN
+                        } else {
+                            quantile_from_unsorted_f64(&mut buffer, q, interpolation)
+                        };
                         values[o * inner + r] = quant;
                     }
                 }
@@ -581,7 +579,7 @@ pub(crate) fn nanquantiles_all(
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
             if data.len() == 1 {
-                fill_nanquantiles_all_single_f32(data[0], values)?;
+                fill_nanquantiles_all_single_f32(data[0], values);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -592,12 +590,12 @@ pub(crate) fn nanquantiles_all(
             }
             if q_len == 1 {
                 let mut buffer: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-                if buffer.is_empty() {
-                    return Err(MinitensorError::invalid_argument(
-                        NANQUANTILE_ALL_NAN_ERR.to_string(),
-                    ));
-                }
-                values[0] = quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation);
+                // All-NaN input -> NaN (NumPy/PyTorch semantics).
+                values[0] = if buffer.is_empty() {
+                    f32::NAN
+                } else {
+                    quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation)
+                };
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -608,13 +606,12 @@ pub(crate) fn nanquantiles_all(
             }
             let mut sorted: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
             if sorted.is_empty() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
+                values.fill(f32::NAN);
+            } else {
+                let positions = quantile_positions_for_len(sorted.len(), qs);
+                sorted.sort_by(|a, b| a.total_cmp(b));
+                quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
             }
-            let positions = quantile_positions_for_len(sorted.len(), qs);
-            sorted.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
         }
         DataType::Float64 => {
             let data = tensor
@@ -625,7 +622,7 @@ pub(crate) fn nanquantiles_all(
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
             if data.len() == 1 {
-                fill_nanquantiles_all_single_f64(data[0], values)?;
+                fill_nanquantiles_all_single_f64(data[0], values);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -636,12 +633,12 @@ pub(crate) fn nanquantiles_all(
             }
             if q_len == 1 {
                 let mut buffer: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-                if buffer.is_empty() {
-                    return Err(MinitensorError::invalid_argument(
-                        NANQUANTILE_ALL_NAN_ERR.to_string(),
-                    ));
-                }
-                values[0] = quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation);
+                // All-NaN input -> NaN (NumPy/PyTorch semantics).
+                values[0] = if buffer.is_empty() {
+                    f64::NAN
+                } else {
+                    quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation)
+                };
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -652,13 +649,12 @@ pub(crate) fn nanquantiles_all(
             }
             let mut sorted: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
             if sorted.is_empty() {
-                return Err(MinitensorError::invalid_argument(
-                    NANQUANTILE_ALL_NAN_ERR.to_string(),
-                ));
+                values.fill(f64::NAN);
+            } else {
+                let positions = quantile_positions_for_len(sorted.len(), qs);
+                sorted.sort_by(|a, b| a.total_cmp(b));
+                quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
             }
-            let positions = quantile_positions_for_len(sorted.len(), qs);
-            sorted.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
         }
         _ => unreachable!("dtype validated"),
     }
