@@ -4,27 +4,31 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::operations::map::{
+    BINARY_PAR_THRESHOLD, PAR_CHUNK, binary_map, build_vec_with, unary_map_threshold,
+};
 use crate::operations::simd::*;
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{Shape, Strides, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use smallvec::smallvec;
+use std::convert::Infallible;
 
 /// Generates a dtype-specialized broadcasting binary kernel.
 ///
-/// Every kernel has the same shape: fetch both input slices and the output
-/// slice for the dtype, then apply `$op` element-wise with broadcasting.
+/// Every kernel has the same shape: fetch both input slices for the dtype,
+/// apply `$op` element-wise with broadcasting into a fresh buffer, and wrap
+/// it as `TensorData` (no zero-initialization pass; see `operations::map`).
 macro_rules! binary_kernel {
-    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $op:expr) => {
+    ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $op:expr) => {
         pub(crate) fn $name(
             lhs: &Tensor,
             rhs: &Tensor,
-            output_data: &mut TensorData,
             output_shape: &Shape,
-        ) -> Result<()> {
+        ) -> Result<TensorData> {
             let lhs_data = lhs.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -39,22 +43,19 @@ macro_rules! binary_kernel {
                     " slice from rhs tensor"
                 ))
             })?;
-            let output_slice = output_data.$accessor_mut().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get mutable ",
-                    $tyname,
-                    " slice from output data"
-                ))
-            })?;
-            broadcast_binary_op(
+            let out = broadcast_binary_map(
                 lhs_data,
                 rhs_data,
-                output_slice,
                 lhs.shape(),
                 rhs.shape(),
                 output_shape,
                 $op,
-            )
+            )?;
+            Ok(TensorData::from_vec::<$ty>(
+                out,
+                DataType::$dtype,
+                lhs.device(),
+            ))
         }
     };
 }
@@ -62,13 +63,12 @@ macro_rules! binary_kernel {
 /// Same as [`binary_kernel!`], with a SIMD fast path for same-shape inputs
 /// (f32/f64 only).
 macro_rules! binary_kernel_simd {
-    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $simd:ident, $op:expr) => {
+    ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $simd:ident, $op:expr) => {
         pub(crate) fn $name(
             lhs: &Tensor,
             rhs: &Tensor,
-            output_data: &mut TensorData,
             output_shape: &Shape,
-        ) -> Result<()> {
+        ) -> Result<TensorData> {
             let lhs_data = lhs.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -83,26 +83,29 @@ macro_rules! binary_kernel_simd {
                     " slice from rhs tensor"
                 ))
             })?;
-            let output_slice = output_data.$accessor_mut().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get mutable ",
-                    $tyname,
-                    " slice from output data"
-                ))
-            })?;
-            if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-                $simd(lhs_data, rhs_data, output_slice)
+            let out = if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
+                // SAFETY: the SIMD entry points initialize every output
+                // element when they return Ok.
+                unsafe {
+                    build_vec_with(output_shape.numel(), |spare| {
+                        $simd(lhs_data, rhs_data, spare)
+                    })?
+                }
             } else {
-                broadcast_binary_op(
+                broadcast_binary_map(
                     lhs_data,
                     rhs_data,
-                    output_slice,
                     lhs.shape(),
                     rhs.shape(),
                     output_shape,
                     $op,
-                )
-            }
+                )?
+            };
+            Ok(TensorData::from_vec::<$ty>(
+                out,
+                DataType::$dtype,
+                lhs.device(),
+            ))
         }
     };
 }
@@ -111,7 +114,8 @@ macro_rules! binary_kernel_simd {
 binary_kernel_simd!(
     add_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     simd_add_f32,
     |a, b| a + b
@@ -119,38 +123,25 @@ binary_kernel_simd!(
 binary_kernel_simd!(
     add_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     simd_add_f64,
     |a, b| a + b
 );
-binary_kernel!(
-    add_i32_direct,
-    as_i32_slice,
-    as_i32_slice_mut,
-    "i32",
-    |a, b| a + b
-);
-binary_kernel!(
-    add_i64_direct,
-    as_i64_slice,
-    as_i64_slice_mut,
-    "i64",
-    |a, b| a + b
-);
-binary_kernel!(
-    add_bool_direct,
-    as_bool_slice,
-    as_bool_slice_mut,
-    "bool",
-    |a, b| a || b
-);
+binary_kernel!(add_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
+    + b);
+binary_kernel!(add_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
+    + b);
+binary_kernel!(add_bool_direct, as_bool_slice, bool, Bool, "bool", |a, b| a
+    || b);
 
 // Subtraction: bool is rejected during operand coercion.
 binary_kernel_simd!(
     sub_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     simd_sub_f32,
     |a, b| a - b
@@ -158,31 +149,23 @@ binary_kernel_simd!(
 binary_kernel_simd!(
     sub_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     simd_sub_f64,
     |a, b| a - b
 );
-binary_kernel!(
-    sub_i32_direct,
-    as_i32_slice,
-    as_i32_slice_mut,
-    "i32",
-    |a, b| a - b
-);
-binary_kernel!(
-    sub_i64_direct,
-    as_i64_slice,
-    as_i64_slice_mut,
-    "i64",
-    |a, b| a - b
-);
+binary_kernel!(sub_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
+    - b);
+binary_kernel!(sub_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
+    - b);
 
 // Multiplication: `*` for numeric dtypes, logical AND for bool.
 binary_kernel_simd!(
     mul_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     simd_mul_f32,
     |a, b| a * b
@@ -190,38 +173,25 @@ binary_kernel_simd!(
 binary_kernel_simd!(
     mul_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     simd_mul_f64,
     |a, b| a * b
 );
-binary_kernel!(
-    mul_i32_direct,
-    as_i32_slice,
-    as_i32_slice_mut,
-    "i32",
-    |a, b| a * b
-);
-binary_kernel!(
-    mul_i64_direct,
-    as_i64_slice,
-    as_i64_slice_mut,
-    "i64",
-    |a, b| a * b
-);
-binary_kernel!(
-    mul_bool_direct,
-    as_bool_slice,
-    as_bool_slice_mut,
-    "bool",
-    |a, b| a && b
-);
+binary_kernel!(mul_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
+    * b);
+binary_kernel!(mul_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
+    * b);
+binary_kernel!(mul_bool_direct, as_bool_slice, bool, Bool, "bool", |a, b| a
+    && b);
 
 // Division: integer and bool operands coerce to floating point beforehand.
 binary_kernel_simd!(
     div_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     simd_div_f32,
     |a, b| a / b
@@ -229,7 +199,8 @@ binary_kernel_simd!(
 binary_kernel_simd!(
     div_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     simd_div_f64,
     |a, b| a / b
@@ -242,21 +213,24 @@ binary_kernel_simd!(
 binary_kernel!(
     floordiv_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     |a: f32, b: f32| (a / b).floor()
 );
 binary_kernel!(
     floordiv_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     |a: f64, b: f64| (a / b).floor()
 );
 binary_kernel!(
     floordiv_i32_direct,
     as_i32_slice,
-    as_i32_slice_mut,
+    i32,
+    Int32,
     "i32",
     |a: i32, b: i32| {
         let q = a.wrapping_div(b);
@@ -271,7 +245,8 @@ binary_kernel!(
 binary_kernel!(
     floordiv_i64_direct,
     as_i64_slice,
-    as_i64_slice_mut,
+    i64,
+    Int64,
     "i64",
     |a: i64, b: i64| {
         let q = a.wrapping_div(b);
@@ -291,7 +266,8 @@ binary_kernel!(
 binary_kernel!(
     rem_f32_direct,
     as_f32_slice,
-    as_f32_slice_mut,
+    f32,
+    Float32,
     "f32",
     |a: f32, b: f32| {
         let r = a % b;
@@ -305,7 +281,8 @@ binary_kernel!(
 binary_kernel!(
     rem_f64_direct,
     as_f64_slice,
-    as_f64_slice_mut,
+    f64,
+    Float64,
     "f64",
     |a: f64, b: f64| {
         let r = a % b;
@@ -319,7 +296,8 @@ binary_kernel!(
 binary_kernel!(
     rem_i32_direct,
     as_i32_slice,
-    as_i32_slice_mut,
+    i32,
+    Int32,
     "i32",
     |a: i32, b: i32| {
         let r = a.wrapping_rem(b);
@@ -333,7 +311,8 @@ binary_kernel!(
 binary_kernel!(
     rem_i64_direct,
     as_i64_slice,
-    as_i64_slice_mut,
+    i64,
+    Int64,
     "i64",
     |a: i64, b: i64| {
         let r = a.wrapping_rem(b);
@@ -345,89 +324,56 @@ binary_kernel!(
     }
 );
 
-/// Generic broadcasting binary operation
-pub(crate) fn broadcast_binary_op<T, F>(
+/// Generic broadcasting binary map: applies `op` element-wise over broadcast
+/// operands, producing a fresh, fully-initialized output buffer (no zeroing
+/// pass — every element is written exactly once).
+pub(crate) fn broadcast_binary_map<T, U, F>(
     lhs_data: &[T],
     rhs_data: &[T],
-    output_data: &mut [T],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     output_shape: &Shape,
     op: F,
-) -> Result<()>
+) -> Result<Vec<U>>
 where
     T: Copy + Send + Sync,
-    F: Fn(T, T) -> T + Send + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(T, T) -> U + Send + Sync,
 {
     let output_dims = output_shape.dims();
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
     let rank = output_dims.len();
+    let numel = output_shape.numel();
 
-    if output_shape.numel() == 0 || output_dims.contains(&0) {
-        return Ok(());
+    if numel == 0 || output_dims.contains(&0) {
+        return Ok(Vec::new());
     }
 
-    // Fast path when no broadcasting is required. This avoids the
-    // relatively expensive index mapping logic below and simply applies the
-    // operation element-wise. We use parallel iteration for large tensors and
-    // fall back to a simple loop for smaller ones to reduce rayon overhead.
+    // Fast path when no broadcasting is required: plain element-wise zip,
+    // parallel above the binary threshold.
     if lhs_dims == output_dims && rhs_dims == output_dims {
-        if output_data.len() >= 1024 {
-            output_data
-                .par_iter_mut()
-                .zip(lhs_data.par_iter().zip(rhs_data.par_iter()))
-                .for_each(|(out, (l, r))| {
-                    *out = op(*l, *r);
-                });
-        } else {
-            for ((out, &l), &r) in output_data
-                .iter_mut()
-                .zip(lhs_data.iter())
-                .zip(rhs_data.iter())
-            {
-                *out = op(l, r);
-            }
-        }
-        return Ok(());
+        return Ok(binary_map(lhs_data, rhs_data, op));
     }
 
-    // Fast path when one side is a scalar and the other already matches the
-    // output shape. This avoids the more expensive coordinate calculation
-    // used for general broadcasting. We again switch between parallel and
-    // sequential execution based on tensor size to minimize overhead.
+    // Fast paths when one side is a scalar and the other already matches the
+    // output shape: a unary map with the scalar captured.
     if lhs_data.len() == 1 && rhs_dims == output_dims {
         let lhs_val = lhs_data[0];
-        if output_data.len() >= 1024 {
-            output_data
-                .par_iter_mut()
-                .zip(rhs_data.par_iter())
-                .for_each(|(out, &r)| {
-                    *out = op(lhs_val, r);
-                });
-        } else {
-            for (out, &r) in output_data.iter_mut().zip(rhs_data.iter()) {
-                *out = op(lhs_val, r);
-            }
-        }
-        return Ok(());
+        return Ok(unary_map_threshold(
+            rhs_data,
+            BINARY_PAR_THRESHOLD,
+            move |r| op(lhs_val, r),
+        ));
     }
 
     if rhs_data.len() == 1 && lhs_dims == output_dims {
         let rhs_val = rhs_data[0];
-        if output_data.len() >= 1024 {
-            output_data
-                .par_iter_mut()
-                .zip(lhs_data.par_iter())
-                .for_each(|(out, &l)| {
-                    *out = op(l, rhs_val);
-                });
-        } else {
-            for (out, &l) in output_data.iter_mut().zip(lhs_data.iter()) {
-                *out = op(l, rhs_val);
-            }
-        }
-        return Ok(());
+        return Ok(unary_map_threshold(
+            lhs_data,
+            BINARY_PAR_THRESHOLD,
+            move |l| op(l, rhs_val),
+        ));
     }
 
     let lhs_contiguous = Strides::from_shape(lhs_shape);
@@ -451,67 +397,84 @@ where
     // For small tensors, a simple sequential loop is faster than spawning
     // rayon tasks. We use the same index mapping logic but without parallel
     // chunking to minimize overhead.
-    if output_data.len() < 1024 {
-        let lhs_ptr = lhs_data.as_ptr();
-        let rhs_ptr = rhs_data.as_ptr();
-        for (idx, out) in output_data.iter_mut().enumerate() {
-            let mut lhs_idx = 0usize;
-            let mut rhs_idx = 0usize;
-            let mut tmp = idx;
-            for i in (0..rank).rev() {
-                let coord = tmp % output_dims[i];
-                tmp /= output_dims[i];
-                lhs_idx += coord * lhs_aligned[i];
-                rhs_idx += coord * rhs_aligned[i];
-            }
-            unsafe {
-                *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
-            }
-        }
-        return Ok(());
-    }
-
-    const CHUNK: usize = 1024;
-    output_data
-        .par_chunks_mut(CHUNK)
-        .enumerate()
-        .for_each(|(chunk_idx, out_chunk)| {
-            let start = chunk_idx * CHUNK;
-            let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
-            let mut tmp = start;
-            for i in (0..rank).rev() {
-                coord[i] = tmp % output_dims[i];
-                tmp /= output_dims[i];
-            }
-
-            let mut lhs_idx = 0usize;
-            let mut rhs_idx = 0usize;
-            for i in 0..rank {
-                lhs_idx += coord[i] * lhs_aligned[i];
-                rhs_idx += coord[i] * rhs_aligned[i];
-            }
-
+    if numel < BINARY_PAR_THRESHOLD {
+        let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
             let lhs_ptr = lhs_data.as_ptr();
             let rhs_ptr = rhs_data.as_ptr();
-            for out in out_chunk.iter_mut() {
-                unsafe {
-                    *out = op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx));
-                }
+            for (idx, out) in spare.iter_mut().enumerate() {
+                let mut lhs_idx = 0usize;
+                let mut rhs_idx = 0usize;
+                let mut tmp = idx;
                 for i in (0..rank).rev() {
-                    coord[i] += 1;
-                    lhs_idx += lhs_aligned[i];
-                    rhs_idx += rhs_aligned[i];
-                    if coord[i] < output_dims[i] {
-                        break;
-                    }
-                    coord[i] = 0;
-                    lhs_idx -= lhs_aligned[i] * output_dims[i];
-                    rhs_idx -= rhs_aligned[i] * output_dims[i];
+                    let coord = tmp % output_dims[i];
+                    tmp /= output_dims[i];
+                    lhs_idx += coord * lhs_aligned[i];
+                    rhs_idx += coord * rhs_aligned[i];
+                }
+                // SAFETY: the aligned strides map every output coordinate to
+                // an in-bounds input element (dimension 1 contributes stride
+                // 0), exactly as in the parallel path below.
+                unsafe {
+                    out.write(op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx)));
                 }
             }
-        });
+            Ok(())
+        };
+        // SAFETY: `fill` writes every element of the spare slice.
+        let out =
+            unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
+        return Ok(out);
+    }
 
-    Ok(())
+    let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
+        spare
+            .par_chunks_mut(PAR_CHUNK)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let start = chunk_idx * PAR_CHUNK;
+                let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
+                let mut tmp = start;
+                for i in (0..rank).rev() {
+                    coord[i] = tmp % output_dims[i];
+                    tmp /= output_dims[i];
+                }
+
+                let mut lhs_idx = 0usize;
+                let mut rhs_idx = 0usize;
+                for i in 0..rank {
+                    lhs_idx += coord[i] * lhs_aligned[i];
+                    rhs_idx += coord[i] * rhs_aligned[i];
+                }
+
+                let lhs_ptr = lhs_data.as_ptr();
+                let rhs_ptr = rhs_data.as_ptr();
+                for out in out_chunk.iter_mut() {
+                    // SAFETY: the incremental coordinate walk keeps both
+                    // indices in bounds for every output position (stride 0
+                    // on broadcast dimensions).
+                    unsafe {
+                        out.write(op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx)));
+                    }
+                    for i in (0..rank).rev() {
+                        coord[i] += 1;
+                        lhs_idx += lhs_aligned[i];
+                        rhs_idx += rhs_aligned[i];
+                        if coord[i] < output_dims[i] {
+                            break;
+                        }
+                        coord[i] = 0;
+                        lhs_idx -= lhs_aligned[i] * output_dims[i];
+                        rhs_idx -= rhs_aligned[i] * output_dims[i];
+                    }
+                }
+            });
+        Ok(())
+    };
+    // SAFETY: the chunked walker writes every element of every chunk, and the
+    // chunks partition the spare slice exactly.
+    let out =
+        unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use std::sync::Arc;
 #[cfg(feature = "blas")]
 use cblas::{Layout, Transpose};
 
-pub(crate) const PAR_THRESHOLD: usize = 1 << 12;
+pub(crate) use crate::operations::map::PAR_THRESHOLD;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DiagonalSpec {

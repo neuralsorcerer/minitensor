@@ -18,7 +18,8 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+pub(crate) use crate::operations::map::PAR_THRESHOLD;
+use crate::operations::map::unary_map;
 
 /// Element-wise addition with broadcasting support
 pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -59,18 +60,15 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         return Ok(output);
     }
 
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
-    // Perform element-wise addition based on data type
-    match result_dtype {
-        DataType::Float32 => add_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Float64 => add_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int32 => add_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int64 => add_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Bool => add_bool_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-    }
+    // Perform element-wise addition based on data type; the kernel produces
+    // the output buffer directly (no zero-init pass).
+    let output_data = match result_dtype {
+        DataType::Float32 => add_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => add_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => add_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => add_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Bool => add_bool_direct(lhs_ref, rhs_ref, &output_shape)?,
+    };
 
     // Create output tensor
     let mut output = Tensor::new(
@@ -242,18 +240,14 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         return Ok(output);
     }
 
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
     // Perform element-wise subtraction based on data type
-    match result_dtype {
-        DataType::Float32 => sub_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Float64 => sub_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int32 => sub_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int64 => sub_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+    let output_data = match result_dtype {
+        DataType::Float32 => sub_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => sub_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => sub_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => sub_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Bool => unreachable!("boolean subtraction should be rejected during coercion"),
-    }
+    };
 
     // Create output tensor
     let mut output = Tensor::new(
@@ -319,18 +313,14 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         return Ok(output);
     }
 
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
     // Perform element-wise multiplication based on data type
-    match result_dtype {
-        DataType::Float32 => mul_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Float64 => mul_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int32 => mul_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int64 => mul_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Bool => mul_bool_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-    }
+    let output_data = match result_dtype {
+        DataType::Float32 => mul_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => mul_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => mul_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => mul_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Bool => mul_bool_direct(lhs_ref, rhs_ref, &output_shape)?,
+    };
 
     // Create output tensor
     let mut output = Tensor::new(
@@ -397,18 +387,14 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         return Ok(output);
     }
 
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
     // Perform element-wise division based on data type
-    match result_dtype {
-        DataType::Float32 => div_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Float64 => div_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+    let output_data = match result_dtype {
+        DataType::Float32 => div_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => div_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Int32 | DataType::Int64 | DataType::Bool => {
             unreachable!("integer and boolean division should coerce to floating point")
         }
-    }
+    };
 
     // Create output tensor
     let mut output = Tensor::new(
@@ -437,16 +423,10 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
 /// Element-wise negation
 pub fn neg(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data = TensorData::uninitialized_on_device(
-        tensor.shape().numel(),
-        tensor.dtype(),
-        tensor.device(),
-    );
-
-    /// Applies negation for one dtype: fetch the input/output slices and map
-    /// element-wise (parallel above `PAR_THRESHOLD`).
+    /// Applies negation for one dtype: fetch the input slice and map
+    /// element-wise into a fresh buffer (parallel above `PAR_THRESHOLD`).
     macro_rules! neg_arm {
-        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+        ($accessor:ident, $dtype:ident, $tyname:literal) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -454,37 +434,25 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
                     " slice from tensor"
                 ))
             })?;
-            let output = output_data.$accessor_mut().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get mutable ",
-                    $tyname,
-                    " slice from output"
-                ))
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = -i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = -i;
-                }
-            }
+            TensorData::from_vec(
+                unary_map(input, |i| -i),
+                DataType::$dtype,
+                tensor.device(),
+            )
         }};
     }
 
-    match tensor.dtype() {
-        DataType::Float32 => neg_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
-        DataType::Float64 => neg_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
-        DataType::Int32 => neg_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
-        DataType::Int64 => neg_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => neg_arm!(as_f32_slice, Float32, "f32"),
+        DataType::Float64 => neg_arm!(as_f64_slice, Float64, "f64"),
+        DataType::Int32 => neg_arm!(as_i32_slice, Int32, "i32"),
+        DataType::Int64 => neg_arm!(as_i64_slice, Int64, "i64"),
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Negation not supported for boolean tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -564,20 +532,13 @@ pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     ensure_no_integer_zero_divisor(rhs_ref)?;
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
-    match result_dtype {
-        DataType::Float32 => {
-            floordiv_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?
-        }
-        DataType::Float64 => {
-            floordiv_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?
-        }
-        DataType::Int32 => floordiv_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int64 => floordiv_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+    let output_data = match result_dtype {
+        DataType::Float32 => floordiv_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => floordiv_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => floordiv_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => floordiv_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Bool => unreachable!("bool rejected during operand coercion"),
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -633,16 +594,13 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     ensure_no_integer_zero_divisor(rhs_ref)?;
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
-    match result_dtype {
-        DataType::Float32 => rem_f32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Float64 => rem_f64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int32 => rem_i32_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
-        DataType::Int64 => rem_i64_direct(lhs_ref, rhs_ref, &mut output_data, &output_shape)?,
+    let output_data = match result_dtype {
+        DataType::Float32 => rem_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => rem_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => rem_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => rem_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
         DataType::Bool => unreachable!("bool rejected during operand coercion"),
-    }
+    };
 
     let mut output = Tensor::new(
         Arc::new(output_data),
@@ -670,15 +628,10 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// complement NOT for integer tensors, rejected for floats — PyTorch's `~`
 /// semantics. Non-differentiable by construction.
 pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data = TensorData::uninitialized_on_device(
-        tensor.shape().numel(),
-        tensor.dtype(),
-        tensor.device(),
-    );
-
-    /// Applies `!` for one dtype, parallel above `PAR_THRESHOLD`.
+    /// Applies `!` for one dtype into a fresh buffer, parallel above
+    /// `PAR_THRESHOLD`.
     macro_rules! not_arm {
-        ($accessor:ident, $accessor_mut:ident, $tyname:literal) => {{
+        ($accessor:ident, $dtype:ident, $tyname:literal) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -686,36 +639,24 @@ pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
                     " slice from tensor"
                 ))
             })?;
-            let output = output_data.$accessor_mut().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get mutable ",
-                    $tyname,
-                    " slice from output"
-                ))
-            })?;
-            if input.len() >= PAR_THRESHOLD {
-                output
-                    .par_iter_mut()
-                    .zip(input.par_iter())
-                    .for_each(|(o, &i)| *o = !i);
-            } else {
-                for (o, &i) in output.iter_mut().zip(input.iter()) {
-                    *o = !i;
-                }
-            }
+            TensorData::from_vec(
+                unary_map(input, |i| !i),
+                DataType::$dtype,
+                tensor.device(),
+            )
         }};
     }
 
-    match tensor.dtype() {
-        DataType::Bool => not_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
-        DataType::Int32 => not_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
-        DataType::Int64 => not_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+    let output_data = match tensor.dtype() {
+        DataType::Bool => not_arm!(as_bool_slice, Bool, "bool"),
+        DataType::Int32 => not_arm!(as_i32_slice, Int32, "i32"),
+        DataType::Int64 => not_arm!(as_i64_slice, Int64, "i64"),
         DataType::Float32 | DataType::Float64 => {
             return Err(MinitensorError::invalid_operation(
                 "Bitwise NOT only supported for boolean and integer tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),

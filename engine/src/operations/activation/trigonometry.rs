@@ -70,76 +70,52 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         PowBroadcast::BaseScalar => exponent_shape.clone(),
     };
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), base.dtype(), base.device());
+    /// One dtype arm: map `powf` over the operands for the detected
+    /// broadcast form. Uses the shared map primitives, so `pow` now
+    /// parallelizes above the same thresholds as the other element-wise ops
+    /// (the previous hand-written loops were always sequential).
+    macro_rules! pow_arm {
+        ($accessor:ident, $ty:ty, $dtype:ident, $tyname:literal) => {{
+            let b = base.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from base tensor"
+                ))
+            })?;
+            let e = exponent.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from exponent tensor"
+                ))
+            })?;
+            let out = match broadcast {
+                PowBroadcast::None => {
+                    crate::operations::map::binary_map(b, e, |x: $ty, y: $ty| x.powf(y))
+                }
+                PowBroadcast::BaseScalar => {
+                    let base_val = b[0];
+                    unary_map(e, move |y: $ty| base_val.powf(y))
+                }
+                PowBroadcast::ExponentScalar => {
+                    let exp_val = e[0];
+                    unary_map(b, move |x: $ty| x.powf(exp_val))
+                }
+            };
+            TensorData::from_vec::<$ty>(out, DataType::$dtype, base.device())
+        }};
+    }
 
-    match base.dtype() {
-        DataType::Float32 => {
-            let b = base.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from base tensor")
-            })?;
-            let e = exponent.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from exponent tensor")
-            })?;
-            let out = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-            })?;
-            match broadcast {
-                PowBroadcast::None => {
-                    for i in 0..b.len() {
-                        out[i] = b[i].powf(e[i]);
-                    }
-                }
-                PowBroadcast::BaseScalar => {
-                    let base_val = b[0];
-                    for i in 0..e.len() {
-                        out[i] = base_val.powf(e[i]);
-                    }
-                }
-                PowBroadcast::ExponentScalar => {
-                    let exp_val = e[0];
-                    for i in 0..b.len() {
-                        out[i] = b[i].powf(exp_val);
-                    }
-                }
-            }
-        }
-        DataType::Float64 => {
-            let b = base.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from base tensor")
-            })?;
-            let e = exponent.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from exponent tensor")
-            })?;
-            let out = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-            })?;
-            match broadcast {
-                PowBroadcast::None => {
-                    for i in 0..b.len() {
-                        out[i] = b[i].powf(e[i]);
-                    }
-                }
-                PowBroadcast::BaseScalar => {
-                    let base_val = b[0];
-                    for i in 0..e.len() {
-                        out[i] = base_val.powf(e[i]);
-                    }
-                }
-                PowBroadcast::ExponentScalar => {
-                    let exp_val = e[0];
-                    for i in 0..b.len() {
-                        out[i] = b[i].powf(exp_val);
-                    }
-                }
-            }
-        }
+    let output_data = match base.dtype() {
+        DataType::Float32 => pow_arm!(as_f32_slice, f32, Float32, "f32"),
+        DataType::Float64 => pow_arm!(as_f64_slice, f64, Float64, "f64"),
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Power operation only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -172,39 +148,37 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
 
 /// Element-wise power with scalar exponent and gradient support
 pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
-    // Create exponent tensor filled with scalar value
-    let mut exp_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let slice = exp_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f32 slice from exponent data",
-                )
-            })?;
-            for val in slice.iter_mut() {
-                *val = exponent as f32;
-            }
-        }
-        DataType::Float64 => {
-            let slice = exp_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f64 slice from exponent data",
-                )
-            })?;
-            for val in slice.iter_mut() {
-                *val = exponent;
-            }
-        }
+    // A single-element exponent is enough: `pow` detects the scalar operand
+    // and takes its ExponentScalar broadcast path, so there is no reason to
+    // materialize (and later save for backward) a full-size constant tensor.
+    // Tensors with zero or one element keep an exponent of their own shape so
+    // the same-shape fast path (and the output shape) are unchanged for them.
+    let exp_shape = if tensor.numel() <= 1 {
+        tensor.shape().clone()
+    } else {
+        crate::tensor::Shape::new(vec![1])
+    };
+    let exp_numel = exp_shape.numel();
+    let exp_data = match tensor.dtype() {
+        DataType::Float32 => TensorData::from_vec(
+            vec![exponent as f32; exp_numel],
+            DataType::Float32,
+            tensor.device(),
+        ),
+        DataType::Float64 => TensorData::from_vec(
+            vec![exponent; exp_numel],
+            DataType::Float64,
+            tensor.device(),
+        ),
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Power operation only supported for floating point tensors",
             ));
         }
-    }
+    };
     let exp_tensor = Tensor::new(
         Arc::new(exp_data),
-        tensor.shape().clone(),
+        exp_shape,
         tensor.dtype(),
         tensor.device(),
         false,
@@ -241,18 +215,11 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let output_shape = lhs_tensor.shape().broadcast_with(rhs_tensor.shape())?;
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
-
-    match result_dtype {
-        DataType::Float32 => {
-            logaddexp_f32(&lhs_tensor, &rhs_tensor, &mut output_data, &output_shape)?
-        }
-        DataType::Float64 => {
-            logaddexp_f64(&lhs_tensor, &rhs_tensor, &mut output_data, &output_shape)?
-        }
+    let output_data = match result_dtype {
+        DataType::Float32 => logaddexp_f32(&lhs_tensor, &rhs_tensor, &output_shape)?,
+        DataType::Float64 => logaddexp_f64(&lhs_tensor, &rhs_tensor, &output_shape)?,
         _ => unreachable!(),
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -289,18 +256,15 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
         ));
     }
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => softplus_f32(tensor, &mut output_data, beta as f32, threshold as f32)?,
-        DataType::Float64 => softplus_f64(tensor, &mut output_data, beta, threshold)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => softplus_f32(tensor, beta as f32, threshold as f32)?,
+        DataType::Float64 => softplus_f64(tensor, beta, threshold)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Softplus is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -329,18 +293,15 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
 
 /// GELU activation function with optional tanh approximation
 pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => gelu_f32(tensor, &mut output_data, approximate)?,
-        DataType::Float64 => gelu_f64(tensor, &mut output_data, approximate)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => gelu_f32(tensor, approximate)?,
+        DataType::Float64 => gelu_f64(tensor, approximate)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "GELU is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -368,18 +329,15 @@ pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
 
 /// ELU activation function with configurable alpha
 pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => elu_f32(tensor, &mut output_data, alpha as f32)?,
-        DataType::Float64 => elu_f64(tensor, &mut output_data, alpha)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => elu_f32(tensor, alpha as f32)?,
+        DataType::Float64 => elu_f64(tensor, alpha)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "ELU is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -407,18 +365,15 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
 
 /// SELU activation function.
 pub fn selu(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => selu_f32(tensor, &mut output_data)?,
-        DataType::Float64 => selu_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => selu_f32(tensor)?,
+        DataType::Float64 => selu_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "SELU is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -445,18 +400,15 @@ pub fn selu(tensor: &Tensor) -> Result<Tensor> {
 
 /// SiLU (Swish) activation function with gradient support
 pub fn silu(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => silu_f32(tensor, &mut output_data)?,
-        DataType::Float64 => silu_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => silu_f32(tensor)?,
+        DataType::Float64 => silu_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "SiLU is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -483,18 +435,15 @@ pub fn silu(tensor: &Tensor) -> Result<Tensor> {
 
 /// Softsign activation function with gradient support
 pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => softsign_f32(tensor, &mut output_data)?,
-        DataType::Float64 => softsign_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => softsign_f32(tensor)?,
+        DataType::Float64 => softsign_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Softsign is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -521,16 +470,17 @@ pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
 
 /// ReLU activation function with gradient support
 pub fn relu(tensor: &Tensor) -> Result<Tensor> {
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    // The backward mask is only materialized when a gradient function will
+    // actually be attached (mirrors `Tensor::new`'s grad gating), so pure
+    // inference skips both the mask allocation and its fill pass.
+    let store_mask = tensor.requires_grad() && crate::autograd::is_grad_enabled();
 
     // Perform ReLU based on data type while capturing mask of positive inputs
-    let mask = match tensor.dtype() {
-        DataType::Float32 => relu_f32(tensor, &mut output_data)?,
-        DataType::Float64 => relu_f64(tensor, &mut output_data)?,
-        DataType::Int32 => relu_i32(tensor, &mut output_data)?,
-        DataType::Int64 => relu_i64(tensor, &mut output_data)?,
+    let (output_data, mask) = match tensor.dtype() {
+        DataType::Float32 => relu_f32(tensor, store_mask)?,
+        DataType::Float64 => relu_f64(tensor, store_mask)?,
+        DataType::Int32 => relu_i32(tensor, store_mask)?,
+        DataType::Int64 => relu_i64(tensor, store_mask)?,
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "ReLU function not supported for boolean tensors",
@@ -551,7 +501,11 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
     if output.requires_grad() {
         let grad_fn = Arc::new(ReluBackward {
             input_id: tensor.id(),
-            mask,
+            mask: mask.ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "relu mask missing despite gradients being required",
+                )
+            })?,
         });
 
         let mut output_with_grad = output;
@@ -574,13 +528,14 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
         ));
     }
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    let store_mask = tensor.requires_grad();
-    let mask = match tensor.dtype() {
-        DataType::Float32 => hardshrink_f32(tensor, &mut output_data, lambd as f32, store_mask)?,
-        DataType::Float64 => hardshrink_f64(tensor, &mut output_data, lambd, store_mask)?,
+    // Gate the mask on the same condition `Tensor::new` uses for
+    // `requires_grad`, so it is neither computed for inference nor missing
+    // when the gradient function needs it (the bare `requires_grad()` check
+    // used previously produced a stray mask under `no_grad`).
+    let store_mask = tensor.requires_grad() && crate::autograd::is_grad_enabled();
+    let (output_data, mask) = match tensor.dtype() {
+        DataType::Float32 => hardshrink_f32(tensor, lambd as f32, store_mask)?,
+        DataType::Float64 => hardshrink_f64(tensor, lambd, store_mask)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "hardshrink is only supported for floating point tensors",
@@ -618,14 +573,14 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
 
 /// LeakyReLU activation function with gradient support
 pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
-    // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+    // As with `relu`, only materialize the backward mask when a gradient
+    // function will consume it.
+    let store_mask = tensor.requires_grad() && crate::autograd::is_grad_enabled();
 
     // Perform LeakyReLU based on data type and capture mask of positive inputs
-    let mask = match tensor.dtype() {
-        DataType::Float32 => leaky_relu_f32(tensor, &mut output_data, negative_slope as f32)?,
-        DataType::Float64 => leaky_relu_f64(tensor, &mut output_data, negative_slope)?,
+    let (output_data, mask) = match tensor.dtype() {
+        DataType::Float32 => leaky_relu_f32(tensor, negative_slope as f32, store_mask)?,
+        DataType::Float64 => leaky_relu_f64(tensor, negative_slope, store_mask)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "LeakyReLU function only supported for floating point tensors",
@@ -647,7 +602,11 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
         let grad_fn = Arc::new(LeakyReluBackward {
             input_id: tensor.id(),
             negative_slope,
-            mask,
+            mask: mask.ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "leaky_relu mask missing despite gradients being required",
+                )
+            })?,
         });
 
         let mut output_with_grad = output;

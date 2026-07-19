@@ -133,14 +133,14 @@ refactor; the rest are documented with a migration path in section 7.
     every kernel does) forms a reference to invalid values, i.e. undefined
     behavior, even though every bit pattern is a representable float/int.
     Per the project's stated priority order (correctness before
-    performance), soundness wins. The measured cost is confined to
-    allocation-bound cases: interleaved A/B on release wheels shows ~25–35%
-    on the pure element-wise microbenchmark (`add`+`sum` over 2000×2000,
-    where the extra `memset` raises output write traffic from ~3N to ~4N)
-    and noise on the matmul-dominated training step. The zero-cost
-    alternative (`MaybeUninit`-typed kernel writes) is retained as tracked
-    future work in section 7 for anyone who wants the throughput back
-    without the unsoundness.
+    performance), soundness won first: buffers were zero-initialized, at a
+    measured ~25–35% cost on allocation-bound element-wise benchmarks. The
+    eighth change set then removed that cost for the entire hot
+    element-wise surface by turning kernels into buffer *producers*
+    (`operations::map`): outputs are written exactly once through
+    `MaybeUninit` spare capacity and only then marked initialized, so the
+    zeroing pass is gone without reintroducing the UB (see section 7,
+    change set 8).
 17. **[PARTIALLY FIXED] API-inconsistencies at the Python layer.**
     `requires_grad_()` now returns `self` (chaining works, matching
     PyTorch). Still open: `expand` materializes at the FFI boundary, so it
@@ -474,6 +474,100 @@ as-is; flagged for the maintainer): `chunk` requires even divisibility
 row returns zeros (PyTorch returns NaN) consistent with `masked_softmax`'s
 fully-masked-row convention.
 
+Completed in the eighth change set (uninit-free element-wise outputs):
+
+- **The forced `memset` is gone from every hot element-wise output.** The
+  soundness fix in finding 16 zero-initialized op output buffers because
+  kernels received them as `&mut [T]`; the measured cost was ~25–35% on
+  allocation-bound element-wise ops. Kernels for the element-wise families
+  are now buffer *producers* built on a small primitive module,
+  `operations::map`: `Vec::with_capacity` + writes through `MaybeUninit`
+  spare capacity + `set_len` only after every element is written. All
+  `unsafe` for the pattern is confined to `map.rs` (safe `unary_map` /
+  `binary_map` combinators and one documented `unsafe fn build_vec_with`
+  escape hatch) plus per-call SAFETY comments at the kernel walkers.
+  Converted families: binary arithmetic (add/sub/mul/div/floordiv/rem ×
+  dtypes, including the SIMD fast paths, which now store through
+  `MaybeUninit` slices), neg, bitwise_not, all ~40 float-unary activations
+  (the `float_unary_kernel!` macros now generate producers), gelu,
+  relu/leaky_relu/hardshrink, abs/sign/clip/round/floor/ceil, nan_to_num,
+  logaddexp, pow/powf, maximum/minimum, and all comparisons. Zero-init
+  remains only where the output is genuinely used as scratch (softmax /
+  log_softmax rows), in cold creation utilities, and in autograd matmul
+  scratch buffers.
+- **`broadcast_binary_op` became `broadcast_binary_map`**, generic over the
+  output element type. That let `comparison.rs` delete its 127-line
+  bool-specialized copy of the broadcast walker and collapse onto the same
+  primitive; `minmax.rs`'s five hand-copied dtype arms collapsed into a
+  macro over it (~150 lines removed).
+- **`relu`/`leaky_relu` no longer compute backward masks during
+  inference.** Both unconditionally allocated and filled a full-size
+  `Vec<bool>` mask on every forward call, even under `no_grad()` or for
+  tensors without gradients. Masks are now gated on exactly the condition
+  `Tensor::new` uses for `requires_grad` (`requires_grad() &&
+  is_grad_enabled()`), which also fixed a latent `hardshrink` bug: its
+  mask was keyed on bare `requires_grad()`, so calling it under
+  `no_grad()` on a parameter produced a stray mask that tripped a
+  `debug_assert` in debug builds. `nan_to_num`'s finite-mask got the same
+  gating. `leaky_relu`'s kernel also lost the last usize-cast raw-pointer
+  parallel loop in the ops layer (the pattern earlier change sets removed
+  from gradient accumulation).
+- **`powf` no longer materializes a full-size exponent tensor.** It now
+  creates a single-element exponent and rides `pow`'s ExponentScalar
+  broadcast path (scalar-preserving for 0-d/1-element inputs), which also
+  shrinks what `PowBackward` keeps alive. `pow` itself moved onto the map
+  primitives and now parallelizes like every other element-wise op — its
+  hand-written loops were always sequential.
+- **`TensorData::from_vec` reinterprets `Vec<bool>` instead of copying.**
+  The old bool special case allocated a second buffer and copied
+  element-by-element (it mistrusted the direction that is actually sound:
+  every `bool` is a valid `u8`; only u8→bool needs validation). This was
+  the difference between comparisons regressing ~40% and improving ~43%
+  under the producer model — the A/B caught it, the reinterpret fixed it.
+- **`ones`/`full` build their buffers in one pass** instead of memset +
+  fill (engine `ones_on_device`, bindings `create_full_tensor`).
+- **`PAR_THRESHOLD` unified.** Four separate crate-local definitions
+  (activation, arithmetic, matmul, autograd) now re-export one constant
+  from `operations::map`.
+- **Release wheel builds un-broken.** `[tool.maturin] compatibility =
+  "pypi"` makes maturin 1.14.x — the exact range `[build-system]`
+  requires — panic during auditwheel (`internal error: … pypi is not a
+  policy`), so every `maturin build` release wheel (and `make dist`)
+  failed; CI stayed green only because test workflows use `maturin
+  develop`, which skips the audit. The key is removed in favor of the
+  default audit-and-tag behavior; `maturin build --release` now produces a
+  properly tagged `manylinux_2_35` wheel in this environment.
+- **A dtype-inference trap surfaced and was closed.** With producer
+  kernels, closure return types are inferred rather than forced by an
+  output slice; `sign`'s bare `1.0`/`-1.0` literals silently inferred
+  `f64` in the f32 kernel. `TensorData::from_vec`'s dtype/size assertions
+  caught it immediately (exactly what they are for), and every converted
+  kernel now pins its element type with `from_vec::<T>` so the closure
+  cannot drift.
+
+Benchmarks for the eighth change set (interleaved A/B on release wheels,
+same protocol as the table in section 8; 2000×2000 f32 unless noted;
+median of per-round best over 3–5 rounds; shared-cloud CPU):
+
+| Benchmark | Zero-init baseline | Producer kernels | Delta |
+|---|---|---|---|
+| add + sum | 3.7 ms | 3.4 ms | −8 % |
+| mul | 3.4 ms | 3.0 ms | −11 % |
+| add (scalar broadcast) | 1.1 ms | 0.45 ms | **−58 %** |
+| exp | 3.5 ms | 3.2 ms | −9 % |
+| relu | 6.5 ms | 0.40 ms | **−94 %** |
+| greater-than | 0.82 ms | 0.47 ms | **−43 %** |
+| maximum | 1.7 ms | 0.79 ms | **−52 %** |
+| floor-divide (int64) | 8.3 ms | 7.0 ms | −16 % |
+| add (row broadcast) | 4.0 ms | 3.4 ms | −14 % |
+| training step (3-layer MLP, batch 64) | 2.0 ms | 1.9 ms | ~ noise |
+| inference chain (matmul→add→tanh→relu→sum, no_grad) | 1.5 ms | 1.3 ms | −15–20 % |
+
+The relu number is the compound of two fixes (no memset, no inference-time
+mask); the comparison and maximum numbers include the `Vec<bool>`
+reinterpret. Full suites pass on both sides of the change: 647 Rust
+tests, 865 Python tests (5 skipped).
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation
@@ -527,14 +621,15 @@ Still open, in priority order:
 3. **Feature-gate or remove the remaining speculative subsystems**
    (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
    — semver-major for the engine crate, maintainer's call.
-4. **`MaybeUninit`-typed kernel output writes (optional throughput
-   recovery).** Op output buffers are now zero-initialized for soundness
-   (finding 16), which the A/B measured at ~25–35% on the allocation-bound
-   element-wise microbenchmark and noise on realistic training. A maintainer
-   who wants that throughput back without reintroducing the UB can thread
-   `MaybeUninit`-typed writes through the ~71 output-producing kernels; the
-   uniform write pattern makes this mechanical, but it is a large surface,
-   so it is left as opt-in future work rather than done under time pressure.
+4. **`MaybeUninit` output writes — done for the element-wise surface**
+   (change set 8). What deliberately keeps zero-initialized outputs: the
+   softmax/log_softmax row kernels (they legitimately reuse the output as
+   scratch — write exp, then normalize in place), the autograd linalg
+   scratch buffers (matmul-bound), reduction/selection outputs with
+   scatter-style write patterns, and the creation utilities in the
+   bindings (arange/linspace/logspace/random, where value generation
+   dominates). Converting those would add complexity for little measured
+   return; revisit only with a benchmark showing otherwise.
 
 ## 8-11. Implementation, tests, validation, benchmarks
 

@@ -7,6 +7,7 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
+use crate::tensor::DataType;
 use crate::tensor::Shape;
 use crate::tensor::Strides;
 use crate::tensor::Tensor;
@@ -18,9 +19,8 @@ use num_traits::Float;
 pub(crate) fn logaddexp_f32(
     lhs: &Tensor,
     rhs: &Tensor,
-    output_data: &mut TensorData,
     output_shape: &Shape,
-) -> Result<()> {
+) -> Result<TensorData> {
     let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
     })?;
@@ -28,18 +28,13 @@ pub(crate) fn logaddexp_f32(
         MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    crate::operations::arithmetic::broadcast_binary_op(
+    let out = crate::operations::arithmetic::broadcast_binary_map(
         lhs_data,
         rhs_data,
-        output_slice,
         lhs.shape(),
         rhs.shape(),
         output_shape,
-        |a, b| {
+        |a: f32, b: f32| {
             if a.is_nan() || b.is_nan() {
                 f32::NAN
             } else {
@@ -53,15 +48,15 @@ pub(crate) fn logaddexp_f32(
                 }
             }
         },
-    )
+    )?;
+    Ok(TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device()))
 }
 
 pub(crate) fn logaddexp_f64(
     lhs: &Tensor,
     rhs: &Tensor,
-    output_data: &mut TensorData,
     output_shape: &Shape,
-) -> Result<()> {
+) -> Result<TensorData> {
     let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
     })?;
@@ -69,18 +64,13 @@ pub(crate) fn logaddexp_f64(
         MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    crate::operations::arithmetic::broadcast_binary_op(
+    let out = crate::operations::arithmetic::broadcast_binary_map(
         lhs_data,
         rhs_data,
-        output_slice,
         lhs.shape(),
         rhs.shape(),
         output_shape,
-        |a, b| {
+        |a: f64, b: f64| {
             if a.is_nan() || b.is_nan() {
                 f64::NAN
             } else {
@@ -94,55 +84,60 @@ pub(crate) fn logaddexp_f64(
                 }
             }
         },
-    )
+    )?;
+    Ok(TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()))
 }
 
-pub(crate) fn tanh_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-    unary_apply(input_data, output_slice, f32::tanh);
-    Ok(())
+    let out = unary_map(input_data, f32::tanh);
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
 }
 
-pub(crate) fn tanh_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn tanh_f64(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-    unary_apply(input_data, output_slice, f64::tanh);
-    Ok(())
+    let out = unary_map(input_data, f64::tanh);
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
 }
 
-pub(crate) fn sigmoid_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sigmoid_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-    unary_apply(input_data, output_slice, stable_sigmoid_f32);
-    Ok(())
+    let out = unary_map(input_data, stable_sigmoid_f32);
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
 }
 
-pub(crate) fn sigmoid_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn sigmoid_f64(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-    unary_apply(input_data, output_slice, stable_sigmoid_f64);
-    Ok(())
+    let out = unary_map(input_data, stable_sigmoid_f64);
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
 }
 
 #[inline]
@@ -167,300 +162,156 @@ fn stable_sigmoid_f64(val: f64) -> f64 {
     }
 }
 
-pub(crate) fn relu_f32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_f32(
+    tensor: &Tensor,
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    if len >= PAR_THRESHOLD {
-        output_slice
-            .par_iter_mut()
-            .zip(input_data.par_iter())
-            .zip(mask.par_iter_mut())
-            .for_each(|((o, &v), m)| {
-                if v.is_nan() {
-                    *o = v;
-                } else if v > 0.0 {
-                    *o = v;
-                    *m = true;
-                } else {
-                    *o = 0.0;
-                }
-            });
-    } else {
-        for ((o, &v), m) in output_slice
-            .iter_mut()
-            .zip(input_data.iter())
-            .zip(mask.iter_mut())
-        {
-            if v.is_nan() {
-                *o = v;
-            } else if v > 0.0 {
-                *o = v;
-                *m = true;
-            } else {
-                *o = 0.0;
-            }
-        }
-    }
-    Ok(mask)
+    // NaN propagates through ReLU; the backward mask marks strictly positive
+    // inputs only. The mask is materialized only when the caller will attach
+    // a gradient function (`store_mask`).
+    let out = unary_map(input_data, |v: f32| if v.is_nan() || v > 0.0 { v } else { 0.0 });
+    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > 0.0));
+    Ok((
+        TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
+        mask,
+    ))
 }
 
-pub(crate) fn relu_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_f64(
+    tensor: &Tensor,
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    if len >= PAR_THRESHOLD {
-        output_slice
-            .par_iter_mut()
-            .zip(input_data.par_iter())
-            .zip(mask.par_iter_mut())
-            .for_each(|((o, &v), m)| {
-                if v.is_nan() {
-                    *o = v;
-                } else if v > 0.0 {
-                    *o = v;
-                    *m = true;
-                } else {
-                    *o = 0.0;
-                }
-            });
-    } else {
-        for ((o, &v), m) in output_slice
-            .iter_mut()
-            .zip(input_data.iter())
-            .zip(mask.iter_mut())
-        {
-            if v.is_nan() {
-                *o = v;
-            } else if v > 0.0 {
-                *o = v;
-                *m = true;
-            } else {
-                *o = 0.0;
-            }
-        }
-    }
-    Ok(mask)
+    // NaN propagates through ReLU; the backward mask marks strictly positive
+    // inputs only. The mask is materialized only when the caller will attach
+    // a gradient function (`store_mask`).
+    let out = unary_map(input_data, |v: f64| if v.is_nan() || v > 0.0 { v } else { 0.0 });
+    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > 0.0));
+    Ok((
+        TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
+        mask,
+    ))
 }
 
-pub(crate) fn relu_i32(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_i32(
+    tensor: &Tensor,
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    if len >= PAR_THRESHOLD {
-        output_slice
-            .par_iter_mut()
-            .zip(input_data.par_iter())
-            .zip(mask.par_iter_mut())
-            .for_each(|((o, &v), m)| {
-                if v > 0 {
-                    *o = v;
-                    *m = true;
-                } else {
-                    *o = 0;
-                }
-            });
-    } else {
-        for ((o, &v), m) in output_slice
-            .iter_mut()
-            .zip(input_data.iter())
-            .zip(mask.iter_mut())
-        {
-            if v > 0 {
-                *o = v;
-                *m = true;
-            } else {
-                *o = 0;
-            }
-        }
-    }
-    Ok(mask)
+    let out = unary_map(input_data, |v: i32| if v > 0 { v } else { 0 });
+    let mask = store_mask.then(|| unary_map(input_data, |v: i32| v > 0));
+    Ok((
+        TensorData::from_vec::<i32>(out, DataType::Int32, tensor.device()),
+        mask,
+    ))
 }
 
-pub(crate) fn relu_i64(tensor: &Tensor, output_data: &mut TensorData) -> Result<Vec<bool>> {
+pub(crate) fn relu_i64(
+    tensor: &Tensor,
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    if len >= PAR_THRESHOLD {
-        output_slice
-            .par_iter_mut()
-            .zip(input_data.par_iter())
-            .zip(mask.par_iter_mut())
-            .for_each(|((o, &v), m)| {
-                if v > 0 {
-                    *o = v;
-                    *m = true;
-                } else {
-                    *o = 0;
-                }
-            });
-    } else {
-        for ((o, &v), m) in output_slice
-            .iter_mut()
-            .zip(input_data.iter())
-            .zip(mask.iter_mut())
-        {
-            if v > 0 {
-                *o = v;
-                *m = true;
-            } else {
-                *o = 0;
-            }
-        }
-    }
-    Ok(mask)
+    let out = unary_map(input_data, |v: i64| if v > 0 { v } else { 0 });
+    let mask = store_mask.then(|| unary_map(input_data, |v: i64| v > 0));
+    Ok((
+        TensorData::from_vec::<i64>(out, DataType::Int64, tensor.device()),
+        mask,
+    ))
 }
 
 pub(crate) fn hardshrink_f32(
     tensor: &Tensor,
-    output_data: &mut TensorData,
     lambd: f32,
     store_mask: bool,
-) -> Result<Option<Vec<bool>>> {
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    let mut mask = if store_mask {
-        Some(Vec::with_capacity(input_data.len()))
-    } else {
-        None
-    };
-
-    for (&value, out_slot) in input_data.iter().zip(output_slice.iter_mut()) {
-        let keep = value > lambd || value < -lambd;
-        *out_slot = if keep { value } else { 0.0 };
-        if let Some(ref mut mask_vec) = mask {
-            mask_vec.push(keep);
-        }
-    }
-
-    Ok(mask)
+    let out = unary_map(input_data, |v: f32| {
+        if v > lambd || v < -lambd { v } else { 0.0 }
+    });
+    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > lambd || v < -lambd));
+    Ok((
+        TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
+        mask,
+    ))
 }
 
 pub(crate) fn hardshrink_f64(
     tensor: &Tensor,
-    output_data: &mut TensorData,
     lambd: f64,
     store_mask: bool,
-) -> Result<Option<Vec<bool>>> {
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    let mut mask = if store_mask {
-        Some(Vec::with_capacity(input_data.len()))
-    } else {
-        None
-    };
-
-    for (&value, out_slot) in input_data.iter().zip(output_slice.iter_mut()) {
-        let keep = value > lambd || value < -lambd;
-        *out_slot = if keep { value } else { 0.0 };
-        if let Some(ref mut mask_vec) = mask {
-            mask_vec.push(keep);
-        }
-    }
-
-    Ok(mask)
+    let out = unary_map(input_data, |v: f64| {
+        if v > lambd || v < -lambd { v } else { 0.0 }
+    });
+    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > lambd || v < -lambd));
+    Ok((
+        TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
+        mask,
+    ))
 }
 
 pub(crate) fn leaky_relu_f32(
     tensor: &Tensor,
-    output_data: &mut TensorData,
     negative_slope: f32,
-) -> Result<Vec<bool>> {
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    let mask_ptr = mask.as_mut_ptr() as usize;
-    let in_ptr = input_data.as_ptr() as usize;
-    let out_ptr = output_slice.as_mut_ptr() as usize;
-    (0..len).into_par_iter().for_each(|i| unsafe {
-        let in_ptr = in_ptr as *const f32;
-        let out_ptr = out_ptr as *mut f32;
-        let mask_ptr = mask_ptr as *mut bool;
-        let val = *in_ptr.add(i);
-        if val >= 0.0 {
-            *out_ptr.add(i) = val;
-            *mask_ptr.add(i) = true;
-        } else {
-            *out_ptr.add(i) = negative_slope * val;
-        }
+    // Safe chunked maps replace the previous raw-pointer parallel loop; the
+    // backward mask marks non-negative inputs and is only materialized when a
+    // gradient function will consume it.
+    let out = unary_map(input_data, move |v: f32| {
+        if v >= 0.0 { v } else { negative_slope * v }
     });
-    Ok(mask)
+    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v >= 0.0));
+    Ok((
+        TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
+        mask,
+    ))
 }
 
 pub(crate) fn leaky_relu_f64(
     tensor: &Tensor,
-    output_data: &mut TensorData,
     negative_slope: f64,
-) -> Result<Vec<bool>> {
+    store_mask: bool,
+) -> Result<(TensorData, Option<Vec<bool>>)> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    let len = input_data.len();
-    let mut mask = vec![false; len];
-    let mask_ptr = mask.as_mut_ptr() as usize;
-    let in_ptr = input_data.as_ptr() as usize;
-    let out_ptr = output_slice.as_mut_ptr() as usize;
-    (0..len).into_par_iter().for_each(|i| unsafe {
-        let in_ptr = in_ptr as *const f64;
-        let out_ptr = out_ptr as *mut f64;
-        let mask_ptr = mask_ptr as *mut bool;
-        let val = *in_ptr.add(i);
-        if val >= 0.0 {
-            *out_ptr.add(i) = val;
-            *mask_ptr.add(i) = true;
-        } else {
-            *out_ptr.add(i) = negative_slope * val;
-        }
+    // Safe chunked maps replace the previous raw-pointer parallel loop; the
+    // backward mask marks non-negative inputs and is only materialized when a
+    // gradient function will consume it.
+    let out = unary_map(input_data, move |v: f64| {
+        if v >= 0.0 { v } else { negative_slope * v }
     });
-    Ok(mask)
+    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v >= 0.0));
+    Ok((
+        TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
+        mask,
+    ))
 }
 
 pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {

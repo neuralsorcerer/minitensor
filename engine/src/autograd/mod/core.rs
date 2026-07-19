@@ -15,7 +15,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+pub(crate) use crate::operations::map::PAR_THRESHOLD;
 
 /// Unique identifier for tensors in the computation graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

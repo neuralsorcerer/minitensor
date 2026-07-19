@@ -7,19 +7,20 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{Tensor, TensorData},
+    tensor::{DataType, Tensor, TensorData},
 };
 
-pub(crate) fn ceil_f64(tensor: &Tensor, output_data: &mut TensorData) -> Result<()> {
+pub(crate) fn ceil_f64(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-    unary_apply(input_data, output_slice, f64::ceil);
-    Ok(())
+    let out = unary_map(input_data, f64::ceil);
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
 }
 
 #[cfg(test)]
