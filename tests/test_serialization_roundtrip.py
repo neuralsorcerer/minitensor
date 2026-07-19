@@ -76,3 +76,30 @@ def test_conv_batchnorm_roundtrip(tmp_path):
     for a, b in zip(params_before, _params(cnn2)):
         np.testing.assert_array_equal(a, b)
     np.testing.assert_array_equal(out_before, cnn2(x).numpy())
+
+
+@pytest.mark.parametrize("fmt", ["json", "bin", "msgpack"])
+def test_batchnorm_running_stats_roundtrip(tmp_path, fmt):
+    # BatchNorm running_mean/running_var are buffers, not parameters. They must
+    # be serialized so a reloaded model reproduces its *eval-mode* output (which
+    # normalizes by the running stats, not the batch's). Train first so the
+    # running stats move away from their (0, 1) init, then compare eval outputs.
+    mt.manual_seed(7)
+    model = nn.Sequential([nn.DenseLayer(4, 4), nn.BatchNorm1d(4)])
+    x = mt.from_numpy(np.random.RandomState(2).randn(16, 4).astype(np.float32))
+    model.train()
+    for _ in range(5):
+        model(x)
+    model.eval()
+    out_before = model(x).numpy().copy()
+
+    path = str(tmp_path / f"bn.{fmt}")
+    model.save(path, fmt)
+    loaded = type(model).load_state_from(path, fmt)
+
+    mt.manual_seed(999)  # different init running stats
+    reloaded = nn.Sequential([nn.DenseLayer(4, 4), nn.BatchNorm1d(4)])
+    reloaded.load_state_dict(loaded)
+    reloaded.eval()
+
+    np.testing.assert_array_equal(out_before, reloaded(x).numpy())

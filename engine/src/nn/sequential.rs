@@ -98,6 +98,24 @@ impl Layer for Sequential {
         params
     }
 
+    fn buffers(&self) -> Vec<&Tensor> {
+        // Flatten child buffers in layer order so the indexed buffer names line
+        // up on save and load (e.g. a BatchNorm's running stats are preserved).
+        let mut buffers = Vec::new();
+        for layer in &self.layers {
+            buffers.extend(layer.buffers());
+        }
+        buffers
+    }
+
+    fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
+        let mut buffers = Vec::new();
+        for layer in &mut self.layers {
+            buffers.extend(layer.buffers_mut());
+        }
+        buffers
+    }
+
     fn train(&mut self) {
         self.training = true;
         for layer in &mut self.layers {
