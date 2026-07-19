@@ -476,11 +476,9 @@ fn broadcast_mask_index(
         let output_dim_idx = output_ndim - 1 - i;
         let mask_dim_idx = mask_ndim - 1 - i;
         let stride = output_strides[output_dim_idx];
-        let coord = if stride == 0 {
-            0
-        } else {
-            (linear_idx / stride) % output_dims[output_dim_idx]
-        };
+        let coord = linear_idx
+            .checked_div(stride)
+            .map_or(0, |quotient| quotient % output_dims[output_dim_idx]);
         let mask_dim = mask_dims[mask_dim_idx];
         let mask_coord = if mask_dim == 1 { 0 } else { coord };
         mask_index += mask_coord * mask_strides[mask_dim_idx];
