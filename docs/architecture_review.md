@@ -626,6 +626,26 @@ per-round best over 3 rounds):
 Suites green on both sides: 651 Rust tests (3 new), 865 Python tests
 (5 skipped).
 
+Completed in the tenth change set (build/CI hardening):
+
+- **The `hardware` subsystem is behind a default-on cargo feature.** The
+  backlog flags `hardware/` (~2k LOC of profiling/optimizer code referenced
+  only by an example and a compatibility test) for removal as a
+  semver-major maintainer decision. This change implements the mechanism
+  without deciding the policy: `default = ["cpu", "hardware"]` keeps every
+  existing build identical, while `default-features = false` (plus `cpu`)
+  now drops the subsystem entirely. The GPU demo examples also gained
+  `required-features`, so `--all-targets` builds no longer compile
+  feature-dependent examples they cannot run. Both configurations pass the
+  full suite and clippy `-D warnings`.
+- **CI now exercises the release wheel path.** `maturin develop` and PEP
+  517 installs skip auditwheel, which is exactly why the broken
+  `compatibility = "pypi"` setting kept CI green while every release wheel
+  build panicked. The Ubuntu test workflow builds one wheel per run
+  (single matrix entry, debug profile reusing the target dir) so
+  configuration breakage of `maturin build` surfaces in CI instead of at
+  release time.
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation
@@ -676,9 +696,11 @@ Still open, in priority order:
    The `items_after_test_module` crate-wide allow — an artifact of the old
    layout — has been removed; clippy passes without it under `-D warnings`,
    both for the default build and for `--features opencl`.
-3. **Feature-gate or remove the remaining speculative subsystems**
-   (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
-   — semver-major for the engine crate, maintainer's call.
+3. **Remove the remaining speculative subsystems, or keep them gated**
+   (`hardware` is now behind a default-on feature — change set 10 — so
+   flipping it out of `default` or deleting the module is the remaining
+   semver-major maintainer decision; the pooled GPU allocator and
+   Python-exposed `debug` are unchanged).
 4. **`MaybeUninit` output writes — done for the element-wise surface**
    (change set 8). What deliberately keeps zero-initialized outputs: the
    softmax/log_softmax row kernels (they legitimately reuse the output as

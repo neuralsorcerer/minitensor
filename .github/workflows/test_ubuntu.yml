@@ -44,3 +44,17 @@ jobs:
         run: |
           source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
           pytest -v tests/
+
+      # `maturin develop` and PEP 517 installs skip the auditwheel step, so a
+      # broken [tool.maturin] compatibility setting can pass every test above
+      # while `maturin build` release wheels fail (it happened: the "pypi"
+      # value panicked maturin 1.14 and CI stayed green). Build one wheel per
+      # run to keep the release path honest; debug profile reuses the target
+      # dir, so this is cheap.
+      - name: Build wheel (release-path guard)
+        if: matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
+          maturin build --out /tmp/wheel-guard
+          ls /tmp/wheel-guard/*.whl
