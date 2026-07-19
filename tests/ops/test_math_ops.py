@@ -363,6 +363,41 @@ def test_sqrt_negative_nan():
     assert np.isnan(y.numpy()).all()
 
 
+def test_sqrt_rsqrt_ieee_edge_cases():
+    # Dedicated sqrt/rsqrt kernels must follow IEEE on the values powf() got
+    # wrong: sqrt(-inf)/sqrt(x<0) = NaN (not +inf), sqrt(-0) = -0,
+    # rsqrt(-inf) = NaN, rsqrt(-0) = -inf.
+    values = np.array([-4.0, -np.inf, -0.0, 0.0, np.inf, 4.0], dtype=np.float64)
+    for dtype in ("float32", "float64"):
+        v = values.astype(dtype)
+        sq = mt.from_numpy(v).sqrt().numpy()
+        rs = mt.from_numpy(v).rsqrt().numpy()
+        with np.errstate(all="ignore"):
+            exp_sq = np.sqrt(v)
+            exp_rs = 1.0 / np.sqrt(v)
+        np.testing.assert_array_equal(np.isnan(sq), np.isnan(exp_sq))
+        np.testing.assert_array_equal(sq[~np.isnan(sq)], exp_sq[~np.isnan(exp_sq)])
+        np.testing.assert_array_equal(np.isnan(rs), np.isnan(exp_rs))
+        np.testing.assert_array_equal(rs[~np.isnan(rs)], exp_rs[~np.isnan(exp_rs)])
+        # signed zero preserved by sqrt(-0) = -0
+        assert np.signbit(sq[2])
+
+
+def test_sqrt_rsqrt_gradients_match_analytic():
+    x = Tensor([0.25, 1.0, 4.0, 9.0], dtype="float64", requires_grad=True)
+    x.sqrt().sum().backward()
+    # d/dx sqrt(x) = 0.5 / sqrt(x)
+    np.testing.assert_allclose(
+        x.grad.numpy(), 0.5 / np.sqrt([0.25, 1.0, 4.0, 9.0]), rtol=1e-9
+    )
+    x = Tensor([0.25, 1.0, 4.0, 9.0], dtype="float64", requires_grad=True)
+    x.rsqrt().sum().backward()
+    # d/dx x**-0.5 = -0.5 * x**-1.5
+    np.testing.assert_allclose(
+        x.grad.numpy(), -0.5 * np.power([0.25, 1.0, 4.0, 9.0], -1.5), rtol=1e-9
+    )
+
+
 def test_trigonometric_functions():
     angles = [
         0.0,
