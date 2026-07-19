@@ -19,7 +19,6 @@ mod ops_methods;
 #[path = "utils.rs"]
 mod utils_methods;
 
-
 use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
     device::Device,

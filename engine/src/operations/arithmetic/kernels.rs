@@ -133,8 +133,14 @@ binary_kernel!(add_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
     + b);
 binary_kernel!(add_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
     + b);
-binary_kernel!(add_bool_direct, as_bool_slice, bool, Bool, "bool", |a, b| a
-    || b);
+binary_kernel!(
+    add_bool_direct,
+    as_bool_slice,
+    bool,
+    Bool,
+    "bool",
+    |a, b| a || b
+);
 
 // Subtraction: bool is rejected during operand coercion.
 binary_kernel_simd!(
@@ -183,8 +189,14 @@ binary_kernel!(mul_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
     * b);
 binary_kernel!(mul_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
     * b);
-binary_kernel!(mul_bool_direct, as_bool_slice, bool, Bool, "bool", |a, b| a
-    && b);
+binary_kernel!(
+    mul_bool_direct,
+    as_bool_slice,
+    bool,
+    Bool,
+    "bool",
+    |a, b| a && b
+);
 
 // Division: integer and bool operands coerce to floating point beforehand.
 binary_kernel_simd!(
@@ -421,8 +433,8 @@ where
             Ok(())
         };
         // SAFETY: `fill` writes every element of the spare slice.
-        let out =
-            unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
+        let out = unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }
+            .unwrap_or_else(|e| match e {});
         return Ok(out);
     }
 

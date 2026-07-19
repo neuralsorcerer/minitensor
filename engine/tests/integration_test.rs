@@ -312,8 +312,8 @@ fn test_nanquantile_all_nan_returns_nan() {
     // slice rather than erroring.
     let tensor = create_test_tensor_f32(vec![f32::NAN, f32::NAN], vec![2], false);
 
-    let result = reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear)
-        .unwrap();
+    let result =
+        reduction::nanquantile(&tensor, 0.5, None, false, QuantileInterpolation::Linear).unwrap();
 
     let values = result.data().as_f32_slice().unwrap();
     assert!(values[0].is_nan());

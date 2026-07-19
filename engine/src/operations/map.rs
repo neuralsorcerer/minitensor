@@ -242,7 +242,11 @@ mod tests {
             let a: Vec<i64> = (0..len).map(|i| i as i64).collect();
             let b: Vec<i64> = (0..len).map(|i| (i * 3) as i64).collect();
             let expected: Vec<i64> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
-            assert_eq!(binary_map(&a, &b, |x: i64, y: i64| x + y), expected, "{len}");
+            assert_eq!(
+                binary_map(&a, &b, |x: i64, y: i64| x + y),
+                expected,
+                "{len}"
+            );
         }
     }
 
@@ -250,9 +254,15 @@ mod tests {
     fn strided_gather_handles_views_and_scalars() {
         // 2x3 row-major identity gather
         let src = [1, 2, 3, 4, 5, 6];
-        assert_eq!(strided_gather(&src, &[2, 3], &[3, 1]), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            strided_gather(&src, &[2, 3], &[3, 1]),
+            vec![1, 2, 3, 4, 5, 6]
+        );
         // transpose view: dims [3,2], strides [1,3]
-        assert_eq!(strided_gather(&src, &[3, 2], &[1, 3]), vec![1, 4, 2, 5, 3, 6]);
+        assert_eq!(
+            strided_gather(&src, &[3, 2], &[1, 3]),
+            vec![1, 4, 2, 5, 3, 6]
+        );
         // broadcast (stride 0) view: one row repeated
         assert_eq!(
             strided_gather(&src[..3], &[2, 3], &[0, 1]),
@@ -274,12 +284,13 @@ mod tests {
 
     #[test]
     fn build_vec_with_error_discards_buffer_safely() {
-        let result: Result<Vec<f32>, &str> =
-            unsafe { build_vec_with(16, |spare| {
+        let result: Result<Vec<f32>, &str> = unsafe {
+            build_vec_with(16, |spare| {
                 // Partially initialize, then fail: must not leak or UB.
                 spare[0].write(1.0);
                 Err("boom")
-            }) };
+            })
+        };
         assert_eq!(result.unwrap_err(), "boom");
     }
 }

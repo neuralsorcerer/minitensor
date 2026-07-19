@@ -257,7 +257,6 @@ fn abs_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-
     let out = unary_map(input_data, |v: f32| v.abs());
     Ok(TensorData::from_vec::<f32>(
         out,
@@ -270,7 +269,6 @@ fn abs_f64(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
-
 
     let out = unary_map(input_data, |v: f64| v.abs());
     Ok(TensorData::from_vec::<f64>(
@@ -285,7 +283,6 @@ fn abs_i32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
 
-
     let out = unary_map(input_data, |v: i32| v.abs());
     Ok(TensorData::from_vec::<i32>(
         out,
@@ -299,7 +296,6 @@ fn abs_i64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
 
-
     let out = unary_map(input_data, |v: i64| v.abs());
     Ok(TensorData::from_vec::<i64>(
         out,
@@ -312,7 +308,6 @@ fn sign_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
-
 
     let out = unary_map(input_data, |v: f32| {
         if v > 0.0 {
@@ -335,7 +330,6 @@ fn sign_f64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-
     let out = unary_map(input_data, |v: f64| {
         if v > 0.0 {
             1.0
@@ -356,7 +350,6 @@ fn sign_i32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
-
 
     let out = unary_map(input_data, |v: i32| {
         if v > 0 {
@@ -379,7 +372,6 @@ fn sign_i64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
 
-
     let out = unary_map(input_data, |v: i64| {
         if v > 0 {
             1
@@ -396,13 +388,10 @@ fn sign_i64(tensor: &Tensor) -> Result<TensorData> {
     ))
 }
 
-fn clip_f32(tensor: &Tensor, 
-    min_val: Option<f64>,
-    max_val: Option<f64>) -> Result<TensorData> {
+fn clip_f32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
-
 
     let min_f32 = min_val.map(|v| v as f32);
     let max_f32 = max_val.map(|v| v as f32);
@@ -423,9 +412,7 @@ fn clip_f32(tensor: &Tensor,
     ))
 }
 
-fn clip_f64(tensor: &Tensor, 
-    min_val: Option<f64>,
-    max_val: Option<f64>) -> Result<TensorData> {
+fn clip_f64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
@@ -447,13 +434,10 @@ fn clip_f64(tensor: &Tensor,
     ))
 }
 
-fn clip_i32(tensor: &Tensor, 
-    min_val: Option<f64>,
-    max_val: Option<f64>) -> Result<TensorData> {
+fn clip_i32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
     let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
-
 
     let min_i32 = min_val.map(|v| v as i32);
     let max_i32 = max_val.map(|v| v as i32);
@@ -474,13 +458,10 @@ fn clip_i32(tensor: &Tensor,
     ))
 }
 
-fn clip_i64(tensor: &Tensor, 
-    min_val: Option<f64>,
-    max_val: Option<f64>) -> Result<TensorData> {
+fn clip_i64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
     let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
-
 
     let min_i64 = min_val.map(|v| v as i64);
     let max_i64 = max_val.map(|v| v as i64);
@@ -549,7 +530,13 @@ fn nan_to_num_f64(
     ))
 }
 
-fn replace_non_finite<T>(input: &[T], nan: T, posinf: T, neginf: T, store_mask: bool) -> (Vec<T>, Vec<bool>)
+fn replace_non_finite<T>(
+    input: &[T],
+    nan: T,
+    posinf: T,
+    neginf: T,
+    store_mask: bool,
+) -> (Vec<T>, Vec<bool>)
 where
     T: Copy + PartialEq + Send + Sync,
     T: FloatClassify,
@@ -638,7 +625,6 @@ fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-
     let multiplier = 10.0_f32.powi(decimals);
     let out = unary_map(input_data, |val: f32| {
         (val * multiplier).round() / multiplier
@@ -654,7 +640,6 @@ fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
-
 
     let multiplier = 10.0_f64.powi(decimals);
     let out = unary_map(input_data, |val: f64| {

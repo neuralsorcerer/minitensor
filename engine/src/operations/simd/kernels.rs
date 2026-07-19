@@ -366,7 +366,11 @@ fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]
 // x86_64 AVX2 implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_add_f32_avx2(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 8; // AVX2 processes 8 f32s at once
 
     let len = lhs.len();
@@ -392,7 +396,11 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_sub_f32_avx2(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -416,7 +424,11 @@ unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_mul_f32_avx2(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -440,7 +452,11 @@ unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_div_f32_avx2(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -465,7 +481,11 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 // x86_64 SSE implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_add_f32_sse(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // SSE processes 4 f32s at once
 
     let len = lhs.len();
@@ -489,7 +509,11 @@ unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_sub_f32_sse(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -513,7 +537,11 @@ unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_mul_f32_sse(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -537,7 +565,11 @@ unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_div_f32_sse(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -562,7 +594,11 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f
 // ARM NEON implementations
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_add_f32_neon(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // NEON processes 4 f32s at once
 
     let len = lhs.len();
@@ -586,7 +622,11 @@ unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_sub_f32_neon(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -610,7 +650,11 @@ unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_mul_f32_neon(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -634,7 +678,11 @@ unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
+unsafe fn simd_div_f32_neon(
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [MaybeUninit<f32>],
+) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();

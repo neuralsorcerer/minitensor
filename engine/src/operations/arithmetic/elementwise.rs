@@ -434,11 +434,7 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
                     " slice from tensor"
                 ))
             })?;
-            TensorData::from_vec(
-                unary_map(input, |i| -i),
-                DataType::$dtype,
-                tensor.device(),
-            )
+            TensorData::from_vec(unary_map(input, |i| -i), DataType::$dtype, tensor.device())
         }};
     }
 
@@ -639,11 +635,7 @@ pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
                     " slice from tensor"
                 ))
             })?;
-            TensorData::from_vec(
-                unary_map(input, |i| !i),
-                DataType::$dtype,
-                tensor.device(),
-            )
+            TensorData::from_vec(unary_map(input, |i| !i), DataType::$dtype, tensor.device())
         }};
     }
 

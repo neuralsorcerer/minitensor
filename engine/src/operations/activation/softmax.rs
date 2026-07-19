@@ -49,7 +49,11 @@ pub(crate) fn logaddexp_f32(
             }
         },
     )?;
-    Ok(TensorData::from_vec::<f32>(out, DataType::Float32, lhs.device()))
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        lhs.device(),
+    ))
 }
 
 pub(crate) fn logaddexp_f64(
@@ -85,7 +89,11 @@ pub(crate) fn logaddexp_f64(
             }
         },
     )?;
-    Ok(TensorData::from_vec::<f64>(out, DataType::Float64, lhs.device()))
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        lhs.device(),
+    ))
 }
 
 pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
@@ -173,7 +181,10 @@ pub(crate) fn relu_f32(
     // NaN propagates through ReLU; the backward mask marks strictly positive
     // inputs only. The mask is materialized only when the caller will attach
     // a gradient function (`store_mask`).
-    let out = unary_map(input_data, |v: f32| if v.is_nan() || v > 0.0 { v } else { 0.0 });
+    let out = unary_map(
+        input_data,
+        |v: f32| if v.is_nan() || v > 0.0 { v } else { 0.0 },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > 0.0));
     Ok((
         TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
@@ -192,7 +203,10 @@ pub(crate) fn relu_f64(
     // NaN propagates through ReLU; the backward mask marks strictly positive
     // inputs only. The mask is materialized only when the caller will attach
     // a gradient function (`store_mask`).
-    let out = unary_map(input_data, |v: f64| if v.is_nan() || v > 0.0 { v } else { 0.0 });
+    let out = unary_map(
+        input_data,
+        |v: f64| if v.is_nan() || v > 0.0 { v } else { 0.0 },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > 0.0));
     Ok((
         TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
@@ -241,9 +255,12 @@ pub(crate) fn hardshrink_f32(
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, |v: f32| {
-        if v > lambd || v < -lambd { v } else { 0.0 }
-    });
+    let out = unary_map(
+        input_data,
+        |v: f32| {
+            if v > lambd || v < -lambd { v } else { 0.0 }
+        },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > lambd || v < -lambd));
     Ok((
         TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
@@ -260,9 +277,12 @@ pub(crate) fn hardshrink_f64(
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, |v: f64| {
-        if v > lambd || v < -lambd { v } else { 0.0 }
-    });
+    let out = unary_map(
+        input_data,
+        |v: f64| {
+            if v > lambd || v < -lambd { v } else { 0.0 }
+        },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > lambd || v < -lambd));
     Ok((
         TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
@@ -282,9 +302,12 @@ pub(crate) fn leaky_relu_f32(
     // Safe chunked maps replace the previous raw-pointer parallel loop; the
     // backward mask marks non-negative inputs and is only materialized when a
     // gradient function will consume it.
-    let out = unary_map(input_data, move |v: f32| {
-        if v >= 0.0 { v } else { negative_slope * v }
-    });
+    let out = unary_map(
+        input_data,
+        move |v: f32| {
+            if v >= 0.0 { v } else { negative_slope * v }
+        },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f32| v >= 0.0));
     Ok((
         TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
@@ -304,9 +327,12 @@ pub(crate) fn leaky_relu_f64(
     // Safe chunked maps replace the previous raw-pointer parallel loop; the
     // backward mask marks non-negative inputs and is only materialized when a
     // gradient function will consume it.
-    let out = unary_map(input_data, move |v: f64| {
-        if v >= 0.0 { v } else { negative_slope * v }
-    });
+    let out = unary_map(
+        input_data,
+        move |v: f64| {
+            if v >= 0.0 { v } else { negative_slope * v }
+        },
+    );
     let mask = store_mask.then(|| unary_map(input_data, |v: f64| v >= 0.0));
     Ok((
         TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),

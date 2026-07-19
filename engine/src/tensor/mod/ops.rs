@@ -243,48 +243,61 @@ impl Tensor {
             }};
         }
 
-        let new_data = match self.dtype {
-            DataType::Float32 => cast_num!(self.data.as_f32_slice(), f32),
-            DataType::Float64 => cast_num!(self.data.as_f64_slice(), f64),
-            DataType::Int32 => cast_num!(self.data.as_i32_slice(), i32),
-            DataType::Int64 => cast_num!(self.data.as_i64_slice(), i64),
-            DataType::Bool => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
-                })?;
-                match dtype {
-                    DataType::Float32 => TensorData::from_vec::<f32>(
-                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
-                            if v { 1.0 } else { 0.0 }
-                        }),
-                        dtype,
-                        self.device,
-                    ),
-                    DataType::Float64 => TensorData::from_vec::<f64>(
-                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
-                            if v { 1.0 } else { 0.0 }
-                        }),
-                        dtype,
-                        self.device,
-                    ),
-                    DataType::Int32 => TensorData::from_vec::<i32>(
-                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
-                            if v { 1 } else { 0 }
-                        }),
-                        dtype,
-                        self.device,
-                    ),
-                    DataType::Int64 => TensorData::from_vec::<i64>(
-                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
-                            if v { 1 } else { 0 }
-                        }),
-                        dtype,
-                        self.device,
-                    ),
-                    DataType::Bool => unreachable!("same-dtype cast returns early"),
+        let new_data =
+            match self.dtype {
+                DataType::Float32 => cast_num!(self.data.as_f32_slice(), f32),
+                DataType::Float64 => cast_num!(self.data.as_f64_slice(), f64),
+                DataType::Int32 => cast_num!(self.data.as_i32_slice(), i32),
+                DataType::Int64 => cast_num!(self.data.as_i64_slice(), i64),
+                DataType::Bool => {
+                    let src = self.data.as_bool_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get bool slice from tensor data")
+                    })?;
+                    match dtype {
+                        DataType::Float32 => {
+                            TensorData::from_vec::<f32>(
+                                unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                                    if v { 1.0 } else { 0.0 }
+                                }),
+                                dtype,
+                                self.device,
+                            )
+                        }
+                        DataType::Float64 => {
+                            TensorData::from_vec::<f64>(
+                                unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                                    if v { 1.0 } else { 0.0 }
+                                }),
+                                dtype,
+                                self.device,
+                            )
+                        }
+                        DataType::Int32 => TensorData::from_vec::<i32>(
+                            unary_map_threshold(
+                                src,
+                                CAST_PAR_THRESHOLD,
+                                |v: bool| {
+                                    if v { 1 } else { 0 }
+                                },
+                            ),
+                            dtype,
+                            self.device,
+                        ),
+                        DataType::Int64 => TensorData::from_vec::<i64>(
+                            unary_map_threshold(
+                                src,
+                                CAST_PAR_THRESHOLD,
+                                |v: bool| {
+                                    if v { 1 } else { 0 }
+                                },
+                            ),
+                            dtype,
+                            self.device,
+                        ),
+                        DataType::Bool => unreachable!("same-dtype cast returns early"),
+                    }
                 }
-            }
-        };
+            };
 
         Ok(Tensor::new(
             Arc::new(new_data),

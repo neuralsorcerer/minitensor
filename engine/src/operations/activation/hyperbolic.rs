@@ -335,57 +335,29 @@ float_unary_kernel!(log_f32, as_f32_slice, f32, Float32, "f32", f32::ln);
 
 float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln);
 
-float_unary_kernel!(
-    log1p_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    |val: f32| {
-        if val == -1.0 {
-            f32::NEG_INFINITY
-        } else if val < -1.0 {
-            f32::NAN
-        } else {
-            val.ln_1p()
-        }
+float_unary_kernel!(log1p_f32, as_f32_slice, f32, Float32, "f32", |val: f32| {
+    if val == -1.0 {
+        f32::NEG_INFINITY
+    } else if val < -1.0 {
+        f32::NAN
+    } else {
+        val.ln_1p()
     }
-);
+});
 
-float_unary_kernel!(
-    log1p_f64,
-    as_f64_slice,
-    f64,
-    Float64,
-    "f64",
-    |val: f64| {
-        if val == -1.0 {
-            f64::NEG_INFINITY
-        } else if val < -1.0 {
-            f64::NAN
-        } else {
-            val.ln_1p()
-        }
+float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
+    if val == -1.0 {
+        f64::NEG_INFINITY
+    } else if val < -1.0 {
+        f64::NAN
+    } else {
+        val.ln_1p()
     }
-);
+});
 
-float_unary_kernel!(
-    expm1_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    f32::exp_m1
-);
+float_unary_kernel!(expm1_f32, as_f32_slice, f32, Float32, "f32", f32::exp_m1);
 
-float_unary_kernel!(
-    expm1_f64,
-    as_f64_slice,
-    f64,
-    Float64,
-    "f64",
-    f64::exp_m1
-);
+float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1);
 
 float_unary_kernel!(sin_f32, as_f32_slice, f32, Float32, "f32", f32::sin);
 
@@ -571,26 +543,12 @@ float_unary_kernel!(silu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     x * sigmoid
 });
 
-float_unary_kernel!(
-    softsign_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    |x: f32| {
-        let denom = 1.0 + x.abs();
-        x / denom
-    }
-);
+float_unary_kernel!(softsign_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
+    let denom = 1.0 + x.abs();
+    x / denom
+});
 
-float_unary_kernel!(
-    softsign_f64,
-    as_f64_slice,
-    f64,
-    Float64,
-    "f64",
-    |x: f64| {
-        let denom = 1.0 + x.abs();
-        x / denom
-    }
-);
+float_unary_kernel!(softsign_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
+    let denom = 1.0 + x.abs();
+    x / denom
+});

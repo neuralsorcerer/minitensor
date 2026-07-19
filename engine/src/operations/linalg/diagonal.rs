@@ -60,7 +60,13 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
                 ))
             })?;
             TensorData::from_vec::<$ty>(
-                transpose_map(input, tensor.shape(), &new_shape_obj, dim0_usize, dim1_usize),
+                transpose_map(
+                    input,
+                    tensor.shape(),
+                    &new_shape_obj,
+                    dim0_usize,
+                    dim1_usize,
+                ),
                 tensor.dtype(),
                 tensor.device(),
             )
@@ -616,8 +622,3 @@ fn optimized_matmul_f64(
 }
 
 // Helper functions for transpose operations
-
-
-
-
-
