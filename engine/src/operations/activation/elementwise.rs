@@ -13,77 +13,26 @@ use crate::{
         SigmoidBackward, SinBackward, SinhBackward, TanBackward, TanhBackward, add_to_graph,
     },
     error::{MinitensorError, Result},
-    tensor::{DataType, Tensor, TensorData},
+    tensor::{DataType, Tensor},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
-
-#[inline(always)]
-pub(crate) fn unary_apply<T, F>(input: &[T], output: &mut [T], op: F)
-where
-    T: Copy + Send + Sync,
-    F: Fn(T) -> T + Sync + Send,
-{
-    #[inline(always)]
-    fn apply_chunk<T, F>(input: &[T], output: &mut [T], op: &F)
-    where
-        T: Copy,
-        F: Fn(T) -> T,
-    {
-        let len = input.len();
-        let mut i = 0usize;
-        let n = len.saturating_sub(len % 8);
-        while i < n {
-            unsafe {
-                *output.get_unchecked_mut(i) = op(*input.get_unchecked(i));
-                *output.get_unchecked_mut(i + 1) = op(*input.get_unchecked(i + 1));
-                *output.get_unchecked_mut(i + 2) = op(*input.get_unchecked(i + 2));
-                *output.get_unchecked_mut(i + 3) = op(*input.get_unchecked(i + 3));
-                *output.get_unchecked_mut(i + 4) = op(*input.get_unchecked(i + 4));
-                *output.get_unchecked_mut(i + 5) = op(*input.get_unchecked(i + 5));
-                *output.get_unchecked_mut(i + 6) = op(*input.get_unchecked(i + 6));
-                *output.get_unchecked_mut(i + 7) = op(*input.get_unchecked(i + 7));
-            }
-            i += 8;
-        }
-        for j in i..len {
-            unsafe {
-                *output.get_unchecked_mut(j) = op(*input.get_unchecked(j));
-            }
-        }
-    }
-
-    let len = input.len();
-    debug_assert_eq!(len, output.len());
-    if len < PAR_THRESHOLD {
-        apply_chunk(input, output, &op);
-    } else {
-        const CHUNK: usize = 1024;
-        input
-            .par_chunks(CHUNK)
-            .zip(output.par_chunks_mut(CHUNK))
-            .for_each(|(in_chunk, out_chunk)| apply_chunk(in_chunk, out_chunk, &op));
-    }
-}
+// The map primitive lives in `operations::map`; re-exported here so every
+// file in the activation cluster picks it up through `use super::*`.
+pub(crate) use crate::operations::map::unary_map;
 
 /// Exponential function with gradient support
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform exponential based on data type
-    match tensor.dtype() {
-        DataType::Float32 => exp_f32(tensor, &mut output_data)?,
-        DataType::Float64 => exp_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => exp_f32(tensor)?,
+        DataType::Float64 => exp_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Exponential function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -116,19 +65,15 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
 /// Natural logarithm function with gradient support
 pub fn log(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform logarithm based on data type
-    match tensor.dtype() {
-        DataType::Float32 => log_f32(tensor, &mut output_data)?,
-        DataType::Float64 => log_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => log_f32(tensor)?,
+        DataType::Float64 => log_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Logarithm function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -160,18 +105,15 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
 
 /// log1p (log(1 + x)) function with gradient support
 pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => log1p_f32(tensor, &mut output_data)?,
-        DataType::Float64 => log1p_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => log1p_f32(tensor)?,
+        DataType::Float64 => log1p_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "log1p is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -198,18 +140,15 @@ pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
 
 /// expm1 (exp(x) - 1) with gradient support
 pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => expm1_f32(tensor, &mut output_data)?,
-        DataType::Float64 => expm1_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => expm1_f32(tensor)?,
+        DataType::Float64 => expm1_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "expm1 is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -237,19 +176,15 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
 /// Sine function with gradient support
 pub fn sin(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform sine based on data type
-    match tensor.dtype() {
-        DataType::Float32 => sin_f32(tensor, &mut output_data)?,
-        DataType::Float64 => sin_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => sin_f32(tensor)?,
+        DataType::Float64 => sin_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sine function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -282,19 +217,15 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
 /// Cosine function with gradient support
 pub fn cos(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform cosine based on data type
-    match tensor.dtype() {
-        DataType::Float32 => cos_f32(tensor, &mut output_data)?,
-        DataType::Float64 => cos_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => cos_f32(tensor)?,
+        DataType::Float64 => cos_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Cosine function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -327,19 +258,15 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
 /// Tangent function with gradient support
 pub fn tan(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform tangent based on data type
-    match tensor.dtype() {
-        DataType::Float32 => tan_f32(tensor, &mut output_data)?,
-        DataType::Float64 => tan_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => tan_f32(tensor)?,
+        DataType::Float64 => tan_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Tangent function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -371,18 +298,15 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse sine function with gradient support
 pub fn asin(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => asin_f32(tensor, &mut output_data)?,
-        DataType::Float64 => asin_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => asin_f32(tensor)?,
+        DataType::Float64 => asin_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Inverse sine only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -409,18 +333,15 @@ pub fn asin(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse cosine function with gradient support
 pub fn acos(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => acos_f32(tensor, &mut output_data)?,
-        DataType::Float64 => acos_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => acos_f32(tensor)?,
+        DataType::Float64 => acos_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Inverse cosine only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -447,18 +368,15 @@ pub fn acos(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse tangent function with gradient support
 pub fn atan(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => atan_f32(tensor, &mut output_data)?,
-        DataType::Float64 => atan_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => atan_f32(tensor)?,
+        DataType::Float64 => atan_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Inverse tangent only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -485,18 +403,15 @@ pub fn atan(tensor: &Tensor) -> Result<Tensor> {
 
 /// Hyperbolic sine with gradient support
 pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => sinh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => sinh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => sinh_f32(tensor)?,
+        DataType::Float64 => sinh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "sinh is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -523,18 +438,15 @@ pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Hyperbolic cosine with gradient support
 pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => cosh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => cosh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => cosh_f32(tensor)?,
+        DataType::Float64 => cosh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "cosh is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -561,18 +473,15 @@ pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic sine with gradient support
 pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => asinh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => asinh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => asinh_f32(tensor)?,
+        DataType::Float64 => asinh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "asinh is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -599,18 +508,15 @@ pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic cosine with gradient support
 pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => acosh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => acosh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => acosh_f32(tensor)?,
+        DataType::Float64 => acosh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "acosh is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -637,18 +543,15 @@ pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic tangent with gradient support
 pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => atanh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => atanh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => atanh_f32(tensor)?,
+        DataType::Float64 => atanh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "atanh is only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     let output = Tensor::new(
         Arc::new(output_data),
@@ -676,19 +579,15 @@ pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
 /// Hyperbolic tangent function with gradient support
 pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform tanh based on data type
-    match tensor.dtype() {
-        DataType::Float32 => tanh_f32(tensor, &mut output_data)?,
-        DataType::Float64 => tanh_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => tanh_f32(tensor)?,
+        DataType::Float64 => tanh_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Tanh function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -721,19 +620,15 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
 /// Sigmoid activation function with gradient support
 pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
     // Create output tensor data
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform sigmoid based on data type
-    match tensor.dtype() {
-        DataType::Float32 => sigmoid_f32(tensor, &mut output_data)?,
-        DataType::Float64 => sigmoid_f64(tensor, &mut output_data)?,
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => sigmoid_f32(tensor)?,
+        DataType::Float64 => sigmoid_f64(tensor)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sigmoid function only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     // Create output tensor
     let output = Tensor::new(

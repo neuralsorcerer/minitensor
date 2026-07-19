@@ -18,6 +18,7 @@ pub mod custom_ops;
 pub mod debug;
 pub mod device;
 pub mod error;
+#[cfg(feature = "hardware")]
 pub mod hardware;
 pub mod memory;
 pub mod nn;
@@ -40,6 +41,7 @@ pub use debug::{
 };
 pub use device::{Device, DeviceType};
 pub use error::{MinitensorError, Result};
+#[cfg(feature = "hardware")]
 pub use hardware::{
     AllocationStrategy, ExecutionPlan, HardwareProfile, HardwareProfiler, ResourceOptimizer,
     SystemHardware, WorkloadAnalysis,

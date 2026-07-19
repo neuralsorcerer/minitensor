@@ -674,35 +674,16 @@ pub(crate) fn create_full_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     let shape = Shape::new(shape);
-    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
-
-    match dtype {
-        DataType::Float32 => {
-            if let Some(slice) = tensor_data.as_f32_slice_mut() {
-                slice.fill(fill_value as f32);
-            }
-        }
-        DataType::Float64 => {
-            if let Some(slice) = tensor_data.as_f64_slice_mut() {
-                slice.fill(fill_value);
-            }
-        }
-        DataType::Int32 => {
-            if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                slice.fill(fill_value as i32);
-            }
-        }
-        DataType::Int64 => {
-            if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                slice.fill(fill_value as i64);
-            }
-        }
-        DataType::Bool => {
-            if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                slice.fill(fill_value != 0.0);
-            }
-        }
-    }
+    let numel = shape.numel();
+    // Build the filled buffer directly; the previous zero-init + fill did two
+    // passes over the allocation.
+    let tensor_data = match dtype {
+        DataType::Float32 => TensorData::from_vec(vec![fill_value as f32; numel], dtype, device),
+        DataType::Float64 => TensorData::from_vec(vec![fill_value; numel], dtype, device),
+        DataType::Int32 => TensorData::from_vec(vec![fill_value as i32; numel], dtype, device),
+        DataType::Int64 => TensorData::from_vec(vec![fill_value as i64; numel], dtype, device),
+        DataType::Bool => TensorData::from_vec(vec![fill_value != 0.0; numel], dtype, device),
+    };
 
     Ok(Tensor::new(
         Arc::new(tensor_data),

@@ -19,7 +19,6 @@ mod ops_methods;
 #[path = "utils.rs"]
 mod utils_methods;
 
-use self::indexing_methods::copy_strided_to_contiguous;
 
 use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
@@ -253,91 +252,49 @@ impl Tensor {
             ));
         }
 
-        let numel = self.numel();
         let dtype = self.dtype;
         let device = self.device;
         let requires_grad = self.requires_grad;
         let shape = self.shape.dims().to_vec();
         let strides = self.strides.as_slice().to_vec();
 
-        let mut output_data = TensorData::uninitialized_on_device(numel, dtype, device);
-
-        match dtype {
-            DataType::Float32 => {
-                let src = self.data.as_f32_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access float32 data for contiguous copy".to_string(),
-                    )
+        /// One dtype arm: gather the strided view into a fresh contiguous
+        /// buffer (parallel above the map threshold, no zeroing pass).
+        macro_rules! gather_arm {
+            ($accessor:ident, $ty:ty, $label:literal) => {{
+                let src = self.data.$accessor().ok_or_else(|| {
+                    MinitensorError::invalid_operation(concat!(
+                        "failed to access ",
+                        $label,
+                        " data for contiguous copy"
+                    ))
                 })?;
-                let dst = output_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access float32 storage for contiguous copy".to_string(),
-                    )
-                })?;
-                copy_strided_to_contiguous(src, dst, &shape, &strides);
-            }
-            DataType::Float64 => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access float64 data for contiguous copy".to_string(),
-                    )
-                })?;
-                let dst = output_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access float64 storage for contiguous copy".to_string(),
-                    )
-                })?;
-                copy_strided_to_contiguous(src, dst, &shape, &strides);
-            }
-            DataType::Int32 => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access int32 data for contiguous copy".to_string(),
-                    )
-                })?;
-                let dst = output_data.as_i32_slice_mut().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access int32 storage for contiguous copy".to_string(),
-                    )
-                })?;
-                copy_strided_to_contiguous(src, dst, &shape, &strides);
-            }
-            DataType::Int64 => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access int64 data for contiguous copy".to_string(),
-                    )
-                })?;
-                let dst = output_data.as_i64_slice_mut().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access int64 storage for contiguous copy".to_string(),
-                    )
-                })?;
-                copy_strided_to_contiguous(src, dst, &shape, &strides);
-            }
-            DataType::Bool => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access bool data for contiguous copy".to_string(),
-                    )
-                })?;
-                let dst = output_data.as_bool_slice_mut().ok_or_else(|| {
-                    MinitensorError::invalid_operation(
-                        "failed to access bool storage for contiguous copy".to_string(),
-                    )
-                })?;
-                copy_strided_to_contiguous(src, dst, &shape, &strides);
-            }
+                TensorData::from_vec::<$ty>(
+                    crate::operations::map::strided_gather(src, &shape, &strides),
+                    dtype,
+                    device,
+                )
+            }};
         }
+
+        let output_data = match dtype {
+            DataType::Float32 => gather_arm!(as_f32_slice, f32, "float32"),
+            DataType::Float64 => gather_arm!(as_f64_slice, f64, "float64"),
+            DataType::Int32 => gather_arm!(as_i32_slice, i32, "int32"),
+            DataType::Int64 => gather_arm!(as_i64_slice, i64, "int64"),
+            DataType::Bool => gather_arm!(as_bool_slice, bool, "bool"),
+        };
 
         let mut output = Tensor::new(
             Arc::new(output_data),
-            self.shape.clone(),
+            Shape::new(shape),
             dtype,
             device,
             requires_grad,
         );
 
+        // The materialized copy passes gradients straight through to the
+        // source tensor (identity backward).
         if requires_grad {
             let grad_fn = Arc::new(CloneBackward {
                 input_id: self.tensor_id,
@@ -348,9 +305,6 @@ impl Tensor {
 
         Ok(output)
     }
-}
-
-impl Tensor {
     /// Set the gradient function for this tensor.
     ///
     /// While grad recording is disabled (`no_grad` scopes and the backward

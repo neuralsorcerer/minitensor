@@ -5,78 +5,75 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::{
-    error::Result,
-    tensor::{Shape, Strides},
-};
+use crate::tensor::{Shape, Strides};
 use rayon::prelude::*;
 
 /// Generic transpose implementation
-pub(crate) fn transpose_generic<T: Copy + Send + Sync>(
+/// Transpose `input_data` (viewed as `input_shape`) into a fresh contiguous
+/// buffer of `output_shape` with `dim0`/`dim1` swapped. Every output element
+/// is written exactly once (no zeroing pass; see `operations::map`).
+pub(crate) fn transpose_map<T: Copy + Send + Sync>(
     input_data: &[T],
-    output_data: &mut [T],
     input_shape: &Shape,
     output_shape: &Shape,
     dim0: usize,
     dim1: usize,
-) -> Result<()> {
+) -> Vec<T> {
+    let numel = output_shape.numel();
+
     // Fast path for 2D matrix transpose
     if input_shape.ndim() == 2 && dim0 == 0 && dim1 == 1 {
         let rows = input_shape.dims()[0];
         let cols = input_shape.dims()[1];
-        if rows * cols < PAR_THRESHOLD {
-            for i in 0..rows {
-                for j in 0..cols {
-                    unsafe {
-                        *output_data.get_unchecked_mut(j * rows + i) =
-                            *input_data.get_unchecked(i * cols + j);
-                    }
-                }
-            }
-        } else {
-            output_data
-                .par_chunks_mut(rows)
-                .enumerate()
-                .for_each(|(j, col)| {
-                    for i in 0..rows {
-                        unsafe {
-                            col[i] = *input_data.get_unchecked(i * cols + j);
+        // SAFETY: both paths write every element (each (i, j) pair exactly
+        // once; the parallel chunks are whole output columns).
+        return unsafe {
+            crate::operations::map::build_vec_with::<T, std::convert::Infallible, _>(
+                numel,
+                |spare| {
+                    if numel < PAR_THRESHOLD {
+                        for i in 0..rows {
+                            for j in 0..cols {
+                                spare[j * rows + i].write(input_data[i * cols + j]);
+                            }
                         }
+                    } else {
+                        spare.par_chunks_mut(rows).enumerate().for_each(|(j, col)| {
+                            for (i, slot) in col.iter_mut().enumerate() {
+                                slot.write(input_data[i * cols + j]);
+                            }
+                        });
                     }
-                });
-        }
-        return Ok(());
+                    Ok(())
+                },
+            )
+            .unwrap_or_else(|e| match e {})
+        };
     }
 
+    // General case: gather through the swapped-stride view of the input.
+    // The output's element at output coordinates c reads the input at the
+    // same coordinates with dim0/dim1 swapped, which is exactly a strided
+    // gather with the input's contiguous strides permuted.
     let input_strides = Strides::from_shape(input_shape);
-    let output_strides = Strides::from_shape(output_shape);
-    let in_strides = input_strides.as_slice().to_vec();
-    let out_strides = output_strides.as_slice().to_vec();
-    let out_dims = output_shape.dims().to_vec();
-
-    output_data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
-            let mut remaining = idx;
-            let mut input_linear = 0;
-            for dim in 0..out_dims.len() {
-                let stride = out_strides[dim];
-                let coord = remaining / stride;
-                remaining %= stride;
-                let in_dim = if dim == dim0 {
-                    dim1
-                } else if dim == dim1 {
-                    dim0
-                } else {
-                    dim
-                };
-                input_linear += coord * in_strides[in_dim];
-            }
-            *out = input_data[input_linear];
-        });
-
-    Ok(())
+    let in_strides = input_strides.as_slice();
+    let out_dims = output_shape.dims();
+    let mut gather_strides: Vec<usize> = (0..out_dims.len())
+        .map(|dim| {
+            let in_dim = if dim == dim0 {
+                dim1
+            } else if dim == dim1 {
+                dim0
+            } else {
+                dim
+            };
+            in_strides[in_dim]
+        })
+        .collect();
+    if out_dims.is_empty() {
+        gather_strides.clear();
+    }
+    crate::operations::map::strided_gather(input_data, out_dims, &gather_strides)
 }
 
 #[cfg(test)]

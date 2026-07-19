@@ -61,8 +61,12 @@ rmp-serde = "1.3"
 chrono = { version = "0.4", features = ["serde"] }
 
 [features]
-default = ["cpu"]
+default = ["cpu", "hardware"]
 cpu = []
+# Hardware profiling/optimizer subsystem (`engine::hardware`). On by default
+# for compatibility; not used by any tensor/autograd execution path, so
+# `default-features = false` builds can drop it (with `cpu` re-enabled).
+hardware = []
 cuda = ["dep:cudarc"]
 metal = ["dep:metal"]
 opencl = ["dep:opencl3"]
@@ -77,3 +81,15 @@ blas = ["dep:blas-src", "dep:cblas"]
 criterion = "0.8"
 proptest = "1.11"
 approx = "0.5"
+
+[[example]]
+name = "hardware_detection"
+required-features = ["hardware"]
+
+[[example]]
+name = "metal_demo"
+required-features = ["metal"]
+
+[[example]]
+name = "opencl_demo"
+required-features = ["opencl"]

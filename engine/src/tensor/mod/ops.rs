@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::operations::map::{BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, unary_map_threshold};
 use crate::{
     autograd::{self},
     error::{MinitensorError, Result},
@@ -197,247 +198,93 @@ impl Tensor {
             return Ok(self.clone());
         }
 
-        let numel = self.numel();
-        let mut new_data = TensorData::zeros_on_device(numel, dtype, self.device);
+        // Non-contiguous storage (e.g. `expand` views) must be materialized
+        // first so the stored element count matches the logical shape. The
+        // previous zip-based fill silently zero-padded the tail in that case.
+        if !(self.is_contiguous() && self.data.is_contiguous()) {
+            return self.contiguous()?.astype(dtype);
+        }
 
-        // Helper macro to cast between slices using parallel iteration for large buffers
-        macro_rules! cast {
-            ($src:expr, $dst:expr, $conv:expr) => {{
-                if numel >= 1024 {
-                    $dst.par_iter_mut().zip($src.par_iter()).for_each(|(d, s)| {
-                        *d = $conv(*s);
-                    });
-                } else {
-                    for (d, &s) in $dst.iter_mut().zip($src.iter()) {
-                        *d = $conv(s);
-                    }
+        // Cast `src` into a fresh buffer for the target dtype (no zeroing
+        // pass). `cast_num!` covers numeric sources (`as` casts, `!= 0` for
+        // bool targets); the bool source arm maps to 0/1 explicitly.
+        macro_rules! cast_num {
+            ($src:expr, $sty:ty) => {{
+                let src = $src.ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get source slice from tensor data")
+                })?;
+                match dtype {
+                    DataType::Float32 => TensorData::from_vec::<f32>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: $sty| v as f32),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Float64 => TensorData::from_vec::<f64>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: $sty| v as f64),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Int32 => TensorData::from_vec::<i32>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: $sty| v as i32),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Int64 => TensorData::from_vec::<i64>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: $sty| v as i64),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Bool => TensorData::from_vec::<bool>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: $sty| v != 0 as $sty),
+                        dtype,
+                        self.device,
+                    ),
                 }
             }};
         }
 
-        match (self.dtype, dtype) {
-            (DataType::Float32, DataType::Float64) => {
-                let src = self.data.as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
-                })?;
-                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f32| v as f64);
-            }
-            (DataType::Float32, DataType::Int32) => {
-                let src = self.data.as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
-                })?;
-                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f32| v as i32);
-            }
-            (DataType::Float32, DataType::Int64) => {
-                let src = self.data.as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
-                })?;
-                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f32| v as i64);
-            }
-            (DataType::Float32, DataType::Bool) => {
-                let src = self.data.as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from tensor data")
-                })?;
-                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable bool slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f32| v != 0.0);
-            }
-            (DataType::Float64, DataType::Float32) => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
-                })?;
-                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f64| v as f32);
-            }
-            (DataType::Float64, DataType::Int32) => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
-                })?;
-                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f64| v as i32);
-            }
-            (DataType::Float64, DataType::Int64) => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
-                })?;
-                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f64| v as i64);
-            }
-            (DataType::Float64, DataType::Bool) => {
-                let src = self.data.as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from tensor data")
-                })?;
-                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable bool slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: f64| v != 0.0);
-            }
-            (DataType::Int32, DataType::Float32) => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
-                })?;
-                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i32| v as f32);
-            }
-            (DataType::Int32, DataType::Float64) => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
-                })?;
-                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i32| v as f64);
-            }
-            (DataType::Int32, DataType::Int64) => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
-                })?;
-                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i32| v as i64);
-            }
-            (DataType::Int32, DataType::Bool) => {
-                let src = self.data.as_i32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i32 slice from tensor data")
-                })?;
-                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable bool slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i32| v != 0);
-            }
-            (DataType::Int64, DataType::Float32) => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
-                })?;
-                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i64| v as f32);
-            }
-            (DataType::Int64, DataType::Float64) => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
-                })?;
-                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i64| v as f64);
-            }
-            (DataType::Int64, DataType::Int32) => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
-                })?;
-                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i64| v as i32);
-            }
-            (DataType::Int64, DataType::Bool) => {
-                let src = self.data.as_i64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get i64 slice from tensor data")
-                })?;
-                let dst = new_data.as_bool_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable bool slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: i64| v != 0);
-            }
-            (DataType::Bool, DataType::Float32) => {
+        let new_data = match self.dtype {
+            DataType::Float32 => cast_num!(self.data.as_f32_slice(), f32),
+            DataType::Float64 => cast_num!(self.data.as_f64_slice(), f64),
+            DataType::Int32 => cast_num!(self.data.as_i32_slice(), i32),
+            DataType::Int64 => cast_num!(self.data.as_i64_slice(), i64),
+            DataType::Bool => {
                 let src = self.data.as_bool_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get bool slice from tensor data")
                 })?;
-                let dst = new_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: bool| if v { 1.0 } else { 0.0 });
+                match dtype {
+                    DataType::Float32 => TensorData::from_vec::<f32>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                            if v { 1.0 } else { 0.0 }
+                        }),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Float64 => TensorData::from_vec::<f64>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                            if v { 1.0 } else { 0.0 }
+                        }),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Int32 => TensorData::from_vec::<i32>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                            if v { 1 } else { 0 }
+                        }),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Int64 => TensorData::from_vec::<i64>(
+                        unary_map_threshold(src, CAST_PAR_THRESHOLD, |v: bool| {
+                            if v { 1 } else { 0 }
+                        }),
+                        dtype,
+                        self.device,
+                    ),
+                    DataType::Bool => unreachable!("same-dtype cast returns early"),
+                }
             }
-            (DataType::Bool, DataType::Float64) => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
-                })?;
-                let dst = new_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: bool| if v { 1.0 } else { 0.0 });
-            }
-            (DataType::Bool, DataType::Int32) => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
-                })?;
-                let dst = new_data.as_i32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i32 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: bool| if v { 1 } else { 0 });
-            }
-            (DataType::Bool, DataType::Int64) => {
-                let src = self.data.as_bool_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get bool slice from tensor data")
-                })?;
-                let dst = new_data.as_i64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable i64 slice from tensor data",
-                    )
-                })?;
-                cast!(src, dst, |v: bool| if v { 1 } else { 0 });
-            }
-            _ => unreachable!("Unhandled dtype conversion"),
-        }
+        };
 
         Ok(Tensor::new(
             Arc::new(new_data),

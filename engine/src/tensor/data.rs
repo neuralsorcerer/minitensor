@@ -247,23 +247,15 @@ impl TensorData {
     #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
         if device.is_cpu() {
-            let size_bytes = numel
-                .checked_mul(dtype.size_bytes())
-                .expect("tensor size overflow");
-            let mut data = Self {
-                buffer: UnsafeCell::new(TensorBuffer::Owned(Self::owned_buffer_for_dtype(
-                    size_bytes, dtype,
-                ))),
-                layout: MemoryLayout {
-                    dtype,
-                    numel,
-                    is_contiguous: true,
-                    device,
-                },
-            };
-            data.fill_with_ones();
-
-            data
+            // Build the filled buffer in one pass instead of zeroing and then
+            // overwriting it.
+            match dtype {
+                DataType::Float32 => Self::from_vec(vec![1.0f32; numel], dtype, device),
+                DataType::Float64 => Self::from_vec(vec![1.0f64; numel], dtype, device),
+                DataType::Int32 => Self::from_vec(vec![1i32; numel], dtype, device),
+                DataType::Int64 => Self::from_vec(vec![1i64; numel], dtype, device),
+                DataType::Bool => Self::from_vec(vec![true; numel], dtype, device),
+            }
         } else {
             // For non-CPU devices, fall back to zero initialization
             // and attempt to fill if the allocation falls back to CPU.
@@ -401,17 +393,13 @@ impl TensorData {
 
         // Convert typed data to bytes
         let buffer = if device.is_cpu() {
-            // For CPU memory we can often avoid an extra allocation by
-            // reinterpreting the `Vec<T>` as a `Vec<u8>`. This is safe for all
-            // `T` except `bool`, which has a special bit-level representation in
-            // Rust. Handle that case explicitly.
-            if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
-                // SAFETY: We have confirmed T == bool, so this transmute is valid
-                let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
-                let mut bytes = Vec::with_capacity(size_bytes);
-                bytes.extend(bools.into_iter().map(|b| b as u8));
-                TensorBuffer::Owned(bytes)
-            } else {
+            // For CPU memory we avoid an extra allocation by reinterpreting
+            // the `Vec<T>` as a `Vec<u8>`. This is sound for every supported
+            // element type, including `bool`: a `bool` is one byte whose only
+            // valid representations (0x00/0x01) are also valid `u8`s. (Only
+            // the reverse u8-to-bool direction would need a copy with
+            // validation, and `from_vec` never goes that way.)
+            {
                 use std::mem::{ManuallyDrop, size_of};
                 let mut data = ManuallyDrop::new(data);
                 let ptr = data.as_mut_ptr() as *mut u8;
@@ -436,19 +424,12 @@ impl TensorData {
                     }
                 }
                 Err(_) => {
-                    // Fallback to CPU
-                    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
-                        let bools: Vec<bool> = unsafe { std::mem::transmute(data) };
-                        let mut bytes = Vec::with_capacity(size_bytes);
-                        bytes.extend(bools.into_iter().map(|b| b as u8));
-                        TensorBuffer::Owned(bytes)
-                    } else {
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes)
-                                .to_vec()
-                        };
-                        TensorBuffer::Owned(bytes)
-                    }
+                    // Fallback to CPU. Byte-copying is sound for `bool` too:
+                    // its valid representations (0x00/0x01) are valid `u8`s.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(data.as_ptr() as *const u8, size_bytes).to_vec()
+                    };
+                    TensorBuffer::Owned(bytes)
                 }
             }
         };

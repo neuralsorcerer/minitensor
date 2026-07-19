@@ -82,7 +82,12 @@ editable-profile = "release"
 strip = false
 # Skip audit for faster builds in development
 skip-auditwheel = false
-compatibility = "pypi"
+# NOTE: `compatibility = "pypi"` is intentionally absent. maturin 1.14.x (the
+# range required by [build-system]) panics on that value during the auditwheel
+# step ("internal error: entered unreachable code: pypi is not a policy"),
+# which broke every `maturin build` release wheel. The default behavior —
+# audit the wheel and apply the manylinux tag the binary actually satisfies —
+# is what PyPI uploads need.
 
 [tool.black]
 line-length = 88

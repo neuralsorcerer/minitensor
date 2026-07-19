@@ -11,6 +11,7 @@ pub mod comparison;
 pub mod conv;
 pub mod linalg;
 pub mod loss;
+pub(crate) mod map;
 pub mod minmax;
 pub mod normalization;
 pub mod reduction;

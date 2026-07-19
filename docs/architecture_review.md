@@ -133,14 +133,14 @@ refactor; the rest are documented with a migration path in section 7.
     every kernel does) forms a reference to invalid values, i.e. undefined
     behavior, even though every bit pattern is a representable float/int.
     Per the project's stated priority order (correctness before
-    performance), soundness wins. The measured cost is confined to
-    allocation-bound cases: interleaved A/B on release wheels shows ~25–35%
-    on the pure element-wise microbenchmark (`add`+`sum` over 2000×2000,
-    where the extra `memset` raises output write traffic from ~3N to ~4N)
-    and noise on the matmul-dominated training step. The zero-cost
-    alternative (`MaybeUninit`-typed kernel writes) is retained as tracked
-    future work in section 7 for anyone who wants the throughput back
-    without the unsoundness.
+    performance), soundness won first: buffers were zero-initialized, at a
+    measured ~25–35% cost on allocation-bound element-wise benchmarks. The
+    eighth change set then removed that cost for the entire hot
+    element-wise surface by turning kernels into buffer *producers*
+    (`operations::map`): outputs are written exactly once through
+    `MaybeUninit` spare capacity and only then marked initialized, so the
+    zeroing pass is gone without reintroducing the UB (see section 7,
+    change set 8).
 17. **[PARTIALLY FIXED] API-inconsistencies at the Python layer.**
     `requires_grad_()` now returns `self` (chaining works, matching
     PyTorch). Still open: `expand` materializes at the FFI boundary, so it
@@ -474,6 +474,178 @@ as-is; flagged for the maintainer): `chunk` requires even divisibility
 row returns zeros (PyTorch returns NaN) consistent with `masked_softmax`'s
 fully-masked-row convention.
 
+Completed in the eighth change set (uninit-free element-wise outputs):
+
+- **The forced `memset` is gone from every hot element-wise output.** The
+  soundness fix in finding 16 zero-initialized op output buffers because
+  kernels received them as `&mut [T]`; the measured cost was ~25–35% on
+  allocation-bound element-wise ops. Kernels for the element-wise families
+  are now buffer *producers* built on a small primitive module,
+  `operations::map`: `Vec::with_capacity` + writes through `MaybeUninit`
+  spare capacity + `set_len` only after every element is written. All
+  `unsafe` for the pattern is confined to `map.rs` (safe `unary_map` /
+  `binary_map` combinators and one documented `unsafe fn build_vec_with`
+  escape hatch) plus per-call SAFETY comments at the kernel walkers.
+  Converted families: binary arithmetic (add/sub/mul/div/floordiv/rem ×
+  dtypes, including the SIMD fast paths, which now store through
+  `MaybeUninit` slices), neg, bitwise_not, all ~40 float-unary activations
+  (the `float_unary_kernel!` macros now generate producers), gelu,
+  relu/leaky_relu/hardshrink, abs/sign/clip/round/floor/ceil, nan_to_num,
+  logaddexp, pow/powf, maximum/minimum, and all comparisons. Zero-init
+  remains only where the output is genuinely used as scratch (softmax /
+  log_softmax rows), in cold creation utilities, and in autograd matmul
+  scratch buffers.
+- **`broadcast_binary_op` became `broadcast_binary_map`**, generic over the
+  output element type. That let `comparison.rs` delete its 127-line
+  bool-specialized copy of the broadcast walker and collapse onto the same
+  primitive; `minmax.rs`'s five hand-copied dtype arms collapsed into a
+  macro over it (~150 lines removed).
+- **`relu`/`leaky_relu` no longer compute backward masks during
+  inference.** Both unconditionally allocated and filled a full-size
+  `Vec<bool>` mask on every forward call, even under `no_grad()` or for
+  tensors without gradients. Masks are now gated on exactly the condition
+  `Tensor::new` uses for `requires_grad` (`requires_grad() &&
+  is_grad_enabled()`), which also fixed a latent `hardshrink` bug: its
+  mask was keyed on bare `requires_grad()`, so calling it under
+  `no_grad()` on a parameter produced a stray mask that tripped a
+  `debug_assert` in debug builds. `nan_to_num`'s finite-mask got the same
+  gating. `leaky_relu`'s kernel also lost the last usize-cast raw-pointer
+  parallel loop in the ops layer (the pattern earlier change sets removed
+  from gradient accumulation).
+- **`powf` no longer materializes a full-size exponent tensor.** It now
+  creates a single-element exponent and rides `pow`'s ExponentScalar
+  broadcast path (scalar-preserving for 0-d/1-element inputs), which also
+  shrinks what `PowBackward` keeps alive. `pow` itself moved onto the map
+  primitives and now parallelizes like every other element-wise op — its
+  hand-written loops were always sequential.
+- **`TensorData::from_vec` reinterprets `Vec<bool>` instead of copying.**
+  The old bool special case allocated a second buffer and copied
+  element-by-element (it mistrusted the direction that is actually sound:
+  every `bool` is a valid `u8`; only u8→bool needs validation). This was
+  the difference between comparisons regressing ~40% and improving ~43%
+  under the producer model — the A/B caught it, the reinterpret fixed it.
+- **`ones`/`full` build their buffers in one pass** instead of memset +
+  fill (engine `ones_on_device`, bindings `create_full_tensor`).
+- **`PAR_THRESHOLD` unified.** Four separate crate-local definitions
+  (activation, arithmetic, matmul, autograd) now re-export one constant
+  from `operations::map`.
+- **Release wheel builds un-broken.** `[tool.maturin] compatibility =
+  "pypi"` makes maturin 1.14.x — the exact range `[build-system]`
+  requires — panic during auditwheel (`internal error: … pypi is not a
+  policy`), so every `maturin build` release wheel (and `make dist`)
+  failed; CI stayed green only because test workflows use `maturin
+  develop`, which skips the audit. The key is removed in favor of the
+  default audit-and-tag behavior; `maturin build --release` now produces a
+  properly tagged `manylinux_2_35` wheel in this environment.
+- **A dtype-inference trap surfaced and was closed.** With producer
+  kernels, closure return types are inferred rather than forced by an
+  output slice; `sign`'s bare `1.0`/`-1.0` literals silently inferred
+  `f64` in the f32 kernel. `TensorData::from_vec`'s dtype/size assertions
+  caught it immediately (exactly what they are for), and every converted
+  kernel now pins its element type with `from_vec::<T>` so the closure
+  cannot drift.
+
+Benchmarks for the eighth change set (interleaved A/B on release wheels,
+same protocol as the table in section 8; 2000×2000 f32 unless noted;
+median of per-round best over 3–5 rounds; shared-cloud CPU):
+
+| Benchmark | Zero-init baseline | Producer kernels | Delta |
+|---|---|---|---|
+| add + sum | 3.7 ms | 3.4 ms | −8 % |
+| mul | 3.4 ms | 3.0 ms | −11 % |
+| add (scalar broadcast) | 1.1 ms | 0.45 ms | **−58 %** |
+| exp | 3.5 ms | 3.2 ms | −9 % |
+| relu | 6.5 ms | 0.40 ms | **−94 %** |
+| greater-than | 0.82 ms | 0.47 ms | **−43 %** |
+| maximum | 1.7 ms | 0.79 ms | **−52 %** |
+| floor-divide (int64) | 8.3 ms | 7.0 ms | −16 % |
+| add (row broadcast) | 4.0 ms | 3.4 ms | −14 % |
+| training step (3-layer MLP, batch 64) | 2.0 ms | 1.9 ms | ~ noise |
+| inference chain (matmul→add→tanh→relu→sum, no_grad) | 1.5 ms | 1.3 ms | −15–20 % |
+
+The relu number is the compound of two fixes (no memset, no inference-time
+mask); the comparison and maximum numbers include the `Vec<bool>`
+reinterpret. Full suites pass on both sides of the change: 647 Rust
+tests, 865 Python tests (5 skipped).
+
+Completed in the ninth change set (view/copy/cast paths onto producer
+buffers):
+
+- **`astype` rebuilt.** The 20 hand-copied cast arms (5×4 dtype pairs, each
+  fetching src+dst and filling a zeroed buffer) collapsed into one nested
+  macro over `unary_map` producers. Two behavioral fixes rode along: casts
+  now parallelize consistently, and a non-contiguous tensor (e.g. an
+  `expand` view) is materialized before casting — the old zip-based fill
+  silently zero-padded the tail in that case. `astype` sits under
+  `coerce_binary_operands`, so every mixed-dtype binary op benefits.
+- **`contiguous()` gathers in parallel.** The old
+  `copy_strided_to_contiguous` was fully sequential and recomputed the
+  source offset from scratch for every element; the new
+  `operations::map::strided_gather` keeps a running offset with the same
+  incremental mixed-radix walk the broadcast kernels use, parallelizes
+  above the map threshold, and produces the buffer directly (no zeroing
+  pass). `transpose`'s generic path now rides the same primitive — a
+  permuted-stride gather — and its 2-D fast path writes through spare
+  capacity; the op previously allocated with `zeros_on_device` (a full
+  memset) before overwriting every element. The five hand-written
+  `transpose_*` dtype wrappers became one macro arm.
+- **`where` is 4× faster.** Both of its kernel paths (same-shape and
+  broadcast) were sequential; the producer rewrite parallelizes both above
+  the binary threshold and drops the zeroing pass.
+- **`triu`/`tril` are single-pass.** Previously: zero-init (memset) +
+  full memcpy + selective re-zeroing, all sequential. Now: one row-parallel
+  pass that writes each element exactly once (kept range copied, the rest
+  zeroed), shared by the forward op and `TriangularBackward`.
+- **One regression caught and fixed during conversion:** the `contiguous`
+  rewrite initially dropped the `CloneBackward` attachment, severing
+  gradient flow through materialized views (broadcast `pow`, batched
+  matmul). Only the Python differential suite caught it — the engine suite
+  had no test for gradient flow through `contiguous` — so the fix landed
+  with engine-level regression tests (`test_contiguous_participates_in_
+  autograd`, `test_contiguous_matches_strided_view_values`).
+
+Deliberately left fill-style: `cumsum`/`cumprod` (genuine sequential scan
+dependence along the scan dimension; the memset is minor next to the
+scan), `diagonal` (small outputs), and the softmax rows as before.
+
+Benchmarks for the ninth change set (same interleaved A/B protocol,
+change-set-8 wheel as baseline; 2000×2000 f32 unless noted; median of
+per-round best over 3 rounds):
+
+| Benchmark | Change set 8 | Change set 9 | Delta |
+|---|---|---|---|
+| transpose | 3.8 ms | 2.8 ms | −26 % |
+| permute (64³, generic path) | 3.7 ms | 2.4 ms | −36 % |
+| astype f32→f64 | 1.8 ms | 0.49 ms | **−73 %** |
+| astype f32→i64 | 2.6 ms | 1.3 ms | −51 % |
+| astype i64→f32 | 1.3 ms | 0.67 ms | −49 % |
+| where | 22.5 ms | 5.4 ms | **−76 %** |
+| triu | 5.5 ms | 0.78 ms | **−86 %** |
+| add with dtype coercion (f32 + i64) | 3.1 ms | 2.4 ms | −22 % |
+
+Suites green on both sides: 651 Rust tests (3 new), 865 Python tests
+(5 skipped).
+
+Completed in the tenth change set (build/CI hardening):
+
+- **The `hardware` subsystem is behind a default-on cargo feature.** The
+  backlog flags `hardware/` (~2k LOC of profiling/optimizer code referenced
+  only by an example and a compatibility test) for removal as a
+  semver-major maintainer decision. This change implements the mechanism
+  without deciding the policy: `default = ["cpu", "hardware"]` keeps every
+  existing build identical, while `default-features = false` (plus `cpu`)
+  now drops the subsystem entirely. The GPU demo examples also gained
+  `required-features`, so `--all-targets` builds no longer compile
+  feature-dependent examples they cannot run. Both configurations pass the
+  full suite and clippy `-D warnings`.
+- **CI now exercises the release wheel path.** `maturin develop` and PEP
+  517 installs skip auditwheel, which is exactly why the broken
+  `compatibility = "pypi"` setting kept CI green while every release wheel
+  build panicked. The Ubuntu test workflow builds one wheel per run
+  (single matrix entry, debug profile reusing the target dir) so
+  configuration breakage of `maturin build` surfaces in CI instead of at
+  release time.
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation
@@ -524,17 +696,20 @@ Still open, in priority order:
    The `items_after_test_module` crate-wide allow — an artifact of the old
    layout — has been removed; clippy passes without it under `-D warnings`,
    both for the default build and for `--features opencl`.
-3. **Feature-gate or remove the remaining speculative subsystems**
-   (`hardware`, pooled allocator; `debug` is exposed to Python and stays)
-   — semver-major for the engine crate, maintainer's call.
-4. **`MaybeUninit`-typed kernel output writes (optional throughput
-   recovery).** Op output buffers are now zero-initialized for soundness
-   (finding 16), which the A/B measured at ~25–35% on the allocation-bound
-   element-wise microbenchmark and noise on realistic training. A maintainer
-   who wants that throughput back without reintroducing the UB can thread
-   `MaybeUninit`-typed writes through the ~71 output-producing kernels; the
-   uniform write pattern makes this mechanical, but it is a large surface,
-   so it is left as opt-in future work rather than done under time pressure.
+3. **Remove the remaining speculative subsystems, or keep them gated**
+   (`hardware` is now behind a default-on feature — change set 10 — so
+   flipping it out of `default` or deleting the module is the remaining
+   semver-major maintainer decision; the pooled GPU allocator and
+   Python-exposed `debug` are unchanged).
+4. **`MaybeUninit` output writes — done for the element-wise surface**
+   (change set 8). What deliberately keeps zero-initialized outputs: the
+   softmax/log_softmax row kernels (they legitimately reuse the output as
+   scratch — write exp, then normalize in place), the autograd linalg
+   scratch buffers (matmul-bound), reduction/selection outputs with
+   scatter-style write patterns, and the creation utilities in the
+   bindings (arange/linspace/logspace/random, where value generation
+   dominates). Converting those would add complexity for little measured
+   return; revisit only with a benchmark showing otherwise.
 
 ## 8-11. Implementation, tests, validation, benchmarks
 

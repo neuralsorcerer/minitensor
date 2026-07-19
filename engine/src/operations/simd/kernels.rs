@@ -10,6 +10,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::Shape,
 };
+use std::mem::MaybeUninit;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -64,8 +65,13 @@ pub fn simd_capabilities() -> SimdCapabilities {
     *SIMD_CAPS.get_or_init(SimdCapabilities::detect)
 }
 
-/// SIMD-optimized element-wise addition for f32 arrays
-pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+/// SIMD-optimized element-wise addition for f32 arrays.
+///
+/// The binary SIMD entry points write into `MaybeUninit` output so freshly
+/// allocated (never zeroed) buffers can be used directly; on success every
+/// element of `output` has been written. See `operations::map` for the
+/// allocation pattern.
+pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -95,7 +101,7 @@ pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise subtraction for f32 arrays
-pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -125,7 +131,7 @@ pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise multiplication for f32 arrays
-pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -155,7 +161,7 @@ pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise division for f32 arrays
-pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -185,9 +191,9 @@ pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> 
 }
 
 // Scalar fallback implementations
-fn simd_add_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+fn simd_add_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] + rhs[i];
+        output[i].write(lhs[i] + rhs[i]);
     }
     Ok(())
 }
@@ -336,23 +342,23 @@ pub fn simd_prod_i64(data: &[i64]) -> i64 {
     total
 }
 
-fn simd_sub_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+fn simd_sub_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] - rhs[i];
+        output[i].write(lhs[i] - rhs[i]);
     }
     Ok(())
 }
 
-fn simd_mul_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+fn simd_mul_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] * rhs[i];
+        output[i].write(lhs[i] * rhs[i]);
     }
     Ok(())
 }
 
-fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] / rhs[i];
+        output[i].write(lhs[i] / rhs[i]);
     }
     Ok(())
 }
@@ -360,7 +366,7 @@ fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<(
 // x86_64 AVX2 implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 8; // AVX2 processes 8 f32s at once
 
     let len = lhs.len();
@@ -372,13 +378,13 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm256_add_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     // Handle remaining elements
     for i in simd_len..len {
-        output[i] = lhs[i] + rhs[i];
+        output[i].write(lhs[i] + rhs[i]);
     }
 
     Ok(())
@@ -386,7 +392,7 @@ unsafe fn simd_add_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -397,12 +403,12 @@ unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm256_sub_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] - rhs[i];
+        output[i].write(lhs[i] - rhs[i]);
     }
 
     Ok(())
@@ -410,7 +416,7 @@ unsafe fn simd_sub_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -421,12 +427,12 @@ unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm256_mul_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] * rhs[i];
+        output[i].write(lhs[i] * rhs[i]);
     }
 
     Ok(())
@@ -434,7 +440,7 @@ unsafe fn simd_mul_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 8;
 
     let len = lhs.len();
@@ -445,12 +451,12 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm256_div_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] / rhs[i];
+        output[i].write(lhs[i] / rhs[i]);
     }
 
     Ok(())
@@ -459,7 +465,7 @@ unsafe fn simd_div_f32_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 // x86_64 SSE implementations
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // SSE processes 4 f32s at once
 
     let len = lhs.len();
@@ -470,12 +476,12 @@ unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
             let a = _mm_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm_add_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] + rhs[i];
+        output[i].write(lhs[i] + rhs[i]);
     }
 
     Ok(())
@@ -483,7 +489,7 @@ unsafe fn simd_add_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -494,12 +500,12 @@ unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
             let a = _mm_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm_sub_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] - rhs[i];
+        output[i].write(lhs[i] - rhs[i]);
     }
 
     Ok(())
@@ -507,7 +513,7 @@ unsafe fn simd_sub_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -518,12 +524,12 @@ unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
             let a = _mm_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm_mul_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] * rhs[i];
+        output[i].write(lhs[i] * rhs[i]);
     }
 
     Ok(())
@@ -531,7 +537,7 @@ unsafe fn simd_mul_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.1")]
-unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -542,12 +548,12 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
             let a = _mm_loadu_ps(lhs.as_ptr().add(i));
             let b = _mm_loadu_ps(rhs.as_ptr().add(i));
             let result = _mm_div_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i), result);
+            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] / rhs[i];
+        output[i].write(lhs[i] / rhs[i]);
     }
 
     Ok(())
@@ -556,7 +562,7 @@ unsafe fn simd_div_f32_sse(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Resu
 // ARM NEON implementations
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4; // NEON processes 4 f32s at once
 
     let len = lhs.len();
@@ -567,12 +573,12 @@ unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = vld1q_f32(lhs.as_ptr().add(i));
             let b = vld1q_f32(rhs.as_ptr().add(i));
             let result = vaddq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i), result);
+            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] + rhs[i];
+        output[i].write(lhs[i] + rhs[i]);
     }
 
     Ok(())
@@ -580,7 +586,7 @@ unsafe fn simd_add_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -591,12 +597,12 @@ unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = vld1q_f32(lhs.as_ptr().add(i));
             let b = vld1q_f32(rhs.as_ptr().add(i));
             let result = vsubq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i), result);
+            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] - rhs[i];
+        output[i].write(lhs[i] - rhs[i]);
     }
 
     Ok(())
@@ -604,7 +610,7 @@ unsafe fn simd_sub_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -615,12 +621,12 @@ unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = vld1q_f32(lhs.as_ptr().add(i));
             let b = vld1q_f32(rhs.as_ptr().add(i));
             let result = vmulq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i), result);
+            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] * rhs[i];
+        output[i].write(lhs[i] * rhs[i]);
     }
 
     Ok(())
@@ -628,7 +634,7 @@ unsafe fn simd_mul_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Result<()> {
+unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
     const SIMD_WIDTH: usize = 4;
 
     let len = lhs.len();
@@ -639,12 +645,12 @@ unsafe fn simd_div_f32_neon(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> Res
             let a = vld1q_f32(lhs.as_ptr().add(i));
             let b = vld1q_f32(rhs.as_ptr().add(i));
             let result = vdivq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i), result);
+            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
         }
     }
 
     for i in simd_len..len {
-        output[i] = lhs[i] / rhs[i];
+        output[i].write(lhs[i] / rhs[i]);
     }
 
     Ok(())
@@ -660,7 +666,7 @@ pub fn can_use_simd_fast_path(lhs_shape: &Shape, rhs_shape: &Shape, output_shape
 }
 
 /// SIMD-optimized element-wise addition for f64 arrays
-pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -690,7 +696,7 @@ pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise subtraction for f64 arrays
-pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -720,7 +726,7 @@ pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise multiplication for f64 arrays
-pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -750,7 +756,7 @@ pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 }
 
 /// SIMD-optimized element-wise division for f64 arrays
-pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     if lhs.len() != rhs.len() || lhs.len() != output.len() {
         return Err(MinitensorError::invalid_operation(
             "Array lengths must match for SIMD operations",
@@ -780,23 +786,23 @@ pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> 
 }
 
 // f64 scalar fallback implementations
-fn simd_add_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+fn simd_add_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] + rhs[i];
+        output[i].write(lhs[i] + rhs[i]);
     }
     Ok(())
 }
 
-fn simd_sub_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+fn simd_sub_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] - rhs[i];
+        output[i].write(lhs[i] - rhs[i]);
     }
     Ok(())
 }
 
-fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<()> {
+fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
     for i in 0..lhs.len() {
-        output[i] = lhs[i] * rhs[i];
+        output[i].write(lhs[i] * rhs[i]);
     }
     Ok(())
 }
@@ -804,6 +810,26 @@ fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [f64]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run one of the binary SIMD entry points into a fresh output vector.
+    fn run(
+        f: impl Fn(&[f32], &[f32], &mut [MaybeUninit<f32>]) -> Result<()>,
+        lhs: &[f32],
+        rhs: &[f32],
+    ) -> Result<Vec<f32>> {
+        // SAFETY: the SIMD entry points initialize every output element on Ok.
+        unsafe { crate::operations::map::build_vec_with(lhs.len(), |out| f(lhs, rhs, out)) }
+    }
+
+    /// f64 variant of [`run`].
+    fn run64(
+        f: impl Fn(&[f64], &[f64], &mut [MaybeUninit<f64>]) -> Result<()>,
+        lhs: &[f64],
+        rhs: &[f64],
+    ) -> Result<Vec<f64>> {
+        // SAFETY: the SIMD entry points initialize every output element on Ok.
+        unsafe { crate::operations::map::build_vec_with(lhs.len(), |out| f(lhs, rhs, out)) }
+    }
 
     #[test]
     fn test_simd_capabilities_detection() {
@@ -816,9 +842,8 @@ mod tests {
     fn test_simd_add_f32() {
         let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
-        let mut result = vec![0.0; 8];
 
-        simd_add_f32(&a, &b, &mut result).unwrap();
+        let result = run(simd_add_f32, &a, &b).unwrap();
 
         for i in 0..8 {
             assert_eq!(result[i], 9.0);
@@ -829,9 +854,8 @@ mod tests {
     fn test_simd_mul_f32() {
         let a = vec![2.0, 3.0, 4.0, 5.0];
         let b = vec![3.0, 4.0, 5.0, 6.0];
-        let mut result = vec![0.0; 4];
 
-        simd_mul_f32(&a, &b, &mut result).unwrap();
+        let result = run(simd_mul_f32, &a, &b).unwrap();
 
         assert_eq!(result, vec![6.0, 12.0, 20.0, 30.0]);
     }
@@ -840,9 +864,8 @@ mod tests {
     fn test_simd_div_f32() {
         let a = vec![12.0, 15.0, 20.0, 24.0];
         let b = vec![3.0, 5.0, 4.0, 6.0];
-        let mut result = vec![0.0; 4];
 
-        simd_div_f32(&a, &b, &mut result).unwrap();
+        let result = run(simd_div_f32, &a, &b).unwrap();
 
         assert_eq!(result, vec![4.0, 3.0, 5.0, 4.0]);
     }
@@ -851,9 +874,8 @@ mod tests {
     fn test_simd_div_by_zero() {
         let a = vec![1.0, 2.0];
         let b = vec![0.0, 2.0];
-        let mut result = vec![0.0; 2];
 
-        simd_div_f32(&a, &b, &mut result).unwrap();
+        let result = run(simd_div_f32, &a, &b).unwrap();
 
         assert_eq!(result[0], f32::INFINITY);
         assert_eq!(result[1], 1.0);
@@ -870,8 +892,7 @@ mod tests {
             })
             .collect();
         let b = vec![0.0_f32; len];
-        let mut result = vec![0.0_f32; len];
-        simd_div_f32(&a, &b, &mut result).unwrap();
+        let result = run(simd_div_f32, &a, &b).unwrap();
         for i in 0..len {
             match i % 3 {
                 0 => assert_eq!(result[i], f32::NEG_INFINITY, "index {i}"),
@@ -882,8 +903,7 @@ mod tests {
 
         let a64: Vec<f64> = a.iter().map(|&v| v as f64).collect();
         let b64 = vec![0.0_f64; len];
-        let mut result64 = vec![0.0_f64; len];
-        simd_div_f64(&a64, &b64, &mut result64).unwrap();
+        let result64 = run64(simd_div_f64, &a64, &b64).unwrap();
         for i in 0..len {
             match i % 3 {
                 0 => assert_eq!(result64[i], f64::NEG_INFINITY, "index {i}"),
@@ -897,27 +917,26 @@ mod tests {
     fn test_simd_f32_length_mismatch_errors() {
         let a = [1.0_f32, 2.0, 3.0];
         let b = [4.0_f32, 5.0];
-        let mut out = [0.0_f32; 3];
 
-        let err = simd_add_f32(&a, &b, &mut out).unwrap_err();
+        let err = run(simd_add_f32, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_sub_f32(&a, &b, &mut out).unwrap_err();
+        let err = run(simd_sub_f32, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_mul_f32(&a, &b, &mut out).unwrap_err();
+        let err = run(simd_mul_f32, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_div_f32(&a, &b, &mut out).unwrap_err();
+        let err = run(simd_div_f32, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
@@ -928,18 +947,17 @@ mod tests {
     fn test_simd_f64_all_ops_with_remainder_and_division_by_zero() {
         let a = vec![10.0_f64, -9.0, 8.0, -7.0, 6.0];
         let b = vec![2.0_f64, -3.0, 4.0, -7.0, 0.0];
-        let mut out = vec![0.0_f64; a.len()];
 
-        simd_add_f64(&a, &b, &mut out).unwrap();
+        let out = run64(simd_add_f64, &a, &b).unwrap();
         assert_eq!(out, vec![12.0, -12.0, 12.0, -14.0, 6.0]);
 
-        simd_sub_f64(&a, &b, &mut out).unwrap();
+        let out = run64(simd_sub_f64, &a, &b).unwrap();
         assert_eq!(out, vec![8.0, -6.0, 4.0, 0.0, 6.0]);
 
-        simd_mul_f64(&a, &b, &mut out).unwrap();
+        let out = run64(simd_mul_f64, &a, &b).unwrap();
         assert_eq!(out, vec![20.0, 27.0, 32.0, 49.0, 0.0]);
 
-        simd_div_f64(&a, &b, &mut out).unwrap();
+        let out = run64(simd_div_f64, &a, &b).unwrap();
         assert_eq!(out[..4], [5.0, 3.0, 2.0, 1.0]);
         assert_eq!(out[4], f64::INFINITY);
     }
@@ -948,27 +966,26 @@ mod tests {
     fn test_simd_f64_length_mismatch_errors() {
         let a = [1.0_f64, 2.0, 3.0];
         let b = [4.0_f64, 5.0];
-        let mut out = [0.0_f64; 3];
 
-        let err = simd_add_f64(&a, &b, &mut out).unwrap_err();
+        let err = run64(simd_add_f64, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_sub_f64(&a, &b, &mut out).unwrap_err();
+        let err = run64(simd_sub_f64, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_mul_f64(&a, &b, &mut out).unwrap_err();
+        let err = run64(simd_mul_f64, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
 
-        let err = simd_div_f64(&a, &b, &mut out).unwrap_err();
+        let err = run64(simd_div_f64, &a, &b).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")

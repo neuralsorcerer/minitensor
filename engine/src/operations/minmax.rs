@@ -8,7 +8,7 @@ use crate::{
     autograd::{GradientFunction, MaximumBackward, MinimumBackward, add_to_graph},
     error::{MinitensorError, Result},
     operations::{
-        arithmetic::broadcast_binary_op,
+        arithmetic::broadcast_binary_map,
         binary::{BinaryOpKind, coerce_binary_operands},
         comparison, selection,
     },
@@ -38,213 +38,124 @@ fn binary_minmax(lhs: &Tensor, rhs: &Tensor, op: BinaryOpKind) -> Result<Tensor>
     let rhs_ref = rhs_cast.as_ref();
 
     let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
-    let mut output_data =
-        TensorData::uninitialized_on_device(output_shape.numel(), result_dtype, lhs.device());
 
-    match result_dtype {
-        DataType::Float32 => {
-            let lhs_slice = lhs_ref.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
+    /// One dtype arm: fetch both slices, apply the max/min closure with
+    /// broadcasting into a fresh buffer, and wrap it as `TensorData`.
+    macro_rules! minmax_arm {
+        ($accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $max:expr, $min:expr) => {{
+            let lhs_slice = lhs_ref.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from lhs tensor"
+                ))
             })?;
-            let rhs_slice = rhs_ref.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from rhs tensor")
+            let rhs_slice = rhs_ref.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from rhs tensor"
+                ))
             })?;
-            let out_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f32 slice from min/max output",
-                )
-            })?;
-            match op {
-                BinaryOpKind::Maximum => broadcast_binary_op(
+            let out = match op {
+                BinaryOpKind::Maximum => broadcast_binary_map(
                     lhs_slice,
                     rhs_slice,
-                    out_slice,
                     lhs_ref.shape(),
                     rhs_ref.shape(),
                     &output_shape,
-                    |a, b| {
-                        if a.is_nan() || b.is_nan() {
-                            if a.is_nan() { a } else { b }
-                        } else if a >= b {
-                            a
-                        } else {
-                            b
-                        }
-                    },
+                    $max,
                 )?,
-                BinaryOpKind::Minimum => broadcast_binary_op(
+                BinaryOpKind::Minimum => broadcast_binary_map(
                     lhs_slice,
                     rhs_slice,
-                    out_slice,
                     lhs_ref.shape(),
                     rhs_ref.shape(),
                     &output_shape,
-                    |a, b| {
-                        if a.is_nan() || b.is_nan() {
-                            if a.is_nan() { a } else { b }
-                        } else if a <= b {
-                            a
-                        } else {
-                            b
-                        }
-                    },
+                    $min,
                 )?,
                 _ => unreachable!(),
-            }
-        }
-        DataType::Float64 => {
-            let lhs_slice = lhs_ref.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
-            })?;
-            let rhs_slice = rhs_ref.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from rhs tensor")
-            })?;
-            let out_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f64 slice from min/max output",
-                )
-            })?;
-            match op {
-                BinaryOpKind::Maximum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| {
-                        if a.is_nan() || b.is_nan() {
-                            if a.is_nan() { a } else { b }
-                        } else if a >= b {
-                            a
-                        } else {
-                            b
-                        }
-                    },
-                )?,
-                BinaryOpKind::Minimum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| {
-                        if a.is_nan() || b.is_nan() {
-                            if a.is_nan() { a } else { b }
-                        } else if a <= b {
-                            a
-                        } else {
-                            b
-                        }
-                    },
-                )?,
-                _ => unreachable!(),
-            }
-        }
-        DataType::Int32 => {
-            let lhs_slice = lhs_ref.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
-            })?;
-            let rhs_slice = rhs_ref.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from rhs tensor")
-            })?;
-            let out_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable i32 slice from min/max output",
-                )
-            })?;
-            match op {
-                BinaryOpKind::Maximum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| if a >= b { a } else { b },
-                )?,
-                BinaryOpKind::Minimum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| if a <= b { a } else { b },
-                )?,
-                _ => unreachable!(),
-            }
-        }
-        DataType::Int64 => {
-            let lhs_slice = lhs_ref.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
-            })?;
-            let rhs_slice = rhs_ref.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from rhs tensor")
-            })?;
-            let out_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable i64 slice from min/max output",
-                )
-            })?;
-            match op {
-                BinaryOpKind::Maximum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| if a >= b { a } else { b },
-                )?,
-                BinaryOpKind::Minimum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| if a <= b { a } else { b },
-                )?,
-                _ => unreachable!(),
-            }
-        }
-        DataType::Bool => {
-            let lhs_slice = lhs_ref.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from lhs tensor")
-            })?;
-            let rhs_slice = rhs_ref.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from rhs tensor")
-            })?;
-            let out_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable bool slice from min/max output",
-                )
-            })?;
-            match op {
-                BinaryOpKind::Maximum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| a || b,
-                )?,
-                BinaryOpKind::Minimum => broadcast_binary_op(
-                    lhs_slice,
-                    rhs_slice,
-                    out_slice,
-                    lhs_ref.shape(),
-                    rhs_ref.shape(),
-                    &output_shape,
-                    |a, b| a && b,
-                )?,
-                _ => unreachable!(),
-            }
-        }
+            };
+            TensorData::from_vec::<$ty>(out, DataType::$dtype, lhs.device())
+        }};
     }
+
+    // NaN-propagating comparisons for floats (matching the previous
+    // hand-written kernels); plain ordering for ints, OR/AND for bool.
+    let output_data = match result_dtype {
+        DataType::Float32 => minmax_arm!(
+            as_f32_slice,
+            f32,
+            Float32,
+            "f32",
+            |a: f32, b: f32| {
+                if a.is_nan() || b.is_nan() {
+                    if a.is_nan() { a } else { b }
+                } else if a >= b {
+                    a
+                } else {
+                    b
+                }
+            },
+            |a: f32, b: f32| {
+                if a.is_nan() || b.is_nan() {
+                    if a.is_nan() { a } else { b }
+                } else if a <= b {
+                    a
+                } else {
+                    b
+                }
+            }
+        ),
+        DataType::Float64 => minmax_arm!(
+            as_f64_slice,
+            f64,
+            Float64,
+            "f64",
+            |a: f64, b: f64| {
+                if a.is_nan() || b.is_nan() {
+                    if a.is_nan() { a } else { b }
+                } else if a >= b {
+                    a
+                } else {
+                    b
+                }
+            },
+            |a: f64, b: f64| {
+                if a.is_nan() || b.is_nan() {
+                    if a.is_nan() { a } else { b }
+                } else if a <= b {
+                    a
+                } else {
+                    b
+                }
+            }
+        ),
+        DataType::Int32 => minmax_arm!(
+            as_i32_slice,
+            i32,
+            Int32,
+            "i32",
+            |a: i32, b: i32| if a >= b { a } else { b },
+            |a: i32, b: i32| if a <= b { a } else { b }
+        ),
+        DataType::Int64 => minmax_arm!(
+            as_i64_slice,
+            i64,
+            Int64,
+            "i64",
+            |a: i64, b: i64| if a >= b { a } else { b },
+            |a: i64, b: i64| if a <= b { a } else { b }
+        ),
+        DataType::Bool => minmax_arm!(
+            as_bool_slice,
+            bool,
+            Bool,
+            "bool",
+            |a: bool, b: bool| a || b,
+            |a: bool, b: bool| a && b
+        ),
+    };
 
     let grad_enabled = requires_grad && result_dtype.is_float();
     let mut output = Tensor::new(
