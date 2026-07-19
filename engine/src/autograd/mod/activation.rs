@@ -384,10 +384,9 @@ impl GradientFunction for HuberLossBackward {
 pub struct CrossEntropyLossBackward {
     pub predictions_shape: Vec<usize>,
     pub targets_shape: Vec<usize>,
-    pub input_ids: [TensorId; 2],
-    /// Which of [predictions, targets] actually need a gradient. Only the
-    /// prediction gradient is ever produced; it is skipped when frozen.
-    pub input_requires_grad: [bool; 2],
+    /// Cross-entropy differentiates only with respect to logits. Targets are
+    /// saved values, not graph inputs, so do not retain or traverse their tape.
+    pub input_ids: [TensorId; 1],
     pub reduction: String,
     pub softmax_predictions: Tensor,
     pub targets: Tensor,
@@ -396,14 +395,19 @@ pub struct CrossEntropyLossBackward {
 impl GradientFunction for CrossEntropyLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
-        if !self.input_requires_grad[0] {
-            return Ok(gradients);
-        }
         gradients.reserve(1);
 
-        // Compute base gradient: softmax(predictions) - targets
-        let mut base_grad =
-            arithmetic::sub(&self.softmax_predictions.detach(), &self.targets.detach())?;
+        // For L = -sum(t * log_softmax(z)), dL/dz is
+        // softmax(z) * sum(t) - t. The commonly quoted `softmax - target`
+        // assumes each target row sums to one; keeping the sum explicit makes
+        // probability/weighted targets mathematically correct while reducing
+        // to the usual formula for class-index and normalized one-hot targets.
+        let probabilities = self.softmax_predictions.detach();
+        let targets = self.targets.detach();
+        let class_dim = (targets.ndim() - 1) as isize;
+        let target_mass = reduction::sum(&targets, Some(vec![class_dim]), true)?;
+        let weighted_probabilities = arithmetic::mul(&probabilities, &target_mass)?;
+        let mut base_grad = arithmetic::sub(&weighted_probabilities, &targets)?;
 
         // Apply reduction scaling
         match self.reduction.as_str() {
@@ -452,8 +456,17 @@ impl GradientFunction for CrossEntropyLossBackward {
             }
         }
 
-        // Multiply by upstream gradient (handles broadcasting)
-        let pred_grad = arithmetic::mul(&base_grad, grad_output)?;
+        // `reduction="none"` returns one loss per sample, while `base_grad`
+        // retains the trailing class dimension. Make that missing dimension
+        // explicit: ordinary trailing-dimension broadcasting would otherwise
+        // reject most batch/class combinations and can silently scale columns
+        // instead of samples when the two sizes happen to match.
+        let grad_output = if self.reduction == "none" {
+            crate::operations::shape_ops::unsqueeze(grad_output, grad_output.ndim() as isize)?
+        } else {
+            grad_output.clone()
+        };
+        let pred_grad = arithmetic::mul(&base_grad, &grad_output)?;
 
         // Targets typically have no gradient
         accumulate_grad(&mut gradients, self.input_ids[0], pred_grad)?;

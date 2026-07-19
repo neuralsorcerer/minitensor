@@ -373,7 +373,7 @@ fn test_log_softmax_extreme_range() {
 }
 
 #[test]
-fn test_cross_entropy_zero_prob_returns_inf() {
+fn test_cross_entropy_underflowed_probability_has_finite_loss() {
     let pred = Tensor::new(
         Arc::new(TensorData::from_vec_f32(
             vec![1000.0, -1000.0],
@@ -393,7 +393,43 @@ fn test_cross_entropy_zero_prob_returns_inf() {
     );
     let loss = loss::cross_entropy(&pred, &target, "mean", 1).unwrap();
     let val = loss.data().as_f32_slice().unwrap()[0];
-    assert!(val.is_infinite() && val.is_sign_positive());
+    assert!(val.is_finite());
+    assert!((val - 2000.0).abs() < 1e-3, "expected 2000, got {val}");
+}
+
+#[test]
+fn test_cross_entropy_ignores_non_target_negative_infinity() {
+    let pred = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(
+            vec![0.0, f32::NEG_INFINITY],
+            Device::cpu(),
+        )),
+        Shape::new(vec![1, 2]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let correct_target = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(vec![1.0, 0.0], Device::cpu())),
+        Shape::new(vec![1, 2]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let impossible_target = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(vec![0.0, 1.0], Device::cpu())),
+        Shape::new(vec![1, 2]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+
+    let correct = loss::cross_entropy(&pred, &correct_target, "mean", 1).unwrap();
+    assert_eq!(correct.data().as_f32_slice().unwrap()[0], 0.0);
+
+    let impossible = loss::cross_entropy(&pred, &impossible_target, "mean", 1).unwrap();
+    let impossible_value = impossible.data().as_f32_slice().unwrap()[0];
+    assert!(impossible_value.is_infinite() && impossible_value.is_sign_positive());
 }
 
 #[test]
