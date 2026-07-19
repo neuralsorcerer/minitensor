@@ -655,7 +655,24 @@ def test_cross_entropy_extreme_logits_remain_finite():
     x = mt.Tensor(x_np.tolist())
     target = mt.Tensor(target_np.tolist())
     loss = F.cross_entropy(x, target, reduction="mean")
+    # Target class (index 1) has ~0 predicted probability -> infinite loss.
     assert np.isinf(loss.numpy())
+
+
+def test_cross_entropy_confident_correct_prediction_is_finite():
+    # A confidently-correct prediction (target == argmax) with a large logit
+    # gap must give ~0 loss and a finite gradient. A blanket "mask near-zero
+    # probability classes to -inf" made the non-target class's contribution
+    # 0 * -inf = NaN, so this used to return NaN for magnitudes >= ~500.
+    targets = mt.Tensor([0], dtype="int64")
+    for mag in (100.0, 500.0, 1000.0, 10000.0):
+        logits = mt.Tensor([[mag, 0.0, -mag]], requires_grad=True)
+        loss = F.cross_entropy(logits, targets, reduction="mean")
+        assert np.isfinite(loss.numpy()), f"CE not finite at mag={mag}"
+        np.testing.assert_allclose(loss.numpy(), 0.0, atol=1e-5)
+        loss.backward()
+        assert np.all(np.isfinite(logits.grad.numpy()))
+        mt.clear_autograd_graph()
 
 
 def test_bce_loss_positive():
