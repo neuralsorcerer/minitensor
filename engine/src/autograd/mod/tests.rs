@@ -675,6 +675,33 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_entropy_records_only_its_analytical_node() {
+        clear_graph().unwrap();
+        let logits = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, -1.0], Device::cpu())),
+            Shape::new(vec![1, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let targets = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 0.0], Device::cpu())),
+            Shape::new(vec![1, 2]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let loss = crate::operations::loss::cross_entropy_loss(&logits, &targets, "mean").unwrap();
+        // The custom loss plus its differentiable logits input. Targets are a
+        // saved value, not a differentiable graph edge, and primitive forward
+        // operations must not leave orphan nodes behind.
+        assert_eq!(graph_node_count(), 2);
+        assert!(get_gradient(&loss).is_none());
+        clear_graph().unwrap();
+    }
+
+    #[test]
     fn test_concat_frozen_inputs_receive_no_gradient() {
         clear_graph().unwrap();
 

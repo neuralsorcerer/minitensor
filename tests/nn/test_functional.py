@@ -649,14 +649,65 @@ def test_cross_entropy_no_reduction_shape_and_values():
     assert np.allclose(loss.numpy(), expected)
 
 
+def test_cross_entropy_no_reduction_backward_scales_each_sample():
+    logits = mt.Tensor([[0.0, 0.0], [0.0, 0.0]], requires_grad=True)
+    targets = mt.Tensor([0, 1], dtype="int64")
+    losses = F.cross_entropy(logits, targets, reduction="none")
+
+    losses.backward(mt.Tensor([2.0, 3.0]))
+
+    np.testing.assert_allclose(
+        logits.grad.numpy(),
+        np.array([[-1.0, 1.0], [1.5, -1.5]], dtype=np.float32),
+        rtol=1e-6,
+    )
+
+
+def test_cross_entropy_soft_target_backward_uses_total_target_mass():
+    logits = mt.Tensor([[0.0, 0.0]], requires_grad=True)
+    weighted_target = mt.Tensor([[2.0, 0.0]])
+
+    F.cross_entropy(logits, weighted_target, reduction="sum").backward()
+
+    np.testing.assert_allclose(
+        logits.grad.numpy(), np.array([[-1.0, 1.0]], dtype=np.float32), rtol=1e-6
+    )
+
+
+def test_cross_entropy_soft_targets_follow_logits_dtype():
+    logits = mt.Tensor([[0.0, 0.0]], dtype="float32", requires_grad=True)
+    target = mt.Tensor([[1.0, 0.0]], dtype="float64")
+
+    loss = F.cross_entropy(logits, target, reduction="sum")
+    loss.backward()
+
+    assert loss.dtype == "float32"
+    assert logits.grad.dtype == "float32"
+    np.testing.assert_allclose(
+        logits.grad.numpy(), np.array([[-0.5, 0.5]], dtype=np.float32), rtol=1e-6
+    )
+
+
 def test_cross_entropy_extreme_logits_remain_finite():
     x_np = np.array([[1000.0, -1000.0]], dtype=np.float32)
     target_np = np.array([[0.0, 1.0]], dtype=np.float32)
     x = mt.Tensor(x_np.tolist())
     target = mt.Tensor(target_np.tolist())
     loss = F.cross_entropy(x, target, reduction="mean")
-    # Target class (index 1) has ~0 predicted probability -> infinite loss.
-    assert np.isinf(loss.numpy())
+    # Stable log-softmax preserves the finite log-probability even though
+    # materializing softmax itself would underflow the target probability.
+    assert np.isfinite(loss.numpy())
+    np.testing.assert_allclose(loss.numpy(), 2000.0, rtol=1e-6)
+
+
+def test_cross_entropy_non_target_negative_infinity_does_not_poison_loss():
+    logits = mt.Tensor([[0.0, -np.inf]])
+
+    correct = F.cross_entropy(logits, mt.Tensor([0], dtype="int64"))
+    np.testing.assert_array_equal(correct.numpy(), 0.0)
+
+    impossible = F.cross_entropy(logits, mt.Tensor([1], dtype="int64"))
+    assert np.isposinf(impossible.numpy())
 
 
 def test_cross_entropy_confident_correct_prediction_is_finite():

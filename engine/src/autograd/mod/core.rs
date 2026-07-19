@@ -233,6 +233,11 @@ pub fn clear_graph() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn graph_node_count() -> usize {
+    GLOBAL_GRAPH.with(|graph| graph.borrow().num_nodes())
+}
+
 /// Mark the computation graph as consumed after a backward pass completes.
 pub fn mark_graph_consumed() {
     GRAPH_CONSUMED.with(|flag| flag.set(true));

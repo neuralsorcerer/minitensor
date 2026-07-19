@@ -8,7 +8,7 @@ use approx::assert_relative_eq;
 use engine::{
     autograd,
     device::Device,
-    operations::{activation, arithmetic, linalg, reduction},
+    operations::{activation, arithmetic, linalg, loss, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use proptest::prelude::*;
@@ -47,6 +47,61 @@ fn test_mul_backward_correct() {
     assert_eq!(grad_a.data().as_f32_slice().unwrap(), &[3.0, 4.0]);
     assert_eq!(grad_b.data().as_f32_slice().unwrap(), &[1.0, 2.0]);
     autograd::clear_graph().unwrap();
+}
+
+#[test]
+fn test_cross_entropy_none_backward_scales_samples() {
+    autograd::clear_graph().unwrap();
+    let logits = create_test_tensor_f32(vec![0.0; 4], vec![2, 2], true);
+    let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+    let losses = loss::cross_entropy_loss(&logits, &targets, "none").unwrap();
+    let grad_output = create_test_tensor_f32(vec![2.0, 3.0], vec![2], false);
+
+    autograd::backward(&losses, Some(grad_output)).unwrap();
+    let grad = autograd::get_gradient(&logits).unwrap();
+    let values = grad.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], -1.0, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 1.0, epsilon = 1e-6);
+    assert_relative_eq!(values[2], 1.5, epsilon = 1e-6);
+    assert_relative_eq!(values[3], -1.5, epsilon = 1e-6);
+}
+
+#[test]
+fn test_cross_entropy_soft_target_backward_accounts_for_target_mass() {
+    autograd::clear_graph().unwrap();
+    let logits = create_test_tensor_f32(vec![0.0, 0.0], vec![1, 2], true);
+    // Deliberately unnormalized weights: sum(target) = 2. A `softmax-target`
+    // shortcut would incorrectly produce [-0.5, -0.5] instead of [-1, 1].
+    let targets = create_test_tensor_f32(vec![2.0, 0.0], vec![1, 2], false);
+    let loss = loss::cross_entropy_loss(&logits, &targets, "sum").unwrap();
+
+    autograd::backward(&loss, None).unwrap();
+    let grad = autograd::get_gradient(&logits).unwrap();
+    let values = grad.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], -1.0, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 1.0, epsilon = 1e-6);
+}
+
+#[test]
+fn test_cross_entropy_soft_targets_are_normalized_to_logits_dtype() {
+    autograd::clear_graph().unwrap();
+    let logits = create_test_tensor_f32(vec![0.0, 0.0], vec![1, 2], true);
+    let targets = Tensor::new(
+        Arc::new(TensorData::from_vec_f64(vec![1.0, 0.0], Device::cpu())),
+        Shape::new(vec![1, 2]),
+        DataType::Float64,
+        Device::cpu(),
+        false,
+    );
+    let loss = loss::cross_entropy_loss(&logits, &targets, "sum").unwrap();
+
+    assert_eq!(loss.dtype(), DataType::Float32);
+    autograd::backward(&loss, None).unwrap();
+    let grad = autograd::get_gradient(&logits).unwrap();
+    assert_eq!(grad.dtype(), DataType::Float32);
+    let values = grad.data().as_f32_slice().unwrap();
+    assert_relative_eq!(values[0], -0.5, epsilon = 1e-6);
+    assert_relative_eq!(values[1], 0.5, epsilon = 1e-6);
 }
 
 #[test]

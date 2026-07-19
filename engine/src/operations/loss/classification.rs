@@ -9,6 +9,7 @@ use crate::operations::arithmetic::mul;
 use crate::operations::map::unary_map;
 use crate::{
     error::{MinitensorError, Result},
+    operations::{comparison, selection::masked_fill_scalar},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -444,8 +445,20 @@ pub(crate) fn negative_log_likelihood(
     log_predictions: &Tensor,
     targets: &Tensor,
 ) -> Result<Tensor> {
-    // Simplified implementation - multiply log predictions by targets and negate
-    let likelihood = mul(log_predictions, targets)?;
+    // Multiplying a zero target by a non-finite log-probability would produce
+    // NaN (`0 * -inf`). Zero those positions before multiplication so only
+    // classes with target mass contribute. This preserves +inf when the
+    // target class itself has log-probability -inf and also supports soft
+    // targets, where more than one class may carry non-zero mass.
+    let zeros = Tensor::zeros(
+        targets.shape().clone(),
+        targets.dtype(),
+        targets.device(),
+        false,
+    );
+    let zero_targets = comparison::eq(targets, &zeros)?;
+    let contributing_log_predictions = masked_fill_scalar(log_predictions, &zero_targets, 0.0)?;
+    let likelihood = mul(&contributing_log_predictions, targets)?;
     negate(&likelihood)
 }
 

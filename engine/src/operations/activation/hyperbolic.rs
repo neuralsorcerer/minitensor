@@ -524,8 +524,8 @@ float_unary_kernel!(selu_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
 });
 
 float_unary_kernel!(selu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
-    const ALPHA: f64 = 1.6732632423543772848170429916717;
-    const SCALE: f64 = 1.0507009873554804934193349852946;
+    const ALPHA: f64 = 1.673_263_242_354_377_2;
+    const SCALE: f64 = 1.050_700_987_355_480_5;
     if x > 0.0 {
         SCALE * x
     } else {

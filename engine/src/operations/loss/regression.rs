@@ -9,15 +9,13 @@ use super::*;
 use crate::{
     autograd::{
         BCELossBackward, CrossEntropyLossBackward, FocalLossBackward, HuberLossBackward,
-        KLDivLossBackward, MAELossBackward, MSELossBackward, add_to_graph,
+        KLDivLossBackward, MAELossBackward, MSELossBackward, NoGradGuard, add_to_graph,
     },
     error::{MinitensorError, Result},
     operations::{
         activation::{abs as activation_abs, exp, log_softmax, log1p},
         arithmetic::{add, mul, sub},
-        comparison,
         reduction::{mean, sum},
-        selection::masked_fill_scalar,
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -189,70 +187,51 @@ pub fn cross_entropy_loss(
     // Convert class indices to one-hot encoding if needed
     let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
-    // Apply log-softmax to predictions for numerical stability.
-    let log_predictions_base = log_softmax(predictions, None)?;
-    let softmax_predictions = exp(&log_predictions_base.detach())?;
+    // Cross-entropy owns an analytical backward node. Do not record the
+    // primitive log-softmax/multiply/reduction graph as well: those nodes are
+    // unreachable after the final grad_fn is replaced and would retain saved
+    // tensors until the whole graph is cleared. Outputs still propagate
+    // `requires_grad`, so the custom node below remains correctly enabled.
+    let (loss, softmax_predictions) = {
+        let _guard = NoGradGuard::new();
+        let log_predictions = log_softmax(predictions, None)?;
+        // Keep probabilities only for the analytical backward formula. The
+        // loss itself remains in log-space so finite log-probabilities cannot
+        // be turned into infinity by exponentiation underflow.
+        let softmax_predictions = exp(&log_predictions.detach())?;
+        let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
+        let per_sample = sum(&nll, Some(vec![1]), false)?;
 
-    // A *target* class whose predicted probability underflows to (numerically)
-    // zero must drive the loss to +inf. We force its log-prob to -inf so the
-    // one-hot product yields +inf. The mask is restricted to target classes:
-    // masking every near-zero class (the previous behavior) turned a non-target
-    // class's finite log-prob into -inf, and `0 * (-inf) = NaN` then poisoned
-    // the whole sum — so a confidently-correct prediction with a large logit
-    // gap produced NaN instead of ~0.
-    let eps = match softmax_predictions.dtype() {
-        DataType::Float32 => 1e-30,
-        DataType::Float64 => 1e-300,
-        _ => 0.0,
-    };
-    let zeros = Tensor::zeros(
-        softmax_predictions.shape().clone(),
-        softmax_predictions.dtype(),
-        softmax_predictions.device(),
-        false,
-    );
-    let eps_mask = comparison::eq(&zeros, &zeros)?;
-    let eps_tensor = masked_fill_scalar(&zeros, &eps_mask, eps)?;
-    let low_prob = comparison::le(&softmax_predictions, &eps_tensor)?;
-    let target_present = comparison::gt(&targets_one_hot, &zeros)?;
-    let target_underflow = mul(&low_prob, &target_present)?; // bool AND
-    let log_predictions =
-        masked_fill_scalar(&log_predictions_base, &target_underflow, f64::NEG_INFINITY)?;
-
-    // Compute negative log likelihood summed over classes
-    let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
-    let per_sample = sum(&nll, Some(vec![1]), false)?;
-
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&per_sample)?;
-            let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
-            divide_by_scalar(&sum, batch)?
-        }
-        "sum" => sum_all_elements(&per_sample)?,
-        "none" => per_sample,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
+        let loss = match reduction {
+            "mean" => {
+                let sum = sum_all_elements(&per_sample)?;
+                let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
+                divide_by_scalar(&sum, batch)?
+            }
+            "sum" => sum_all_elements(&per_sample)?,
+            "none" => per_sample,
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
+        };
+        (loss, softmax_predictions)
     };
 
     // Set up gradient function if needed
-    if loss.requires_grad() {
+    if predictions.requires_grad() {
         let grad_fn = Arc::new(CrossEntropyLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets_one_hot.shape().dims().to_vec(),
-            input_ids: [predictions.id(), targets.id()],
-            input_requires_grad: [predictions.requires_grad(), targets.requires_grad()],
+            input_ids: [predictions.id()],
             reduction: reduction.to_string(),
             softmax_predictions: softmax_predictions.clone().detach(),
             targets: targets_one_hot.clone().detach(),
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -870,7 +849,14 @@ fn prepare_classification_targets(predictions: &Tensor, targets: &Tensor) -> Res
                 targets.shape().dims().to_vec(),
             ));
         }
-        Ok(targets.clone())
+        // Probability/one-hot targets participate in the same element-wise
+        // kernels as the logits and must therefore use the logits dtype.
+        // Normalizing here also keeps the saved target and analytical
+        // backward gradient in the prediction dtype. Target gradients are not
+        // part of the classification-loss contract, so detach the normalized
+        // value explicitly instead of leaving an untracked cast that appears
+        // differentiable.
+        Ok(targets.astype(predictions.dtype())?.detach())
     } else {
         Err(MinitensorError::shape_mismatch(
             predictions.shape().dims().to_vec(),

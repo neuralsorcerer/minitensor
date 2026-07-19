@@ -462,8 +462,8 @@ impl GradientFunction for SeluBackward {
                     )
                 })?;
 
-                const SCALE: f64 = 1.0507009873554804934193349852946;
-                const ALPHA: f64 = 1.6732632423543772848170429916717;
+                const SCALE: f64 = 1.050_700_987_355_480_5;
+                const ALPHA: f64 = 1.673_263_242_354_377_2;
                 for ((grad_slot, &out), &gout) in grad_slice
                     .iter_mut()
                     .zip(output_slice.iter())
