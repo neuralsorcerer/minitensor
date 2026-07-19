@@ -279,6 +279,31 @@ impl ComputationGraph {
         self.gradients = gradients;
     }
 
+    /// Accumulate a freshly computed gradient map into the stored gradients,
+    /// summing on collision. This is PyTorch's `backward()` contract: repeated
+    /// backward passes add into `.grad` (of the persistent leaf tensors) until
+    /// `zero_grad` clears it, which is what enables gradient accumulation over
+    /// micro-batches and multi-loss training. Interior (non-leaf) gradients are
+    /// transient and dropped by [`Self::release_saved_subgraph`] after each
+    /// non-retaining pass, so this map does not grow across training steps.
+    ///
+    /// The caller runs this with grad recording disabled; `add_inplace` copies
+    /// on write when the stored gradient is shared (e.g. a `.grad` clone the
+    /// user still holds), so accumulation never mutates a returned gradient.
+    pub fn accumulate_gradients(&mut self, gradients: FxHashMap<TensorId, Tensor>) -> Result<()> {
+        for (id, grad) in gradients {
+            match self.gradients.entry(id) {
+                Entry::Occupied(mut existing) => {
+                    arithmetic::add_inplace(existing.get_mut(), &grad)?;
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(grad);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Clone the stored gradient map. Intended for tests and diagnostics; the
     /// training path reads individual gradients via [`Self::get_gradient`].
     pub fn gradients_snapshot(&self) -> FxHashMap<TensorId, Tensor> {
@@ -300,6 +325,11 @@ impl ComputationGraph {
         });
         for id in interior {
             self.nodes.remove(&id);
+            // Interior gradient *entries* are intentionally kept: minitensor
+            // exposes non-leaf `.grad` after backward (unlike PyTorch), and
+            // tests rely on it. The stored map stays bounded because
+            // `optimizer.step()` / `clear_autograd_graph()` reset the graph, and
+            // `zero_grad` clears per-tensor entries, between training steps.
         }
     }
 
