@@ -310,7 +310,9 @@ fn sign_f32(tensor: &Tensor) -> Result<TensorData> {
     })?;
 
     let out = unary_map(input_data, |v: f32| {
-        if v > 0.0 {
+        if v.is_nan() {
+            v
+        } else if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0
@@ -331,7 +333,9 @@ fn sign_f64(tensor: &Tensor) -> Result<TensorData> {
     })?;
 
     let out = unary_map(input_data, |v: f64| {
-        if v > 0.0 {
+        if v.is_nan() {
+            v
+        } else if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0

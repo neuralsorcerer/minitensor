@@ -586,6 +586,16 @@ def test_tensor_sign_float_dtype():
     assert result.dtype == tensor.dtype
 
 
+def test_tensor_sign_propagates_nan():
+    # NaN must propagate through sign (matches NumPy and PyTorch), not collapse
+    # to 0 (the >0/<0/else fallthrough used to return 0 for NaN).
+    for dtype in ("float32", "float64"):
+        values = np.array([np.nan, -np.inf, np.inf, -3.0, 0.0], dtype=dtype)
+        result = mt.Tensor(values.tolist(), dtype=dtype).sign()
+        np.testing.assert_array_equal(result.numpy(), np.sign(values))
+        assert np.isnan(result.numpy()[0])
+
+
 def test_tensor_sign_integer_dtype():
     tensor = mt.Tensor([-3, 0, 4, -7], dtype="int32")
 
