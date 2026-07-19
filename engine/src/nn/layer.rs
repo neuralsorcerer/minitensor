@@ -18,6 +18,18 @@ pub trait Layer: Send + Sync {
     /// Get mutable layer parameters
     fn parameters_mut(&mut self) -> Vec<&mut Tensor>;
 
+    /// Get persistent, non-trainable buffers (e.g. BatchNorm running stats).
+    /// These are excluded from gradient updates but must be serialized so a
+    /// reloaded model reproduces its inference behavior. Default: none.
+    fn buffers(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    /// Get mutable persistent buffers (for loading a state dict). Default: none.
+    fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+
     /// Set the layer to training mode
     fn train(&mut self) {
         // Default implementation - override in layers that need it
@@ -83,9 +95,19 @@ pub trait Module: Layer {
             }
         }
 
-        // Add buffers (default none unless provided by implementation)
-        for (name, tensor) in self.named_buffers() {
-            let _ = state_dict.add_buffer(name, tensor);
+        // Add buffers (named if provided, otherwise indexed like parameters).
+        // The indexed fallback is what actually carries BatchNorm running stats
+        // through the blanket `impl<T: Layer> Module for T`, which leaves
+        // `named_buffers` at its empty default.
+        let named_buffers = self.named_buffers();
+        if named_buffers.is_empty() {
+            for (i, tensor) in self.buffers().into_iter().enumerate() {
+                let _ = state_dict.add_buffer(format!("buffer_{}", i), tensor);
+            }
+        } else {
+            for (name, tensor) in named_buffers {
+                let _ = state_dict.add_buffer(name, tensor);
+            }
         }
 
         state_dict
@@ -118,12 +140,22 @@ pub trait Module: Layer {
             }
         }
 
-        // Load buffers
+        // Load buffers (named if provided, otherwise indexed to mirror
+        // `state_dict`). The indexed path restores BatchNorm running stats.
         let mut named_buffers = self.named_buffers_mut();
-        for (name, buf_ref) in named_buffers.iter_mut() {
-            if let Ok(loaded_tensor) = state_dict.load_buffer(name, device) {
-                // Replace buffer tensor in-place
-                **buf_ref = loaded_tensor;
+        if named_buffers.is_empty() {
+            let mut bufs = self.buffers_mut();
+            for (i, buf_ref) in bufs.iter_mut().enumerate() {
+                if let Ok(loaded_tensor) = state_dict.load_buffer(&format!("buffer_{}", i), device)
+                {
+                    **buf_ref = loaded_tensor;
+                }
+            }
+        } else {
+            for (name, buf_ref) in named_buffers.iter_mut() {
+                if let Ok(loaded_tensor) = state_dict.load_buffer(name, device) {
+                    **buf_ref = loaded_tensor;
+                }
             }
         }
 

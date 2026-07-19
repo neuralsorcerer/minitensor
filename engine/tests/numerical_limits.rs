@@ -395,3 +395,32 @@ fn test_cross_entropy_zero_prob_returns_inf() {
     let val = loss.data().as_f32_slice().unwrap()[0];
     assert!(val.is_infinite() && val.is_sign_positive());
 }
+
+#[test]
+fn test_cross_entropy_confident_correct_prediction_is_finite() {
+    // Target is the argmax class (logit 1000) with a large gap: loss must be
+    // ~0, not NaN. Masking every near-zero-probability class to -inf made the
+    // non-target class contribute 0 * -inf = NaN before this was restricted to
+    // target classes only.
+    let pred = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(
+            vec![1000.0, 0.0, -1000.0],
+            Device::cpu(),
+        )),
+        Shape::new(vec![1, 3]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let target = Tensor::new(
+        Arc::new(TensorData::from_vec_f32(vec![1.0, 0.0, 0.0], Device::cpu())),
+        Shape::new(vec![1, 3]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    );
+    let loss = loss::cross_entropy(&pred, &target, "mean", 1).unwrap();
+    let val = loss.data().as_f32_slice().unwrap()[0];
+    assert!(val.is_finite(), "loss must be finite, got {val}");
+    assert!(val.abs() < 1e-4, "loss must be ~0, got {val}");
+}

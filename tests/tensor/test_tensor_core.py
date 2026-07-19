@@ -759,6 +759,60 @@ def test_backward_create_graph_not_supported():
     mt.clear_autograd_graph()
 
 
+def test_grad_accumulates_across_backward_calls():
+    # PyTorch semantics: .grad adds up over successive backward() passes until
+    # zero_grad clears it (this is what enables gradient accumulation).
+    x = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+    (x * 2.0).sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [2.0, 2.0, 2.0])
+
+    (x * 3.0).sum().backward()  # separate graph, no zero_grad in between
+    np.testing.assert_allclose(x.grad.numpy(), [5.0, 5.0, 5.0])
+
+    x.zero_grad()
+    (x * 4.0).sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [4.0, 4.0, 4.0])
+
+    mt.clear_autograd_graph()
+
+
+def test_grad_accumulates_with_retain_graph():
+    x = mt.Tensor([3.0], requires_grad=True)
+    y = (x * x).sum()
+
+    y.backward(retain_graph=True)  # d/dx = 2x = 6
+    y.backward(retain_graph=True)  # accumulate -> 12 (no zero_grad in between)
+    np.testing.assert_allclose(x.grad.numpy(), [12.0])
+
+    mt.clear_autograd_graph()
+
+
+def test_gradient_accumulation_equals_combined_loss():
+    # Accumulating gradients of two mini-batches must equal the gradient of the
+    # summed loss -- the invariant that makes micro-batching correct.
+    w = mt.Tensor([0.5, -0.5], requires_grad=True)
+    xb1 = mt.Tensor([1.0, 2.0])
+    xb2 = mt.Tensor([3.0, 1.0])
+
+    def loss(xb, target):
+        pred = (w * xb).sum()
+        return (pred - target) * (pred - target)
+
+    w.zero_grad()
+    loss(xb1, 1.0).backward()
+    loss(xb2, 0.5).backward()
+    accumulated = w.grad.numpy().copy()
+
+    w.zero_grad()
+    (loss(xb1, 1.0) + loss(xb2, 0.5)).backward()
+    combined = w.grad.numpy().copy()
+
+    np.testing.assert_allclose(accumulated, combined, rtol=1e-6)
+
+    mt.clear_autograd_graph()
+
+
 def test_sum_negative_dim():
     t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
     r = t.sum(dim=[-1])

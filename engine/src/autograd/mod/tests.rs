@@ -623,6 +623,58 @@ mod tests {
     }
 
     #[test]
+    fn test_grad_accumulates_across_backward_passes() {
+        // Successive backward() passes add into the stored gradient (PyTorch
+        // semantics) until the graph/gradients are cleared.
+        clear_graph().unwrap();
+        let x = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let ones = || Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), false);
+        let two = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![2.0; 3], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let three = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(vec![3.0; 3], Device::cpu())),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        // d/dx (x*2) = 2
+        let y1 = arithmetic::mul(&x, &two).unwrap();
+        backward(&y1, Some(ones())).unwrap();
+        for &v in get_gradient(&x).unwrap().data().as_f32_slice().unwrap() {
+            assert_eq!(v, 2.0);
+        }
+
+        // Second pass, no clear: d/dx (x*3) = 3, accumulates onto the 2 -> 5
+        let y2 = arithmetic::mul(&x, &three).unwrap();
+        backward(&y2, Some(ones())).unwrap();
+        for &v in get_gradient(&x).unwrap().data().as_f32_slice().unwrap() {
+            assert_eq!(v, 5.0);
+        }
+
+        // Clearing per-tensor grad resets accumulation.
+        clear_gradient(&x);
+        let y3 = arithmetic::mul(&x, &two).unwrap();
+        backward(&y3, Some(ones())).unwrap();
+        for &v in get_gradient(&x).unwrap().data().as_f32_slice().unwrap() {
+            assert_eq!(v, 2.0);
+        }
+        clear_graph().unwrap();
+    }
+
+    #[test]
     fn test_concat_frozen_inputs_receive_no_gradient() {
         clear_graph().unwrap();
 

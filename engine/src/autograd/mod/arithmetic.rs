@@ -377,6 +377,65 @@ impl GradientFunction for ExpBackward {
     }
 }
 
+/// Gradient function for square root.
+///
+/// Saves the output `y = sqrt(x)` (rather than the input) so the derivative
+/// `d/dx sqrt(x) = 0.5 / sqrt(x)` is a single division: `grad_output / (2y)`.
+/// At `x == 0` this divides by zero and yields `inf`, matching PyTorch.
+pub struct SqrtBackward {
+    pub input_id: TensorId,
+    pub output: Tensor,
+}
+
+impl GradientFunction for SqrtBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx sqrt(x) = 0.5 / sqrt(x) = 1 / (2 * y)
+        let two_y = arithmetic::add(&self.output, &self.output)?;
+        let grad = arithmetic::div(grad_output, &two_y)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for reciprocal square root.
+///
+/// Saves the output `y = x^(-1/2)` so the derivative
+/// `d/dx x^(-1/2) = -0.5 * x^(-3/2) = -0.5 * y^3` needs no reference to the
+/// input.
+pub struct RsqrtBackward {
+    pub input_id: TensorId,
+    pub output: Tensor,
+}
+
+impl GradientFunction for RsqrtBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // d/dx rsqrt(x) = -0.5 * y^3
+        let y2 = arithmetic::mul(&self.output, &self.output)?;
+        let y3 = arithmetic::mul(&y2, &self.output)?;
+        let scaled = arithmetic::mul(&y3, grad_output)?;
+        let neg_half = create_scalar_tensor(-0.5, self.output.dtype(), self.output.device())?;
+        let grad = arithmetic::mul(&scaled, &neg_half)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for logarithm
 pub struct LogBackward {
     pub input_id: TensorId,

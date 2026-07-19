@@ -180,7 +180,11 @@ pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<()> {
         execute_backward_plan(&plan, tensor.id(), grad)?
     };
 
-    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().set_gradients(gradients));
+    // Accumulate into the stored gradients (PyTorch semantics: `.grad` adds up
+    // across backward passes until `zero_grad`). The guard keeps the in-place
+    // accumulation adds from trying to re-borrow the graph or record nodes.
+    let _guard = NoGradGuard::new();
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().accumulate_gradients(gradients))?;
     Ok(())
 }
 

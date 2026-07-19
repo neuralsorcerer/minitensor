@@ -286,6 +286,16 @@ impl Layer for BatchNorm1d {
         vec![&mut self.weight, &mut self.bias]
     }
 
+    fn buffers(&self) -> Vec<&Tensor> {
+        // Order must stay stable: it defines the indexed buffer names used for
+        // serialization (buffer_0 = running_mean, buffer_1 = running_var).
+        vec![&self.running_mean, &self.running_var]
+    }
+
+    fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
+        vec![&mut self.running_mean, &mut self.running_var]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -476,6 +486,15 @@ impl Layer for BatchNorm2d {
         vec![&mut self.weight, &mut self.bias]
     }
 
+    fn buffers(&self) -> Vec<&Tensor> {
+        // buffer_0 = running_mean, buffer_1 = running_var (stable order).
+        vec![&self.running_mean, &self.running_var]
+    }
+
+    fn buffers_mut(&mut self) -> Vec<&mut Tensor> {
+        vec![&mut self.running_mean, &mut self.running_var]
+    }
+
     fn train(&mut self) {
         self.training = true;
     }
@@ -489,8 +508,28 @@ impl Layer for BatchNorm2d {
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::nn::Module;
     use crate::tensor::{DataType, Shape, TensorData};
     use std::sync::Arc;
+
+    #[test]
+    fn test_batchnorm_state_dict_includes_running_stats() {
+        // Running stats are buffers, so the state dict must carry them (2
+        // parameters + 2 buffers), otherwise a reloaded model loses its
+        // inference statistics.
+        let layer =
+            BatchNorm1d::new(8, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32).unwrap();
+        assert_eq!(layer.buffers().len(), 2);
+        let sd = layer.state_dict();
+        assert_eq!(sd.parameters.len(), 2);
+        assert_eq!(
+            sd.buffers.len(),
+            2,
+            "running_mean and running_var must serialize"
+        );
+        assert!(sd.buffers.contains_key("buffer_0"));
+        assert!(sd.buffers.contains_key("buffer_1"));
+    }
 
     #[test]
     fn test_batchnorm1d_creation() {

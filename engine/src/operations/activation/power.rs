@@ -8,6 +8,8 @@ use super::*;
 use crate::autograd::AbsBackward;
 use crate::autograd::ClampBackward;
 use crate::autograd::NanToNumBackward;
+use crate::autograd::RsqrtBackward;
+use crate::autograd::SqrtBackward;
 use crate::{
     autograd::add_to_graph,
     error::{MinitensorError, Result},
@@ -74,16 +76,81 @@ pub fn sign(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Square root function
+/// Square root function.
+///
+/// A dedicated op (rather than `x.powf(0.5)`) so the forward path uses the
+/// hardware `sqrt`, which follows IEEE for the edge cases `powf` gets wrong:
+/// `sqrt(-inf)` and `sqrt(x<0)` are NaN, `sqrt(-0.0)` is `-0.0`. Gradients flow
+/// through [`SqrtBackward`].
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
-    // Use powf implementation for gradient support: sqrt(x) = x.powf(0.5)
-    powf(tensor, 0.5)
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => sqrt_f32(tensor)?,
+        DataType::Float64 => sqrt_f64(tensor)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Square root only supported for floating point tensors",
+            ));
+        }
+    };
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(SqrtBackward {
+            input_id: tensor.id(),
+            output: output.clone().detach(),
+        });
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        return Ok(output_with_grad);
+    }
+
+    Ok(output)
 }
 
-/// Reciprocal square root function
+/// Reciprocal square root function.
+///
+/// Dedicated op for the same reason as [`sqrt`]: `1/sqrt(x)` gives the IEEE
+/// results `powf(-0.5)` misses (`rsqrt(-inf)` is NaN, `rsqrt(-0.0)` is `-inf`).
+/// Gradients flow through [`RsqrtBackward`].
 pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
-    // Use powf implementation for gradient support: rsqrt(x) = x.powf(-0.5)
-    powf(tensor, -0.5)
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => rsqrt_f32(tensor)?,
+        DataType::Float64 => rsqrt_f64(tensor)?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "Reciprocal square root only supported for floating point tensors",
+            ));
+        }
+    };
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    );
+
+    if output.requires_grad() {
+        let grad_fn = Arc::new(RsqrtBackward {
+            input_id: tensor.id(),
+            output: output.clone().detach(),
+        });
+        let mut output_with_grad = output;
+        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        return Ok(output_with_grad);
+    }
+
+    Ok(output)
 }
 
 /// Element-wise reciprocal (1/x) with gradient support
@@ -252,6 +319,54 @@ pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
 
 // Helper functions for the new operations
 
+fn sqrt_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let out = unary_map(input_data, |v: f32| v.sqrt());
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
+fn sqrt_f64(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+    let out = unary_map(input_data, |v: f64| v.sqrt());
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
+}
+
+fn rsqrt_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let out = unary_map(input_data, |v: f32| v.sqrt().recip());
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
+fn rsqrt_f64(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+    })?;
+    let out = unary_map(input_data, |v: f64| v.sqrt().recip());
+    Ok(TensorData::from_vec::<f64>(
+        out,
+        DataType::Float64,
+        tensor.device(),
+    ))
+}
+
 fn abs_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
@@ -310,7 +425,9 @@ fn sign_f32(tensor: &Tensor) -> Result<TensorData> {
     })?;
 
     let out = unary_map(input_data, |v: f32| {
-        if v > 0.0 {
+        if v.is_nan() {
+            v
+        } else if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0
@@ -331,7 +448,9 @@ fn sign_f64(tensor: &Tensor) -> Result<TensorData> {
     })?;
 
     let out = unary_map(input_data, |v: f64| {
-        if v > 0.0 {
+        if v.is_nan() {
+            v
+        } else if v > 0.0 {
             1.0
         } else if v < 0.0 {
             -1.0

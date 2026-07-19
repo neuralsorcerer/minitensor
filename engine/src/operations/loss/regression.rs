@@ -189,24 +189,35 @@ pub fn cross_entropy_loss(
     // Convert class indices to one-hot encoding if needed
     let targets_one_hot = prepare_classification_targets(predictions, targets)?;
 
-    // Apply log-softmax to predictions for numerical stability
+    // Apply log-softmax to predictions for numerical stability.
     let log_predictions_base = log_softmax(predictions, None)?;
     let softmax_predictions = exp(&log_predictions_base.detach())?;
+
+    // A *target* class whose predicted probability underflows to (numerically)
+    // zero must drive the loss to +inf. We force its log-prob to -inf so the
+    // one-hot product yields +inf. The mask is restricted to target classes:
+    // masking every near-zero class (the previous behavior) turned a non-target
+    // class's finite log-prob into -inf, and `0 * (-inf) = NaN` then poisoned
+    // the whole sum — so a confidently-correct prediction with a large logit
+    // gap produced NaN instead of ~0.
     let eps = match softmax_predictions.dtype() {
         DataType::Float32 => 1e-30,
         DataType::Float64 => 1e-300,
         _ => 0.0,
     };
-    let eps_template = Tensor::zeros(
+    let zeros = Tensor::zeros(
         softmax_predictions.shape().clone(),
         softmax_predictions.dtype(),
         softmax_predictions.device(),
         false,
     );
-    let eps_mask = comparison::eq(&eps_template, &eps_template)?;
-    let eps_tensor = masked_fill_scalar(&eps_template, &eps_mask, eps)?;
-    let zero_mask = comparison::le(&softmax_predictions, &eps_tensor)?;
-    let log_predictions = masked_fill_scalar(&log_predictions_base, &zero_mask, f64::NEG_INFINITY)?;
+    let eps_mask = comparison::eq(&zeros, &zeros)?;
+    let eps_tensor = masked_fill_scalar(&zeros, &eps_mask, eps)?;
+    let low_prob = comparison::le(&softmax_predictions, &eps_tensor)?;
+    let target_present = comparison::gt(&targets_one_hot, &zeros)?;
+    let target_underflow = mul(&low_prob, &target_present)?; // bool AND
+    let log_predictions =
+        masked_fill_scalar(&log_predictions_base, &target_underflow, f64::NEG_INFINITY)?;
 
     // Compute negative log likelihood summed over classes
     let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
