@@ -628,10 +628,7 @@ mod tests {
         // semantics) until the graph/gradients are cleared.
         clear_graph().unwrap();
         let x = Tensor::new(
-            Arc::new(TensorData::from_vec_f32(
-                vec![1.0, 2.0, 3.0],
-                Device::cpu(),
-            )),
+            Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),
             Shape::new(vec![3]),
             DataType::Float32,
             Device::cpu(),

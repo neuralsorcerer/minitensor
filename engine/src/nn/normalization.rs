@@ -522,7 +522,11 @@ mod tests {
         assert_eq!(layer.buffers().len(), 2);
         let sd = layer.state_dict();
         assert_eq!(sd.parameters.len(), 2);
-        assert_eq!(sd.buffers.len(), 2, "running_mean and running_var must serialize");
+        assert_eq!(
+            sd.buffers.len(),
+            2,
+            "running_mean and running_var must serialize"
+        );
         assert!(sd.buffers.contains_key("buffer_0"));
         assert!(sd.buffers.contains_key("buffer_1"));
     }

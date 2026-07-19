@@ -413,10 +413,7 @@ fn test_cross_entropy_confident_correct_prediction_is_finite() {
         false,
     );
     let target = Tensor::new(
-        Arc::new(TensorData::from_vec_f32(
-            vec![1.0, 0.0, 0.0],
-            Device::cpu(),
-        )),
+        Arc::new(TensorData::from_vec_f32(vec![1.0, 0.0, 0.0], Device::cpu())),
         Shape::new(vec![1, 3]),
         DataType::Float32,
         Device::cpu(),

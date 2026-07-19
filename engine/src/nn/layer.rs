@@ -146,7 +146,8 @@ pub trait Module: Layer {
         if named_buffers.is_empty() {
             let mut bufs = self.buffers_mut();
             for (i, buf_ref) in bufs.iter_mut().enumerate() {
-                if let Ok(loaded_tensor) = state_dict.load_buffer(&format!("buffer_{}", i), device) {
+                if let Ok(loaded_tensor) = state_dict.load_buffer(&format!("buffer_{}", i), device)
+                {
                     **buf_ref = loaded_tensor;
                 }
             }
