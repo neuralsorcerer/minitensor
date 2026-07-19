@@ -568,6 +568,64 @@ mask); the comparison and maximum numbers include the `Vec<bool>`
 reinterpret. Full suites pass on both sides of the change: 647 Rust
 tests, 865 Python tests (5 skipped).
 
+Completed in the ninth change set (view/copy/cast paths onto producer
+buffers):
+
+- **`astype` rebuilt.** The 20 hand-copied cast arms (5×4 dtype pairs, each
+  fetching src+dst and filling a zeroed buffer) collapsed into one nested
+  macro over `unary_map` producers. Two behavioral fixes rode along: casts
+  now parallelize consistently, and a non-contiguous tensor (e.g. an
+  `expand` view) is materialized before casting — the old zip-based fill
+  silently zero-padded the tail in that case. `astype` sits under
+  `coerce_binary_operands`, so every mixed-dtype binary op benefits.
+- **`contiguous()` gathers in parallel.** The old
+  `copy_strided_to_contiguous` was fully sequential and recomputed the
+  source offset from scratch for every element; the new
+  `operations::map::strided_gather` keeps a running offset with the same
+  incremental mixed-radix walk the broadcast kernels use, parallelizes
+  above the map threshold, and produces the buffer directly (no zeroing
+  pass). `transpose`'s generic path now rides the same primitive — a
+  permuted-stride gather — and its 2-D fast path writes through spare
+  capacity; the op previously allocated with `zeros_on_device` (a full
+  memset) before overwriting every element. The five hand-written
+  `transpose_*` dtype wrappers became one macro arm.
+- **`where` is 4× faster.** Both of its kernel paths (same-shape and
+  broadcast) were sequential; the producer rewrite parallelizes both above
+  the binary threshold and drops the zeroing pass.
+- **`triu`/`tril` are single-pass.** Previously: zero-init (memset) +
+  full memcpy + selective re-zeroing, all sequential. Now: one row-parallel
+  pass that writes each element exactly once (kept range copied, the rest
+  zeroed), shared by the forward op and `TriangularBackward`.
+- **One regression caught and fixed during conversion:** the `contiguous`
+  rewrite initially dropped the `CloneBackward` attachment, severing
+  gradient flow through materialized views (broadcast `pow`, batched
+  matmul). Only the Python differential suite caught it — the engine suite
+  had no test for gradient flow through `contiguous` — so the fix landed
+  with engine-level regression tests (`test_contiguous_participates_in_
+  autograd`, `test_contiguous_matches_strided_view_values`).
+
+Deliberately left fill-style: `cumsum`/`cumprod` (genuine sequential scan
+dependence along the scan dimension; the memset is minor next to the
+scan), `diagonal` (small outputs), and the softmax rows as before.
+
+Benchmarks for the ninth change set (same interleaved A/B protocol,
+change-set-8 wheel as baseline; 2000×2000 f32 unless noted; median of
+per-round best over 3 rounds):
+
+| Benchmark | Change set 8 | Change set 9 | Delta |
+|---|---|---|---|
+| transpose | 3.8 ms | 2.8 ms | −26 % |
+| permute (64³, generic path) | 3.7 ms | 2.4 ms | −36 % |
+| astype f32→f64 | 1.8 ms | 0.49 ms | **−73 %** |
+| astype f32→i64 | 2.6 ms | 1.3 ms | −51 % |
+| astype i64→f32 | 1.3 ms | 0.67 ms | −49 % |
+| where | 22.5 ms | 5.4 ms | **−76 %** |
+| triu | 5.5 ms | 0.78 ms | **−86 %** |
+| add with dtype coercion (f32 + i64) | 3.1 ms | 2.4 ms | −22 % |
+
+Suites green on both sides: 651 Rust tests (3 new), 865 Python tests
+(5 skipped).
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation

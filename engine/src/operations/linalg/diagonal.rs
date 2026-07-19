@@ -47,48 +47,33 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     let mut new_strides = old_strides.to_vec();
     new_strides.swap(dim0_usize, dim1_usize);
 
-    // Create output tensor data by copying and rearranging
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    // Perform transpose based on data type
-    match tensor.dtype() {
-        DataType::Float32 => transpose_f32(
-            tensor,
-            &mut output_data,
-            &new_shape_obj,
-            dim0_usize,
-            dim1_usize,
-        )?,
-        DataType::Float64 => transpose_f64(
-            tensor,
-            &mut output_data,
-            &new_shape_obj,
-            dim0_usize,
-            dim1_usize,
-        )?,
-        DataType::Int32 => transpose_i32(
-            tensor,
-            &mut output_data,
-            &new_shape_obj,
-            dim0_usize,
-            dim1_usize,
-        )?,
-        DataType::Int64 => transpose_i64(
-            tensor,
-            &mut output_data,
-            &new_shape_obj,
-            dim0_usize,
-            dim1_usize,
-        )?,
-        DataType::Bool => transpose_bool(
-            tensor,
-            &mut output_data,
-            &new_shape_obj,
-            dim0_usize,
-            dim1_usize,
-        )?,
+    /// One dtype arm: transpose into a fresh buffer (previously this
+    /// allocated with `zeros_on_device` — a full memset — and then
+    /// overwrote every element).
+    macro_rules! transpose_arm {
+        ($accessor:ident, $ty:ty, $tyname:literal) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input tensor"
+                ))
+            })?;
+            TensorData::from_vec::<$ty>(
+                transpose_map(input, tensor.shape(), &new_shape_obj, dim0_usize, dim1_usize),
+                tensor.dtype(),
+                tensor.device(),
+            )
+        }};
     }
+
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => transpose_arm!(as_f32_slice, f32, "f32"),
+        DataType::Float64 => transpose_arm!(as_f64_slice, f64, "f64"),
+        DataType::Int32 => transpose_arm!(as_i32_slice, i32, "i32"),
+        DataType::Int64 => transpose_arm!(as_i64_slice, i64, "i64"),
+        DataType::Bool => transpose_arm!(as_bool_slice, bool, "bool"),
+    };
 
     // Create output tensor
     let output = Tensor::new(
@@ -265,10 +250,7 @@ fn triangular_op(tensor: &Tensor, diagonal: i64, upper: bool) -> Result<Tensor> 
 
     let clamped_diagonal = diagonal.clamp(isize::MIN as i64, isize::MAX as i64) as isize;
 
-    let mut output_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    apply_triangular_mask(tensor, &mut output_data, clamped_diagonal, upper)?;
+    let output_data = apply_triangular_mask(tensor, clamped_diagonal, upper)?;
 
     let mut output = Tensor::new(
         Arc::new(output_data),
@@ -296,113 +278,96 @@ fn triangular_op(tensor: &Tensor, diagonal: i64, upper: bool) -> Result<Tensor> 
 
 pub(crate) fn apply_triangular_mask(
     tensor: &Tensor,
-    output_data: &mut TensorData,
     diagonal: isize,
     upper: bool,
-) -> Result<()> {
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from tensor")
+) -> Result<TensorData> {
+    /// One dtype arm: build the masked copy in a single pass (previously:
+    /// zero-init + memcpy + selective zeroing, all sequential).
+    macro_rules! mask_arm {
+        ($accessor:ident, $ty:ty, $tyname:literal) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from tensor"
+                ))
             })?;
-            let output = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f32 slice for triangular output",
-                )
-            })?;
-            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
-        }
-        DataType::Float64 => {
-            let input = tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from tensor")
-            })?;
-            let output = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable f64 slice for triangular output",
-                )
-            })?;
-            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
-        }
-        DataType::Int32 => {
-            let input = tensor.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from tensor")
-            })?;
-            let output = output_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable i32 slice for triangular output",
-                )
-            })?;
-            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
-        }
-        DataType::Int64 => {
-            let input = tensor.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from tensor")
-            })?;
-            let output = output_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable i64 slice for triangular output",
-                )
-            })?;
-            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
-        }
-        DataType::Bool => {
-            let input = tensor.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from tensor")
-            })?;
-            let output = output_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error(
-                    "Failed to get mutable bool slice for triangular output",
-                )
-            })?;
-            copy_and_mask(input, output, tensor.shape(), diagonal, upper);
-        }
+            TensorData::from_vec::<$ty>(
+                triangular_mask_map(input, tensor.shape(), diagonal, upper),
+                tensor.dtype(),
+                tensor.device(),
+            )
+        }};
     }
 
-    Ok(())
+    Ok(match tensor.dtype() {
+        DataType::Float32 => mask_arm!(as_f32_slice, f32, "f32"),
+        DataType::Float64 => mask_arm!(as_f64_slice, f64, "f64"),
+        DataType::Int32 => mask_arm!(as_i32_slice, i32, "i32"),
+        DataType::Int64 => mask_arm!(as_i64_slice, i64, "i64"),
+        DataType::Bool => mask_arm!(as_bool_slice, bool, "bool"),
+    })
 }
 
-fn copy_and_mask<T: Copy + Default>(
+/// Copy `input` while zeroing the elements outside the requested triangle.
+/// Row-parallel single pass: each output row is either copied and partially
+/// zeroed according to the diagonal offset. Every element is written exactly
+/// once.
+fn triangular_mask_map<T: Copy + Default + Send + Sync>(
     input: &[T],
-    output: &mut [T],
     shape: &Shape,
     diagonal: isize,
     upper: bool,
-) {
-    if input.is_empty() {
-        return;
-    }
+) -> Vec<T> {
+    use std::mem::MaybeUninit;
 
-    output.copy_from_slice(input);
+    if input.is_empty() {
+        return Vec::new();
+    }
 
     let dims = shape.dims();
     debug_assert!(dims.len() >= 2);
     let rows = dims[dims.len() - 2];
     let cols = dims[dims.len() - 1];
-
-    if rows == 0 || cols == 0 {
-        return;
-    }
-
-    let batch = shape.numel() / (rows * cols);
+    let numel = input.len();
     let zero = T::default();
 
-    for b in 0..batch {
-        let base = b * rows * cols;
-        for r in 0..rows {
-            let row_offset = base + r * cols;
-            let row_idx = r as isize;
-            for c in 0..cols {
-                let col_idx = c as isize;
-                let keep = if upper {
-                    col_idx - row_idx >= diagonal
-                } else {
-                    col_idx - row_idx <= diagonal
-                };
-                if !keep {
-                    output[row_offset + c] = zero;
-                }
+    // For output row r (within its matrix), the kept column range is
+    // upper: [max(0, r + diagonal), cols)   lower: [0, min(cols, r + diagonal + 1)).
+    let fill_row = |row_idx: usize, row: &mut [MaybeUninit<T>]| {
+        let r = (row_idx % rows) as isize;
+        let base = row_idx * cols;
+        let (keep_start, keep_end) = if upper {
+            ((r + diagonal).clamp(0, cols as isize) as usize, cols)
+        } else {
+            (0, (r + diagonal + 1).clamp(0, cols as isize) as usize)
+        };
+        for (c, slot) in row.iter_mut().enumerate() {
+            if c >= keep_start && c < keep_end {
+                slot.write(input[base + c]);
+            } else {
+                slot.write(zero);
             }
         }
+    };
+
+    // SAFETY: rows partition the buffer exactly and `fill_row` writes every
+    // element of its row.
+    unsafe {
+        crate::operations::map::build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
+            if numel < crate::operations::map::PAR_THRESHOLD {
+                for (row_idx, row) in spare.chunks_mut(cols).enumerate() {
+                    fill_row(row_idx, row);
+                }
+            } else {
+                spare
+                    .par_chunks_mut(cols)
+                    .enumerate()
+                    .for_each(|(row_idx, row)| fill_row(row_idx, row));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
     }
 }
 
@@ -652,127 +617,7 @@ fn optimized_matmul_f64(
 
 // Helper functions for transpose operations
 
-fn transpose_f32(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-    dim0: usize,
-    dim1: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
 
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
 
-    transpose_generic(
-        input_data,
-        output_slice,
-        tensor.shape(),
-        output_shape,
-        dim0,
-        dim1,
-    )
-}
 
-fn transpose_f64(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-    dim0: usize,
-    dim1: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
 
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    transpose_generic(
-        input_data,
-        output_slice,
-        tensor.shape(),
-        output_shape,
-        dim0,
-        dim1,
-    )
-}
-
-fn transpose_i32(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-    dim0: usize,
-    dim1: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_i32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
-    })?;
-
-    transpose_generic(
-        input_data,
-        output_slice,
-        tensor.shape(),
-        output_shape,
-        dim0,
-        dim1,
-    )
-}
-
-fn transpose_i64(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-    dim0: usize,
-    dim1: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_i64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
-    })?;
-
-    transpose_generic(
-        input_data,
-        output_slice,
-        tensor.shape(),
-        output_shape,
-        dim0,
-        dim1,
-    )
-}
-
-fn transpose_bool(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-    dim0: usize,
-    dim1: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_bool_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable bool slice from output data")
-    })?;
-
-    transpose_generic(
-        input_data,
-        output_slice,
-        tensor.shape(),
-        output_shape,
-        dim0,
-        dim1,
-    )
-}

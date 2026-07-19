@@ -11,6 +11,7 @@ use crate::{
     operations::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -54,104 +55,49 @@ pub fn where_op(condition: &Tensor, input: &Tensor, other: &Tensor) -> Result<Te
     let tmp_shape = condition.shape().broadcast_with(input_tensor.shape())?;
     let output_shape = tmp_shape.broadcast_with(other_tensor.shape())?;
 
-    let mut output_data = TensorData::uninitialized_on_device(
-        output_shape.numel(),
-        result_dtype,
-        input_tensor.device(),
-    );
-
-    match result_dtype {
-        DataType::Float32 => where_kernel(
-            condition.data().as_bool_slice().ok_or_else(|| {
+    /// One dtype arm: run the where selection into a fresh buffer.
+    macro_rules! where_arm {
+        ($accessor:ident, $ty:ty, $tyname:literal) => {{
+            let input_slice = input_tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input tensor"
+                ))
+            })?;
+            let other_slice = other_tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from other tensor"
+                ))
+            })?;
+            let cond_slice = condition.data().as_bool_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get bool slice from condition tensor")
-            })?,
-            input_tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-            })?,
-            other_tensor.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from other tensor")
-            })?,
-            output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice for where output")
-            })?,
-            condition.shape(),
-            input_tensor.shape(),
-            other_tensor.shape(),
-            &output_shape,
-        )?,
-        DataType::Float64 => where_kernel(
-            condition.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from condition tensor")
-            })?,
-            input_tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-            })?,
-            other_tensor.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from other tensor")
-            })?,
-            output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice for where output")
-            })?,
-            condition.shape(),
-            input_tensor.shape(),
-            other_tensor.shape(),
-            &output_shape,
-        )?,
-        DataType::Int32 => where_kernel(
-            condition.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from condition tensor")
-            })?,
-            input_tensor.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from input tensor")
-            })?,
-            other_tensor.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice from other tensor")
-            })?,
-            output_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice for where output")
-            })?,
-            condition.shape(),
-            input_tensor.shape(),
-            other_tensor.shape(),
-            &output_shape,
-        )?,
-        DataType::Int64 => where_kernel(
-            condition.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from condition tensor")
-            })?,
-            input_tensor.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from input tensor")
-            })?,
-            other_tensor.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice from other tensor")
-            })?,
-            output_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice for where output")
-            })?,
-            condition.shape(),
-            input_tensor.shape(),
-            other_tensor.shape(),
-            &output_shape,
-        )?,
-        DataType::Bool => where_kernel(
-            condition.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from condition tensor")
-            })?,
-            input_tensor.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from input tensor")
-            })?,
-            other_tensor.data().as_bool_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get bool slice from other tensor")
-            })?,
-            output_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice for where output")
-            })?,
-            condition.shape(),
-            input_tensor.shape(),
-            other_tensor.shape(),
-            &output_shape,
-        )?,
+            })?;
+            TensorData::from_vec::<$ty>(
+                where_map(
+                    cond_slice,
+                    input_slice,
+                    other_slice,
+                    condition.shape(),
+                    input_tensor.shape(),
+                    other_tensor.shape(),
+                    &output_shape,
+                )?,
+                result_dtype,
+                input_tensor.device(),
+            )
+        }};
     }
+
+    let output_data = match result_dtype {
+        DataType::Float32 => where_arm!(as_f32_slice, f32, "f32"),
+        DataType::Float64 => where_arm!(as_f64_slice, f64, "f64"),
+        DataType::Int32 => where_arm!(as_i32_slice, i32, "i32"),
+        DataType::Int64 => where_arm!(as_i64_slice, i64, "i64"),
+        DataType::Bool => where_arm!(as_bool_slice, bool, "bool"),
+    };
 
     let requires_grad = input.requires_grad() || other.requires_grad();
     let mut output = Tensor::new(
@@ -434,18 +380,25 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
     Ok(())
 }
 
-fn where_kernel<T: Copy>(
+/// Select `input[i]` where `condition[i]` else `other[i]`, with NumPy
+/// broadcasting, into a fresh fully-initialized buffer. Parallel above the
+/// binary threshold on both the same-shape and the broadcast path (the
+/// previous fill-style kernel was sequential on both).
+fn where_map<T: Copy + Send + Sync>(
     condition: &[bool],
     input: &[T],
     other: &[T],
-    output: &mut [T],
     condition_shape: &Shape,
     input_shape: &Shape,
     other_shape: &Shape,
     output_shape: &Shape,
-) -> Result<()> {
-    if output.is_empty() {
-        return Ok(());
+) -> Result<Vec<T>> {
+    use crate::operations::map::{BINARY_PAR_THRESHOLD, PAR_CHUNK, build_vec_with};
+    use std::mem::MaybeUninit;
+
+    let numel = output_shape.numel();
+    if numel == 0 {
+        return Ok(Vec::new());
     }
 
     let output_dims = output_shape.dims();
@@ -454,19 +407,34 @@ fn where_kernel<T: Copy>(
     let same_shape = condition_shape.dims() == output_dims
         && input_shape.dims() == output_dims
         && other_shape.dims() == output_dims
-        && condition.len() == output.len()
-        && input.len() == output.len()
-        && other.len() == output.len();
+        && condition.len() == numel
+        && input.len() == numel
+        && other.len() == numel;
 
     if same_shape {
-        for ((out, &mask), (&lhs, &rhs)) in output
-            .iter_mut()
-            .zip(condition.iter())
-            .zip(input.iter().zip(other.iter()))
-        {
-            *out = if mask { lhs } else { rhs };
-        }
-        return Ok(());
+        let fill_chunk = |start: usize, chunk: &mut [MaybeUninit<T>]| {
+            for (k, slot) in chunk.iter_mut().enumerate() {
+                let i = start + k;
+                slot.write(if condition[i] { input[i] } else { other[i] });
+            }
+        };
+        // SAFETY: the chunks partition the spare slice and every element of
+        // each chunk is written.
+        let out = unsafe {
+            build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
+                if numel < BINARY_PAR_THRESHOLD {
+                    fill_chunk(0, spare);
+                } else {
+                    spare
+                        .par_chunks_mut(PAR_CHUNK)
+                        .enumerate()
+                        .for_each(|(ci, chunk)| fill_chunk(ci * PAR_CHUNK, chunk));
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|e| match e {})
+        };
+        return Ok(out);
     }
 
     let cond_strides = Strides::from_shape(condition_shape);
@@ -500,35 +468,58 @@ fn where_kernel<T: Copy>(
         other_aligned[other_offset + i] = if dim == 1 { 0 } else { other_stride_slice[i] };
     }
 
-    let cond_ptr = condition.as_ptr();
-    let input_ptr = input.as_ptr();
-    let other_ptr = other.as_ptr();
-
-    for (idx, out) in output.iter_mut().enumerate() {
-        let mut tmp = idx;
+    let fill_chunk = |start: usize, chunk: &mut [MaybeUninit<T>]| {
+        let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
+        let mut tmp = start;
         let mut cond_index = 0usize;
         let mut input_index = 0usize;
         let mut other_index = 0usize;
-
         for dim in (0..rank).rev() {
-            let coord = tmp % output_dims[dim];
+            coord[dim] = tmp % output_dims[dim];
             tmp /= output_dims[dim];
-
-            cond_index += coord * cond_aligned[dim];
-            input_index += coord * input_aligned[dim];
-            other_index += coord * other_aligned[dim];
+            cond_index += coord[dim] * cond_aligned[dim];
+            input_index += coord[dim] * input_aligned[dim];
+            other_index += coord[dim] * other_aligned[dim];
         }
+        for slot in chunk.iter_mut() {
+            slot.write(if condition[cond_index] {
+                input[input_index]
+            } else {
+                other[other_index]
+            });
+            for dim in (0..rank).rev() {
+                coord[dim] += 1;
+                cond_index += cond_aligned[dim];
+                input_index += input_aligned[dim];
+                other_index += other_aligned[dim];
+                if coord[dim] < output_dims[dim] {
+                    break;
+                }
+                coord[dim] = 0;
+                cond_index -= cond_aligned[dim] * output_dims[dim];
+                input_index -= input_aligned[dim] * output_dims[dim];
+                other_index -= other_aligned[dim] * output_dims[dim];
+            }
+        }
+    };
 
-        let mask = unsafe { *cond_ptr.add(cond_index) };
-        let chosen = if mask {
-            unsafe { *input_ptr.add(input_index) }
-        } else {
-            unsafe { *other_ptr.add(other_index) }
-        };
-        *out = chosen;
-    }
-
-    Ok(())
+    // SAFETY: the chunks partition the spare slice and the walker writes
+    // every element of each chunk.
+    let out = unsafe {
+        build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
+            if numel < BINARY_PAR_THRESHOLD {
+                fill_chunk(0, spare);
+            } else {
+                spare
+                    .par_chunks_mut(PAR_CHUNK)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| fill_chunk(ci * PAR_CHUNK, chunk));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
+    };
+    Ok(out)
 }
 
 fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {

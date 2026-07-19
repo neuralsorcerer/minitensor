@@ -270,6 +270,50 @@ mod tests {
     }
 
     #[test]
+    fn test_contiguous_participates_in_autograd() {
+        // `contiguous()` materializes a copy but must keep gradient flow to
+        // the source (identity backward). Regression test: the producer-buffer
+        // rewrite once dropped the CloneBackward attachment, which only the
+        // Python differential suite caught.
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
+        let tensor = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![1, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let expanded = tensor.expand(vec![2, 3]).unwrap();
+        let materialized = expanded.contiguous().unwrap();
+        assert!(materialized.requires_grad());
+        assert!(materialized.grad_fn().is_some());
+
+        let loss = crate::operations::reduction::sum(&materialized, None, false).unwrap();
+        let grads = crate::autograd::backward_collect(&loss, None).unwrap();
+        let grad = grads.get(&tensor.id()).expect("source tensor gradient");
+        // Each source element is broadcast into 2 rows, so its gradient is 2.
+        assert_eq!(grad.data().as_f32_slice().unwrap(), &[2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn test_contiguous_matches_strided_view_values() {
+        // transpose().contiguous() must gather through the view's strides.
+        let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], Device::cpu());
+        let tensor = Tensor::new(
+            Arc::new(data),
+            Shape::new(vec![2, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let transposed = tensor.transpose(0, 1).unwrap();
+        assert_eq!(
+            transposed.data().as_f32_slice().unwrap(),
+            &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
     fn test_reshape_materializes_non_contiguous_tensor() {
         let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
         let tensor = Tensor::new(

@@ -865,38 +865,3 @@ impl Tensor {
         self.grad_fn.is_none()
     }
 }
-
-pub(super) fn copy_strided_to_contiguous<T: Copy>(
-    src: &[T],
-    dst: &mut [T],
-    shape: &[usize],
-    strides: &[usize],
-) {
-    if dst.is_empty() {
-        return;
-    }
-
-    if shape.is_empty() {
-        dst[0] = src[0];
-        return;
-    }
-
-    let ndim = shape.len();
-    let mut index = vec![0usize; ndim];
-
-    for value in dst.iter_mut() {
-        let mut offset = 0usize;
-        for (&idx, &stride) in index.iter().zip(strides.iter()) {
-            offset += idx * stride;
-        }
-        *value = src[offset];
-
-        for dim in (0..ndim).rev() {
-            index[dim] += 1;
-            if index[dim] < shape[dim] {
-                break;
-            }
-            index[dim] = 0;
-        }
-    }
-}

@@ -832,12 +832,8 @@ impl GradientFunction for TriangularBackward {
                 ));
             }
 
-            let mut grad_data = TensorData::uninitialized_on_device(
-                grad_output.numel(),
-                grad_output.dtype(),
-                grad_output.device(),
-            );
-            linalg::apply_triangular_mask(grad_output, &mut grad_data, self.diagonal, self.upper)?;
+            let grad_data =
+                linalg::apply_triangular_mask(grad_output, self.diagonal, self.upper)?;
             let grad = Tensor::new(
                 Arc::new(grad_data),
                 grad_output.shape().clone(),

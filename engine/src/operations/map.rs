@@ -20,6 +20,7 @@
 //! orders ([`build_vec_with`]) is an `unsafe fn` with an explicit contract.
 
 use rayon::prelude::*;
+use smallvec::{SmallVec, smallvec};
 use std::mem::MaybeUninit;
 
 /// Element count above which unary kernels switch to parallel execution.
@@ -148,6 +149,73 @@ where
     }
 }
 
+/// Gather a strided view into a fresh contiguous (row-major) buffer.
+///
+/// `dims`/`strides` describe the source view (element strides; stride 0 is
+/// valid and repeats the element, as `expand` produces). Every output element
+/// is written exactly once, so no zeroing pass is needed. Out-of-bounds
+/// views panic via safe indexing rather than reading out of bounds.
+///
+/// Replaces the previous `copy_strided_to_contiguous`, which was fully
+/// sequential and recomputed the source offset from scratch for every
+/// element; this walker maintains a running offset and parallelizes above
+/// [`PAR_THRESHOLD`].
+pub(crate) fn strided_gather<T: Copy + Send + Sync>(
+    src: &[T],
+    dims: &[usize],
+    strides: &[usize],
+) -> Vec<T> {
+    debug_assert_eq!(dims.len(), strides.len());
+    if dims.is_empty() {
+        return vec![src[0]];
+    }
+    let numel: usize = dims.iter().product();
+    if numel == 0 {
+        return Vec::new();
+    }
+    let rank = dims.len();
+
+    let walk = |start: usize, chunk: &mut [MaybeUninit<T>]| {
+        let mut index: SmallVec<[usize; 8]> = smallvec![0; rank];
+        let mut offset = 0usize;
+        let mut tmp = start;
+        for i in (0..rank).rev() {
+            index[i] = tmp % dims[i];
+            tmp /= dims[i];
+            offset += index[i] * strides[i];
+        }
+        for o in chunk.iter_mut() {
+            o.write(src[offset]);
+            for dim in (0..rank).rev() {
+                index[dim] += 1;
+                offset += strides[dim];
+                if index[dim] < dims[dim] {
+                    break;
+                }
+                index[dim] = 0;
+                offset -= strides[dim] * dims[dim];
+            }
+        }
+    };
+
+    // SAFETY: both paths write every element of the spare slice (the chunks
+    // partition it exactly).
+    unsafe {
+        build_vec_with::<T, std::convert::Infallible, _>(numel, |spare| {
+            if numel < PAR_THRESHOLD {
+                walk(0, spare);
+            } else {
+                spare
+                    .par_chunks_mut(PAR_CHUNK)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| walk(ci * PAR_CHUNK, chunk));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +243,32 @@ mod tests {
             let b: Vec<i64> = (0..len).map(|i| (i * 3) as i64).collect();
             let expected: Vec<i64> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
             assert_eq!(binary_map(&a, &b, |x: i64, y: i64| x + y), expected, "{len}");
+        }
+    }
+
+    #[test]
+    fn strided_gather_handles_views_and_scalars() {
+        // 2x3 row-major identity gather
+        let src = [1, 2, 3, 4, 5, 6];
+        assert_eq!(strided_gather(&src, &[2, 3], &[3, 1]), vec![1, 2, 3, 4, 5, 6]);
+        // transpose view: dims [3,2], strides [1,3]
+        assert_eq!(strided_gather(&src, &[3, 2], &[1, 3]), vec![1, 4, 2, 5, 3, 6]);
+        // broadcast (stride 0) view: one row repeated
+        assert_eq!(
+            strided_gather(&src[..3], &[2, 3], &[0, 1]),
+            vec![1, 2, 3, 1, 2, 3]
+        );
+        // 0-d
+        assert_eq!(strided_gather(&src, &[], &[]), vec![1]);
+        // empty
+        assert_eq!(strided_gather(&src, &[0, 3], &[3, 1]), Vec::<i32>::new());
+        // parallel path matches sequential reference
+        let big: Vec<i64> = (0..10_000).collect();
+        let gathered = strided_gather(&big, &[100, 100], &[1, 100]);
+        for r in 0..100 {
+            for c in 0..100 {
+                assert_eq!(gathered[r * 100 + c], big[c * 100 + r]);
+            }
         }
     }
 
