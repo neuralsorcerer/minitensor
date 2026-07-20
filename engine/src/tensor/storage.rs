@@ -177,24 +177,32 @@ impl TensorData {
         vec![0u8; size_bytes]
     }
 
-    /// Allocate a CPU buffer for an operation output.
+    /// Allocate a CPU buffer for an operation output obtained through
+    /// [`Self::uninitialized_on_device`].
     ///
-    /// This is always zero-initialized. The kernels immediately overwrite it,
-    /// so the zeros are never observed — but allocating it uninitialized and
-    /// handing it out as `&mut [f32]`/`&mut [i64]`/… (which every kernel does)
-    /// is undefined behavior: a reference of type `&mut T` must point to a
-    /// *valid* `T`, and a float/integer read from uninitialized memory is not
-    /// a valid value even though every bit pattern is representable. Per the
-    /// project's stated priority order (correctness before performance),
-    /// soundness wins here.
+    /// **This buffer is zero-initialized and callers rely on that.** A kernel
+    /// that fetches it as `&mut [f32]`/`&mut [i64]`/… (via `as_*_slice_mut`)
+    /// and does not write every element would otherwise expose uninitialized
+    /// memory: `&mut T` must point to a *valid* `T`, and a float/integer read
+    /// from uninitialized memory is not a valid value even though every bit
+    /// pattern is representable. The zeroing makes any un-overwritten element a
+    /// defined zero rather than undefined behavior, so this must not be
+    /// weakened to a genuinely-uninitialized allocation while any such caller
+    /// exists (activation, reduction, and several autograd kernels still take
+    /// this path).
     ///
-    /// Measured cost (interleaved A/B, release, this machine): the extra
-    /// `memset` adds ~25–35% to the pure element-wise microbenchmark
-    /// (`add`+`sum` over a 2000×2000 tensor — bound by output write traffic,
-    /// which the zeroing roughly increases from 3N to 4N), and is within
-    /// noise on the matmul-dominated training-step benchmark. The zero-cost
-    /// alternative is `MaybeUninit`-typed writes threaded through every
-    /// kernel; it is tracked in docs/architecture_review.md as future work.
+    /// The zero-cost alternative — writing each output element exactly once
+    /// through `MaybeUninit`, with no `memset` — is implemented in
+    /// [`crate::ops::map`] (`build_vec_with` and the `unary_map` /
+    /// `binary_map` / `strided_gather` / `broadcast_binary_map` combinators
+    /// built on it) and is what the element-wise arithmetic, `where`,
+    /// `tril`/`triu`, and gather kernels now use; those no longer allocate
+    /// through here at all. Migrating the remaining zero-then-overwrite kernels
+    /// onto that path is the tracked follow-up in docs/architecture_review.md.
+    ///
+    /// Measured cost of the `memset` this path still pays (interleaved A/B,
+    /// release): ~25–35% on the pure element-wise microbenchmark (bound by
+    /// output write traffic), within noise on matmul-dominated training steps.
     #[inline(always)]
     fn owned_buffer_for_dtype(size_bytes: usize, _dtype: DataType) -> Vec<u8> {
         Self::owned_zeroed_buffer(size_bytes)

@@ -171,7 +171,7 @@ impl Layer for Tanh {
 ///
 /// Applies the softmax function to an n-dimensional input tensor
 /// rescaling them so that the elements of the n-dimensional output tensor
-/// lie in the range [0,1] and sum to 1.
+/// lie in the range \[0, 1\] and sum to 1.
 #[derive(Clone)]
 pub struct Softmax {
     dim: Option<usize>,

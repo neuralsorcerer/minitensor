@@ -1026,7 +1026,7 @@ fn roll_forward(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Re
     }
 }
 
-/// Specification of repeat counts accepted by [`repeat_interleave`].
+/// Specification of repeat counts accepted by [`super::repeat_interleave`].
 #[derive(Clone, Copy)]
 pub enum RepeatInterleaveSpec<'a> {
     /// A single repeat value applied to every element along ``dim``.
