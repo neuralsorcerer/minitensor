@@ -14,6 +14,56 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+/// Sort each 1-D slice along a dimension, parallelizing over the outer index.
+///
+/// `values`/`indices` are partitioned into one disjoint chunk per outer
+/// position (`par_chunks_mut`), so the parallel writes never overlap and this
+/// stays safe. Each slice gathers `(original_index, value)` pairs, sorts them
+/// with `cmp` (so `indices` becomes the argsort), and scatters the result back.
+/// `dim`-0 sorts (`outer == 1`) simply run on a single chunk.
+#[allow(clippy::too_many_arguments)]
+fn sort_along_dim_par<T, C>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    outer: usize,
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    stable: bool,
+    cmp: C,
+) where
+    T: Copy + Send + Sync,
+    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+{
+    debug_assert_eq!(values.len(), outer * outer_stride);
+    debug_assert_eq!(indices.len(), outer * outer_stride);
+    values
+        .par_chunks_mut(outer_stride)
+        .zip(indices.par_chunks_mut(outer_stride))
+        .enumerate()
+        .for_each(|(o, (vchunk, ichunk))| {
+            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+            for r in 0..inner {
+                entries.clear();
+                let base = o * outer_stride + r;
+                for d in 0..dim_size {
+                    entries.push((d, input[base + d * inner]));
+                }
+                if stable {
+                    entries.sort_by(cmp);
+                } else {
+                    entries.sort_unstable_by(cmp);
+                }
+                for (j, (index, value)) in entries.iter().enumerate() {
+                    let off = r + j * inner;
+                    vchunk[off] = *value;
+                    ichunk[off] = *index as i64;
+                }
+            }
+        });
+}
+
 pub fn sort(
     tensor: &Tensor,
     dim: Option<isize>,
@@ -132,6 +182,41 @@ pub fn sort(
     };
     let outer_stride = dim_size * inner;
 
+    // Dispatch to the parallel kernel with the *ascending* or *descending*
+    // comparator passed as a function item (not through an `if`, which would
+    // coerce to a non-inlinable function pointer and slow the sort's inner
+    // comparisons). Passing the item lets the generic kernel monomorphize and
+    // inline the comparator.
+    macro_rules! run_sort {
+        ($input:expr, $values:expr, $indices:expr, $asc:expr, $desc:expr) => {
+            if descending {
+                sort_along_dim_par(
+                    $input,
+                    $values,
+                    $indices,
+                    outer,
+                    inner,
+                    dim_size,
+                    outer_stride,
+                    stable,
+                    $desc,
+                );
+            } else {
+                sort_along_dim_par(
+                    $input,
+                    $values,
+                    $indices,
+                    outer,
+                    inner,
+                    dim_size,
+                    outer_stride,
+                    stable,
+                    $asc,
+                );
+            }
+        };
+    }
+
     match tensor.dtype() {
         DataType::Float32 => {
             let input = tensor
@@ -145,35 +230,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    if stable {
-                        if descending {
-                            entries.sort_by(cmp_f32_desc);
-                        } else {
-                            entries.sort_by(cmp_f32_asc);
-                        }
-                    } else if descending {
-                        entries.sort_unstable_by(cmp_f32_desc);
-                    } else {
-                        entries.sort_unstable_by(cmp_f32_asc);
-                    }
-
-                    let base = o * outer_stride + r;
-                    for (j, (index, value)) in entries.iter().enumerate() {
-                        let offset = base + j * inner;
-                        values[offset] = *value;
-                        indices[offset] = *index as i64;
-                    }
-                }
-            }
+            run_sort!(input, values, indices, cmp_f32_asc, cmp_f32_desc);
         }
         DataType::Float64 => {
             let input = tensor
@@ -187,35 +244,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    if stable {
-                        if descending {
-                            entries.sort_by(cmp_f64_desc);
-                        } else {
-                            entries.sort_by(cmp_f64_asc);
-                        }
-                    } else if descending {
-                        entries.sort_unstable_by(cmp_f64_desc);
-                    } else {
-                        entries.sort_unstable_by(cmp_f64_asc);
-                    }
-
-                    let base = o * outer_stride + r;
-                    for (j, (index, value)) in entries.iter().enumerate() {
-                        let offset = base + j * inner;
-                        values[offset] = *value;
-                        indices[offset] = *index as i64;
-                    }
-                }
-            }
+            run_sort!(input, values, indices, cmp_f64_asc, cmp_f64_desc);
         }
         DataType::Int32 => {
             let input = tensor
@@ -229,35 +258,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    if stable {
-                        if descending {
-                            entries.sort_by(cmp_i32_desc);
-                        } else {
-                            entries.sort_by(cmp_i32_asc);
-                        }
-                    } else if descending {
-                        entries.sort_unstable_by(cmp_i32_desc);
-                    } else {
-                        entries.sort_unstable_by(cmp_i32_asc);
-                    }
-
-                    let base = o * outer_stride + r;
-                    for (j, (index, value)) in entries.iter().enumerate() {
-                        let offset = base + j * inner;
-                        values[offset] = *value;
-                        indices[offset] = *index as i64;
-                    }
-                }
-            }
+            run_sort!(input, values, indices, cmp_i32_asc, cmp_i32_desc);
         }
         DataType::Int64 => {
             let input = tensor
@@ -271,35 +272,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    if stable {
-                        if descending {
-                            entries.sort_by(cmp_i64_desc);
-                        } else {
-                            entries.sort_by(cmp_i64_asc);
-                        }
-                    } else if descending {
-                        entries.sort_unstable_by(cmp_i64_desc);
-                    } else {
-                        entries.sort_unstable_by(cmp_i64_asc);
-                    }
-
-                    let base = o * outer_stride + r;
-                    for (j, (index, value)) in entries.iter().enumerate() {
-                        let offset = base + j * inner;
-                        values[offset] = *value;
-                        indices[offset] = *index as i64;
-                    }
-                }
-            }
+            run_sort!(input, values, indices, cmp_i64_asc, cmp_i64_desc);
         }
         DataType::Bool => {
             let input = tensor
@@ -313,35 +286,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    if stable {
-                        if descending {
-                            entries.sort_by(cmp_bool_desc);
-                        } else {
-                            entries.sort_by(cmp_bool_asc);
-                        }
-                    } else if descending {
-                        entries.sort_unstable_by(cmp_bool_desc);
-                    } else {
-                        entries.sort_unstable_by(cmp_bool_asc);
-                    }
-
-                    let base = o * outer_stride + r;
-                    for (j, (index, value)) in entries.iter().enumerate() {
-                        let offset = base + j * inner;
-                        values[offset] = *value;
-                        indices[offset] = *index as i64;
-                    }
-                }
-            }
+            run_sort!(input, values, indices, cmp_bool_asc, cmp_bool_desc);
         }
     }
 
