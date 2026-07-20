@@ -36,6 +36,20 @@ def test_hardshrink_matches_numpy_and_grad():
     np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-6)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_hardshrink_propagates_nan(dtype):
+    # hardshrink must pass NaN through, like every other elementwise activation
+    # (and PyTorch). A NaN input compares false against both bounds; testing
+    # the finite-value complement `|x| > lambd` would drop NaN into the "zero"
+    # branch, silently turning NaN into 0.
+    tensor = mt.Tensor([float("nan"), 1.2, -0.2, 0.9], dtype=dtype)
+    out = tensor.hardshrink(lambd=0.3).numpy()
+    assert np.isnan(out[0])
+    np.testing.assert_allclose(
+        out[1:], np.array([1.2, 0.0, 0.9], dtype=out.dtype), rtol=1e-6
+    )
+
+
 def test_hardshrink_invalid_lambda():
     t = mt.Tensor([1.0])
     with pytest.raises(ValueError):

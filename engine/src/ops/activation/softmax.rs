@@ -255,13 +255,19 @@ pub(crate) fn hardshrink_f32(
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
+    // Phrase the dead-zone test as `-lambd <= v <= lambd` (PyTorch's form)
+    // rather than its finite-value complement `v > lambd || v < -lambd`. The
+    // two agree for every finite input, but for NaN the complement is false on
+    // both sides and would zero the NaN; testing the dead zone leaves NaN in
+    // the `else` branch so it passes through, matching PyTorch and the rest of
+    // minitensor's elementwise ops.
     let out = unary_map(
         input_data,
         |v: f32| {
-            if v > lambd || v < -lambd { v } else { 0.0 }
+            if v >= -lambd && v <= lambd { 0.0 } else { v }
         },
     );
-    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > lambd || v < -lambd));
+    let mask = store_mask.then(|| unary_map(input_data, |v: f32| !(v >= -lambd && v <= lambd)));
     Ok((
         TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
         mask,
@@ -277,13 +283,15 @@ pub(crate) fn hardshrink_f64(
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
+    // See `hardshrink_f32`: test the dead zone directly so a NaN input passes
+    // through instead of being zeroed by the finite-value complement.
     let out = unary_map(
         input_data,
         |v: f64| {
-            if v > lambd || v < -lambd { v } else { 0.0 }
+            if v >= -lambd && v <= lambd { 0.0 } else { v }
         },
     );
-    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > lambd || v < -lambd));
+    let mask = store_mask.then(|| unary_map(input_data, |v: f64| !(v >= -lambd && v <= lambd)));
     Ok((
         TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
         mask,
