@@ -16,17 +16,14 @@ homepage = "https://github.com/neuralsorcerer/minitensor#README"
 ndarray = "0.17"
 num-traits = "0.2"
 thiserror = "2.0"
-anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 once_cell = "1.21"
 
 # Memory management
-arc-swap = "1.9"
 parking_lot = "0.12"
 
 # SIMD and performance
 rayon = "1.12"
-wide = "1.5"
 matrixmultiply = { version = "0.3", features = ["threading"] }
 smallvec = "1.15"
 rustc-hash = "2.1"

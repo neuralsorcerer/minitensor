@@ -17,7 +17,6 @@ engine = { path = "../engine" }
 pyo3 = { workspace = true }
 numpy = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 once_cell = { workspace = true }
