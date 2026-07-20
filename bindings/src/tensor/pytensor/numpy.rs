@@ -69,14 +69,14 @@ impl PyTensor {
                 apply_binary_ufunc(&operands, BinaryOpKind::Add, |lhs, rhs| lhs.add(rhs))?
             }
             ("subtract", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Sub, |lhs, rhs| {
-                engine::operations::arithmetic::sub(lhs, rhs)
+                engine::ops::arithmetic::sub(lhs, rhs)
             })?,
             ("multiply", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Mul, |lhs, rhs| {
-                engine::operations::arithmetic::mul(lhs, rhs)
+                engine::ops::arithmetic::mul(lhs, rhs)
             })?,
             ("true_divide", 2) | ("divide", 2) => {
                 apply_binary_ufunc(&operands, BinaryOpKind::Div, |lhs, rhs| {
-                    engine::operations::arithmetic::div(lhs, rhs)
+                    engine::ops::arithmetic::div(lhs, rhs)
                 })?
             }
             ("power", 2) => {
@@ -88,9 +88,7 @@ impl PyTensor {
             ("minimum", 2) => apply_binary_ufunc(&operands, BinaryOpKind::Minimum, |lhs, rhs| {
                 lhs.minimum(rhs)
             })?,
-            ("negative", 1) => apply_unary_ufunc(&operands, |tensor| {
-                engine::operations::arithmetic::neg(tensor)
-            })?,
+            ("negative", 1) => apply_unary_ufunc(&operands, engine::ops::arithmetic::neg)?,
             ("absolute", 1) | ("abs", 1) => apply_unary_ufunc(&operands, |tensor| tensor.abs())?,
             ("exp", 1) => apply_unary_ufunc(&operands, |tensor| tensor.exp())?,
             ("log", 1) => apply_unary_ufunc(&operands, |tensor| tensor.log())?,

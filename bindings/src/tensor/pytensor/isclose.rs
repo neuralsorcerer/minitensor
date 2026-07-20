@@ -19,7 +19,7 @@ impl PyTensor {
         let atol = atol.unwrap_or(1e-8);
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
-        let result = engine::operations::comparison::isclose(&lhs, &rhs, rtol, atol, equal_nan)
+        let result = engine::ops::comparison::isclose(&lhs, &rhs, rtol, atol, equal_nan)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

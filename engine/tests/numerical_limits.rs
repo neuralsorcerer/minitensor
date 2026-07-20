@@ -6,7 +6,7 @@
 
 use engine::{
     device::Device,
-    operations::{activation, arithmetic, comparison, loss, reduction},
+    ops::{activation, arithmetic, comparison, loss, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;

@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{GradientFunction, TensorId};
-use crate::{error::Result, operations::arithmetic, tensor::Tensor};
+use crate::{error::Result, ops::arithmetic, tensor::Tensor};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;

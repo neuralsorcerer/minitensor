@@ -145,8 +145,8 @@ impl PyTensor {
     #[pyo3(signature = (*shape))]
     pub fn reshape(&self, shape: &Bound<PyTuple>) -> PyResult<Self> {
         let dims = normalize_variadic_isize_args(shape, "shape")?;
-        let reshaped = engine::operations::reshape_with_inference(&self.inner, dims)
-            .map_err(_convert_error)?;
+        let reshaped =
+            engine::ops::reshape_with_inference(&self.inner, dims).map_err(_convert_error)?;
         Ok(Self::from_tensor(reshaped))
     }
 
@@ -179,7 +179,7 @@ impl PyTensor {
             Ok(v) => vec![v],
             Err(_) => destination.extract()?,
         };
-        let result = engine::operations::shape_ops::movedim(&self.inner, &src_vec, &dst_vec)
+        let result = engine::ops::shape_ops::movedim(&self.inner, &src_vec, &dst_vec)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -208,15 +208,13 @@ impl PyTensor {
 
     #[pyo3(signature = (dim=None))]
     pub fn squeeze(&self, dim: Option<isize>) -> PyResult<Self> {
-        let result =
-            engine::operations::shape_ops::squeeze(&self.inner, dim).map_err(_convert_error)?;
+        let result = engine::ops::shape_ops::squeeze(&self.inner, dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     #[pyo3(signature = (dim))]
     pub fn unsqueeze(&self, dim: isize) -> PyResult<Self> {
-        let result =
-            engine::operations::shape_ops::unsqueeze(&self.inner, dim).map_err(_convert_error)?;
+        let result = engine::ops::shape_ops::unsqueeze(&self.inner, dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -247,7 +245,7 @@ impl PyTensor {
     pub fn flip(&self, dims: &Bound<PyAny>) -> PyResult<Self> {
         let dims_vec = normalize_required_axes(dims, "dims")?;
         let result =
-            engine::operations::shape_ops::flip(&self.inner, &dims_vec).map_err(_convert_error)?;
+            engine::ops::shape_ops::flip(&self.inner, &dims_vec).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -256,7 +254,7 @@ impl PyTensor {
         let shift_vec = normalize_roll_shifts(shifts)?;
         let dims_vec = normalize_optional_axes(dims)?;
         let dims_ref = dims_vec.as_deref();
-        let result = engine::operations::shape_ops::roll(&self.inner, &shift_vec, dims_ref)
+        let result = engine::ops::shape_ops::roll(&self.inner, &shift_vec, dims_ref)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -269,7 +267,7 @@ impl PyTensor {
         output_size: Option<usize>,
     ) -> PyResult<Self> {
         if let Ok(value) = repeats.extract::<usize>() {
-            let result = engine::operations::shape_ops::repeat_interleave(
+            let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Scalar(value),
                 dim,
@@ -292,7 +290,7 @@ impl PyTensor {
                 })?;
                 converted.push(value);
             }
-            let result = engine::operations::shape_ops::repeat_interleave(
+            let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Slice(&converted),
                 dim,
@@ -303,7 +301,7 @@ impl PyTensor {
         }
 
         if let Ok(py_tensor) = repeats.extract::<PyRef<PyTensor>>() {
-            let result = engine::operations::shape_ops::repeat_interleave(
+            let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
                 dim,
@@ -316,7 +314,7 @@ impl PyTensor {
         if let Ok(bound_attr) = repeats.getattr("_tensor")
             && let Ok(py_tensor) = bound_attr.extract::<PyRef<PyTensor>>()
         {
-            let result = engine::operations::shape_ops::repeat_interleave(
+            let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Tensor(py_tensor.tensor()),
                 dim,
@@ -333,14 +331,14 @@ impl PyTensor {
 
     #[pyo3(signature = (dim, start, length))]
     pub fn narrow(&self, dim: isize, start: usize, length: usize) -> PyResult<Self> {
-        let result = engine::operations::shape_ops::narrow(&self.inner, dim, start, length)
+        let result = engine::ops::shape_ops::narrow(&self.inner, dim, start, length)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     #[pyo3(signature = (start_dim=0, end_dim=-1))]
     pub fn flatten(&self, start_dim: isize, end_dim: isize) -> PyResult<Self> {
-        let result = engine::operations::shape_ops::flatten(&self.inner, start_dim, end_dim)
+        let result = engine::ops::shape_ops::flatten(&self.inner, start_dim, end_dim)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

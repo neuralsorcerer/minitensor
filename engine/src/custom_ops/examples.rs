@@ -7,7 +7,7 @@
 use super::*;
 use crate::{
     error::Result,
-    operations::{activation, arithmetic},
+    ops::{activation, arithmetic},
     tensor::{DataType, Shape, Tensor},
 };
 use rustc_hash::FxHashMap;

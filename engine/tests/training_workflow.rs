@@ -6,7 +6,7 @@
 
 use engine::{
     autograd,
-    operations::{arithmetic, linalg, reduction},
+    ops::{arithmetic, linalg, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;

@@ -8,7 +8,7 @@ use approx::assert_relative_eq;
 use engine::{
     autograd,
     device::Device,
-    operations::{
+    ops::{
         activation, arithmetic, comparison, linalg,
         reduction::{self, QuantileInterpolation},
         shape_ops,

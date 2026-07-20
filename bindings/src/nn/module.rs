@@ -27,10 +27,10 @@ use engine::nn::{
     normalization::{BatchNorm1d, BatchNorm2d},
     utils::{LayerUtils, SequentialUtils},
 };
-use engine::operations::batch_norm as batch_norm_op;
-use engine::operations::conv2d as conv2d_op;
-use engine::operations::linalg::matmul as matmul_op;
-use engine::operations::loss::cross_entropy as cross_entropy_op;
+use engine::ops::batch_norm as batch_norm_op;
+use engine::ops::conv2d as conv2d_op;
+use engine::ops::linalg::matmul as matmul_op;
+use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};

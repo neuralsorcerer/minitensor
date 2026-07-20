@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+  # `rustsec/audit-check` reports findings by creating a check run; without
+  # this it fails every run with "Resource not accessible by integration"
+  # (HTTP 403) while trying to post annotations.
+  checks: write
 
 jobs:
   cargo-audit:
@@ -25,6 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Cargo.lock is gitignored (library crate), but `rustsec/audit-check`
+      # audits `./Cargo.lock`. Resolve one from the manifests first so the
+      # audit runs instead of failing with "Couldn't load ./Cargo.lock".
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

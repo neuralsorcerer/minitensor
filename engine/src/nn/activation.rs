@@ -8,7 +8,7 @@ use super::Layer;
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    operations::{
+    ops::{
         activation::{exp, leaky_relu, relu, sigmoid, softmax, tanh},
         arithmetic,
     },

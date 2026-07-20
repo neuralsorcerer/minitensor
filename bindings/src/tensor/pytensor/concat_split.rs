@@ -25,8 +25,8 @@ impl PyTensor {
             .collect::<PyResult<_>>()?;
 
         let tensor_refs: Vec<&Tensor> = tensor_vec.iter().collect();
-        let result = engine::operations::shape_ops::concatenate(&tensor_refs, axis)
-            .map_err(_convert_error)?;
+        let result =
+            engine::ops::shape_ops::concatenate(&tensor_refs, axis).map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
 
@@ -46,13 +46,12 @@ impl PyTensor {
             .iter()
             .map(|obj| {
                 let t = PyTensor::from_python_value(&obj)?;
-                engine::operations::shape_ops::unsqueeze(&t.inner, axis).map_err(_convert_error)
+                engine::ops::shape_ops::unsqueeze(&t.inner, axis).map_err(_convert_error)
             })
             .collect::<PyResult<_>>()?;
 
         let refs: Vec<&Tensor> = unsqueezed.iter().collect();
-        let result =
-            engine::operations::shape_ops::concatenate(&refs, axis).map_err(_convert_error)?;
+        let result = engine::ops::shape_ops::concatenate(&refs, axis).map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
 
@@ -60,14 +59,14 @@ impl PyTensor {
     /// (a Python sequence or an integer tensor)
     pub fn index_select(&self, dim: isize, indices: &Bound<PyAny>) -> PyResult<PyTensor> {
         let idx_vec = extract_index_vector(indices)?;
-        let result = engine::operations::shape_ops::index_select(&self.inner, dim, &idx_vec)
+        let result = engine::ops::shape_ops::index_select(&self.inner, dim, &idx_vec)
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
 
     /// Gather elements along a dimension using an index tensor
     pub fn gather(&self, dim: isize, index: &PyTensor) -> PyResult<PyTensor> {
-        let result = engine::operations::shape_ops::gather(&self.inner, dim, &index.inner)
+        let result = engine::ops::shape_ops::gather(&self.inner, dim, &index.inner)
             .map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
@@ -181,9 +180,8 @@ impl PyTensor {
         let mut start = 0;
         for size in sections {
             let end = start + size;
-            let slice =
-                engine::operations::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
-                    .map_err(_convert_error)?;
+            let slice = engine::ops::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
+                .map_err(_convert_error)?;
             outputs.push(PyTensor::from_tensor(slice));
             start = end;
         }

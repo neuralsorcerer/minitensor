@@ -6,7 +6,7 @@
 
 use crate::{
     error::Result,
-    operations::loss::{
+    ops::loss::{
         binary_cross_entropy_loss, cross_entropy_loss, focal_loss, huber_loss, log_cosh_loss,
         mae_loss, mse_loss, smooth_l1_loss,
     },

@@ -467,7 +467,7 @@ impl TensorDebugger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{DataType, data::TensorData};
+    use crate::tensor::{DataType, storage::TensorData};
     use std::sync::Arc;
 
     #[test]
