@@ -196,7 +196,11 @@ impl SerializedTensor {
         // Create tensor data based on dtype
         let tensor_data = match self.dtype {
             DataType::Float32 => {
-                if self.data.len() != numel * 4 {
+                // `checked_mul` guards the untrusted `numel` (from the
+                // deserialized shape): a product that overflows `usize` is
+                // treated as a length mismatch rather than wrapping to a small
+                // value that could spuriously pass the check.
+                if numel.checked_mul(4) != Some(self.data.len()) {
                     return Err(MinitensorError::serialization_error(
                         "Invalid f32 data length",
                     ));
@@ -211,7 +215,7 @@ impl SerializedTensor {
                 crate::tensor::TensorData::from_vec_f32(values, device)
             }
             DataType::Float64 => {
-                if self.data.len() != numel * 8 {
+                if numel.checked_mul(8) != Some(self.data.len()) {
                     return Err(MinitensorError::serialization_error(
                         "Invalid f64 data length",
                     ));
@@ -226,7 +230,7 @@ impl SerializedTensor {
                 crate::tensor::TensorData::from_vec_f64(values, device)
             }
             DataType::Int32 => {
-                if self.data.len() != numel * 4 {
+                if numel.checked_mul(4) != Some(self.data.len()) {
                     return Err(MinitensorError::serialization_error(
                         "Invalid i32 data length",
                     ));
@@ -241,7 +245,7 @@ impl SerializedTensor {
                 crate::tensor::TensorData::from_vec_i32(values, device)
             }
             DataType::Int64 => {
-                if self.data.len() != numel * 8 {
+                if numel.checked_mul(8) != Some(self.data.len()) {
                     return Err(MinitensorError::serialization_error(
                         "Invalid i64 data length",
                     ));
@@ -661,6 +665,35 @@ mod tests {
         assert_eq!(SerializationFormat::Json.extension(), "json");
         assert_eq!(SerializationFormat::Binary.extension(), "bin");
         assert_eq!(SerializationFormat::MessagePack.extension(), "msgpack");
+    }
+
+    #[test]
+    fn test_to_tensor_rejects_length_mismatch() {
+        // A shape claiming more elements than `data` holds must be rejected,
+        // not read out of bounds.
+        let bad = SerializedTensor {
+            shape: Shape::new(vec![4]),
+            dtype: DataType::Float32,
+            device: Device::cpu(),
+            data: vec![0u8; 4], // 1 f32, but shape says 4
+            requires_grad: false,
+        };
+        assert!(bad.to_tensor(None).is_err());
+    }
+
+    #[test]
+    fn test_to_tensor_rejects_overflowing_shape() {
+        // `numel * elem_size` overflows usize here; the checked length guard
+        // must reject it with an error instead of wrapping to a small value
+        // (which would then drive a huge `Vec::with_capacity`).
+        let evil = SerializedTensor {
+            shape: Shape::new(vec![1usize << 62]), // numel fits usize; *4 overflows
+            dtype: DataType::Float32,
+            device: Device::cpu(),
+            data: vec![0u8; 8],
+            requires_grad: false,
+        };
+        assert!(evil.to_tensor(None).is_err());
     }
 
     #[test]
