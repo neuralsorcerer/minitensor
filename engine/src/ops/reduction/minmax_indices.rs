@@ -38,28 +38,15 @@ pub(crate) fn min_along_dim_with_indices(
             let values = values_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = f32::INFINITY;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            min_val = f32::NAN;
-                            min_idx = d;
-                            break;
-                        }
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = min_val;
-                    indices[out_idx] = min_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                f32::INFINITY,
+                |v, b| v < b,
+                |v| if v.is_nan() { Some(f32::NAN) } else { None },
+            );
         }
         DataType::Float64 => {
             let input = tensor
@@ -69,28 +56,15 @@ pub(crate) fn min_along_dim_with_indices(
             let values = values_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = f64::INFINITY;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            min_val = f64::NAN;
-                            min_idx = d;
-                            break;
-                        }
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = min_val;
-                    indices[out_idx] = min_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                f64::INFINITY,
+                |v, b| v < b,
+                |v| if v.is_nan() { Some(f64::NAN) } else { None },
+            );
         }
         DataType::Int32 => {
             let input = tensor
@@ -100,23 +74,15 @@ pub(crate) fn min_along_dim_with_indices(
             let values = values_data.as_i32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i32 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = i32::MAX;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = min_val;
-                    indices[out_idx] = min_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                i32::MAX,
+                |v, b| v < b,
+                |_| None,
+            );
         }
         DataType::Int64 => {
             let input = tensor
@@ -126,23 +92,15 @@ pub(crate) fn min_along_dim_with_indices(
             let values = values_data.as_i64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = i64::MAX;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = min_val;
-                    indices[out_idx] = min_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                i64::MAX,
+                |v, b| v < b,
+                |_| None,
+            );
         }
         DataType::Bool => {
             let input = tensor
@@ -152,23 +110,15 @@ pub(crate) fn min_along_dim_with_indices(
             let values = values_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = true;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        if !input[idx] {
-                            min_val = false;
-                            min_idx = d;
-                            break;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = min_val;
-                    indices[out_idx] = min_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                true,
+                |_, _| false,
+                |v| if !v { Some(false) } else { None },
+            );
         }
     }
 
