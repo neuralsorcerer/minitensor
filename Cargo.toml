@@ -43,7 +43,7 @@ libc = "0.2"
 # Random number generation
 rand = "0.10"
 rand_distr = "0.6"
-statrs = "0.18"
+statrs = "0.19"
 
 # Special mathematical functions
 libm = "0.2"
