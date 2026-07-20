@@ -196,8 +196,8 @@ impl Conv2d {
 
 impl Layer for Conv2d {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Delegate actual computation to operations::conv::conv2d
-        crate::operations::conv2d(
+        // Delegate actual computation to ops::conv::conv2d
+        crate::ops::conv2d(
             input,
             &self.weight,
             self.bias.as_ref(),

@@ -7,7 +7,7 @@
 use super::Layer;
 use crate::{
     error::{MinitensorError, Result},
-    operations::arithmetic,
+    ops::arithmetic,
     random,
     tensor::{DataType, Shape, Tensor, TensorData},
 };

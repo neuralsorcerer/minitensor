@@ -11,7 +11,7 @@ use super::{
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    operations::linalg::matmul,
+    ops::linalg::matmul,
     tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;

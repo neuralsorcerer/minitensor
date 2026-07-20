@@ -161,11 +161,11 @@ refactor; the rest are documented with a migration path in section 7.
 The refactor converges on the following boundaries (largely realized for the
 autograd path in this change set):
 
-- **Storage layer** (`tensor::data`): dumb, `Arc`-shared buffers; no
+- **Storage layer** (`tensor::storage`): dumb, `Arc`-shared buffers; no
   reference counting of its own; eventual interior mutability
   (`UnsafeCell`-backed cells behind a safe API) so parameter updates do not
   need aliasing casts.
-- **Tensor layer** (`tensor::mod`): shape/stride bookkeeping with *enforced*
+- **Tensor layer** (`tensor::tensor`): shape/stride bookkeeping with *enforced*
   invariants — a `Tensor`'s shape must always describe its storage; `view`
   is contiguous-only, `reshape` materializes, `expand` is the only stride
   producer until strided kernels exist.
@@ -174,7 +174,7 @@ autograd path in this change set):
   only), pass execution (`execute_backward_plan`, borrow-free, grad-mode
   off), and storage (`set_gradients`/`get_gradient`), with node release
   decoupled from optimizer stepping (`release_saved_subgraph`).
-- **Ops layer** (`operations`): kernels stay dtype-specialized but should be
+- **Ops layer** (`ops`): kernels stay dtype-specialized but should be
   generated (macro/generics) rather than hand-copied; broadcasting via
   shape-level utilities; no direct graph manipulation beyond `add_to_graph`.
 - **Boundary layer** (`bindings`): conversion, validation, and Python
@@ -191,21 +191,23 @@ engine-wide is a larger project listed below.
 
 ## 4. Recommended folder/module structure
 
-Realized now: no file moves (churn would obscure the behavioral fixes).
-Recommended next structure, in order of value:
+Implemented (the earlier change sets took the behavioral fixes without moving
+files, so the churn would not obscure them; this change set performs the moves
+now that the behavior is settled):
 
 ```text
 engine/src/
   autograd/
-    graph.rs        # tape + planning + execution (done, in place)
-    ops/            # one file per Backward family, real submodules (replace include!)
+    graph.rs        # tape + planning + execution (in place)
+    ops/            # one file per Backward family, real submodules (was autograd/mod/)
   tensor/
-    storage.rs      # TensorData (rename of data.rs)
-    tensor.rs       # Tensor core (replace include!-merged mod/)
-  ops/
+    storage.rs      # TensorData (renamed from data.rs)
+    tensor.rs       # Tensor core, one module (was the tensor/mod/ method split)
+  ops/              # renamed from operations/
     kernels/        # dtype-generic kernel bodies (macro-generated)
     ...
-  # delete or feature-gate: hardware/, operations/fusion.rs, debug.rs
+  # feature-gated behind default-on cargo features: hardware/, debug.rs
+  # (operations/fusion.rs was already deleted — fourth change set)
 ```
 
 ## 5. Component responsibilities and boundaries (after this change)
@@ -216,7 +218,7 @@ engine/src/
 | `Tensor` | shape/stride invariants, COW mutation policy | `TensorData`, autograd registration |
 | `ComputationGraph` | record nodes, plan/execute/store backward | gradient functions |
 | `NoGradGuard` / grad mode | decide whether ops record | thread-local flag |
-| ops (`operations::*`) | math + broadcasting + attaching `*Backward` | tensors, `add_to_graph` |
+| ops (`ops::*`) | math + broadcasting + attaching `*Backward` | tensors, `add_to_graph` |
 | optimizers | read grads (`get_gradient`), update params in place | tensors |
 | bindings | conversion + Python semantics | public engine API only |
 
@@ -646,6 +648,26 @@ Completed in the tenth change set (build/CI hardening):
   configuration breakage of `maturin build` surfaces in CI instead of at
   release time.
 
+Completed in the eleventh change set (module reorganization — section 4):
+
+- **The recommended folder/module structure (section 4) is now in place.**
+  `autograd/mod/` → `autograd/ops/` and `operations/` → `ops/` become real
+  submodule directories (the `#[path]` overrides on those two trees are
+  gone); the `tensor/mod/` method split
+  (`core`/`autograd`/`indexing`/`ops`/`utils`) collapses into a single
+  `tensor/tensor.rs` module, and `tensor/data.rs` is renamed to
+  `tensor/storage.rs`. The dtype-generic binary broadcasting kernels move
+  out of `arithmetic/kernels.rs` into a dedicated `ops/kernels/` module
+  (`crate::ops::kernels`). Every public path is preserved through the
+  existing re-exports, so `crate::autograd::X`, `crate::tensor::X`, and the
+  whole Python surface are unchanged — the rename is internal.
+- **`debug.rs` joins `hardware/` behind a default-on cargo feature.**
+  `default = ["cpu", "hardware", "debug"]` keeps every existing build
+  identical, while `default-features = false` (plus `cpu`) now drops both
+  auxiliary subsystems (the Python bindings depend on the defaults, so they
+  still get `debug`). Both configurations pass the full suite and clippy
+  `-D warnings`; the Python suite is green (879 passed, 5 skipped).
+
 Still open, in priority order:
 
 1. **dtype dispatch macro for the remaining ops files** — the activation
@@ -687,20 +709,26 @@ Still open, in priority order:
    - **siblings + `pub(crate)` re-exports** where files only share
      free functions (operations, autograd);
    - **children-of-core** where files carry `impl` blocks that touch a
-     struct's private fields or private methods — `tensor`'s method files
-     are children of the `Tensor`-declaring module, `nn`'s `layers`
-     (pyclass impls + registration) is a child of `module`, and opencl's
-     `ops_impl` (`impl OpenCLOps`) is a child of `context` (the type
-     declarations). This preserved every field's privacy; only genuinely
-     cross-file helpers/methods were widened to `pub(crate)`.
+     struct's private fields or private methods — `nn`'s `layers` (pyclass
+     impls + registration) is a child of `module`, and opencl's `ops_impl`
+     (`impl OpenCLOps`) is a child of `context` (the type declarations).
+     This preserved every field's privacy; only genuinely cross-file
+     helpers/methods were widened to `pub(crate)`.
    The `items_after_test_module` crate-wide allow — an artifact of the old
    layout — has been removed; clippy passes without it under `-D warnings`,
-   both for the default build and for `--features opencl`.
+   both for the default build and for `--features opencl`. The eleventh
+   change set then moved these trees onto the section-4 directory names
+   (`autograd/mod/` → `autograd/ops/`, `operations/` → `ops/`) and collapsed
+   `tensor`'s method files — which had been children of the
+   `Tensor`-declaring module — into the single `tensor/tensor.rs` module, so
+   the private-field impls now share one module rather than a parent/child
+   split.
 3. **Remove the remaining speculative subsystems, or keep them gated**
-   (`hardware` is now behind a default-on feature — change set 10 — so
-   flipping it out of `default` or deleting the module is the remaining
-   semver-major maintainer decision; the pooled GPU allocator and
-   Python-exposed `debug` are unchanged).
+   (`hardware` and `debug` are now both behind default-on features — change
+   sets 10 and 11 — so flipping either out of `default` or deleting the
+   module is the remaining semver-major maintainer decision; the pooled GPU
+   allocator is unchanged, and `debug` stays wired into the Python API
+   through the default feature set).
 4. **`MaybeUninit` output writes — done for the element-wise surface**
    (change set 8). What deliberately keeps zero-initialized outputs: the
    softmax/log_softmax row kernels (they legitimately reuse the output as

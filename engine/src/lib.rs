@@ -15,6 +15,7 @@
 pub mod autograd;
 pub mod backends;
 pub mod custom_ops;
+#[cfg(feature = "debug")]
 pub mod debug;
 pub mod device;
 pub mod error;
@@ -22,7 +23,7 @@ pub mod error;
 pub mod hardware;
 pub mod memory;
 pub mod nn;
-pub mod operations;
+pub mod ops;
 pub mod optim;
 pub mod plugins;
 pub mod random;
@@ -35,6 +36,7 @@ pub use custom_ops::{
     CustomOp, CustomOpBuilder, CustomOpRegistry, execute_custom_op, is_custom_op_registered,
     list_custom_ops, register_custom_op, unregister_custom_op,
 };
+#[cfg(feature = "debug")]
 pub use debug::{
     GraphEdge, GraphNode, GraphVisualizer, MemoryTracker, OperationProfiler, TensorDebugger,
     TensorInfo,

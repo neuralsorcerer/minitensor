@@ -8,7 +8,7 @@ use approx::assert_relative_eq;
 use engine::{
     autograd,
     device::Device,
-    operations::{activation, arithmetic, linalg, loss, reduction},
+    ops::{activation, arithmetic, linalg, loss, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use proptest::prelude::*;

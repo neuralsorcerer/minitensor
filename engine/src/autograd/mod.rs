@@ -7,30 +7,11 @@
 //! Automatic differentiation: tape building, backward planning/execution,
 //! and the gradient functions recorded by tensor operations.
 //!
-//! The submodules group gradient functions by operation family; everything
-//! public is re-exported here so callers keep using `crate::autograd::X`.
+//! `graph` holds the tape plus the backward planner/executor; `ops` holds the
+//! gradient functions grouped by operation family. Everything public is
+//! re-exported here so callers keep using `crate::autograd::X`.
 
 pub mod graph;
+pub mod ops;
 
-#[path = "mod/activation.rs"]
-mod activation;
-#[path = "mod/arithmetic.rs"]
-mod arithmetic;
-#[path = "mod/core.rs"]
-mod core;
-#[path = "mod/linalg.rs"]
-mod linalg;
-#[path = "mod/reduction.rs"]
-mod reduction;
-#[path = "mod/shape.rs"]
-mod shape;
-#[cfg(test)]
-#[path = "mod/tests.rs"]
-mod tests;
-
-pub use self::activation::*;
-pub use self::arithmetic::*;
-pub use self::core::*;
-pub use self::linalg::*;
-pub use self::reduction::*;
-pub use self::shape::*;
+pub use self::ops::*;

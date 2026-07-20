@@ -470,7 +470,7 @@ mod tests {
         let op = CustomOpBuilder::new("test_add", 2)
             .forward(|inputs| {
                 // Simple addition operation
-                crate::operations::arithmetic::add(inputs[0], inputs[1])
+                crate::ops::arithmetic::add(inputs[0], inputs[1])
             })
             .build()
             .unwrap();
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn test_custom_op_builder() {
         let op = CustomOpBuilder::new("test_mul", 2)
-            .forward(|inputs| crate::operations::arithmetic::mul(inputs[0], inputs[1]))
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[1]))
             .validate(|inputs| {
                 if inputs[0].shape() != inputs[1].shape() {
                     return Err(MinitensorError::shape_mismatch(

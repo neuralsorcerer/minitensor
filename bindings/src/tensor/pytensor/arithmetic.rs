@@ -9,7 +9,7 @@ use super::*;
 impl PyTensor {
     // Arithmetic operations
     fn __neg__(&self) -> PyResult<Self> {
-        use engine::operations::arithmetic::neg;
+        use engine::ops::arithmetic::neg;
         let result = neg(&self.inner).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -29,7 +29,7 @@ impl PyTensor {
     }
 
     fn __sub__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::sub;
+        use engine::ops::arithmetic::sub;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Sub)?;
         let result = sub(&lhs, &rhs).map_err(_convert_error)?;
@@ -37,7 +37,7 @@ impl PyTensor {
     }
 
     fn __rsub__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::sub;
+        use engine::ops::arithmetic::sub;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Sub)?;
         let result = sub(&lhs, &rhs).map_err(_convert_error)?;
@@ -45,7 +45,7 @@ impl PyTensor {
     }
 
     pub fn __mul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::mul;
+        use engine::ops::arithmetic::mul;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Mul)?;
         let result = mul(&lhs, &rhs).map_err(_convert_error)?;
@@ -53,7 +53,7 @@ impl PyTensor {
     }
 
     pub fn __rmul__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::mul;
+        use engine::ops::arithmetic::mul;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Mul)?;
         let result = mul(&lhs, &rhs).map_err(_convert_error)?;
@@ -61,7 +61,7 @@ impl PyTensor {
     }
 
     fn __truediv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::div;
+        use engine::ops::arithmetic::div;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
@@ -69,7 +69,7 @@ impl PyTensor {
     }
 
     fn __rtruediv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::div;
+        use engine::ops::arithmetic::div;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Div)?;
         let result = div(&lhs, &rhs).map_err(_convert_error)?;
@@ -77,7 +77,7 @@ impl PyTensor {
     }
 
     fn __floordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::floor_div;
+        use engine::ops::arithmetic::floor_div;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::FloorDiv)?;
         let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
@@ -85,7 +85,7 @@ impl PyTensor {
     }
 
     fn __rfloordiv__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::floor_div;
+        use engine::ops::arithmetic::floor_div;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::FloorDiv)?;
         let result = floor_div(&lhs, &rhs).map_err(_convert_error)?;
@@ -93,7 +93,7 @@ impl PyTensor {
     }
 
     fn __mod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::remainder;
+        use engine::ops::arithmetic::remainder;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Rem)?;
         let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
@@ -101,7 +101,7 @@ impl PyTensor {
     }
 
     fn __rmod__(&self, other: &Bound<PyAny>) -> PyResult<Self> {
-        use engine::operations::arithmetic::remainder;
+        use engine::ops::arithmetic::remainder;
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, true, BinaryOpKind::Rem)?;
         let result = remainder(&lhs, &rhs).map_err(_convert_error)?;
@@ -109,7 +109,7 @@ impl PyTensor {
     }
 
     fn __invert__(&self) -> PyResult<Self> {
-        use engine::operations::arithmetic::bitwise_not;
+        use engine::ops::arithmetic::bitwise_not;
         let result = bitwise_not(&self.inner).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

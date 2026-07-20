@@ -217,21 +217,20 @@ impl Layer for BatchNorm1d {
                 vec![0]
             };
             let mean = input.mean(Some(axes.clone()), true)?; // [1,C] or [1,C,1]
-            let centered = crate::operations::arithmetic::sub(input, &mean)?;
-            let var =
-                crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?; // biased, pre-eps
+            let centered = crate::ops::arithmetic::sub(input, &mean)?;
+            let var = crate::ops::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?; // biased, pre-eps
 
             // Update running statistics with the batch statistics *before* eps
             // is added: running = (1 - momentum) * running + momentum * batch.
             let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
             let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
-            self.running_mean = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
+            self.running_mean = crate::ops::arithmetic::add(
+                &crate::ops::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
+                &crate::ops::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
             )?;
-            self.running_var = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
+            self.running_var = crate::ops::arithmetic::add(
+                &crate::ops::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
+                &crate::ops::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
             )?;
 
             (mean, var)
@@ -255,10 +254,10 @@ impl Layer for BatchNorm1d {
             )
         };
 
-        let centered = crate::operations::arithmetic::sub(input, &mean)?;
-        let var = crate::operations::arithmetic::add(&var, &self.eps_tensor)?;
-        let std = crate::operations::activation::sqrt(&var)?;
-        let normalized = crate::operations::arithmetic::div(&centered, &std)?;
+        let centered = crate::ops::arithmetic::sub(input, &mean)?;
+        let var = crate::ops::arithmetic::add(&var, &self.eps_tensor)?;
+        let std = crate::ops::activation::sqrt(&var)?;
+        let normalized = crate::ops::arithmetic::div(&centered, &std)?;
 
         // Scale and shift
         let mut weight = self.weight.clone();
@@ -270,8 +269,8 @@ impl Layer for BatchNorm1d {
             weight = weight.unsqueeze(0)?;
             bias = bias.unsqueeze(0)?;
         }
-        let output = crate::operations::arithmetic::add(
-            &crate::operations::arithmetic::mul(&normalized, &weight)?,
+        let output = crate::ops::arithmetic::add(
+            &crate::ops::arithmetic::mul(&normalized, &weight)?,
             &bias,
         )?;
 
@@ -431,20 +430,19 @@ impl Layer for BatchNorm2d {
         let (mean, var) = if self.training {
             let axes: Vec<isize> = vec![0, 2, 3];
             let mean = input.mean(Some(axes.clone()), true)?;
-            let centered = crate::operations::arithmetic::sub(input, &mean)?;
-            let var =
-                crate::operations::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?;
+            let centered = crate::ops::arithmetic::sub(input, &mean)?;
+            let var = crate::ops::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?;
 
             let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
             let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
 
-            self.running_mean = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
+            self.running_mean = crate::ops::arithmetic::add(
+                &crate::ops::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
+                &crate::ops::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
             )?;
-            self.running_var = crate::operations::arithmetic::add(
-                &crate::operations::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
-                &crate::operations::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
+            self.running_var = crate::ops::arithmetic::add(
+                &crate::ops::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
+                &crate::ops::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
             )?;
 
             (mean, var)
@@ -459,10 +457,10 @@ impl Layer for BatchNorm2d {
             )
         };
 
-        let centered = crate::operations::arithmetic::sub(input, &mean)?;
-        let var = crate::operations::arithmetic::add(&var, &self.eps_tensor)?;
-        let std = crate::operations::activation::sqrt(&var)?;
-        let normalized = crate::operations::arithmetic::div(&centered, &std)?;
+        let centered = crate::ops::arithmetic::sub(input, &mean)?;
+        let var = crate::ops::arithmetic::add(&var, &self.eps_tensor)?;
+        let std = crate::ops::activation::sqrt(&var)?;
+        let normalized = crate::ops::arithmetic::div(&centered, &std)?;
         let weight = self
             .weight
             .clone()
@@ -470,8 +468,8 @@ impl Layer for BatchNorm2d {
             .unsqueeze(2)?
             .unsqueeze(3)?;
         let bias = self.bias.clone().unsqueeze(0)?.unsqueeze(2)?.unsqueeze(3)?;
-        let output = crate::operations::arithmetic::add(
-            &crate::operations::arithmetic::mul(&normalized, &weight)?,
+        let output = crate::ops::arithmetic::add(
+            &crate::ops::arithmetic::mul(&normalized, &weight)?,
             &bias,
         )?;
 

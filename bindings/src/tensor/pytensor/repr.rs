@@ -150,7 +150,7 @@ impl PyTensor {
                 convert_python_data_to_tensor(value, dtype, device, false)?
             };
             let mut this = slf.borrow_mut();
-            engine::operations::selection::masked_index_assign(&mut this.inner, &mask, &val_tensor)
+            engine::ops::selection::masked_index_assign(&mut this.inner, &mask, &val_tensor)
                 .map_err(_convert_error)?;
             return Ok(());
         }

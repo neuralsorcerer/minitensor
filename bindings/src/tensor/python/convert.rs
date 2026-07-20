@@ -648,7 +648,7 @@ fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
         }
         idx.push(r as usize);
     }
-    engine::operations::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
+    engine::ops::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
 }
 
 /// Extract a boolean mask tensor from a `__getitem__`/`__setitem__` key when
@@ -682,7 +682,7 @@ pub(crate) fn try_fancy_index_tensor(
     key: &Bound<PyAny>,
 ) -> PyResult<Option<Tensor>> {
     if let Some(mask) = try_bool_mask_key(key)? {
-        return engine::operations::selection::masked_index(reference, &mask)
+        return engine::ops::selection::masked_index(reference, &mask)
             .map(Some)
             .map_err(_convert_error);
     }

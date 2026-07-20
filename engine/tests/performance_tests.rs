@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::{
-    operations::arithmetic,
+    ops::arithmetic,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use ndarray::Array2;
