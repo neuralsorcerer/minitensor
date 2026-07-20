@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+  # `rustsec/audit-check` reports findings by creating a check run; without
+  # this it fails every run with "Resource not accessible by integration"
+  # (HTTP 403) while trying to post annotations.
+  checks: write
 
 jobs:
   cargo-audit:
