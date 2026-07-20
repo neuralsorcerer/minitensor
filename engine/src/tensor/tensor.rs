@@ -483,14 +483,17 @@ impl Tensor {
     /// Reshape the tensor to a new shape.
     ///
     /// Returns a zero-copy view when the tensor is contiguous and materialises
-    /// a contiguous copy otherwise.
+    /// a contiguous copy otherwise. Autograd-aware: a `ReshapeBackward` node is
+    /// recorded when the tensor requires grad, so gradients flow back to the
+    /// original shape. (A bare [`Self::view`] would keep the input's identity
+    /// and grad function, silently routing the caller's gradient into the
+    /// *pre-reshape* node — which is how the multi-dim `cross_entropy` wrapper,
+    /// `flatten_all`, `squeeze`, and `unsqueeze` used to drop/misroute the
+    /// backward pass. The backward pass itself runs under `NoGradGuard`, so this
+    /// records nothing when called from inside a gradient kernel.)
     #[inline(always)]
     pub fn reshape(&self, new_shape: Shape) -> Result<Self> {
-        if self.is_contiguous() {
-            self.view(new_shape)
-        } else {
-            self.contiguous()?.view(new_shape)
-        }
+        crate::ops::shape_ops::reshape(self, new_shape)
     }
 
     /// Flatten the tensor into a one-dimensional view.

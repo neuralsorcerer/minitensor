@@ -47,6 +47,30 @@ Key mechanics discovered during the review:
 Ordered roughly by severity. Items marked **[FIXED]** were addressed in this
 refactor; the rest are documented with a migration path in section 7.
 
+> **[FIXED] `Tensor::reshape` silently dropped gradients (found in the
+> post-merge audit of the analytical cross-entropy node).** The `Tensor::reshape`
+> *method* delegated to `view`, which clones the operand while keeping its
+> `tensor_id` and `grad_fn` and records **no** `ReshapeBackward` node — unlike
+> its siblings `transpose`/`permute`, and unlike the autograd-aware
+> `shape_ops::reshape` *function* that the Python binding calls. Any Rust caller
+> that reshaped a grad-requiring tensor through the method therefore misrouted
+> the backward pass into the *pre-reshape* node. The concrete failure:
+> `F.cross_entropy(x, t, dim=d)` with `d` not the last axis permutes the logits
+> with `transpose(...).reshape([N, C])`; on `backward()` the analytical
+> gradient (shape `[N, C]`) was handed straight to the transpose node, which
+> then tried to swap axes 1↔2 of a rank-2 tensor and raised
+> `IndexError: index 2 is out of bounds for dimension 0 with size 2` (and, for
+> `reduction="none"`, a `[N,C]` vs `[b,k,1]` shape mismatch). `flatten_all`,
+> `squeeze`, and `unsqueeze` (all built on the method) shared the latent defect.
+> Fixed at the root: `Tensor::reshape` now delegates to `shape_ops::reshape`, so
+> it records `ReshapeBackward` when grad is enabled. The backward pass runs
+> under `NoGradGuard`, so gradient kernels that reshape internally still record
+> nothing. Verified: multi-dim cross-entropy gradients now match the closed-form
+> `(softmax − onehot)·scale` and central finite differences to machine
+> precision for every reduction and class-axis placement (2-D/3-D/4-D); new
+> parametrized regression test in `tests/nn/test_functional.py`; full suite 891
+> Python + all Rust green.
+
 1. **[FIXED] `Tensor::view`/`reshape` corrupted non-contiguous tensors.**
    `view` re-strided unconditionally, so `expand(...).reshape(...)` at the
    engine level produced a tensor whose shape claimed N elements over storage

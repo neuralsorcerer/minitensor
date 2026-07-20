@@ -663,6 +663,52 @@ def test_cross_entropy_no_reduction_backward_scales_each_sample():
     )
 
 
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+@pytest.mark.parametrize(
+    "shape,dim,tshape",
+    [
+        ((2, 4, 3), 1, (2, 3)),  # class dim in the middle (needs a transpose)
+        ((4, 2, 3), 0, (2, 3)),  # class dim first (two transposes)
+        ((2, 3, 4), 2, (2, 3)),  # class dim already last (no transpose)
+        ((2, 5, 3, 4), 1, (2, 3, 4)),  # 4-D, class dim in the middle
+    ],
+)
+def test_cross_entropy_backward_multidim_matches_analytic(
+    reduction, shape, dim, tshape
+):
+    # Regression: ``F.cross_entropy`` with ``dim`` other than the last one
+    # permutes the logits internally. The reshape used for that permutation has
+    # to record an autograd node, or the analytical backward's gradient is
+    # routed into the pre-reshape (transpose) node and either crashes with an
+    # out-of-bounds transpose or silently corrupts the result. Check the
+    # gradient against the closed form ``(softmax - onehot) * scale`` for every
+    # reduction and class-dimension placement.
+    rng = np.random.default_rng(0)
+    z = rng.standard_normal(shape).astype(np.float32)
+    ti = rng.integers(0, shape[dim], size=tshape).astype(np.int64)
+
+    logits = mt.Tensor(z.tolist(), requires_grad=True)
+    target = mt.Tensor(ti.tolist(), dtype="int64")
+    loss = F.cross_entropy(logits, target, reduction=reduction, dim=dim)
+
+    if reduction == "none":
+        loss.backward(mt.Tensor(np.ones(loss.shape, dtype=np.float32).tolist()))
+    else:
+        loss.backward()
+
+    shifted = z - z.max(axis=dim, keepdims=True)
+    exp = np.exp(shifted)
+    softmax = exp / exp.sum(axis=dim, keepdims=True)
+    onehot = np.zeros_like(z)
+    np.put_along_axis(onehot, np.expand_dims(ti, dim), 1.0, axis=dim)
+    scale = (1.0 / int(np.prod(tshape))) if reduction == "mean" else 1.0
+    expected_grad = (softmax - onehot) * scale
+
+    grad = logits.grad.numpy()
+    assert grad.shape == z.shape
+    np.testing.assert_allclose(grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
 def test_cross_entropy_soft_target_backward_uses_total_target_mass():
     logits = mt.Tensor([[0.0, 0.0]], requires_grad=True)
     weighted_target = mt.Tensor([[2.0, 0.0]])
