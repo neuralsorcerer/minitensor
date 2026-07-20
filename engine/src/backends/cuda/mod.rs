@@ -376,7 +376,9 @@ extern "C" __global__ void matmul_kernel(float* a, float* b, float* c, int m, in
 extern "C" __global__ void relu_kernel(float* input, float* output, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        output[idx] = fmaxf(0.0f, input[idx]);
+        // isnan guard: fmaxf drops NaN, but CPU relu / PyTorch propagate it.
+        float x = input[idx];
+        output[idx] = isnan(x) ? x : fmaxf(0.0f, x);
     }
 }
 "#;

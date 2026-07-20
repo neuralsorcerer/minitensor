@@ -504,7 +504,9 @@ kernel void relu_kernel(device const float* input [[buffer(0)]],
                        constant uint& n [[buffer(2)]],
                        uint index [[thread_position_in_grid]]) {
     if (index >= n) return;
-    output[index] = max(0.0f, input[index]);
+    // isnan guard: max/fmax drop NaN, but CPU relu / PyTorch propagate it.
+    float x = input[index];
+    output[index] = isnan(x) ? x : fmax(0.0f, x);
 }
 "#;
 
@@ -569,7 +571,9 @@ kernel void relu_kernel(device const float* input [[buffer(0)]],
                        constant uint& n [[buffer(2)]],
                        uint index [[thread_position_in_grid]]) {
     if (index >= n) return;
-    output[index] = max(0.0f, input[index]);
+    // isnan guard: max/fmax drop NaN, but CPU relu / PyTorch propagate it.
+    float x = input[index];
+    output[index] = isnan(x) ? x : fmax(0.0f, x);
 }
 
 kernel void sigmoid_kernel(device const float* input [[buffer(0)]],
