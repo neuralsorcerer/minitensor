@@ -321,7 +321,9 @@ pub fn binary_cross_entropy_loss(
     validate_loss_inputs(predictions, targets)?;
 
     // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
-    let log_predictions = log_tensor(predictions)?;
+    // PyTorch clamps the log outputs to >= -100 so a saturated prediction
+    // (exactly 0 or 1) yields a finite loss instead of +inf.
+    let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
 
     let ones = Tensor::ones(
         predictions.shape().clone(),
@@ -331,7 +333,7 @@ pub fn binary_cross_entropy_loss(
     );
     let one_minus_targets = sub(&ones, targets)?;
     let one_minus_predictions = sub(&ones, predictions)?;
-    let log_one_minus_predictions = log_tensor(&one_minus_predictions)?;
+    let log_one_minus_predictions = log_tensor(&one_minus_predictions)?.clamp_min(-100.0)?;
 
     let term1 = mul(targets, &log_predictions)?;
     let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;

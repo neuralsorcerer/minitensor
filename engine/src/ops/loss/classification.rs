@@ -630,6 +630,29 @@ mod tests {
     }
 
     #[test]
+    fn test_bce_saturated_prediction_stays_finite() {
+        // PyTorch clamps BCE's log outputs to >= -100 (forward) and its backward
+        // denominator to >= 1e-12, so a saturated prediction (exactly 0 or 1)
+        // yields a finite loss and gradient instead of inf/nan.
+        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], true);
+        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2], false);
+
+        let loss = binary_cross_entropy_loss(&predictions, &targets, "mean").unwrap();
+        let loss_val = loss.data().as_f32_slice().unwrap()[0];
+        // Each element contributes -log(0) -> clamped to 100; mean = 100.
+        assert!(loss_val.is_finite(), "loss={loss_val}");
+        assert!((loss_val - 100.0).abs() < 1e-3, "loss={loss_val}");
+
+        let grads = crate::autograd::backward_collect(&loss, None).unwrap();
+        let grad = grads.get(&predictions.id()).unwrap();
+        let grad_slice = grad.data().as_f32_slice().unwrap();
+        assert!(
+            grad_slice.iter().all(|g| g.is_finite()),
+            "grads={grad_slice:?}"
+        );
+    }
+
+    #[test]
     fn test_kl_div_loss_mean_and_backward() {
         let predictions = create_test_tensor_f32(vec![0.4, 0.6], vec![2], true);
         let targets = create_test_tensor_f32(vec![0.5, 0.5], vec![2], false);

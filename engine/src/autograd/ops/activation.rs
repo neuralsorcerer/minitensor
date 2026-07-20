@@ -509,7 +509,11 @@ impl GradientFunction for BCELossBackward {
         );
         let one_minus_pred = arithmetic::sub(&one, &self.predictions)?;
         let numerator = arithmetic::sub(&self.predictions, &self.targets)?;
-        let denom = arithmetic::mul(&self.predictions, &one_minus_pred)?;
+        // PyTorch clamps the denominator to EPSILON (1e-12) in
+        // `binary_cross_entropy_backward`, so a saturated prediction (predictions
+        // * (1 - predictions) == 0) produces a large-but-finite gradient rather
+        // than inf/nan.
+        let denom = arithmetic::mul(&self.predictions, &one_minus_pred)?.clamp_min(1e-12)?;
         let mut base_grad = arithmetic::div(&numerator, &denom)?;
 
         if self.reduction == "mean" {
