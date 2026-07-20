@@ -217,8 +217,12 @@ impl SGD {
 
         let param_id = param.id();
 
-        // Get or create velocity buffer
-        let velocity = match self.velocity.entry(param_id) {
+        // Get or create velocity buffer. `is_new` marks a freshly created (or
+        // reset) buffer: on that first step PyTorch initializes the momentum
+        // buffer to the gradient itself (`buf = grad.clone()`), applying the
+        // `(1 - dampening)` factor only from the second step onward. Tracking
+        // this lets us reproduce that behavior instead of damping the first step.
+        let (velocity, is_new) = match self.velocity.entry(param_id) {
             Entry::Occupied(mut entry) => {
                 let needs_reset = entry.get().shape() != param.shape()
                     || entry.get().dtype() != param.dtype()
@@ -231,14 +235,17 @@ impl SGD {
                         false,
                     ));
                 }
-                entry.into_mut()
+                (entry.into_mut(), needs_reset)
             }
-            Entry::Vacant(entry) => entry.insert(Tensor::zeros(
-                param.shape().clone(),
-                param.dtype(),
-                param.device(),
-                false,
-            )),
+            Entry::Vacant(entry) => (
+                entry.insert(Tensor::zeros(
+                    param.shape().clone(),
+                    param.dtype(),
+                    param.device(),
+                    false,
+                )),
+                true,
+            ),
         };
 
         match param.dtype() {
@@ -256,7 +263,11 @@ impl SGD {
                     .zip(v.par_iter_mut())
                     .for_each(|((p_i, &g_i), v_i)| {
                         let grad_val = g_i + wd * *p_i;
-                        *v_i = momentum * *v_i + (1.0 - damp) * grad_val;
+                        *v_i = if is_new {
+                            grad_val
+                        } else {
+                            momentum * *v_i + (1.0 - damp) * grad_val
+                        };
                         let update = if nesterov {
                             grad_val + momentum * *v_i
                         } else {
@@ -277,7 +288,11 @@ impl SGD {
                     .zip(v.par_iter_mut())
                     .for_each(|((p_i, &g_i), v_i)| {
                         let grad_val = g_i + weight_decay * *p_i;
-                        *v_i = momentum * *v_i + (1.0 - damp) * grad_val;
+                        *v_i = if is_new {
+                            grad_val
+                        } else {
+                            momentum * *v_i + (1.0 - damp) * grad_val
+                        };
                         let update = if nesterov {
                             grad_val + momentum * *v_i
                         } else {

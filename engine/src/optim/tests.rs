@@ -37,6 +37,37 @@ mod tests {
     }
 
     #[test]
+    fn test_sgd_momentum_dampening_first_step_matches_pytorch() {
+        // PyTorch seeds the momentum buffer with the raw gradient on the first
+        // step (`buf = grad.clone()`), applying the (1 - dampening) factor only
+        // from the second step onward. Verify both steps against hand-computed
+        // reference values (lr=0.1, momentum=0.9, dampening=0.5, grad=2.0).
+        let mut p = Tensor::ones(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        let mut grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), false);
+        grad.data_mut().as_f32_slice_mut().unwrap()[0] = 2.0;
+
+        let mut sgd = SGD::new(0.1, Some(0.9), Some(0.0)).with_dampening(0.5);
+
+        // Step 1: buf = grad = 2.0  ->  p = 1.0 - 0.1 * 2.0 = 0.8
+        p.set_grad(Some(grad.clone()));
+        {
+            let mut params = vec![&mut p];
+            sgd.step(&mut params).unwrap();
+        }
+        let after1 = p.data().as_f32_slice().unwrap()[0];
+        assert!((after1 - 0.8).abs() < 1e-6, "first step got {after1}");
+
+        // Step 2: buf = 0.9 * 2.0 + 0.5 * 2.0 = 2.8  ->  p = 0.8 - 0.1 * 2.8 = 0.52
+        p.set_grad(Some(grad.clone()));
+        {
+            let mut params = vec![&mut p];
+            sgd.step(&mut params).unwrap();
+        }
+        let after2 = p.data().as_f32_slice().unwrap()[0];
+        assert!((after2 - 0.52).abs() < 1e-6, "second step got {after2}");
+    }
+
+    #[test]
     fn test_adam_creation() {
         let adam = Adam::new(0.001, Some(0.9), Some(0.999), Some(1e-8), Some(1e-4));
         assert_eq!(adam.learning_rate(), 0.001);
