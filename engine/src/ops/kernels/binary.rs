@@ -406,29 +406,74 @@ where
         rhs_aligned[rhs_offset + i] = if dim == 1 { 0 } else { rhs_strides[i] };
     }
 
-    // For small tensors, a simple sequential loop is faster than spawning
-    // rayon tasks. We use the same index mapping logic but without parallel
-    // chunking to minimize overhead.
+    // Inner-run fast path. In any valid broadcast each operand's last dimension
+    // is either the output's last dimension (contiguous, stride 1) or 1
+    // (broadcast, stride 0). So the expensive coordinate decomposition is done
+    // once per output *row* (its coordinates over dims `0..last`) instead of
+    // once per element, and each row is filled with a contiguous, auto-
+    // vectorizable inner loop whose broadcast branch is hoisted out.
+    let last = rank - 1;
+    let inner = output_dims[last];
+    let lhs_last = lhs_aligned[last]; // 0 (broadcast) or 1 (contiguous)
+    let rhs_last = rhs_aligned[last];
+
+    // Base offsets into lhs/rhs for output row `row`.
+    let row_bases = |row: usize| -> (usize, usize) {
+        let mut lhs_base = 0usize;
+        let mut rhs_base = 0usize;
+        let mut tmp = row;
+        for i in (0..last).rev() {
+            let coord = tmp % output_dims[i];
+            tmp /= output_dims[i];
+            lhs_base += coord * lhs_aligned[i];
+            rhs_base += coord * rhs_aligned[i];
+        }
+        (lhs_base, rhs_base)
+    };
+
+    // Fill one output row given its input base offsets.
+    let fill_row = |out_row: &mut [std::mem::MaybeUninit<U>], lhs_base: usize, rhs_base: usize| {
+        let lhs_ptr = lhs_data.as_ptr();
+        let rhs_ptr = rhs_data.as_ptr();
+        // SAFETY: `lhs_last`/`rhs_last` are 0 or 1; for every k in 0..inner the
+        // offsets `*_base + k * stride` stay in bounds (stride 0 repeats the
+        // broadcast scalar, stride 1 walks a contiguous run of length `inner`).
+        unsafe {
+            match (lhs_last, rhs_last) {
+                (1, 1) => {
+                    for (k, out) in out_row.iter_mut().enumerate() {
+                        out.write(op(*lhs_ptr.add(lhs_base + k), *rhs_ptr.add(rhs_base + k)));
+                    }
+                }
+                (1, 0) => {
+                    let rv = *rhs_ptr.add(rhs_base);
+                    for (k, out) in out_row.iter_mut().enumerate() {
+                        out.write(op(*lhs_ptr.add(lhs_base + k), rv));
+                    }
+                }
+                (0, 1) => {
+                    let lv = *lhs_ptr.add(lhs_base);
+                    for (k, out) in out_row.iter_mut().enumerate() {
+                        out.write(op(lv, *rhs_ptr.add(rhs_base + k)));
+                    }
+                }
+                _ => {
+                    let lv = *lhs_ptr.add(lhs_base);
+                    let rv = *rhs_ptr.add(rhs_base);
+                    for out in out_row.iter_mut() {
+                        out.write(op(lv, rv));
+                    }
+                }
+            }
+        }
+    };
+
+    // For small tensors a sequential row walk avoids rayon task overhead.
     if numel < BINARY_PAR_THRESHOLD {
         let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
-            let lhs_ptr = lhs_data.as_ptr();
-            let rhs_ptr = rhs_data.as_ptr();
-            for (idx, out) in spare.iter_mut().enumerate() {
-                let mut lhs_idx = 0usize;
-                let mut rhs_idx = 0usize;
-                let mut tmp = idx;
-                for i in (0..rank).rev() {
-                    let coord = tmp % output_dims[i];
-                    tmp /= output_dims[i];
-                    lhs_idx += coord * lhs_aligned[i];
-                    rhs_idx += coord * rhs_aligned[i];
-                }
-                // SAFETY: the aligned strides map every output coordinate to
-                // an in-bounds input element (dimension 1 contributes stride
-                // 0), exactly as in the parallel path below.
-                unsafe {
-                    out.write(op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx)));
-                }
+            for (row, out_row) in spare.chunks_mut(inner).enumerate() {
+                let (lhs_base, rhs_base) = row_bases(row);
+                fill_row(out_row, lhs_base, rhs_base);
             }
             Ok(())
         };
@@ -438,52 +483,25 @@ where
         return Ok(out);
     }
 
+    // Parallelize over groups of whole rows so each rayon task carries enough
+    // work regardless of the inner-run length.
+    let rows_per_chunk = (PAR_CHUNK / inner).max(1);
+    let chunk_len = rows_per_chunk * inner;
     let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
         spare
-            .par_chunks_mut(PAR_CHUNK)
+            .par_chunks_mut(chunk_len)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
-                let start = chunk_idx * PAR_CHUNK;
-                let mut coord: SmallVec<[usize; 8]> = smallvec![0; rank];
-                let mut tmp = start;
-                for i in (0..rank).rev() {
-                    coord[i] = tmp % output_dims[i];
-                    tmp /= output_dims[i];
-                }
-
-                let mut lhs_idx = 0usize;
-                let mut rhs_idx = 0usize;
-                for i in 0..rank {
-                    lhs_idx += coord[i] * lhs_aligned[i];
-                    rhs_idx += coord[i] * rhs_aligned[i];
-                }
-
-                let lhs_ptr = lhs_data.as_ptr();
-                let rhs_ptr = rhs_data.as_ptr();
-                for out in out_chunk.iter_mut() {
-                    // SAFETY: the incremental coordinate walk keeps both
-                    // indices in bounds for every output position (stride 0
-                    // on broadcast dimensions).
-                    unsafe {
-                        out.write(op(*lhs_ptr.add(lhs_idx), *rhs_ptr.add(rhs_idx)));
-                    }
-                    for i in (0..rank).rev() {
-                        coord[i] += 1;
-                        lhs_idx += lhs_aligned[i];
-                        rhs_idx += rhs_aligned[i];
-                        if coord[i] < output_dims[i] {
-                            break;
-                        }
-                        coord[i] = 0;
-                        lhs_idx -= lhs_aligned[i] * output_dims[i];
-                        rhs_idx -= rhs_aligned[i] * output_dims[i];
-                    }
+                let first_row = chunk_idx * rows_per_chunk;
+                for (local, out_row) in out_chunk.chunks_mut(inner).enumerate() {
+                    let (lhs_base, rhs_base) = row_bases(first_row + local);
+                    fill_row(out_row, lhs_base, rhs_base);
                 }
             });
         Ok(())
     };
-    // SAFETY: the chunked walker writes every element of every chunk, and the
-    // chunks partition the spare slice exactly.
+    // SAFETY: the chunks partition the spare slice into whole rows and every
+    // row is fully written.
     let out =
         unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
     Ok(out)
@@ -536,6 +554,56 @@ mod tests {
 
         assert_eq!(result_data, &[11.0, 12.0, 13.0]);
         assert_eq!(result.shape().dims(), &[3]);
+    }
+
+    // Naive reference broadcast add for [d0,d1,d2] op [d0',d1',d2'] where each
+    // operand dim is either the output dim or 1.
+    fn naive_add_3d(a: &[f32], ash: [usize; 3], b: &[f32], bsh: [usize; 3]) -> Vec<f32> {
+        let osh = [ash[0].max(bsh[0]), ash[1].max(bsh[1]), ash[2].max(bsh[2])];
+        let idx = |sh: [usize; 3], c: [usize; 3]| {
+            let c0 = if sh[0] == 1 { 0 } else { c[0] };
+            let c1 = if sh[1] == 1 { 0 } else { c[1] };
+            let c2 = if sh[2] == 1 { 0 } else { c[2] };
+            (c0 * sh[1] + c1) * sh[2] + c2
+        };
+        let mut out = Vec::with_capacity(osh[0] * osh[1] * osh[2]);
+        for i in 0..osh[0] {
+            for j in 0..osh[1] {
+                for k in 0..osh[2] {
+                    out.push(a[idx(ash, [i, j, k])] + b[idx(bsh, [i, j, k])]);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_add_broadcast_patterns_match_naive() {
+        // Exercises the inner-run kernel's four stride branches: last-dim
+        // broadcast on each side, a middle-dim broadcast, and a full match.
+        let cases: &[([usize; 3], [usize; 3])] = &[
+            ([2, 3, 4], [2, 3, 1]), // rhs broadcasts last dim  -> (1,0)
+            ([2, 3, 1], [2, 3, 4]), // lhs broadcasts last dim  -> (0,1)
+            ([2, 1, 4], [2, 3, 4]), // lhs broadcasts middle dim
+            ([2, 3, 4], [1, 3, 4]), // rhs broadcasts leading dim
+            ([1, 3, 4], [2, 3, 4]), // lhs broadcasts leading dim
+            ([2, 3, 4], [2, 3, 4]), // no broadcast -> (1,1)
+        ];
+        for &(ash, bsh) in cases {
+            let an = ash.iter().product::<usize>();
+            let bn = bsh.iter().product::<usize>();
+            let a: Vec<f32> = (0..an).map(|x| x as f32 + 1.0).collect();
+            let b: Vec<f32> = (0..bn).map(|x| (x as f32) * 0.5 - 3.0).collect();
+            let ta = create_test_tensor_f32(a.clone(), ash.to_vec(), false);
+            let tb = create_test_tensor_f32(b.clone(), bsh.to_vec(), false);
+            let got = add(&ta, &tb).unwrap();
+            let expected = naive_add_3d(&a, ash, &b, bsh);
+            assert_eq!(
+                got.data().as_f32_slice().unwrap(),
+                expected.as_slice(),
+                "broadcast {ash:?} + {bsh:?}"
+            );
+        }
     }
 
     #[test]
