@@ -515,6 +515,13 @@ fn clip_f32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     let min_f32 = min_val.map(|v| v as f32);
     let max_f32 = max_val.map(|v| v as f32);
     let out = unary_map(input_data, |val: f32| {
+        // NaN must pass through unchanged (NumPy `clip` / PyTorch `clamp`
+        // parity, and consistency with `maximum`/`minimum`). Rust's
+        // `f32::max`/`min` return the *non*-NaN operand, so without this guard
+        // a NaN input would be silently replaced by a clamp bound.
+        if val.is_nan() {
+            return val;
+        }
         let mut v = val;
         if let Some(min) = min_f32 {
             v = v.max(min);
@@ -537,6 +544,13 @@ fn clip_f64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     })?;
 
     let out = unary_map(input_data, |val: f64| {
+        // NaN must pass through unchanged (NumPy `clip` / PyTorch `clamp`
+        // parity, and consistency with `maximum`/`minimum`). Rust's
+        // `f64::max`/`min` return the *non*-NaN operand, so without this guard
+        // a NaN input would be silently replaced by a clamp bound.
+        if val.is_nan() {
+            return val;
+        }
         let mut v = val;
         if let Some(min) = min_val {
             v = v.max(min);

@@ -797,6 +797,26 @@ def test_clamp_min_max_helpers():
     )
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_clamp_propagates_nan(dtype):
+    # NaN must pass through clamp/clip unchanged, matching np.clip and
+    # torch.clamp (and minitensor's own maximum/minimum). A previous
+    # implementation used Rust f64::max/min, which return the non-NaN operand,
+    # so clamp(nan, -1, 1) silently returned the -1 bound.
+    tensor = mt.Tensor([float("nan"), 5.0, -5.0, 0.3], dtype=dtype)
+    for got in (tensor.clamp(-1.0, 1.0), tensor.clip(-1.0, 1.0)):
+        out = got.numpy()
+        assert np.isnan(out[0])
+        np.testing.assert_allclose(out[1:], np.array([1.0, -1.0, 0.3], dtype=out.dtype))
+
+    nan_vec = mt.Tensor([float("nan"), -2.0, 3.0], dtype=dtype)
+    lo = nan_vec.clamp_min(0.0).numpy()
+    hi = nan_vec.clamp_max(0.0).numpy()
+    assert np.isnan(lo[0]) and np.isnan(hi[0])
+    np.testing.assert_allclose(lo[1:], np.array([0.0, 3.0], dtype=lo.dtype))
+    np.testing.assert_allclose(hi[1:], np.array([-2.0, 0.0], dtype=hi.dtype))
+
+
 def test_clip_raises_for_invalid_bounds():
     tensor = mt.Tensor([1.0, 2.0, 3.0])
     with pytest.raises(ValueError):
