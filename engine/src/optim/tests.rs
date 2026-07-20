@@ -68,6 +68,39 @@ mod tests {
     }
 
     #[test]
+    fn test_rmsprop_momentum_lr_schedule_matches_pytorch() {
+        // PyTorch keeps lr out of the RMSprop momentum buffer:
+        //   buf = momentum*buf + grad/denom ; param -= lr*buf
+        // so a mid-training lr change rescales the entire accumulated buffer.
+        // Reference (f64, alpha=0.99, eps=1e-8, momentum=0.9, grad=2.0):
+        //   step1 lr=0.1: sq=0.04, denom≈0.2, buf≈10, p≈1-0.1*10=0.0
+        //   step2 lr=0.5: sq≈0.0796, denom≈0.28213, buf≈0.9*10+2/0.28213≈16.0888,
+        //                 p≈0.0-0.5*16.0888≈-8.0444
+        let mut p = Tensor::ones(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+        let mut grad = Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+        grad.data_mut().as_f64_slice_mut().unwrap()[0] = 2.0;
+
+        let mut opt = RMSprop::new(0.1, Some(0.99), Some(1e-8), Some(0.0), Some(0.9));
+
+        p.set_grad(Some(grad.clone()));
+        {
+            let mut params = vec![&mut p];
+            opt.step(&mut params).unwrap();
+        }
+        let after1 = p.data().as_f64_slice().unwrap()[0];
+        assert!(after1.abs() < 1e-3, "first step got {after1}");
+
+        opt.set_learning_rate(0.5);
+        p.set_grad(Some(grad.clone()));
+        {
+            let mut params = vec![&mut p];
+            opt.step(&mut params).unwrap();
+        }
+        let after2 = p.data().as_f64_slice().unwrap()[0];
+        assert!((after2 + 8.0444).abs() < 1e-2, "second step got {after2}");
+    }
+
+    #[test]
     fn test_adam_creation() {
         let adam = Adam::new(0.001, Some(0.9), Some(0.999), Some(1e-8), Some(1e-4));
         assert_eq!(adam.learning_rate(), 0.001);

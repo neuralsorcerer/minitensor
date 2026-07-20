@@ -257,8 +257,8 @@ impl RMSprop {
                                 *ga_i = alpha as f32 * *ga_i + (1.0 - alpha as f32) * g_val;
                                 let avg = *sq_i - *ga_i * *ga_i;
                                 let denom = avg.sqrt() + eps as f32;
-                                *mb_i = momentum * *mb_i + lr * g_val / denom;
-                                *p_i -= *mb_i;
+                                *mb_i = momentum * *mb_i + g_val / denom;
+                                *p_i -= lr * *mb_i;
                             });
                     }
                     (Some(mb), None) => {
@@ -271,8 +271,8 @@ impl RMSprop {
                                 let g_val = g_i + wd * *p_i;
                                 *sq_i = alpha as f32 * *sq_i + (1.0 - alpha as f32) * g_val * g_val;
                                 let denom = sq_i.sqrt() + eps as f32;
-                                *mb_i = momentum * *mb_i + lr * g_val / denom;
-                                *p_i -= *mb_i;
+                                *mb_i = momentum * *mb_i + g_val / denom;
+                                *p_i -= lr * *mb_i;
                             });
                     }
                     (None, Some(ga)) => {
@@ -323,8 +323,8 @@ impl RMSprop {
                                 *ga_i = alpha * *ga_i + (1.0 - alpha) * g_val;
                                 let avg = *sq_i - *ga_i * *ga_i;
                                 let denom = avg.sqrt() + eps;
-                                *mb_i = momentum * *mb_i + lr * g_val / denom;
-                                *p_i -= *mb_i;
+                                *mb_i = momentum * *mb_i + g_val / denom;
+                                *p_i -= lr * *mb_i;
                             });
                     }
                     (Some(mb), None) => {
@@ -337,8 +337,8 @@ impl RMSprop {
                                 let g_val = g_i + weight_decay * *p_i;
                                 *sq_i = alpha * *sq_i + (1.0 - alpha) * g_val * g_val;
                                 let denom = sq_i.sqrt() + eps;
-                                *mb_i = momentum * *mb_i + lr * g_val / denom;
-                                *p_i -= *mb_i;
+                                *mb_i = momentum * *mb_i + g_val / denom;
+                                *p_i -= lr * *mb_i;
                             });
                     }
                     (None, Some(ga)) => {
