@@ -22,6 +22,25 @@ def test_relu_negative_and_nan():
     np.testing.assert_allclose(vals, np.array([0.0, np.nan, 2.0]), equal_nan=True)
 
 
+def test_batch_norm_running_var_is_unbiased():
+    # PyTorch stores the UNBIASED batch variance in running_var (Bessel's
+    # correction, var_biased * n/(n-1)) even though the normalization itself
+    # uses the biased estimate. For x with 2 rows per channel the correction
+    # factor is 2/(2-1) = 2. The running buffers are updated in place, so they
+    # are passed as raw engine tensors.
+    x = mt.Tensor(np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32"))
+    running_mean = mt.Tensor(np.array([0.0, 0.0], dtype="float32"))
+    running_var = mt.Tensor(np.array([1.0, 1.0], dtype="float32"))
+
+    F.batch_norm(x, running_mean, running_var, training=True, momentum=0.1)
+
+    # Per channel over N=2: mean=[2,3], biased var=[1,1], unbiased=[2,2].
+    #   running_mean = 0.9*0 + 0.1*[2,3] = [0.2, 0.3]
+    #   running_var  = 0.9*1 + 0.1*[2,2] = [1.1, 1.1]  (biased form -> 1.0)
+    np.testing.assert_allclose(running_mean.numpy(), [0.2, 0.3], rtol=1e-5)
+    np.testing.assert_allclose(running_var.numpy(), [1.1, 1.1], rtol=1e-5)
+
+
 def test_hardshrink_matches_numpy_and_grad():
     data = np.array([-1.2, -0.25, 0.0, 0.35, 0.8], dtype=np.float32)
     lambd = 0.3
