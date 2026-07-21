@@ -98,7 +98,21 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                 }
                 PowBroadcast::ExponentScalar => {
                     let exp_val = e[0];
-                    unary_map(b, move |x: $ty| x.powf(exp_val))
+                    // Fast paths for common small integer exponents avoid the
+                    // expensive transcendental `powf`. Repeated multiplication
+                    // matches NumPy/PyTorch (which lower `x**2`/`x**3` to
+                    // multiplies) and agrees with `powf` on IEEE special values
+                    // (NaN, +/-inf, +/-0) for these exponents. The gradient is
+                    // produced separately by `PowBackward`, so it is unchanged.
+                    if exp_val == 2.0 {
+                        unary_map(b, |x: $ty| x * x)
+                    } else if exp_val == 1.0 {
+                        unary_map(b, |x: $ty| x)
+                    } else if exp_val == 3.0 {
+                        unary_map(b, |x: $ty| x * x * x)
+                    } else {
+                        unary_map(b, move |x: $ty| x.powf(exp_val))
+                    }
                 }
             };
             TensorData::from_vec::<$ty>(out, DataType::$dtype, base.device())
