@@ -348,6 +348,97 @@ pub(crate) fn leaky_relu_f64(
     ))
 }
 
+/// Column-wise softmax of a `[dim_size, after]` row-major block (`after > 1`).
+///
+/// The softmax dimension is the outer (row) index. Processing the block one
+/// contiguous row at a time with `after`-sized max/sum accumulators makes every
+/// memory access sequential, unlike the naive per-column loop which strides by
+/// `after` on every element. Numerically identical to the strided version: the
+/// per-column max is order-independent and the per-column sum accumulates rows
+/// in the same order.
+fn softmax_block_columnwise_f32(
+    in_block: &[f32],
+    out_block: &mut [f32],
+    dim_size: usize,
+    after: usize,
+) {
+    let mut col_max = vec![f32::NEG_INFINITY; after];
+    for k in 0..dim_size {
+        let row = &in_block[k * after..k * after + after];
+        for (m, &v) in col_max.iter_mut().zip(row) {
+            if v > *m {
+                *m = v;
+            }
+        }
+    }
+    let mut col_sum = vec![0.0f32; after];
+    for k in 0..dim_size {
+        let in_row = &in_block[k * after..k * after + after];
+        let out_row = &mut out_block[k * after..k * after + after];
+        for a in 0..after {
+            let m = col_max[a];
+            // A column whose max is -inf is all -inf (or empty); emit 0, matching
+            // the strided path's negative-infinity short-circuit.
+            let e = if m == f32::NEG_INFINITY {
+                0.0
+            } else {
+                (in_row[a] - m).exp()
+            };
+            out_row[a] = e;
+            col_sum[a] += e;
+        }
+    }
+    for k in 0..dim_size {
+        let out_row = &mut out_block[k * after..k * after + after];
+        for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
+            if s > 0.0 {
+                *o /= s;
+            }
+        }
+    }
+}
+
+/// f64 counterpart of [`softmax_block_columnwise_f32`].
+fn softmax_block_columnwise_f64(
+    in_block: &[f64],
+    out_block: &mut [f64],
+    dim_size: usize,
+    after: usize,
+) {
+    let mut col_max = vec![f64::NEG_INFINITY; after];
+    for k in 0..dim_size {
+        let row = &in_block[k * after..k * after + after];
+        for (m, &v) in col_max.iter_mut().zip(row) {
+            if v > *m {
+                *m = v;
+            }
+        }
+    }
+    let mut col_sum = vec![0.0f64; after];
+    for k in 0..dim_size {
+        let in_row = &in_block[k * after..k * after + after];
+        let out_row = &mut out_block[k * after..k * after + after];
+        for a in 0..after {
+            let m = col_max[a];
+            let e = if m == f64::NEG_INFINITY {
+                0.0
+            } else {
+                (in_row[a] - m).exp()
+            };
+            out_row[a] = e;
+            col_sum[a] += e;
+        }
+    }
+    for k in 0..dim_size {
+        let out_row = &mut out_block[k * after..k * after + after];
+        for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
+            if s > 0.0 {
+                *o /= s;
+            }
+        }
+    }
+}
+
 pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
@@ -377,31 +468,33 @@ pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: us
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
         .for_each(|(in_block, out_block)| {
-            for a in 0..after {
-                let base = a;
+            if after == 1 {
+                // Softmax over the last (contiguous) dimension: each block is a
+                // single slice laid out contiguously.
                 let mut max_val = f32::NEG_INFINITY;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    max_val = max_val.max(in_block[idx]);
+                for &v in in_block.iter() {
+                    max_val = max_val.max(v);
                 }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
-                    }
-                    continue;
+                if max_val == f32::NEG_INFINITY {
+                    out_block.fill(0.0);
+                    return;
                 }
                 let mut sum = 0.0f32;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let val = (in_block[idx] - max_val).exp();
-                    out_block[idx] = val;
-                    sum += val;
+                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                    let e = (v - max_val).exp();
+                    *o = e;
+                    sum += e;
                 }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] /= sum;
+                for o in out_block.iter_mut() {
+                    *o /= sum;
                 }
+            } else {
+                // Softmax over a non-last dimension: the block is a
+                // `[dim_size, after]` row-major matrix and the reduction runs
+                // down the rows. Using `after`-sized column accumulators keeps
+                // every pass contiguous (cache-friendly) instead of striding by
+                // `after` per element.
+                softmax_block_columnwise_f32(in_block, out_block, dim_size, after);
             }
         });
 
@@ -434,31 +527,26 @@ pub(crate) fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: us
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
         .for_each(|(in_block, out_block)| {
-            for a in 0..after {
-                let base = a;
+            if after == 1 {
                 let mut max_val = f64::NEG_INFINITY;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    max_val = max_val.max(in_block[idx]);
+                for &v in in_block.iter() {
+                    max_val = max_val.max(v);
                 }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
-                    }
-                    continue;
+                if max_val == f64::NEG_INFINITY {
+                    out_block.fill(0.0);
+                    return;
                 }
                 let mut sum = 0.0f64;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let val = (in_block[idx] - max_val).exp();
-                    out_block[idx] = val;
-                    sum += val;
+                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                    let e = (v - max_val).exp();
+                    *o = e;
+                    sum += e;
                 }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] /= sum;
+                for o in out_block.iter_mut() {
+                    *o /= sum;
                 }
+            } else {
+                softmax_block_columnwise_f64(in_block, out_block, dim_size, after);
             }
         });
 
@@ -759,32 +847,67 @@ fn log_softmax_core<T: Float + Send + Sync>(
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
         .for_each(|(in_block, out_block)| {
-            for a in 0..after {
-                let base = a;
+            if after == 1 {
+                // Log-softmax over the last (contiguous) dimension.
                 let mut max_val = neg_inf;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let val = in_block[idx];
-                    if val > max_val {
-                        max_val = val;
+                for &v in in_block.iter() {
+                    if v > max_val {
+                        max_val = v;
                     }
                 }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = neg_inf;
-                    }
-                    continue;
+                if max_val == neg_inf {
+                    out_block.fill(neg_inf);
+                    return;
                 }
                 let mut sum = T::zero();
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    sum = sum + (in_block[idx] - max_val).exp();
+                for &v in in_block.iter() {
+                    sum = sum + (v - max_val).exp();
                 }
                 let logsum = sum.ln() + max_val;
+                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                    *o = v - logsum;
+                }
+            } else {
+                // Non-last dimension: process the `[dim_size, after]` block
+                // column-wise with `after`-sized accumulators so every pass is
+                // contiguous instead of striding by `after`.
+                let mut col_logsum = vec![neg_inf; after];
                 for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] = in_block[idx] - logsum;
+                    let row = &in_block[k * after..k * after + after];
+                    for (m, &v) in col_logsum.iter_mut().zip(row) {
+                        if v > *m {
+                            *m = v;
+                        }
+                    }
+                }
+                let mut col_sum = vec![T::zero(); after];
+                for k in 0..dim_size {
+                    let in_row = &in_block[k * after..k * after + after];
+                    for a in 0..after {
+                        let m = col_logsum[a];
+                        if m != neg_inf {
+                            col_sum[a] = col_sum[a] + (in_row[a] - m).exp();
+                        }
+                    }
+                }
+                // Fold each column's max into log(sum) + max; -inf columns stay
+                // -inf so their outputs are all -inf.
+                for a in 0..after {
+                    if col_logsum[a] != neg_inf {
+                        col_logsum[a] = col_sum[a].ln() + col_logsum[a];
+                    }
+                }
+                for k in 0..dim_size {
+                    let in_row = &in_block[k * after..k * after + after];
+                    let out_row = &mut out_block[k * after..k * after + after];
+                    for a in 0..after {
+                        let ls = col_logsum[a];
+                        out_row[a] = if ls == neg_inf {
+                            neg_inf
+                        } else {
+                            in_row[a] - ls
+                        };
+                    }
                 }
             }
         });
