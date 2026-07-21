@@ -300,19 +300,27 @@ macro_rules! prod_along_dim_kernel {
             let dim_size = input_shape[dim];
             let inner = input_shape[dim + 1..].iter().product::<usize>();
             let outer_stride = dim_size * inner;
+            if inner == 0 {
+                return Ok(());
+            }
+            // Accumulate the reduced dimension by multiplying contiguous slabs
+            // (`input[.. k*inner ..]`) into a per-`outer` product buffer, so
+            // every read and write is sequential (cache-friendly) rather than
+            // striding by `inner` per output element. Parallel over the outer
+            // index.
             result_slice
-                .par_iter_mut()
+                .par_chunks_mut(inner)
                 .enumerate()
-                .for_each(|(idx, out)| {
-                    let o = idx / inner;
-                    let r = idx % inner;
-                    let mut prod_val = $one;
-                    let mut base = o * outer_stride + r;
-                    for _ in 0..dim_size {
-                        prod_val *= input_data[base];
-                        base += inner;
+                .for_each(|(o, out_chunk)| {
+                    out_chunk.fill($one);
+                    let block_base = o * outer_stride;
+                    for k in 0..dim_size {
+                        let slab_base = block_base + k * inner;
+                        let slab = &input_data[slab_base..slab_base + inner];
+                        for (acc, &v) in out_chunk.iter_mut().zip(slab) {
+                            *acc *= v;
+                        }
                     }
-                    *out = prod_val;
                 });
             Ok(())
         }
