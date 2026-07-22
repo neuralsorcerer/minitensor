@@ -368,6 +368,19 @@ pub fn var(
     }
 
     let reduction_dims: Vec<usize> = dims.clone().unwrap_or_else(|| (0..tensor.ndim()).collect());
+
+    // Fused fast path: single-axis variance for tensors that don't require
+    // gradients. Computes mean and the sum of squared deviations in two
+    // cache-friendly passes, avoiding the full-size difference/square
+    // intermediates that the autograd composition below materializes. The
+    // gradient path is left entirely to that composition.
+    if !tensor.requires_grad()
+        && reduction_dims.len() == 1
+        && tensor.shape().dims()[reduction_dims[0]] >= 1
+    {
+        return var_fused_single_axis(tensor, reduction_dims[0], keepdim, unbiased);
+    }
+
     let reduction_dims_isize: Vec<isize> = reduction_dims.iter().map(|&d| d as isize).collect();
 
     // Keep reduced axes while computing deviations so broadcasting is unambiguous for
@@ -446,6 +459,111 @@ pub fn var(
         Shape::new(new_dims)
     };
     shape_ops::reshape(&variance, target_shape)
+}
+
+/// Fused single-axis variance for tensors that do not require gradients.
+///
+/// Two cache-friendly slab passes per outer block (mean, then sum of squared
+/// deviations), parallel over the outer index. Numerically matches the autograd
+/// composition (`mean` -> `x - mean` -> square -> `mean` -> Bessel): biased
+/// variance is `sum_sq_dev / n`, unbiased is `sum_sq_dev / (n - 1)` (and NaN
+/// when `n <= 1`).
+fn var_fused_single_axis(
+    tensor: &Tensor,
+    axis: usize,
+    keepdim: bool,
+    unbiased: bool,
+) -> Result<Tensor> {
+    let dims = tensor.shape().dims();
+    let dim_size = dims[axis];
+    let inner: usize = dims[axis + 1..].iter().product();
+    let outer: usize = dims[..axis].iter().product();
+    let outer_stride = dim_size * inner;
+    let out_numel = outer * inner;
+
+    let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
+
+    macro_rules! fill {
+        ($accessor:ident, $accessor_mut:ident, $ty:ty) => {{
+            let input = tensor
+                .data()
+                .$accessor()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let out = result_data
+                .$accessor_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            let n = dim_size as $ty;
+            let divisor = if unbiased { n - 1.0 } else { n };
+            let all_nan = unbiased && dim_size <= 1;
+            if inner != 0 {
+                out.par_chunks_mut(inner)
+                    .enumerate()
+                    .for_each(|(o, out_chunk)| {
+                        if all_nan {
+                            out_chunk.fill(<$ty>::NAN);
+                            return;
+                        }
+                        let block_base = o * outer_stride;
+                        let mut col_mean = vec![0.0 as $ty; inner];
+                        for k in 0..dim_size {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for (m, &v) in col_mean.iter_mut().zip(slab) {
+                                *m += v;
+                            }
+                        }
+                        for m in col_mean.iter_mut() {
+                            *m /= n;
+                        }
+                        out_chunk.fill(0.0 as $ty);
+                        for k in 0..dim_size {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for ((acc, &v), &m) in
+                                out_chunk.iter_mut().zip(slab).zip(col_mean.iter())
+                            {
+                                let d = v - m;
+                                *acc += d * d;
+                            }
+                        }
+                        for acc in out_chunk.iter_mut() {
+                            *acc /= divisor;
+                        }
+                    });
+            }
+        }};
+    }
+
+    match tensor.dtype() {
+        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32),
+        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64),
+        _ => unreachable!("variance is only defined for floating point tensors"),
+    }
+
+    let out_shape = if keepdim {
+        let mut d = dims.to_vec();
+        d[axis] = 1;
+        Shape::new(d)
+    } else {
+        let d: Vec<usize> = dims
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
+            .collect();
+        if d.is_empty() {
+            Shape::scalar()
+        } else {
+            Shape::new(d)
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        out_shape,
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
 }
 
 // Helper functions for type-specific operations
