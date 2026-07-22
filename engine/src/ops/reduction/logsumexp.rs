@@ -55,6 +55,14 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
         return Ok(tensor.clone());
     }
 
+    // Fused fast path: single-axis log-sum-exp for tensors that don't require
+    // gradients (mirrors the var/std fast path). Avoids materializing the
+    // full-size shift/exp intermediates; the gradient path keeps the autograd
+    // composition below.
+    if !tensor.requires_grad() && dims.len() == 1 && tensor.shape().dims()[dims[0]] >= 1 {
+        return logsumexp_fused_single_axis(tensor, dims[0], keepdim);
+    }
+
     let mut max_tensor = tensor.clone();
     for &d in &dims {
         max_tensor = max_along_dim(&max_tensor, d, true)?;
@@ -131,6 +139,103 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
     }
 
     Ok(result)
+}
+
+/// Fused single-axis log-sum-exp for tensors that do not require gradients.
+///
+/// Two cache-friendly slab passes per outer block (column max with NaN
+/// propagation, then the sum of `exp(x - max)`), parallel over the outer index.
+/// Reproduces the autograd composition including its non-finite-max limit: a
+/// column whose max is +/-inf or NaN reduces to that max itself.
+fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> Result<Tensor> {
+    let dims = tensor.shape().dims();
+    let dim_size = dims[axis];
+    let inner: usize = dims[axis + 1..].iter().product();
+    let outer: usize = dims[..axis].iter().product();
+    let outer_stride = dim_size * inner;
+    let out_numel = outer * inner;
+
+    let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
+
+    macro_rules! fill {
+        ($accessor:ident, $accessor_mut:ident, $ty:ty) => {{
+            let input = tensor
+                .data()
+                .$accessor()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get slice"))?;
+            let out = result_data
+                .$accessor_mut()
+                .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
+            if inner != 0 {
+                out.par_chunks_mut(inner)
+                    .enumerate()
+                    .for_each(|(o, out_chunk)| {
+                        let block_base = o * outer_stride;
+                        // Column max with NaN propagation (matches max_along_dim).
+                        let mut col_max = vec![<$ty>::NEG_INFINITY; inner];
+                        for k in 0..dim_size {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for (m, &v) in col_max.iter_mut().zip(slab) {
+                                if v.is_nan() {
+                                    *m = v;
+                                } else if v > *m {
+                                    *m = v;
+                                }
+                            }
+                        }
+                        // Sum of exp(x - max), skipping non-finite-max columns
+                        // (their result is the max itself).
+                        let mut col_sum = vec![0.0 as $ty; inner];
+                        for k in 0..dim_size {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for ((s, &v), &m) in col_sum.iter_mut().zip(slab).zip(col_max.iter()) {
+                                if m.is_finite() {
+                                    *s += (v - m).exp();
+                                }
+                            }
+                        }
+                        for ((dst, &m), &s) in
+                            out_chunk.iter_mut().zip(col_max.iter()).zip(col_sum.iter())
+                        {
+                            *dst = if m.is_finite() { m + s.ln() } else { m };
+                        }
+                    });
+            }
+        }};
+    }
+
+    match tensor.dtype() {
+        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32),
+        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64),
+        _ => unreachable!("logsumexp dtype checked above"),
+    }
+
+    let out_shape = if keepdim {
+        let mut d = dims.to_vec();
+        d[axis] = 1;
+        Shape::new(d)
+    } else {
+        let d: Vec<usize> = dims
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
+            .collect();
+        if d.is_empty() {
+            Shape::scalar()
+        } else {
+            Shape::new(d)
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(result_data),
+        out_shape,
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    ))
 }
 
 /// Product reduction along specified dimensions
