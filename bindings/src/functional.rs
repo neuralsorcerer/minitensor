@@ -1223,6 +1223,60 @@ pub fn layer_norm(
     )
 }
 
+/// Root-mean-square layer normalization (RMSNorm) — the normalization used by
+/// LLaMA/Mistral/Gemma and most modern LLMs. Normalizes by the RMS over
+/// `normalized_shape` (no mean subtraction, no bias) and rescales by `weight`.
+#[pyfunction]
+#[pyo3(signature = (input, normalized_shape, weight=None, eps=1e-6))]
+pub fn rms_norm(
+    input: &Bound<PyAny>,
+    normalized_shape: &Bound<PyAny>,
+    weight: Option<&Bound<PyAny>>,
+    eps: f64,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let shape = parse_normalized_shape(normalized_shape)?;
+    let weight_tensor = borrow_optional_tensor(weight)?;
+    tensor.rms_norm(shape, weight_tensor.as_deref(), Some(eps))
+}
+
+/// Scaled dot-product attention — the core Transformer primitive
+/// (Vaswani et al., 2017). Computes `softmax(Q Kᵀ / sqrt(E) + bias) V` over the
+/// key axis, fully differentiable through `query`, `key`, `value` and a float
+/// `attn_mask`. Leading batch axes broadcast, so multi-head layouts
+/// `(batch, heads, seq, dim)` work directly.
+///
+/// `attn_mask` is broadcastable to the scores `(..., L, S)`: a float mask is
+/// added to the scores (use `-inf` to disallow), a bool mask keeps `True`
+/// positions and disables `False` ones. `is_causal=True` applies an
+/// autoregressive mask (position i attends only to j <= i); combining it with an
+/// explicit `attn_mask` is rejected. `scale` overrides the default `1/sqrt(E)`.
+#[pyfunction]
+#[pyo3(signature = (query, key, value, attn_mask=None, is_causal=false, scale=None))]
+pub fn scaled_dot_product_attention(
+    query: &Bound<PyAny>,
+    key: &Bound<PyAny>,
+    value: &Bound<PyAny>,
+    attn_mask: Option<&Bound<PyAny>>,
+    is_causal: bool,
+    scale: Option<f64>,
+) -> PyResult<PyTensor> {
+    let q = borrow_tensor(query)?;
+    let k = borrow_tensor(key)?;
+    let v = borrow_tensor(value)?;
+    let mask = borrow_optional_tensor(attn_mask)?;
+    let result = engine::ops::scaled_dot_product_attention(
+        q.tensor(),
+        k.tensor(),
+        v.tensor(),
+        mask.as_deref().map(|m| m.tensor()),
+        is_causal,
+        scale,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
@@ -1383,6 +1437,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(quantile, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanquantile, parent)?)?;
     parent.add_function(wrap_pyfunction!(layer_norm, parent)?)?;
+    parent.add_function(wrap_pyfunction!(rms_norm, parent)?)?;
+    parent.add_function(wrap_pyfunction!(scaled_dot_product_attention, parent)?)?;
     parent.add_function(wrap_pyfunction!(cat, parent)?)?;
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
     parent.add_function(wrap_pyfunction!(dot, parent)?)?;

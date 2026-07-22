@@ -2021,6 +2021,17 @@ impl Tensor {
         layer_norm(self, normalized_shape, weight, bias, eps)
     }
 
+    /// Root-mean-square layer normalization (RMSNorm).
+    pub fn rms_norm(
+        &self,
+        normalized_shape: &[usize],
+        weight: Option<&Tensor>,
+        eps: f64,
+    ) -> Result<Self> {
+        use crate::ops::normalization::rms_norm;
+        rms_norm(self, normalized_shape, weight, eps)
+    }
+
     /// Absolute value
     #[inline(always)]
     pub fn abs(&self) -> Result<Self> {

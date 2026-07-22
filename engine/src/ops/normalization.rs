@@ -353,6 +353,98 @@ pub fn layer_norm(
     Ok(output_with_grad)
 }
 
+/// Apply root-mean-square layer normalization (RMSNorm) to the input tensor.
+///
+/// RMSNorm (Zhang & Sennrich, 2019) normalizes activations by their root mean
+/// square over the trailing `normalized_shape` dimensions — dropping LayerNorm's
+/// mean subtraction and bias term — then rescales by an optional learnable
+/// `weight`:
+///
+/// ```text
+/// rms_norm(x) = x / sqrt(mean(x², over normalized dims) + eps) * weight
+/// ```
+///
+/// It is the normalization used by LLaMA, Mistral, Gemma, Qwen and most modern
+/// large language models: cheaper than LayerNorm (no mean/variance, no re-
+/// centering) while matching or improving training stability. Built by composing
+/// autograd-tracked primitives, so gradients — including the coupling of the
+/// input through the RMS denominator — flow automatically.
+pub fn rms_norm(
+    input: &Tensor,
+    normalized_shape: &[usize],
+    weight: Option<&Tensor>,
+    eps: f64,
+) -> Result<Tensor> {
+    if normalized_shape.is_empty() {
+        return Err(MinitensorError::invalid_argument(
+            "rms_norm requires at least one normalized dimension".to_string(),
+        ));
+    }
+    if normalized_shape.len() > input.ndim() {
+        return Err(MinitensorError::invalid_operation(
+            "normalized_shape rank cannot exceed input rank for rms_norm".to_string(),
+        ));
+    }
+    match input.dtype() {
+        DataType::Float32 | DataType::Float64 => {}
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "rms_norm only supports floating point tensors".to_string(),
+            ));
+        }
+    }
+
+    let axis_start = input.ndim() - normalized_shape.len();
+    for (i, &expected) in normalized_shape.iter().enumerate() {
+        let actual = input.size(axis_start + i)?;
+        if actual != expected {
+            return Err(MinitensorError::shape_mismatch(
+                vec![expected],
+                vec![actual],
+            ));
+        }
+    }
+
+    if let Some(w) = weight {
+        if w.dtype() != input.dtype() {
+            return Err(MinitensorError::type_mismatch(
+                input.dtype().to_string(),
+                w.dtype().to_string(),
+            ));
+        }
+        if w.device() != input.device() {
+            return Err(MinitensorError::device_mismatch(
+                input.device().to_string(),
+                w.device().to_string(),
+            ));
+        }
+        if w.shape().dims() != normalized_shape {
+            return Err(MinitensorError::shape_mismatch(
+                normalized_shape.to_vec(),
+                w.shape().dims().to_vec(),
+            ));
+        }
+    }
+
+    let axes: Vec<isize> = (axis_start..input.ndim()).map(|d| d as isize).collect();
+    // mean(x²) over the normalized dimensions, kept for broadcasting.
+    let mean_sq = crate::ops::arithmetic::mul(input, input)?.mean(Some(axes), true)?;
+    let eps_tensor = scalar_tensor(eps, input.dtype(), input.device())?;
+    let denom = crate::ops::arithmetic::add(&mean_sq, &eps_tensor)?;
+    let inv_rms = crate::ops::activation::rsqrt(&denom)?;
+    let mut output = crate::ops::arithmetic::mul(input, &inv_rms)?;
+
+    if let Some(w) = weight {
+        let mut view = w.clone();
+        for _ in 0..axis_start {
+            view = view.unsqueeze(0)?;
+        }
+        output = crate::ops::arithmetic::mul(&output, &view)?;
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

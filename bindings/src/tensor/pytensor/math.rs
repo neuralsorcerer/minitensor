@@ -281,6 +281,26 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Root-mean-square layer normalization (RMSNorm).
+    pub fn rms_norm(
+        &self,
+        normalized_shape: Vec<usize>,
+        weight: Option<&PyTensor>,
+        eps: Option<f64>,
+    ) -> PyResult<Self> {
+        if normalized_shape.is_empty() {
+            return Err(PyValueError::new_err(
+                "rms_norm requires normalized_shape to contain at least one dimension",
+            ));
+        }
+        let weight_inner = weight.map(|w| &w.inner);
+        let result = self
+            .inner
+            .rms_norm(&normalized_shape, weight_inner, eps.unwrap_or(1e-6))
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(signature = (approximate=None))]
     pub fn gelu(&self, approximate: Option<&str>) -> PyResult<Self> {
         let approx_mode = approximate.unwrap_or("none");

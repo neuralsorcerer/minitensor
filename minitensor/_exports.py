@@ -63,6 +63,8 @@ _FUNCTIONAL_FORWARDERS = (
     "softsign",
     "tanh",
     "layer_norm",
+    "rms_norm",
+    "scaled_dot_product_attention",
     "rsqrt",
     "reciprocal",
     "sign",

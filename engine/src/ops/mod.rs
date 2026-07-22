@@ -6,6 +6,7 @@
 
 pub mod activation;
 pub mod arithmetic;
+pub mod attention;
 pub mod binary;
 pub mod comparison;
 pub mod conv;
@@ -24,6 +25,7 @@ pub(crate) mod util;
 // Re-export common operations
 pub use activation::*;
 pub use arithmetic::*;
+pub use attention::*;
 pub use comparison::*;
 pub use conv::*;
 pub use linalg::*;
