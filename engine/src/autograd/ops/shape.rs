@@ -92,37 +92,76 @@ impl GradientFunction for Conv2dBackward {
         let device = self.input.device();
         let mut gradients = FxHashMap::default();
 
-        // grad_input: parallel over batches, which own disjoint output regions.
+        let ohw = out_h * out_w;
+        let n_ohw = batch * ohw;
+        let k_dim = in_channels * kernel_h * kernel_w;
+        let kh_kw = kernel_h * kernel_w;
+
+        // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
+        // the layout both weight- and input-gradient GEMMs contract against.
+        let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
+            let mut gm = vec![0f32; out_channels * n_ohw];
+            gm.par_chunks_mut(n_ohw).enumerate().for_each(|(oc, row)| {
+                for n in 0..batch {
+                    let src = (n * out_channels + oc) * ohw;
+                    row[n * ohw..n * ohw + ohw].copy_from_slice(&go[src..src + ohw]);
+                }
+            });
+            gm
+        } else {
+            Vec::new()
+        };
+
+        // grad_input = col2im(weightᵀ @ go_mat). The GEMM yields grad_cols
+        // [K, N*OH*OW]; col2im scatters each column back to the input positions it
+        // was gathered from. Parallel over the batch (disjoint grad_input regions),
+        // with a serial scatter-add within each batch, so there are no races.
         if self.input_requires_grad {
             let in_stride = in_channels * in_h * in_w;
             let mut grad_input = vec![0f32; batch * in_stride];
-            grad_input
-                .par_chunks_mut(in_stride)
-                .enumerate()
-                .for_each(|(n, gi)| {
-                    for oc in 0..out_channels {
-                        let w_base = oc * in_channels * kernel_h * kernel_w;
-                        for oh in 0..out_h {
-                            for ow in 0..out_w {
-                                let g = go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
-                                for kh in 0..kernel_h {
-                                    for kw in 0..kernel_w {
-                                        if let Some((ih, iw)) = conv_input_coord(
-                                            oh, ow, kh, kw, stride, padding, in_h, in_w,
-                                        ) {
-                                            let spatial = ih * in_w + iw;
-                                            for ic in 0..in_channels {
-                                                let w_idx =
-                                                    w_base + (ic * kernel_h + kh) * kernel_w + kw;
-                                                gi[ic * in_h * in_w + spatial] += g * weight[w_idx];
-                                            }
-                                        }
-                                    }
+            if n_ohw > 0 {
+                let mut weight_t = vec![0f32; k_dim * out_channels];
+                for oc in 0..out_channels {
+                    for k in 0..k_dim {
+                        weight_t[k * out_channels + oc] = weight[oc * k_dim + k];
+                    }
+                }
+                let mut grad_cols = vec![0f32; k_dim * n_ohw];
+                // SAFETY: weight_t is [K, C_out], go_mat is [C_out, N*OH*OW], and
+                // grad_cols is [K, N*OH*OW]; all contiguous row-major, dims match.
+                unsafe {
+                    crate::ops::linalg::gemm_f32(
+                        k_dim,
+                        out_channels,
+                        n_ohw,
+                        weight_t.as_ptr(),
+                        go_mat.as_ptr(),
+                        grad_cols.as_mut_ptr(),
+                    );
+                }
+                grad_input
+                    .par_chunks_mut(in_stride)
+                    .enumerate()
+                    .for_each(|(n, gi)| {
+                        for k in 0..k_dim {
+                            let ic = k / kh_kw;
+                            let rem = k % kh_kw;
+                            let ky = rem / kernel_w;
+                            let kx = rem % kernel_w;
+                            let row_base = k * n_ohw + n * ohw;
+                            let ic_base = ic * in_h * in_w;
+                            for p in 0..ohw {
+                                let oh = p / out_w;
+                                let ow = p % out_w;
+                                if let Some((ih, iw)) =
+                                    conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
+                                {
+                                    gi[ic_base + ih * in_w + iw] += grad_cols[row_base + p];
                                 }
                             }
                         }
-                    }
-                });
+                    });
+            }
             let grad = Tensor::new(
                 Arc::new(TensorData::from_vec_f32(grad_input, device)),
                 self.input.shape().clone(),
@@ -133,37 +172,46 @@ impl GradientFunction for Conv2dBackward {
             accumulate_grad(&mut gradients, self.input_id, grad)?;
         }
 
-        // grad_weight: parallel over output channels, which own disjoint slices.
+        // grad_weight = go_mat @ cols, where `cols` [N*OH*OW, K] is the im2col of
+        // the input (the same lowering as the forward). One GEMM replaces the
+        // naive per-element accumulation.
         if self.weight_requires_grad {
-            let w_stride = in_channels * kernel_h * kernel_w;
-            let mut grad_weight = vec![0f32; out_channels * w_stride];
-            grad_weight
-                .par_chunks_mut(w_stride)
-                .enumerate()
-                .for_each(|(oc, gw)| {
-                    for n in 0..batch {
-                        for oh in 0..out_h {
-                            for ow in 0..out_w {
-                                let g = go[((n * out_channels + oc) * out_h + oh) * out_w + ow];
-                                for kh in 0..kernel_h {
-                                    for kw in 0..kernel_w {
-                                        if let Some((ih, iw)) = conv_input_coord(
-                                            oh, ow, kh, kw, stride, padding, in_h, in_w,
-                                        ) {
-                                            let spatial = ih * in_w + iw;
-                                            for ic in 0..in_channels {
-                                                let in_idx =
-                                                    (n * in_channels + ic) * in_h * in_w + spatial;
-                                                gw[(ic * kernel_h + kh) * kernel_w + kw] +=
-                                                    g * input[in_idx];
-                                            }
-                                        }
-                                    }
-                                }
+            let mut grad_weight = vec![0f32; out_channels * k_dim];
+            if n_ohw > 0 {
+                let mut cols = vec![0f32; n_ohw * k_dim];
+                cols.par_chunks_mut(k_dim)
+                    .enumerate()
+                    .for_each(|(r, prow)| {
+                        let n = r / ohw;
+                        let p = r % ohw;
+                        let oh = p / out_w;
+                        let ow = p % out_w;
+                        for (k, slot) in prow.iter_mut().enumerate() {
+                            let ic = k / kh_kw;
+                            let rem = k % kh_kw;
+                            let ky = rem / kernel_w;
+                            let kx = rem % kernel_w;
+                            if let Some((ih, iw)) =
+                                conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
+                            {
+                                *slot =
+                                    input[(n * in_channels + ic) * in_h * in_w + ih * in_w + iw];
                             }
                         }
-                    }
-                });
+                    });
+                // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
+                // grad_weight is [C_out, K]; all contiguous row-major, dims match.
+                unsafe {
+                    crate::ops::linalg::gemm_f32(
+                        out_channels,
+                        n_ohw,
+                        k_dim,
+                        go_mat.as_ptr(),
+                        cols.as_ptr(),
+                        grad_weight.as_mut_ptr(),
+                    );
+                }
+            }
             let grad = Tensor::new(
                 Arc::new(TensorData::from_vec_f32(grad_weight, device)),
                 self.weight.shape().clone(),
