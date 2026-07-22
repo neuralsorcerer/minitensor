@@ -108,53 +108,86 @@ pub fn conv2d(
                     None
                 };
 
-            let mut output_vec =
-                vec![0f32; batch_size * out_channels * output_height * output_width];
+            // im2col + GEMM. Lower each output position's receptive field into a
+            // column of `cols` ([K, N*out_h*out_w], K = C_in*kH*kW), then a single
+            // matrix multiply `weight[C_out, K] @ cols` produces `[C_out,
+            // N*out_h*out_w]`, which is scattered (with bias) into the
+            // `[N, C_out, out_h, out_w]` output. `weight` is already laid out as
+            // `[C_out, K]`, so it needs no repacking. This routes the arithmetic
+            // through the tuned GEMM instead of a naive per-output accumulation,
+            // and produces the same cross-correlation result as before.
+            let ohw = output_height * output_width;
+            let k_dim = in_channels * kernel_h * kernel_w;
+            let n_cols = batch_size * ohw;
+            let kh_kw = kernel_h * kernel_w;
 
-            output_vec
-                .par_chunks_mut(output_height * output_width)
-                .enumerate()
-                .for_each(|(chunk_idx, out_chunk)| {
-                    let n = chunk_idx / out_channels;
-                    let oc = chunk_idx % out_channels;
-                    for oh in 0..output_height {
-                        for ow in 0..output_width {
-                            let mut sum = 0f32;
-                            for ic in 0..in_channels {
-                                for kh in 0..kernel_h {
-                                    for kw in 0..kernel_w {
-                                        let h_in = oh * stride.0 + kh;
-                                        let w_in = ow * stride.1 + kw;
-                                        if h_in < padding.0
-                                            || w_in < padding.1
-                                            || h_in >= input_height + padding.0
-                                            || w_in >= input_width + padding.1
-                                        {
-                                            continue;
-                                        }
-                                        let ih = h_in - padding.0;
-                                        let iw = w_in - padding.1;
-                                        if ih < input_height && iw < input_width {
-                                            let input_idx = ((n * in_channels + ic) * input_height
-                                                + ih)
-                                                * input_width
-                                                + iw;
-                                            let weight_idx = ((oc * in_channels + ic) * kernel_h
-                                                + kh)
-                                                * kernel_w
-                                                + kw;
-                                            sum += input_data[input_idx] * weight_data[weight_idx];
-                                        }
-                                    }
-                                }
+            let mut output_vec = vec![0f32; batch_size * out_channels * ohw];
+
+            if !output_vec.is_empty() {
+                // Build cols row by row (one row per kernel-input index `k`), so
+                // each row is written contiguously.
+                let mut cols = vec![0f32; k_dim * n_cols];
+                cols.par_chunks_mut(n_cols)
+                    .enumerate()
+                    .for_each(|(k, row)| {
+                        let ic = k / kh_kw;
+                        let rem = k % kh_kw;
+                        let ky = rem / kernel_w;
+                        let kx = rem % kernel_w;
+                        for (c, slot) in row.iter_mut().enumerate() {
+                            let n = c / ohw;
+                            let p = c % ohw;
+                            let oh = p / output_width;
+                            let ow = p % output_width;
+                            let ih = oh * stride.0 + ky;
+                            let iw = ow * stride.1 + kx;
+                            // Padded coordinate; the valid (unpadded) region is
+                            // [padding, dim + padding); everything else is zero pad.
+                            if ih >= padding.0
+                                && iw >= padding.1
+                                && ih < input_height + padding.0
+                                && iw < input_width + padding.1
+                            {
+                                let ih = ih - padding.0;
+                                let iw = iw - padding.1;
+                                let idx =
+                                    ((n * in_channels + ic) * input_height + ih) * input_width + iw;
+                                *slot = input_data[idx];
                             }
-                            if let Some(bias) = bias_data {
-                                sum += bias[oc];
-                            }
-                            out_chunk[oh * output_width + ow] = sum;
                         }
-                    }
-                });
+                    });
+
+                let mut gemm_out = vec![0f32; out_channels * n_cols];
+                // SAFETY: `weight_data` is [C_out, k_dim], `cols` is [k_dim,
+                // n_cols], and `gemm_out` is [C_out, n_cols]; all are contiguous
+                // row-major and the dimensions match the GEMM signature.
+                unsafe {
+                    crate::ops::linalg::gemm_f32(
+                        out_channels,
+                        k_dim,
+                        n_cols,
+                        weight_data.as_ptr(),
+                        cols.as_ptr(),
+                        gemm_out.as_mut_ptr(),
+                    );
+                }
+
+                // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a
+                // given (n, oc) the source and destination are contiguous `ohw`
+                // slabs.
+                output_vec
+                    .par_chunks_mut(ohw)
+                    .enumerate()
+                    .for_each(|(chunk_idx, out_chunk)| {
+                        let n = chunk_idx / out_channels;
+                        let oc = chunk_idx % out_channels;
+                        let b = bias_data.map(|bd| bd[oc]).unwrap_or(0.0);
+                        let base = oc * n_cols + n * ohw;
+                        for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
+                            *o = v + b;
+                        }
+                    });
+            }
 
             let requires_grad = input.requires_grad()
                 || weight.requires_grad()
