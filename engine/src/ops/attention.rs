@@ -198,6 +198,84 @@ pub fn scaled_dot_product_attention(
     attn.matmul(value)
 }
 
+/// Rotary Position Embedding (RoPE; Su et al., 2021) — the positional encoding
+/// used by LLaMA, Mistral, Qwen and most modern LLMs. Rotates pairs of feature
+/// dimensions of `x` by position-dependent angles, injecting *relative*
+/// position information directly into the query/key vectors with no learned
+/// parameters.
+///
+/// `x` has shape `(..., seq, head_dim)` with an even `head_dim`. Positions
+/// `offset .. offset + seq` run along the second-to-last axis; `offset` supports
+/// incremental / KV-cache decoding. The "rotate-half" convention (GPT-J /
+/// Hugging Face LLaMA) is used and `base` sets the frequency spectrum (10000 in
+/// the original paper). The cos/sin tables are constants with respect to `x`, so
+/// the map is linear in `x` and gradients flow through the autograd-tracked
+/// slice / concat / multiply / add.
+pub fn rope(x: &Tensor, base: f64, offset: usize) -> Result<Tensor> {
+    if !x.dtype().is_float() {
+        return Err(MinitensorError::invalid_operation(
+            "rope requires a floating point tensor",
+        ));
+    }
+    if x.ndim() < 2 {
+        return Err(MinitensorError::invalid_operation(
+            "rope requires a tensor with at least 2 dimensions (..., seq, head_dim)",
+        ));
+    }
+    let dims = x.shape().dims();
+    let seq = dims[dims.len() - 2];
+    let d = dims[dims.len() - 1];
+    if !d.is_multiple_of(2) {
+        return Err(MinitensorError::invalid_operation(
+            "rope requires an even head dimension",
+        ));
+    }
+    let half = d / 2;
+
+    // Build the (seq, d) cos/sin tables on the host. inv_freq[j] = base^(-2j/d);
+    // `emb = cat(freqs, freqs)` so columns j and j+half share an angle.
+    let mut cos_data = vec![0f64; seq * d];
+    let mut sin_data = vec![0f64; seq * d];
+    let inv_freq: Vec<f64> = (0..half)
+        .map(|j| base.powf(-((2 * j) as f64) / d as f64))
+        .collect();
+    for p in 0..seq {
+        let pos = (p + offset) as f64;
+        let row = p * d;
+        for j in 0..half {
+            let (s, c) = (pos * inv_freq[j]).sin_cos();
+            cos_data[row + j] = c;
+            cos_data[row + j + half] = c;
+            sin_data[row + j] = s;
+            sin_data[row + j + half] = s;
+        }
+    }
+
+    let shape = Shape::new(vec![seq, d]);
+    let build = |data: Vec<f64>| -> Tensor {
+        let td = match x.dtype() {
+            DataType::Float32 => {
+                TensorData::from_vec_f32(data.iter().map(|&v| v as f32).collect(), x.device())
+            }
+            _ => TensorData::from_vec_f64(data, x.device()),
+        };
+        Tensor::new(Arc::new(td), shape.clone(), x.dtype(), x.device(), false)
+    };
+    let cos_t = build(cos_data);
+    let sin_t = build(sin_data);
+
+    // rotate_half(x) = cat(-x[..., half:], x[..., :half]) along the last axis.
+    let x1 = crate::ops::shape_ops::narrow(x, -1, 0, half)?;
+    let x2 = crate::ops::shape_ops::narrow(x, -1, half, half)?;
+    let neg_x2 = x2.neg()?;
+    let rotated = crate::ops::shape_ops::concatenate(&[&neg_x2, &x1], -1)?;
+
+    // out = x * cos + rotate_half(x) * sin (cos/sin broadcast over leading axes).
+    let a = crate::ops::arithmetic::mul(x, &cos_t)?;
+    let b = crate::ops::arithmetic::mul(&rotated, &sin_t)?;
+    crate::ops::arithmetic::add(&a, &b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +349,45 @@ mod tests {
         assert!(grads.contains_key(&q.id()));
         assert!(grads.contains_key(&k.id()));
         assert!(grads.contains_key(&v.id()));
+    }
+
+    #[test]
+    fn rope_position_zero_is_identity() {
+        // At position 0 all angles are 0, so cos=1, sin=0 and rope is a no-op.
+        let x = tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4], false);
+        let out = rope(&x, 10000.0, 0).unwrap();
+        let got = out.data().as_f32_slice().unwrap().to_vec();
+        for (g, e) in got.iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert!((g - e).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn rope_rotates_by_expected_angle() {
+        // head_dim=2, position 1: angle = 1 * base^0 = 1 rad. rotate_half of
+        // [x0, x1] is [-x1, x0], so out = [x0*cos1 - x1*sin1, x1*cos1 + x0*sin1].
+        let x = tensor_f32(vec![1.0, 0.0, 1.0, 0.0], vec![2, 2], false);
+        let out = rope(&x, 10000.0, 0).unwrap();
+        let got = out.data().as_f32_slice().unwrap().to_vec();
+        // Row 0 (pos 0) unchanged.
+        assert!((got[0] - 1.0).abs() < 1e-5 && got[1].abs() < 1e-5);
+        // Row 1 (pos 1): [cos(1), sin(1)].
+        assert!((got[2] - 1.0_f32.cos()).abs() < 1e-5);
+        assert!((got[3] - 1.0_f32.sin()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rope_rejects_odd_head_dim() {
+        let x = tensor_f32(vec![1.0, 2.0, 3.0], vec![1, 3], false);
+        assert!(rope(&x, 10000.0, 0).is_err());
+    }
+
+    #[test]
+    fn rope_backward_flows_to_input() {
+        let x = tensor_f32(vec![0.1, 0.2, 0.3, 0.4], vec![2, 2], true);
+        let out = rope(&x, 10000.0, 0).unwrap();
+        let ones = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = crate::autograd::backward_collect(&out, Some(ones)).unwrap();
+        assert!(grads.contains_key(&x.id()));
     }
 }

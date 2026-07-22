@@ -657,3 +657,36 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
         Ok(output)
     }
 }
+
+/// Gated Linear Unit (Dauphin et al., 2017). Splits `input` into two equal
+/// halves `(a, b)` along `dim` and returns `a * sigmoid(b)`. This gating is the
+/// basis of the GLU-family feed-forward blocks (GEGLU, SwiGLU) used throughout
+/// modern Transformers. Built from autograd-tracked slice / sigmoid / multiply,
+/// so the gradient is exact. The split dimension must have even length.
+pub fn glu(input: &Tensor, dim: isize) -> Result<Tensor> {
+    if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
+        return Err(MinitensorError::invalid_operation(
+            "glu only supports floating point tensors",
+        ));
+    }
+    let ndim = input.ndim() as isize;
+    let axis = if dim < 0 { dim + ndim } else { dim };
+    if axis < 0 || axis >= ndim {
+        return Err(MinitensorError::invalid_argument(format!(
+            "glu dim {} is out of range for a {}-dimensional tensor",
+            dim, ndim
+        )));
+    }
+    let size = input.shape().dims()[axis as usize];
+    if !size.is_multiple_of(2) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "glu requires an even split dimension, but dim {} has length {}",
+            dim, size
+        )));
+    }
+    let half = size / 2;
+    let a = crate::ops::shape_ops::narrow(input, axis, 0, half)?;
+    let b = crate::ops::shape_ops::narrow(input, axis, half, half)?;
+    let gate = sigmoid(&b)?;
+    crate::ops::arithmetic::mul(&a, &gate)
+}

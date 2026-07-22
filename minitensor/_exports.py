@@ -65,6 +65,8 @@ _FUNCTIONAL_FORWARDERS = (
     "layer_norm",
     "rms_norm",
     "scaled_dot_product_attention",
+    "rope",
+    "glu",
     "rsqrt",
     "reciprocal",
     "sign",

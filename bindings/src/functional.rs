@@ -1277,6 +1277,30 @@ pub fn scaled_dot_product_attention(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Rotary Position Embedding (RoPE; Su et al., 2021) — the positional encoding
+/// of LLaMA/Mistral/Qwen and most modern LLMs. Rotates pairs of features of `x`
+/// (shape `(..., seq, head_dim)`, even `head_dim`) by position-dependent angles,
+/// injecting relative position with no learned parameters. `offset` shifts the
+/// starting position (KV-cache decoding); `base` sets the frequency spectrum.
+#[pyfunction]
+#[pyo3(signature = (x, base=10000.0, offset=0))]
+pub fn rope(x: &Bound<PyAny>, base: f64, offset: usize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(x)?;
+    let result = engine::ops::rope(tensor.tensor(), base, offset).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Gated Linear Unit (Dauphin et al., 2017). Splits `input` in half along `dim`
+/// into `(a, b)` and returns `a * sigmoid(b)` — the gate underlying GLU-family
+/// feed-forward blocks (GEGLU, SwiGLU). `dim` must have even length.
+#[pyfunction]
+#[pyo3(signature = (input, dim=-1))]
+pub fn glu(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let result = engine::ops::glu(tensor.tensor(), dim).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
@@ -1439,6 +1463,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(layer_norm, parent)?)?;
     parent.add_function(wrap_pyfunction!(rms_norm, parent)?)?;
     parent.add_function(wrap_pyfunction!(scaled_dot_product_attention, parent)?)?;
+    parent.add_function(wrap_pyfunction!(rope, parent)?)?;
+    parent.add_function(wrap_pyfunction!(glu, parent)?)?;
     parent.add_function(wrap_pyfunction!(cat, parent)?)?;
     parent.add_function(wrap_pyfunction!(stack, parent)?)?;
     parent.add_function(wrap_pyfunction!(dot, parent)?)?;
