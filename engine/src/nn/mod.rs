@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 pub mod activation;
+pub mod attention;
 pub mod conv;
 pub mod dense_layer;
 pub mod dropout;
@@ -18,6 +19,7 @@ pub mod utils;
 
 // Re-export the main trait and common types
 pub use activation::{ELU, GELU, LeakyReLU, ReLU, Sigmoid, Softmax, Tanh};
+pub use attention::MultiheadAttention;
 pub use dense_layer::DenseLayer;
 pub use embedding::Embedding;
 pub use init::{InitMethod, init_bias, init_parameter};

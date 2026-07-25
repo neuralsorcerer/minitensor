@@ -580,6 +580,130 @@ impl PyRMSNorm {
     }
 }
 
+/// Multi-head attention block
+#[pyclass(name = "MultiheadAttention", extends = PyModule)]
+pub struct PyMultiheadAttention;
+
+#[pymethods]
+impl PyMultiheadAttention {
+    /// Create a new MultiheadAttention layer
+    #[new]
+    #[pyo3(signature = (embed_dim, num_heads, bias=None, is_causal=None, device=None, dtype=None))]
+    fn new(
+        embed_dim: usize,
+        num_heads: usize,
+        bias: Option<bool>,
+        is_causal: Option<bool>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
+
+        let mha = MultiheadAttention::new(
+            embed_dim,
+            num_heads,
+            bias.unwrap_or(true),
+            is_causal.unwrap_or(false),
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
+
+        Ok(PyClassInitializer::from(PyModule::from_multihead_attention(mha)).add_subclass(Self))
+    }
+
+    /// Attention over separate query/key/value sequences (cross-attention).
+    ///
+    /// `key` and `value` must share a batch size and sequence length; `query`
+    /// may have its own sequence length, and the output follows it. `attn_mask`
+    /// broadcasts to the per-head scores `(batch, heads, query_seq, key_seq)`.
+    #[pyo3(signature = (query, key, value, attn_mask=None, is_causal=false))]
+    fn forward_qkv(
+        slf: PyRef<Self>,
+        query: &Bound<PyAny>,
+        key: &Bound<PyAny>,
+        value: &Bound<PyAny>,
+        attn_mask: Option<&Bound<PyAny>>,
+        is_causal: bool,
+    ) -> PyResult<PyTensor> {
+        let module = slf.as_ref();
+        let ModuleType::MultiheadAttention(layer) = &module.inner else {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ));
+        };
+
+        let q = borrow_tensor(query)?;
+        let k = borrow_tensor(key)?;
+        let v = borrow_tensor(value)?;
+        let mask = borrow_optional_tensor(attn_mask)?;
+
+        let result = layer
+            .forward_qkv(
+                q.tensor(),
+                k.tensor(),
+                v.tensor(),
+                mask.as_deref().map(|m| m.tensor()),
+                is_causal,
+            )
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    /// Model width
+    #[getter]
+    fn embed_dim(slf: PyRef<Self>) -> PyResult<usize> {
+        let module = slf.as_ref();
+        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+            Ok(layer.embed_dim())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Number of attention heads
+    #[getter]
+    fn num_heads(slf: PyRef<Self>) -> PyResult<usize> {
+        let module = slf.as_ref();
+        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+            Ok(layer.num_heads())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Width of each head
+    #[getter]
+    fn head_dim(slf: PyRef<Self>) -> PyResult<usize> {
+        let module = slf.as_ref();
+        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+            Ok(layer.head_dim())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Whether forward applies an autoregressive mask
+    #[getter]
+    fn is_causal(slf: PyRef<Self>) -> PyResult<bool> {
+        let module = slf.as_ref();
+        if let ModuleType::MultiheadAttention(layer) = &module.inner {
+            Ok(layer.is_causal())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+}
+
 /// Accept either an int or a sequence of ints for `normalized_shape`.
 fn parse_normalized_shape_arg(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
     if let Ok(value) = arg.extract::<usize>() {
@@ -1069,6 +1193,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyEmbedding>()?;
     nn_module.add_class::<PyLayerNorm>()?;
     nn_module.add_class::<PyRMSNorm>()?;
+    nn_module.add_class::<PyMultiheadAttention>()?;
     nn_module.add_class::<PySequential>()?;
 
     // Add functional APIs

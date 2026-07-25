@@ -22,6 +22,7 @@ use engine::nn::{
     BCELoss, CrossEntropyLoss, DenseLayer, FocalLoss, HuberLoss, Layer, LogCoshLoss, MAELoss,
     MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
     activation::{ELU, GELU, LeakyReLU},
+    attention::MultiheadAttention,
     conv::Conv2d,
     dropout::{Dropout, Dropout2d},
     embedding::Embedding,
@@ -388,6 +389,7 @@ module_types! {
     Embedding(Embedding),
     LayerNorm(LayerNorm),
     RMSNorm(RMSNorm),
+    MultiheadAttention(MultiheadAttention),
 }
 
 #[pymethods]
@@ -554,6 +556,13 @@ impl PyModule {
                 layer.normalized_shape(),
                 layer.eps(),
                 layer.elementwise_affine()
+            ),
+            ModuleType::MultiheadAttention(layer) => format!(
+                "MultiheadAttention(embed_dim={}, num_heads={}, head_dim={}, is_causal={})",
+                layer.embed_dim(),
+                layer.num_heads(),
+                layer.head_dim(),
+                layer.is_causal()
             ),
         }
     }
@@ -722,6 +731,12 @@ impl PyModule {
         }
     }
 
+    pub fn from_multihead_attention(mha: MultiheadAttention) -> Self {
+        Self {
+            inner: ModuleType::MultiheadAttention(mha),
+        }
+    }
+
     /// Clone the inner layer into a boxed trait object. Written out per variant
     /// rather than derived from `module_types!` because `Sequential` is not
     /// `Clone` and is rejected outright.
@@ -746,6 +761,7 @@ impl PyModule {
             ModuleType::Dropout(layer) => Box::new(layer.clone()),
             ModuleType::Dropout2d(layer) => Box::new(layer.clone()),
             ModuleType::Embedding(layer) => Box::new(layer.clone()),
+            ModuleType::MultiheadAttention(layer) => Box::new(layer.clone()),
             ModuleType::LayerNorm(layer) => Box::new(layer.clone()),
             ModuleType::RMSNorm(layer) => Box::new(layer.clone()),
         };
