@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 pub mod adam;
+pub mod lion;
 pub mod optimizer;
 pub mod rmsprop;
 pub mod sgd;
@@ -14,6 +15,7 @@ pub mod utils;
 mod tests;
 
 pub use adam::{Adam, AdamW};
+pub use lion::Lion;
 pub use optimizer::{
     ConstantLR, CosineAnnealingLR, ExponentialLR, GradientClipping, LearningRateScheduler,
     Optimizer, ParameterGroup, StepLR,

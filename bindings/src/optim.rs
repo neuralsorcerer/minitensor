@@ -6,7 +6,7 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
-use engine::optim::{Adam, AdamW, Optimizer, RMSprop, SGD};
+use engine::optim::{Adam, AdamW, Lion, Optimizer, RMSprop, SGD};
 use engine::{autograd, tensor::Tensor};
 use pyo3::Py;
 use pyo3::PyClassInitializer;
@@ -27,6 +27,7 @@ enum OptimizerType {
     Adam(Adam),
     AdamW(AdamW),
     RMSprop(RMSprop),
+    Lion(Lion),
 }
 
 #[pymethods]
@@ -53,6 +54,7 @@ impl PyOptimizer {
                 OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::AdamW(opt) => opt.step(tensor_refs.as_mut_slice()),
                 OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
+                OptimizerType::Lion(opt) => opt.step(tensor_refs.as_mut_slice()),
             }
             .map_err(_convert_error)?;
         }
@@ -88,6 +90,7 @@ impl PyOptimizer {
                 OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::AdamW(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
                 OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
+                OptimizerType::Lion(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
             }
             .map_err(_convert_error)?;
         }
@@ -103,6 +106,7 @@ impl PyOptimizer {
             OptimizerType::Adam(optimizer) => optimizer.learning_rate(),
             OptimizerType::AdamW(optimizer) => optimizer.learning_rate(),
             OptimizerType::RMSprop(optimizer) => optimizer.learning_rate(),
+            OptimizerType::Lion(optimizer) => optimizer.learning_rate(),
         }
     }
 
@@ -114,6 +118,7 @@ impl PyOptimizer {
             OptimizerType::Adam(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::AdamW(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::RMSprop(optimizer) => optimizer.set_learning_rate(lr),
+            OptimizerType::Lion(optimizer) => optimizer.set_learning_rate(lr),
         }
     }
 
@@ -148,6 +153,13 @@ impl PyOptimizer {
                 optimizer.alpha(),
                 optimizer.epsilon()
             ),
+            OptimizerType::Lion(optimizer) => format!(
+                "Lion(lr={}, betas=({}, {}), weight_decay={})",
+                optimizer.learning_rate(),
+                optimizer.beta1(),
+                optimizer.beta2(),
+                optimizer.weight_decay()
+            ),
         }
     }
 }
@@ -177,6 +189,13 @@ impl PyOptimizer {
     fn from_rmsprop(rmsprop: RMSprop, parameters: Vec<Py<PyAny>>) -> Self {
         Self {
             inner: OptimizerType::RMSprop(rmsprop),
+            parameters,
+        }
+    }
+
+    fn from_lion(lion: Lion, parameters: Vec<Py<PyAny>>) -> Self {
+        Self {
+            inner: OptimizerType::Lion(lion),
             parameters,
         }
     }
@@ -246,6 +265,17 @@ fn resolve_betas(
     beta1: Option<f64>,
     beta2: Option<f64>,
 ) -> PyResult<(f64, f64)> {
+    resolve_betas_with_defaults(betas, beta1, beta2, (0.9, 0.999))
+}
+
+/// Resolve beta coefficients against optimizer-specific defaults. Lion, for
+/// example, defaults to (0.9, 0.99) rather than Adam's (0.9, 0.999).
+fn resolve_betas_with_defaults(
+    betas: Option<(f64, f64)>,
+    beta1: Option<f64>,
+    beta2: Option<f64>,
+    defaults: (f64, f64),
+) -> PyResult<(f64, f64)> {
     if betas.is_some() && (beta1.is_some() || beta2.is_some()) {
         return Err(PyTypeError::new_err(
             "specify either betas tuple or beta1/beta2, not both",
@@ -257,7 +287,7 @@ fn resolve_betas(
     } else {
         match (beta1, beta2) {
             (Some(b1), Some(b2)) => (b1, b2),
-            (None, None) => (0.9, 0.999),
+            (None, None) => defaults,
             _ => {
                 return Err(PyTypeError::new_err(
                     "both beta1 and beta2 must be provided",
@@ -662,6 +692,87 @@ impl PyRMSprop {
     }
 }
 
+/// Lion optimizer (Chen et al., 2023) — sign-momentum update with decoupled
+/// weight decay. Half the optimizer state of Adam and often a stronger
+/// large-model optimizer; because updates are sign-based, use a smaller learning
+/// rate (≈3-10×) and a larger weight decay than AdamW.
+#[pyclass(name = "Lion", extends = PyOptimizer)]
+pub struct PyLion;
+
+#[pymethods]
+impl PyLion {
+    /// Create a new Lion optimizer
+    #[new]
+    #[pyo3(
+        signature = (
+            parameters,
+            lr=1e-4,
+            betas=None,
+            beta1=None,
+            beta2=None,
+            weight_decay=0.0
+        )
+    )]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        betas: Option<(f64, f64)>,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
+        weight_decay: f64,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
+        }
+
+        if weight_decay < 0.0 {
+            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        }
+
+        let params = collect_parameters(parameters)?;
+        // Lion's paper defaults are (0.9, 0.99), not Adam's (0.9, 0.999).
+        let (beta1, beta2) = resolve_betas_with_defaults(betas, beta1, beta2, (0.9, 0.99))?;
+
+        let lion = Lion::new(lr, Some(beta1), Some(beta2), Some(weight_decay));
+
+        Ok(PyClassInitializer::from(PyOptimizer::from_lion(lion, params)).add_subclass(Self))
+    }
+
+    /// Get beta1 parameter
+    #[getter]
+    fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::Lion(lion) = &optimizer.inner {
+            Ok(lion.beta1())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get beta2 parameter
+    #[getter]
+    fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::Lion(lion) = &optimizer.inner {
+            Ok(lion.beta2())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get weight decay parameter
+    #[getter]
+    fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::Lion(lion) = &optimizer.inner {
+            Ok(lion.weight_decay())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+}
+
 /// Register optimizer module with Python
 pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyResult<()> {
     let optim_module = Pyo3Module::new(py, "optim")?;
@@ -672,6 +783,7 @@ pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> P
     optim_module.add_class::<PyAdam>()?;
     optim_module.add_class::<PyAdamW>()?;
     optim_module.add_class::<PyRMSprop>()?;
+    optim_module.add_class::<PyLion>()?;
 
     parent_module.add_submodule(&optim_module)?;
     Ok(())
