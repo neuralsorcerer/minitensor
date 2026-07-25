@@ -384,6 +384,218 @@ impl PyBatchNorm2d {
     }
 }
 
+/// Embedding lookup table
+#[pyclass(name = "Embedding", extends = PyModule)]
+pub struct PyEmbedding;
+
+#[pymethods]
+impl PyEmbedding {
+    /// Create a new Embedding layer
+    #[new]
+    #[pyo3(signature = (num_embeddings, embedding_dim, padding_idx=None, device=None, dtype=None))]
+    fn new(
+        num_embeddings: usize,
+        embedding_dim: usize,
+        padding_idx: Option<usize>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
+
+        let embedding = Embedding::new(num_embeddings, embedding_dim, padding_idx, device, dtype)
+            .map_err(_convert_error)?;
+
+        Ok(PyClassInitializer::from(PyModule::from_embedding(embedding)).add_subclass(Self))
+    }
+
+    /// Vocabulary size
+    #[getter]
+    fn num_embeddings(slf: PyRef<Self>) -> PyResult<usize> {
+        let module = slf.as_ref();
+        if let ModuleType::Embedding(layer) = &module.inner {
+            Ok(layer.num_embeddings())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Width of each embedding vector
+    #[getter]
+    fn embedding_dim(slf: PyRef<Self>) -> PyResult<usize> {
+        let module = slf.as_ref();
+        if let ModuleType::Embedding(layer) = &module.inner {
+            Ok(layer.embedding_dim())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Token id held at zero, if any
+    #[getter]
+    fn padding_idx(slf: PyRef<Self>) -> PyResult<Option<usize>> {
+        let module = slf.as_ref();
+        if let ModuleType::Embedding(layer) = &module.inner {
+            Ok(layer.padding_idx())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// The embedding matrix
+    #[getter]
+    fn weight(slf: PyRef<Self>) -> PyResult<PyTensor> {
+        let module = slf.as_ref();
+        if let ModuleType::Embedding(layer) = &module.inner {
+            Ok(PyTensor::from_tensor(layer.weight().clone()))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+}
+
+/// Layer normalization
+#[pyclass(name = "LayerNorm", extends = PyModule)]
+pub struct PyLayerNorm;
+
+#[pymethods]
+impl PyLayerNorm {
+    /// Create a new LayerNorm layer
+    #[new]
+    #[pyo3(signature = (normalized_shape, eps=None, elementwise_affine=None, device=None, dtype=None))]
+    fn new(
+        normalized_shape: &Bound<PyAny>,
+        eps: Option<f64>,
+        elementwise_affine: Option<bool>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let shape = parse_normalized_shape_arg(normalized_shape)?;
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
+
+        let layer = LayerNorm::new(
+            shape,
+            eps,
+            elementwise_affine.unwrap_or(true),
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
+
+        Ok(PyClassInitializer::from(PyModule::from_layer_norm(layer)).add_subclass(Self))
+    }
+
+    /// Dimensions normalized over
+    #[getter]
+    fn normalized_shape(slf: PyRef<Self>) -> PyResult<Vec<usize>> {
+        let module = slf.as_ref();
+        if let ModuleType::LayerNorm(layer) = &module.inner {
+            Ok(layer.normalized_shape().to_vec())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Numerical stability epsilon
+    #[getter]
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
+        let module = slf.as_ref();
+        if let ModuleType::LayerNorm(layer) = &module.inner {
+            Ok(layer.eps())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+}
+
+/// Root-mean-square layer normalization
+#[pyclass(name = "RMSNorm", extends = PyModule)]
+pub struct PyRMSNorm;
+
+#[pymethods]
+impl PyRMSNorm {
+    /// Create a new RMSNorm layer
+    #[new]
+    #[pyo3(signature = (normalized_shape, eps=None, elementwise_affine=None, device=None, dtype=None))]
+    fn new(
+        normalized_shape: &Bound<PyAny>,
+        eps: Option<f64>,
+        elementwise_affine: Option<bool>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let shape = parse_normalized_shape_arg(normalized_shape)?;
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
+
+        let layer = RMSNorm::new(
+            shape,
+            eps,
+            elementwise_affine.unwrap_or(true),
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
+
+        Ok(PyClassInitializer::from(PyModule::from_rms_norm(layer)).add_subclass(Self))
+    }
+
+    /// Dimensions normalized over
+    #[getter]
+    fn normalized_shape(slf: PyRef<Self>) -> PyResult<Vec<usize>> {
+        let module = slf.as_ref();
+        if let ModuleType::RMSNorm(layer) = &module.inner {
+            Ok(layer.normalized_shape().to_vec())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+
+    /// Numerical stability epsilon
+    #[getter]
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
+        let module = slf.as_ref();
+        if let ModuleType::RMSNorm(layer) = &module.inner {
+            Ok(layer.eps())
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            ))
+        }
+    }
+}
+
+/// Accept either an int or a sequence of ints for `normalized_shape`.
+fn parse_normalized_shape_arg(arg: &Bound<PyAny>) -> PyResult<Vec<usize>> {
+    if let Ok(value) = arg.extract::<usize>() {
+        return Ok(vec![value]);
+    }
+    let seq = arg.extract::<Vec<usize>>().map_err(|_| {
+        PyValueError::new_err("normalized_shape must be an int or a sequence of ints")
+    })?;
+    if seq.is_empty() {
+        return Err(PyValueError::new_err(
+            "normalized_shape must contain at least one dimension",
+        ));
+    }
+    Ok(seq)
+}
+
 /// Sequential container for layers
 #[pyclass(name = "Sequential", extends = PyModule)]
 pub struct PySequential;
@@ -854,6 +1066,9 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyConv2d>()?;
     nn_module.add_class::<PyBatchNorm1d>()?;
     nn_module.add_class::<PyBatchNorm2d>()?;
+    nn_module.add_class::<PyEmbedding>()?;
+    nn_module.add_class::<PyLayerNorm>()?;
+    nn_module.add_class::<PyRMSNorm>()?;
     nn_module.add_class::<PySequential>()?;
 
     // Add functional APIs

@@ -24,7 +24,8 @@ use engine::nn::{
     activation::{ELU, GELU, LeakyReLU},
     conv::Conv2d,
     dropout::{Dropout, Dropout2d},
-    normalization::{BatchNorm1d, BatchNorm2d},
+    embedding::Embedding,
+    normalization::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm},
     utils::{LayerUtils, SequentialUtils},
 };
 use engine::ops::batch_norm as batch_norm_op;
@@ -384,6 +385,9 @@ module_types! {
     BatchNorm2d(BatchNorm2d),
     Dropout(Dropout),
     Dropout2d(Dropout2d),
+    Embedding(Embedding),
+    LayerNorm(LayerNorm),
+    RMSNorm(RMSNorm),
 }
 
 #[pymethods]
@@ -533,6 +537,24 @@ impl PyModule {
             }
             ModuleType::Dropout(layer) => format!("Dropout(p={})", layer.p()),
             ModuleType::Dropout2d(layer) => format!("Dropout2d(p={})", layer.p()),
+            ModuleType::Embedding(layer) => format!(
+                "Embedding(num_embeddings={}, embedding_dim={}, padding_idx={:?})",
+                layer.num_embeddings(),
+                layer.embedding_dim(),
+                layer.padding_idx()
+            ),
+            ModuleType::LayerNorm(layer) => format!(
+                "LayerNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
+                layer.normalized_shape(),
+                layer.eps(),
+                layer.elementwise_affine()
+            ),
+            ModuleType::RMSNorm(layer) => format!(
+                "RMSNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
+                layer.normalized_shape(),
+                layer.eps(),
+                layer.elementwise_affine()
+            ),
         }
     }
 
@@ -682,6 +704,24 @@ impl PyModule {
         }
     }
 
+    pub fn from_embedding(embedding: Embedding) -> Self {
+        Self {
+            inner: ModuleType::Embedding(embedding),
+        }
+    }
+
+    pub fn from_layer_norm(layer_norm: LayerNorm) -> Self {
+        Self {
+            inner: ModuleType::LayerNorm(layer_norm),
+        }
+    }
+
+    pub fn from_rms_norm(rms_norm: RMSNorm) -> Self {
+        Self {
+            inner: ModuleType::RMSNorm(rms_norm),
+        }
+    }
+
     /// Clone the inner layer into a boxed trait object. Written out per variant
     /// rather than derived from `module_types!` because `Sequential` is not
     /// `Clone` and is rejected outright.
@@ -705,6 +745,9 @@ impl PyModule {
             ModuleType::BatchNorm2d(layer) => Box::new(layer.clone()),
             ModuleType::Dropout(layer) => Box::new(layer.clone()),
             ModuleType::Dropout2d(layer) => Box::new(layer.clone()),
+            ModuleType::Embedding(layer) => Box::new(layer.clone()),
+            ModuleType::LayerNorm(layer) => Box::new(layer.clone()),
+            ModuleType::RMSNorm(layer) => Box::new(layer.clone()),
         };
 
         Ok(layer)

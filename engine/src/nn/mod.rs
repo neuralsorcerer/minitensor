@@ -8,6 +8,7 @@ pub mod activation;
 pub mod conv;
 pub mod dense_layer;
 pub mod dropout;
+pub mod embedding;
 pub mod init;
 pub mod layer;
 pub mod loss;
@@ -18,6 +19,7 @@ pub mod utils;
 // Re-export the main trait and common types
 pub use activation::{ELU, GELU, LeakyReLU, ReLU, Sigmoid, Softmax, Tanh};
 pub use dense_layer::DenseLayer;
+pub use embedding::Embedding;
 pub use init::{InitMethod, init_bias, init_parameter};
 pub use layer::{Layer, Module};
 pub use loss::{

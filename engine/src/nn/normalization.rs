@@ -502,6 +502,265 @@ impl Layer for BatchNorm2d {
     }
 }
 
+/// Shared validation for the shape-normalizing layers: `normalized_shape` must
+/// be non-empty and match the trailing dimensions of the input.
+fn check_normalized_suffix(input: &Tensor, normalized_shape: &[usize], layer: &str) -> Result<()> {
+    let dims = input.shape().dims();
+    if dims.len() < normalized_shape.len() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{} expects an input with at least {} dimensions, got {}",
+            layer,
+            normalized_shape.len(),
+            dims.len()
+        )));
+    }
+    if &dims[dims.len() - normalized_shape.len()..] != normalized_shape {
+        return Err(MinitensorError::shape_mismatch(
+            normalized_shape.to_vec(),
+            dims.to_vec(),
+        ));
+    }
+    Ok(())
+}
+
+/// Layer normalization (Ba et al., 2016) as a stateful layer.
+///
+/// Normalizes over the trailing `normalized_shape` dimensions using that
+/// slice's own mean and variance, then applies a learned elementwise scale and
+/// shift. Unlike BatchNorm it carries no running statistics and behaves
+/// identically in training and evaluation.
+#[derive(Clone)]
+pub struct LayerNorm {
+    weight: Option<Tensor>,
+    bias: Option<Tensor>,
+    normalized_shape: Vec<usize>,
+    eps: f64,
+}
+
+impl LayerNorm {
+    /// Create a new LayerNorm over the trailing `normalized_shape` dimensions.
+    pub fn new(
+        normalized_shape: Vec<usize>,
+        eps: Option<f64>,
+        elementwise_affine: bool,
+        device: Device,
+        dtype: DataType,
+    ) -> Result<Self> {
+        if normalized_shape.is_empty() {
+            return Err(MinitensorError::invalid_argument(
+                "LayerNorm requires normalized_shape to contain at least one dimension",
+            ));
+        }
+        if !dtype.is_float() {
+            return Err(MinitensorError::invalid_argument(
+                "LayerNorm parameters must have a floating point dtype",
+            ));
+        }
+
+        let (weight, bias) = if elementwise_affine {
+            let shape = Shape::new(normalized_shape.clone());
+            (
+                Some(init_parameter(
+                    shape.clone(),
+                    InitMethod::Ones,
+                    dtype,
+                    device,
+                )?),
+                Some(init_parameter(shape, InitMethod::Zeros, dtype, device)?),
+            )
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            weight,
+            bias,
+            normalized_shape,
+            eps: eps.unwrap_or(1e-5),
+        })
+    }
+
+    /// Dimensions this layer normalizes over.
+    pub fn normalized_shape(&self) -> &[usize] {
+        &self.normalized_shape
+    }
+
+    /// Numerical stability epsilon.
+    pub fn eps(&self) -> f64 {
+        self.eps
+    }
+
+    /// Whether a learned scale and shift are applied.
+    pub fn elementwise_affine(&self) -> bool {
+        self.weight.is_some()
+    }
+
+    /// Named parameters for serialization.
+    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut params = HashMap::new();
+        if let Some(ref w) = self.weight {
+            params.insert("weight".to_string(), w);
+        }
+        if let Some(ref b) = self.bias {
+            params.insert("bias".to_string(), b);
+        }
+        params
+    }
+
+    /// Named mutable parameters for state-dict loading.
+    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut params = HashMap::new();
+        if let Some(ref mut w) = self.weight {
+            params.insert("weight".to_string(), w);
+        }
+        if let Some(ref mut b) = self.bias {
+            params.insert("bias".to_string(), b);
+        }
+        params
+    }
+}
+
+impl Layer for LayerNorm {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        check_normalized_suffix(input, &self.normalized_shape, "LayerNorm")?;
+        crate::ops::normalization::layer_norm(
+            input,
+            &self.normalized_shape,
+            self.weight.as_ref(),
+            self.bias.as_ref(),
+            self.eps,
+        )
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        let mut params = Vec::new();
+        if let Some(ref w) = self.weight {
+            params.push(w);
+        }
+        if let Some(ref b) = self.bias {
+            params.push(b);
+        }
+        params
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        let mut params = Vec::new();
+        if let Some(ref mut w) = self.weight {
+            params.push(w);
+        }
+        if let Some(ref mut b) = self.bias {
+            params.push(b);
+        }
+        params
+    }
+}
+
+/// Root-mean-square layer normalization (Zhang & Sennrich, 2019) as a stateful
+/// layer — the normalization used by LLaMA, Mistral, Gemma and Qwen.
+///
+/// Rescales by the root mean square over the trailing `normalized_shape`
+/// dimensions and applies a learned gain. There is no mean subtraction and no
+/// bias, which makes it cheaper than LayerNorm while matching its quality on
+/// large language models.
+#[derive(Clone)]
+pub struct RMSNorm {
+    weight: Option<Tensor>,
+    normalized_shape: Vec<usize>,
+    eps: f64,
+}
+
+impl RMSNorm {
+    /// Create a new RMSNorm over the trailing `normalized_shape` dimensions.
+    pub fn new(
+        normalized_shape: Vec<usize>,
+        eps: Option<f64>,
+        elementwise_affine: bool,
+        device: Device,
+        dtype: DataType,
+    ) -> Result<Self> {
+        if normalized_shape.is_empty() {
+            return Err(MinitensorError::invalid_argument(
+                "RMSNorm requires normalized_shape to contain at least one dimension",
+            ));
+        }
+        if !dtype.is_float() {
+            return Err(MinitensorError::invalid_argument(
+                "RMSNorm parameters must have a floating point dtype",
+            ));
+        }
+
+        let weight = if elementwise_affine {
+            Some(init_parameter(
+                Shape::new(normalized_shape.clone()),
+                InitMethod::Ones,
+                dtype,
+                device,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            normalized_shape,
+            eps: eps.unwrap_or(1e-6),
+        })
+    }
+
+    /// Dimensions this layer normalizes over.
+    pub fn normalized_shape(&self) -> &[usize] {
+        &self.normalized_shape
+    }
+
+    /// Numerical stability epsilon.
+    pub fn eps(&self) -> f64 {
+        self.eps
+    }
+
+    /// Whether a learned gain is applied.
+    pub fn elementwise_affine(&self) -> bool {
+        self.weight.is_some()
+    }
+
+    /// Named parameters for serialization.
+    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut params = HashMap::new();
+        if let Some(ref w) = self.weight {
+            params.insert("weight".to_string(), w);
+        }
+        params
+    }
+
+    /// Named mutable parameters for state-dict loading.
+    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut params = HashMap::new();
+        if let Some(ref mut w) = self.weight {
+            params.insert("weight".to_string(), w);
+        }
+        params
+    }
+}
+
+impl Layer for RMSNorm {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        check_normalized_suffix(input, &self.normalized_shape, "RMSNorm")?;
+        crate::ops::normalization::rms_norm(
+            input,
+            &self.normalized_shape,
+            self.weight.as_ref(),
+            self.eps,
+        )
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        self.weight.as_ref().into_iter().collect()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        self.weight.as_mut().into_iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
