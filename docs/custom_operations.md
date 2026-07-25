@@ -180,6 +180,8 @@ registry state. If a test or script needs a clean state, unregister the names it
 registered:
 
 ```python
+import minitensor as mt
+
 for name in ["swish", "gelu", "mish", "power", "layer_norm"]:
     if mt.is_custom_op_registered_py(name):
         mt.unregister_custom_op_py(name)

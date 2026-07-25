@@ -73,8 +73,9 @@ build for local debugging.
 ## Contributor setup
 
 Contributor installs should include the `dev` extra. The extra includes pytest,
-coverage and benchmark plugins, mypy, pre-commit, isort, and `black[jupyter]` so
+coverage and benchmark plugins, mypy, pre-commit, numpy, and `black[jupyter]` so
 notebook formatting uses the same dependencies as the pre-commit Black hook.
+`isort` is not part of the extra -- it runs through its pinned `pre-commit` hook.
 
 ```bash
 python -m pip install -e '.[dev]'
@@ -107,7 +108,7 @@ For explicit formatting and lint checks outside pre-commit:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 black --check .
-isort --check-only .
+pre-commit run isort --all-files
 ```
 
 ## Troubleshooting

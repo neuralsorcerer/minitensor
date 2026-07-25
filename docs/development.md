@@ -26,9 +26,17 @@ python -m pip install -e '.[dev]'
 pre-commit install
 ```
 
-The `dev` extra installs test, lint, formatting, benchmark, typing, and notebook
-formatting tools. Use `python -m pip` so tools are installed into the same
-interpreter used to run `python -m pytest`.
+The `dev` extra installs `pytest` (with the benchmark and coverage plugins),
+`black`, `mypy`, `pre-commit`, and `numpy`. Use `python -m pip` so tools are
+installed into the same interpreter used to run `python -m pytest`.
+
+Two tools are deliberately not in the `dev` extra:
+
+- `maturin` is a build backend, so install it separately when you need
+  `maturin develop` (see [the installation guide](installation.md)).
+- `isort` is run through its pinned `pre-commit` hook rather than from the
+  environment. Use `pre-commit run isort --all-files`, or
+  `python -m pip install isort` if you want to invoke it directly.
 
 ## Build workflow
 
@@ -71,7 +79,7 @@ Useful targeted checks:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 black --check .
-isort --check-only .
+pre-commit run isort --all-files
 python -m pytest tests/tensor/test_tensor_core.py
 ```
 

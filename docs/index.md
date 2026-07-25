@@ -21,7 +21,6 @@ performance
 :caption: Contributor guides
 
 development
-architecture_review
 ```
 
 ## Start here
@@ -34,9 +33,6 @@ architecture_review
   utilities.
 - [Development guide](development.md) -- repository layout, environment setup,
   validation commands, documentation workflow, and release checks.
-- [Architecture review](architecture_review.md) -- assessment of the engine,
-  bindings, and Python layers, the autograd/storage refactors that came out of
-  it, and the prioritized plan for remaining architectural work.
 
 ## Feature guides
 

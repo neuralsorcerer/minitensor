@@ -261,14 +261,72 @@ Every creation helper is available as either `mt.<name>(...)` or
   the source array after construction are not visible through the tensor
 - `as_tensor(obj, dtype=None, requires_grad=None, copy=False)`
 
+```python
+import numpy as np
+
+import minitensor as mt
+
+mt.manual_seed(0)  # make the random helpers reproducible
+
+# Deterministic / structured
+print(mt.zeros(2, 3).shape, mt.ones(2).tolist(), mt.eye(3).shape)
+print(mt.arange(0.0, 1.0, 0.25).tolist())
+print(mt.linspace(0.0, 1.0, 3).tolist())
+print(mt.full((2,), 7.0).tolist())
+
+# Random + initialization schemes (shapes are deterministic; values are not)
+print(mt.randn(2, 3).shape, mt.rand(4).shape)
+print(mt.xavier_uniform(4, 4).shape, mt.he_normal(3, 3).shape)
+
+# `*_like` variants copy shape/dtype/device from an existing tensor
+base = mt.zeros(2, 2)
+print(mt.ones_like(base).tolist(), mt.randn_like(base).shape)
+
+# NumPy interop
+array = np.array([1.0, 2.0, 3.0], dtype="float32")
+print(mt.from_numpy(array).tolist())
+print(mt.as_tensor([1, 2, 3], dtype="float32").tolist())
+```
+
+```text
+Shape([2, 3]) [1.0, 1.0] Shape([3, 3])
+[0.0, 0.25, 0.5, 0.75]
+[0.0, 0.5, 1.0]
+[7.0, 7.0]
+Shape([2, 3]) Shape([4])
+Shape([4, 4]) Shape([3, 3])
+[[1.0, 1.0], [1.0, 1.0]] Shape([2, 2])
+[1.0, 2.0, 3.0]
+[1.0, 2.0, 3.0]
+```
+
+```{note}
+`from_numpy_shared` currently copies exactly like `from_numpy`. Writing to the
+source NumPy array after construction does **not** change the tensor.
+```
+
 ## 3) Tensor properties & conversion helpers
 
-Frequently used tensor attributes:
+Frequently used tensor properties (accessed without parentheses):
 
-- `tensor.shape` / `tensor.ndim`
-- `tensor.dtype`
-- `tensor.device`
-- `tensor.requires_grad`
+- `tensor.shape` -- a `Shape` object that compares equal to the equivalent tuple
+- `tensor.dtype` -- dtype name, e.g. `"float32"`
+- `tensor.device` -- device name, e.g. `"cpu"`
+- `tensor.requires_grad` -- whether autograd tracks this tensor
+- `tensor.grad` -- accumulated gradient, or `None`
+- `tensor.size` -- total number of elements
+- `tensor.strides`, `tensor.itemsize`, `tensor.nbytes` -- layout and storage size
+
+Rank and element count are **methods**, so they must be called:
+
+- `tensor.ndim()` -- number of dimensions
+- `tensor.numel()` -- number of elements (same value as the `size` property)
+
+```{warning}
+`ndim` and `numel` are methods, not properties. Writing `tensor.ndim == 2`
+compares a bound method against an integer and is always `False`; use
+`tensor.ndim() == 2`.
+```
 
 Conversion helpers:
 
@@ -282,6 +340,30 @@ Conversion helpers:
 Python numeric protocol: tensors support `+`, `-`, `*`, `/`, `//`, `%`, `@`,
 `**`, unary `-`/`+`, `abs()`, `~` (bool/int only), the comparison operators,
 and the in-place forms (`+=`, `-=`, …), with scalars accepted on either side.
+
+```python
+import minitensor as mt
+
+t = mt.Tensor([[1.5, 2.5], [3.5, 4.5]], requires_grad=True)
+
+print(t.shape, t.dtype, t.device, t.requires_grad)
+print(t.ndim(), t.numel(), t.size)          # methods vs property
+print(t.shape == (2, 2))                    # Shape compares equal to a tuple
+print(t.tolist(), t.astype("float64").dtype)
+print(float(t[0][0]), int(mt.Tensor([2.7])))  # int() truncates
+
+doubled = (t * 2 + 1).numpy()               # operators return tensors
+print(doubled.tolist())
+```
+
+```text
+Shape([2, 2]) float32 cpu True
+2 4 4
+True
+[[1.5, 2.5], [3.5, 4.5]] float64
+1.5 2
+[[4.0, 6.0], [8.0, 10.0]]
+```
 
 ## 4) Tensor instance methods
 
@@ -761,6 +843,45 @@ All optimizer classes share a common interface:
 - `zero_grad(set_to_none: bool = False)` -- reset gradients.
 - `lr` property -- read/write learning rate.
 
+Every optimizer takes an iterable of parameter tensors, which is what
+`model.parameters()` returns. A training step is always the same four calls:
+zero the gradients, compute the loss, back-propagate, then step.
+
+```python
+import minitensor as mt
+from minitensor import nn, optim
+
+mt.manual_seed(0)
+
+model = nn.DenseLayer(4, 2)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+inputs = mt.randn(8, 4)
+targets = mt.randn(8, 2)
+
+first = None
+for _ in range(20):
+    optimizer.zero_grad()
+    loss = criterion(model(inputs), targets)
+    loss.backward()
+    optimizer.step()
+    if first is None:
+        first = float(loss.numpy())
+
+print(len(model.parameters()), optimizer.lr)
+print(float(loss.numpy()) < first)   # the loss went down
+
+optimizer.lr = 0.001                 # schedules can write the learning rate
+print(optimizer.lr)
+```
+
+```text
+2 0.01
+True
+0.001
+```
+
 ## 8) NumPy compatibility module (`minitensor.numpy_compat`)
 
 ### Array creation
@@ -780,15 +901,49 @@ All optimizer classes share a common interface:
 
 ### Statistics
 
-- `mean`, `nanmean`, `std`, `var`, `prod`, `sum`, `nansum`
+- `mean`, `nanmean`, `tensor_std`, `var`, `prod`, `sum`, `nansum`
 - `max`, `min`, `nanmax`, `nanmin`
 
-`numpy_compat.std(tensor, axis=None, keepdims=None, ddof=None)` and
+The standard-deviation helper is exported as `tensor_std`, not `std`, so it does
+not shadow the builtin-shaped name when the module is star-imported.
+
+`numpy_compat.tensor_std(tensor, axis=None, keepdims=None, ddof=None)` and
 `numpy_compat.var(tensor, axis=None, keepdims=None, ddof=None)` accept a single
 integer axis or `None`; `ddof=0` maps to population statistics and `ddof=1` maps
 to unbiased sample statistics. Values outside `0` and `1` are rejected because
 the current tensor engine exposes a boolean unbiased flag rather than arbitrary
 correction values.
+
+```python
+from minitensor import numpy_compat as npc
+
+a = npc.asarray([[1.0, 2.0], [3.0, 4.0]])
+b = npc.asarray([[5.0, 6.0], [7.0, 8.0]])
+
+print(npc.vstack([a, b]).shape, npc.hstack([a, b]).shape)
+print(npc.concatenate([a, b], axis=0).shape)
+print(npc.matmul(a, b).tolist())
+print(npc.sum(a).tolist(), npc.mean(a).tolist(), npc.max(a).tolist())
+
+# ddof selects population (0) vs unbiased sample (1) statistics
+print(npc.var(a, ddof=0).tolist(), round(npc.var(a, ddof=1).tolist(), 4))
+print(npc.allclose(a, a), npc.array_equal(a, b))
+
+try:
+    npc.tensor_std(a, ddof=2)
+except ValueError as exc:
+    print("ddof=2 rejected:", isinstance(exc, ValueError))
+```
+
+```text
+Shape([4, 2]) Shape([2, 4])
+Shape([4, 2])
+[[19.0, 22.0], [43.0, 50.0]]
+10.0 2.5 4.0
+1.25 1.6667
+True False
+ddof=2 rejected: True
+```
 
 ## 9) Serialization (`minitensor.serialization`)
 
@@ -807,21 +962,107 @@ correction values.
 - `save_model(model, path, format=None)`
 - `load_model(path, format=None)`
 
+Any module can write its own weights with `module.save(path, format=...)` and
+read a saved file back with `Module.load_state_from(path, format=...)`, which
+returns a `StateDict` that `load_state_dict` applies. Passing `format=None`
+picks the format from the file extension. Layers without named parameters fall
+back to indexed names (`param_0`, `param_1`, ...).
+
+```python
+import os
+import tempfile
+
+import minitensor as mt
+from minitensor import nn
+
+mt.manual_seed(0)
+model = nn.DenseLayer(3, 2)
+probe = mt.ones(1, 3)
+before = model(probe).tolist()
+
+state = model.state_dict()
+print(sorted(state.parameter_names()), sorted(state.buffer_names()))
+
+with tempfile.TemporaryDirectory() as folder:
+    path = os.path.join(folder, "model.json")
+    model.save(path, format="json")
+
+    restored = nn.Module.load_state_from(path, format="json")
+    model.load_state_dict(restored)
+
+print(model(probe).tolist() == before)
+```
+
+```text
+['param_0', 'param_1'] []
+True
+```
+
 ## 10) Plugin system (`minitensor.plugins`)
 
 ### Versioning and metadata
 
-- `VersionInfo` (parse, current, compatibility checks)
-- `PluginInfo` (name, version, author, min/max supported versions)
+- `VersionInfo` -- `VersionInfo.parse("1.2.3")`, `VersionInfo.current()`,
+  `major` / `minor` / `patch` properties, and `is_compatible_with(other)`.
+- `PluginInfo` -- read-only descriptor with `name`, `version`, `author`,
+  `description`, `min_minitensor_version` and `max_minitensor_version`
+  properties. It is produced by the library rather than constructed directly.
 
 ### Python-side plugins
 
-- `CustomPlugin` -- plugin object with init/cleanup/custom-op callbacks.
-- `PluginRegistry` -- register/unregister/list Python plugins.
-- `CustomLayer` -- define custom layers in Python.
-- `PluginBuilder` -- fluent builder for plugin metadata.
+- `PluginBuilder` -- fluent builder. Takes no constructor arguments; chain
+  `name`, `version`, `author`, `description` and `min_minitensor_version`, then
+  call `build()`, which returns a **`CustomPlugin`** (not a `PluginInfo`).
+  A minimum supported version is mandatory -- `build()` raises `ValueError`
+  without it.
+- `CustomPlugin` -- plugin object exposing an `info` property and the
+  `set_initialize_fn` / `set_cleanup_fn` / `set_custom_operations_fn` callback
+  hooks.
+- `PluginRegistry` -- `register(plugin)`, `unregister(name)`, `list_plugins()`,
+  `is_registered(name)`, `get_plugin(name)`.
+- `CustomLayer` -- define custom layers in Python: `add_parameter(name, tensor)`,
+  `get_parameter(name)`, `list_parameters()`, `set_forward(fn)`, `forward(...)`,
+  and a `name` property.
+
+```python
+import minitensor as mt
+from minitensor.plugins import CustomLayer, PluginBuilder, PluginRegistry, VersionInfo
+
+plugin = (
+    PluginBuilder()
+    .name("demo")
+    .version(VersionInfo.parse("0.1.0"))
+    .author("me")
+    .description("a demo plugin")
+    .min_minitensor_version(VersionInfo.parse("0.1.0"))
+    .build()
+)
+
+info = plugin.info  # a property, not a method
+print(info.name, info.author, f"{info.version.major}.{info.version.minor}")
+
+registry = PluginRegistry()
+registry.register(plugin)
+print(registry.is_registered("demo"))
+registry.unregister("demo")
+print(registry.list_plugins())
+
+layer = CustomLayer("mylayer")
+layer.add_parameter("w", mt.ones(2, 2))
+print(layer.name, layer.list_parameters())
+```
+
+```text
+demo me 0.1
+True
+[]
+mylayer ['w']
+```
 
 ### Dynamic loading (if compiled)
+
+These operate on the process-wide registry of natively compiled plugins, which
+is empty unless a shared library has been loaded.
 
 - `load_plugin(path)`
 - `unload_plugin(name)`
@@ -836,6 +1077,34 @@ high-level Python package does not re-export it as `minitensor.debug`; access it
 through the core extension when needed by advanced diagnostics or tests. Debug
 APIs are intended for development and troubleshooting rather than stable
 end-user workflows.
+
+Available types are `TensorDebugger` (`get_info`, `inspect`, `compare`,
+`health_check`), `TensorInfo` (shape, dtype, device, stride, `numel`,
+`memory_usage_bytes`, `is_leaf`, `summary`, `detailed`), `MemoryTracker`,
+`OperationProfiler` and `Timer`.
+
+```python
+import minitensor as mt
+from minitensor import _core
+
+debugger = _core.debug.TensorDebugger()
+info = debugger.get_info(mt.ones(2, 3))
+
+print(info.shape, info.dtype, info.numel)
+print(info.requires_grad, info.is_leaf)
+print(debugger.health_check(mt.ones(2, 3)))
+```
+
+```text
+[2, 3] Float32 6
+False True
+['✅ No issues detected']
+```
+
+```{note}
+`TensorInfo.dtype` reports the engine's capitalized name (`Float32`), whereas
+the `Tensor.dtype` property returns the lower-case Python name (`float32`).
+```
 
 ## 12) Custom operations
 
