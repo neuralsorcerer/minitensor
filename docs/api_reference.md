@@ -391,6 +391,8 @@ assert row_std.shape == (2, 3)
 ### Normalization
 
 - `layer_norm(shape, weight=None, bias=None, eps=1e-5)`
+- `rms_norm(shape, weight=None, eps=1e-6)` -- root-mean-square normalization
+  (no mean subtraction, no bias)
 
 ### Autograd + in-place
 
@@ -415,7 +417,8 @@ isinf, isfinite, nan_to_num, logsumexp, softmax, log_softmax,
 masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
-layer_norm, rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
+layer_norm, rms_norm, scaled_dot_product_attention, rope, glu,
+rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
 trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
@@ -599,6 +602,49 @@ weighted = mt.functional.bincount(labels, weights=weights, minlength=4)
 assert weighted.tolist() == [0.5, 2.0, 3.0, 0.0]
 ```
 
+### Transformer primitives
+
+Stateless building blocks for Transformer-style models. All are assembled from
+autograd-tracked operations, so gradients flow through them without any special
+handling.
+
+`rms_norm(input, normalized_shape, weight=None, eps=1e-6)` -- root-mean-square
+normalization: rescales by the RMS over the trailing `normalized_shape`
+dimensions and applies an optional gain. Unlike `layer_norm` there is no mean
+subtraction and no bias.
+
+`scaled_dot_product_attention(query, key, value, attn_mask=None, is_causal=False, scale=None)`
+-- computes `softmax(Q Kᵀ / sqrt(E) + bias) V` over the key axis. Shapes are
+`query (..., L, E)`, `key (..., S, E)`, `value (..., S, Ev)`, returning
+`(..., L, Ev)`. Leading batch axes broadcast, so a multi-head layout
+`(batch, heads, seq, dim)` works directly. `attn_mask` broadcasts to the scores
+`(..., L, S)`: a float mask is added to them (use `-inf` to disallow a position,
+or supply a relative-position bias), while a bool mask keeps `True` positions
+and disables `False` ones. `is_causal=True` restricts query `i` to keys `j <= i`,
+aligned to the bottom right when `L != S`; combining it with an explicit
+`attn_mask` is rejected. `scale` overrides the default `1/sqrt(E)`.
+
+`rope(x, base=10000.0, offset=0)` -- rotary position embedding. Rotates pairs of
+features of an `(..., seq, head_dim)` input by position-dependent angles,
+injecting *relative* position information with no learned parameters;
+`head_dim` must be even. `offset` shifts the starting position, which is what
+incremental (KV-cache) decoding needs, and `base` sets the frequency spectrum.
+
+`glu(input, dim=-1)` -- gated linear unit. Splits `input` into halves `(a, b)`
+along `dim` and returns `a * sigmoid(b)`; `dim` must have even length. This is
+the gate underlying GLU-family feed-forward blocks.
+
+```python
+import minitensor as mt
+from minitensor import functional as F
+
+# One causal attention head with rotary positions.
+q = mt.randn(2, 8, 4, 16)  # (batch, heads, seq, head_dim)
+k = mt.randn(2, 8, 4, 16)
+v = mt.randn(2, 8, 4, 16)
+out = F.scaled_dot_product_attention(F.rope(q), F.rope(k), v, is_causal=True)
+```
+
 ### Tensor-centric math helpers
 
 The `functional` namespace also exposes:
@@ -621,8 +667,48 @@ have a functional signature).
 - `Conv2d`
 - `BatchNorm1d`
 - `BatchNorm2d`
+- `LayerNorm(normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None)`
+- `RMSNorm(normalized_shape, eps=1e-6, elementwise_affine=True, device=None, dtype=None)`
+- `Embedding(num_embeddings, embedding_dim, padding_idx=None, device=None, dtype=None)`
+- `MultiheadAttention(embed_dim, num_heads, bias=True, is_causal=False, device=None, dtype=None)`
 - `Dropout`, `Dropout2d`
 - `Sequential` (container of modules)
+
+#### Transformer layers
+
+`LayerNorm` and `RMSNorm` normalize over the trailing `normalized_shape`
+dimensions, given as an int or a sequence of ints. `LayerNorm` learns a scale
+and a shift; `RMSNorm` learns only a gain, matching its no-mean-subtraction
+definition. Setting `elementwise_affine=False` drops the learned parameters
+entirely.
+
+`Embedding` maps integer token ids (int32 or int64) to rows of a learned
+`[num_embeddings, embedding_dim]` matrix; output shape is the input shape with
+`embedding_dim` appended. Ids are range-checked. A token given as `padding_idx`
+keeps a fixed zero embedding and receives no gradient.
+
+`MultiheadAttention` takes batch-first `(batch, seq, embed_dim)` input, where
+`embed_dim` must be divisible by `num_heads`. Calling the layer performs
+self-attention; `is_causal=True` makes it autoregressive. For cross-attention
+use:
+
+- `forward_qkv(query, key, value, attn_mask=None, is_causal=False)` -- `key` and
+  `value` must share a batch size and sequence length, while `query` may have
+  its own; the output follows the query's length. `attn_mask` broadcasts to the
+  per-head scores `(batch, heads, query_seq, key_seq)`.
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+embed = nn.Embedding(32000, 512)
+norm = nn.RMSNorm(512)
+attn = nn.MultiheadAttention(512, 8, is_causal=True)
+
+tokens = mt.Tensor([[1, 42, 7]], dtype="int64")
+hidden = embed(tokens)
+hidden = hidden + attn(norm(hidden))  # pre-norm residual block
+```
 
 ### Activations
 
@@ -658,6 +744,14 @@ have a functional signature).
 - `Adam`
 - `AdamW`
 - `RMSprop`
+- `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
+
+`Lion` (Chen et al., 2023) updates parameters by the *sign* of an interpolated
+momentum, so every parameter moves by exactly `lr` regardless of gradient
+magnitude, and it stores one momentum buffer per parameter instead of Adam's
+two. Because the step size is uniform, a Lion learning rate is typically 3-10x
+smaller than the AdamW one, with a correspondingly larger `weight_decay`. Its
+beta defaults are `(0.9, 0.99)` -- not Adam's `(0.9, 0.999)`.
 
 ### Base optimizer API
 

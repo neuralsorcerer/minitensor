@@ -33,6 +33,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 - **High Performance**: Rust engine for maximum speed and memory efficiency
 - **Python-Friendly**: Familiar PyTorch-like API for easy adoption
 - **Neural Networks**: Complete neural network layers and optimizers
+- **Transformers**: Attention, RoPE, RMSNorm and embeddings for modern architectures
 - **NumPy Integration**: Seamless interoperability with NumPy arrays
 - **Automatic Differentiation**: Built-in gradient computation for training
 - **Extensible**: Modular design for easy customization and extension
@@ -205,6 +206,12 @@ conv = nn.Conv2d(3, 16, 3)          # 2D convolution
 bn = nn.BatchNorm1d(128)            # Batch normalization
 dropout = nn.Dropout(0.5)           # Dropout regularization
 
+# Transformer building blocks
+emb = nn.Embedding(32000, 512)      # Token embedding table
+ln = nn.LayerNorm(512)              # Layer normalization
+rms = nn.RMSNorm(512)               # RMS normalization (LLaMA-style)
+mha = nn.MultiheadAttention(512, 8) # Multi-head attention
+
 # Activations
 relu = nn.ReLU()                    # ReLU activation
 sigmoid = nn.Sigmoid()              # Sigmoid activation
@@ -236,13 +243,18 @@ sgd = optim.SGD(params, lr=0.01, momentum=0.9, weight_decay=0.0, nesterov=False)
 adam = optim.Adam(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.0)
 adamw = optim.AdamW(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.01)
 rmsprop = optim.RMSprop(params, lr=0.01, alpha=0.99, epsilon=1e-8, weight_decay=0.0, momentum=0.0)
+lion = optim.Lion(params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0)
 
-print(type(sgd).__name__, type(adam).__name__, type(adamw).__name__, type(rmsprop).__name__)
+print(type(sgd).__name__, type(adam).__name__, type(adamw).__name__, type(rmsprop).__name__, type(lion).__name__)
 ```
 
 ```text
-SGD Adam AdamW RMSprop
+SGD Adam AdamW RMSprop Lion
 ```
+
+`Lion` moves every parameter by exactly `lr` (it uses the sign of a momentum
+interpolation), so it needs a learning rate roughly 3-10x smaller than AdamW's
+and stores half the optimizer state.
 
 ## Architecture
 
@@ -288,6 +300,62 @@ print(type(model).__name__, type(optimizer).__name__)
 
 ```text
 Sequential Adam
+```
+
+### Transformer Block
+
+A pre-norm decoder block with rotary positions, the layout used by modern
+language models. Because `MultiheadAttention` is a regular layer, its parameters
+join the optimizer like any other.
+
+```python
+import minitensor as mt
+from minitensor import nn, optim
+from minitensor import functional as F
+
+vocab, dim, heads = 32000, 256, 8
+
+embed = nn.Embedding(vocab, dim)
+norm = nn.RMSNorm(dim)
+attn = nn.MultiheadAttention(dim, heads, is_causal=True)
+
+tokens = mt.Tensor([[10, 42, 7, 3]], dtype="int64")
+
+# Pre-norm residual: x + Attention(RMSNorm(x))
+hidden = embed(tokens)
+hidden = hidden + attn(norm(hidden))
+
+params = embed.parameters() + norm.parameters() + attn.parameters()
+optimizer = optim.Lion(params, lr=1e-4)
+
+hidden.sum().backward()
+optimizer.step()
+
+print(tuple(hidden.shape), len(params))
+```
+
+```text
+(1, 4, 256) 10
+```
+
+Rotary position embeddings apply directly to queries and keys when you drive
+attention yourself:
+
+```python
+import minitensor as mt
+from minitensor import functional as F
+
+# (batch, heads, seq, head_dim)
+q = mt.randn(1, 8, 16, 32)
+k = mt.randn(1, 8, 16, 32)
+v = mt.randn(1, 8, 16, 32)
+
+out = F.scaled_dot_product_attention(F.rope(q), F.rope(k), v, is_causal=True)
+print(tuple(out.shape))
+```
+
+```text
+(1, 8, 16, 32)
 ```
 
 ### Training Loop
