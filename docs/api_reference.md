@@ -476,10 +476,71 @@ assert row_std.shape == (2, 3)
 - `rms_norm(shape, weight=None, eps=1e-6)` -- root-mean-square normalization
   (no mean subtraction, no bias)
 
+### Comparison methods
+
+Method forms of the comparison operators, all returning a `bool` tensor:
+`eq`, `ne`, `lt`, `le`, `gt`, `ge`. Each accepts a tensor or a scalar. The
+`*_from_py` variants (`eq_from_py`, `ne_from_py`, `lt_from_py`, `le_from_py`,
+`gt_from_py`, `ge_from_py`) take a Python scalar directly and exist so the
+operator protocol can dispatch without building a temporary tensor.
+
+### Tensor-like constructors
+
+Create a new tensor that inherits dtype and device from an existing one:
+
+- `new_zeros(shape)`, `new_ones(shape)`, `new_empty(shape)`
+- `new_full(shape, value)`
+- `new_tensor(data)`
+
 ### Autograd + in-place
 
 - `backward()` to trigger gradient computation.
 - `fill_(value)` for in-place fills.
+- `copy_(other)` copies another tensor's values in place.
+- `detach()` returns a view that autograd does not track; `detach_()` detaches
+  in place and returns `None`.
+- `requires_grad_(flag)` sets gradient tracking and returns the tensor, so it
+  chains.
+- `grad` holds the accumulated gradient; `has_grad` is a **property** reporting
+  whether one is present.
+
+### Layout and conversion extras
+
+- `is_contiguous()` reports whether the storage is contiguous.
+- `numpy_copy()` returns a NumPy array that never shares storage.
+- `split_with_sections(sections, dim)` splits into explicitly sized chunks.
+
+```python
+import minitensor as mt
+
+t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+
+print(t.exp().tolist()[0][0] > 2.7, t.pow(2.0).tolist())
+print(t.lt(3.0).tolist())                    # scalars are accepted
+print(t.new_zeros([2]).tolist(), t.new_full([2], 5.0).tolist())
+print(t.is_contiguous(), type(t.numpy_copy()).__name__)
+print([x.shape for x in t.split_with_sections([1, 1], 0)])
+
+target = mt.Tensor([1.0, 2.0])
+target.copy_(mt.Tensor([9.0, 9.0]))
+print(target.tolist())
+
+param = mt.Tensor([1.0]).requires_grad_(True)   # chains
+print(param.requires_grad, param.has_grad)
+(param * 2).sum().backward()
+print(param.has_grad, param.detach().requires_grad)
+```
+
+```text
+True [[1.0, 4.0], [9.0, 16.0]]
+[[True, True], [False, False]]
+[0.0, 0.0] [5.0, 5.0]
+True ndarray
+[Shape([1, 2]), Shape([1, 2])]
+[9.0, 9.0]
+True False
+True False
+```
 
 ## 5) Functional API (`minitensor.functional`)
 
@@ -737,8 +798,53 @@ The `functional` namespace also exposes:
 ### Cross-pollination with `nn`
 
 Lower-case callable symbols from `minitensor.nn` are mirrored into
-`minitensor.functional` for convenience (for example, activation functions that
-have a functional signature).
+`minitensor.functional`, so each of the following is reachable as both
+`nn.<name>` and `functional.<name>` -- they are the same function object. These
+are the stateless counterparts of the layers and losses in section 6, useful
+when you already hold the weights and do not want a module:
+
+| Function | Purpose |
+| --- | --- |
+| `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. |
+| `conv2d(input, weight, bias=None, stride=None, padding=None)` | 2-D convolution. |
+| `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |
+| `dropout2d(input, p)` | Channel-wise dropout. |
+| `mse_loss(predictions, targets, reduction="mean")` | Mean squared error. |
+| `smooth_l1_loss(predictions, targets, ...)` | Smooth L1 / Huber-style loss. |
+| `log_cosh_loss(predictions, targets, ...)` | Log-cosh loss. |
+| `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy. |
+| `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
+
+```python
+import minitensor as mt
+from minitensor import functional as F
+from minitensor import nn
+
+# The nn and functional names are the same object.
+print(nn.mse_loss is F.mse_loss)
+
+x = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+weight = mt.Tensor([[1.0, 0.0], [0.0, 1.0]])
+bias = mt.Tensor([0.5, 0.5])
+print(F.dense_layer(x, weight, bias).tolist())
+
+predictions = mt.Tensor([[0.2, 0.8]])
+targets = mt.Tensor([[0.0, 1.0]])
+print(round(float(F.mse_loss(predictions, targets).numpy()), 4))
+print(round(float(F.binary_cross_entropy(predictions, targets).numpy()), 4))
+
+logits = mt.Tensor([[2.0, 1.0, 0.1]])
+labels = mt.Tensor([[1.0, 0.0, 0.0]])
+print(round(float(F.cross_entropy(logits, labels).numpy()), 4))
+```
+
+```text
+True
+[[1.5, 2.5], [3.5, 4.5]]
+0.04
+0.2231
+0.417
+```
 
 ## 6) Neural network module (`minitensor.nn`)
 
@@ -836,6 +942,9 @@ smaller than the AdamW one, with a correspondingly larger `weight_decay`. Its
 beta defaults are `(0.9, 0.99)` -- not Adam's `(0.9, 0.999)`.
 
 ### Base optimizer API
+
+`Optimizer` is the shared base class; every optimizer above subclasses it, so
+`isinstance(opt, optim.Optimizer)` identifies any of them.
 
 All optimizer classes share a common interface:
 

@@ -37,7 +37,9 @@ def _documents():
 def _blocks():
     """Yield (doc_name, index, source, expected_stdout_or_None)."""
     for path in _documents():
-        fences = FENCE.findall(path.read_text())
+        # Pin the encoding: the docs contain characters (─, ✅, ᵀ) that a
+        # non-UTF-8 default locale, as on Windows CI, cannot decode.
+        fences = FENCE.findall(path.read_text(encoding="utf-8"))
         for index, (lang, body) in enumerate(fences):
             if lang != "python":
                 continue
