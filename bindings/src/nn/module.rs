@@ -334,7 +334,42 @@ pub struct PyModule {
     inner: ModuleType,
 }
 
-enum ModuleType {
+/// Declare the module variants once and derive the uniform dispatch from that
+/// single list. Every wrapped layer implements `Layer` (and therefore `Module`
+/// through the blanket impl), so forwarding, parameter queries, train/eval and
+/// serialization are all just trait calls on the erased inner layer — only
+/// genuinely variant-specific behavior (`__repr__`, the typed constructors and
+/// downcast getters) is written out per variant.
+macro_rules! module_types {
+    ($($variant:ident($ty:ty)),+ $(,)?) => {
+        enum ModuleType {
+            $($variant($ty),)+
+        }
+
+        impl ModuleType {
+            fn as_layer(&self) -> &dyn Layer {
+                match self {
+                    $(ModuleType::$variant(layer) => layer,)+
+                }
+            }
+
+            fn as_module(&self) -> &dyn engine::nn::Module {
+                match self {
+                    $(ModuleType::$variant(layer) => layer,)+
+                }
+            }
+
+            fn as_module_mut(&mut self) -> &mut dyn engine::nn::Module {
+                match self {
+                    $(ModuleType::$variant(layer) => layer,)+
+                }
+            }
+
+        }
+    };
+}
+
+module_types! {
     DenseLayer(DenseLayer),
     ReLU(ReLU),
     Sigmoid(Sigmoid),
@@ -356,23 +391,11 @@ impl PyModule {
     /// Forward pass through the module
     fn forward(&mut self, input: &Bound<PyAny>) -> PyResult<PyTensor> {
         let input_tensor = borrow_tensor(input)?;
-        let result = match &mut self.inner {
-            ModuleType::DenseLayer(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::ReLU(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Sigmoid(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Tanh(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Softmax(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::LeakyReLU(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Elu(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Gelu(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Sequential(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Conv2d(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::BatchNorm1d(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::BatchNorm2d(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Dropout(layer) => layer.forward(input_tensor.tensor()),
-            ModuleType::Dropout2d(layer) => layer.forward(input_tensor.tensor()),
-        }
-        .map_err(_convert_error)?;
+        let result = self
+            .inner
+            .as_module_mut()
+            .forward(input_tensor.tensor())
+            .map_err(_convert_error)?;
 
         Ok(PyTensor::from_tensor(result))
     }
@@ -384,24 +407,9 @@ impl PyModule {
 
     /// Get all parameters of the module
     fn parameters(&self) -> Vec<PyTensor> {
-        let params = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer.parameters(),
-            ModuleType::ReLU(layer) => layer.parameters(),
-            ModuleType::Sigmoid(layer) => layer.parameters(),
-            ModuleType::Tanh(layer) => layer.parameters(),
-            ModuleType::Softmax(layer) => layer.parameters(),
-            ModuleType::LeakyReLU(layer) => layer.parameters(),
-            ModuleType::Elu(layer) => layer.parameters(),
-            ModuleType::Gelu(layer) => layer.parameters(),
-            ModuleType::Sequential(layer) => layer.parameters(),
-            ModuleType::Conv2d(layer) => layer.parameters(),
-            ModuleType::BatchNorm1d(layer) => layer.parameters(),
-            ModuleType::BatchNorm2d(layer) => layer.parameters(),
-            ModuleType::Dropout(layer) => layer.parameters(),
-            ModuleType::Dropout2d(layer) => layer.parameters(),
-        };
-
-        params
+        self.inner
+            .as_layer()
+            .parameters()
             .into_iter()
             .map(|tensor| PyTensor::from_tensor(tensor.clone()))
             .collect()
@@ -409,82 +417,22 @@ impl PyModule {
 
     /// Set module to training mode
     fn train(&mut self) {
-        match &mut self.inner {
-            ModuleType::DenseLayer(layer) => layer.train(),
-            ModuleType::ReLU(layer) => layer.train(),
-            ModuleType::Sigmoid(layer) => layer.train(),
-            ModuleType::Tanh(layer) => layer.train(),
-            ModuleType::Softmax(layer) => layer.train(),
-            ModuleType::LeakyReLU(layer) => layer.train(),
-            ModuleType::Elu(layer) => layer.train(),
-            ModuleType::Gelu(layer) => layer.train(),
-            ModuleType::Sequential(layer) => layer.train(),
-            ModuleType::Conv2d(layer) => layer.train(),
-            ModuleType::BatchNorm1d(layer) => layer.train(),
-            ModuleType::BatchNorm2d(layer) => layer.train(),
-            ModuleType::Dropout(layer) => layer.train(),
-            ModuleType::Dropout2d(layer) => layer.train(),
-        }
+        self.inner.as_module_mut().train()
     }
 
     /// Set module to evaluation mode
     fn eval(&mut self) {
-        match &mut self.inner {
-            ModuleType::DenseLayer(layer) => layer.eval(),
-            ModuleType::ReLU(layer) => layer.eval(),
-            ModuleType::Sigmoid(layer) => layer.eval(),
-            ModuleType::Tanh(layer) => layer.eval(),
-            ModuleType::Softmax(layer) => layer.eval(),
-            ModuleType::LeakyReLU(layer) => layer.eval(),
-            ModuleType::Elu(layer) => layer.eval(),
-            ModuleType::Gelu(layer) => layer.eval(),
-            ModuleType::Sequential(layer) => layer.eval(),
-            ModuleType::Conv2d(layer) => layer.eval(),
-            ModuleType::BatchNorm1d(layer) => layer.eval(),
-            ModuleType::BatchNorm2d(layer) => layer.eval(),
-            ModuleType::Dropout(layer) => layer.eval(),
-            ModuleType::Dropout2d(layer) => layer.eval(),
-        }
+        self.inner.as_module_mut().eval()
     }
 
     /// Get number of parameters
     fn num_parameters(&self) -> usize {
-        match &self.inner {
-            ModuleType::DenseLayer(layer) => layer.num_parameters(),
-            ModuleType::ReLU(layer) => layer.num_parameters(),
-            ModuleType::Sigmoid(layer) => layer.num_parameters(),
-            ModuleType::Tanh(layer) => layer.num_parameters(),
-            ModuleType::Softmax(layer) => layer.num_parameters(),
-            ModuleType::LeakyReLU(layer) => layer.num_parameters(),
-            ModuleType::Elu(layer) => layer.num_parameters(),
-            ModuleType::Gelu(layer) => layer.num_parameters(),
-            ModuleType::Sequential(layer) => layer.num_parameters(),
-            ModuleType::Conv2d(layer) => layer.num_parameters(),
-            ModuleType::BatchNorm1d(layer) => layer.num_parameters(),
-            ModuleType::BatchNorm2d(layer) => layer.num_parameters(),
-            ModuleType::Dropout(layer) => layer.num_parameters(),
-            ModuleType::Dropout2d(layer) => layer.num_parameters(),
-        }
+        self.inner.as_layer().num_parameters()
     }
 
     /// Get detailed parameter statistics
     fn parameter_stats(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let layer: &dyn Layer = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer,
-            ModuleType::ReLU(layer) => layer,
-            ModuleType::Sigmoid(layer) => layer,
-            ModuleType::Tanh(layer) => layer,
-            ModuleType::Softmax(layer) => layer,
-            ModuleType::LeakyReLU(layer) => layer,
-            ModuleType::Elu(layer) => layer,
-            ModuleType::Gelu(layer) => layer,
-            ModuleType::Sequential(layer) => layer,
-            ModuleType::Conv2d(layer) => layer,
-            ModuleType::BatchNorm1d(layer) => layer,
-            ModuleType::BatchNorm2d(layer) => layer,
-            ModuleType::Dropout(layer) => layer,
-            ModuleType::Dropout2d(layer) => layer,
-        };
+        let layer: &dyn Layer = self.inner.as_layer();
         let stats = LayerUtils::parameter_stats(layer);
         let dict = PyDict::new(py);
         dict.set_item("total_parameters", stats.total_parameters)?;
@@ -496,22 +444,7 @@ impl PyModule {
 
     /// Get memory usage information
     fn memory_usage(&self, py: Python) -> PyResult<Py<PyAny>> {
-        let layer: &dyn Layer = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer,
-            ModuleType::ReLU(layer) => layer,
-            ModuleType::Sigmoid(layer) => layer,
-            ModuleType::Tanh(layer) => layer,
-            ModuleType::Softmax(layer) => layer,
-            ModuleType::LeakyReLU(layer) => layer,
-            ModuleType::Elu(layer) => layer,
-            ModuleType::Gelu(layer) => layer,
-            ModuleType::Sequential(layer) => layer,
-            ModuleType::Conv2d(layer) => layer,
-            ModuleType::BatchNorm1d(layer) => layer,
-            ModuleType::BatchNorm2d(layer) => layer,
-            ModuleType::Dropout(layer) => layer,
-            ModuleType::Dropout2d(layer) => layer,
-        };
+        let layer: &dyn Layer = self.inner.as_layer();
         let usage = LayerUtils::memory_usage(layer);
         let dict = PyDict::new(py);
         dict.set_item("total_bytes", usage.total_bytes)?;
@@ -529,22 +462,7 @@ impl PyModule {
         match &self.inner {
             ModuleType::Sequential(model) => Ok(SequentialUtils::model_summary(model, name)),
             _ => {
-                let layer: &dyn Layer = match &self.inner {
-                    ModuleType::DenseLayer(layer) => layer,
-                    ModuleType::ReLU(layer) => layer,
-                    ModuleType::Sigmoid(layer) => layer,
-                    ModuleType::Tanh(layer) => layer,
-                    ModuleType::Softmax(layer) => layer,
-                    ModuleType::LeakyReLU(layer) => layer,
-                    ModuleType::Elu(layer) => layer,
-                    ModuleType::Gelu(layer) => layer,
-                    ModuleType::Sequential(layer) => layer,
-                    ModuleType::Conv2d(layer) => layer,
-                    ModuleType::BatchNorm1d(layer) => layer,
-                    ModuleType::BatchNorm2d(layer) => layer,
-                    ModuleType::Dropout(layer) => layer,
-                    ModuleType::Dropout2d(layer) => layer,
-                };
+                let layer: &dyn Layer = self.inner.as_layer();
                 let owned;
                 let layer_name = match name {
                     Some(n) => n,
@@ -622,23 +540,7 @@ impl PyModule {
     #[pyo3(signature = (path, format=None))]
     fn save(&self, path: &str, format: Option<&str>) -> PyResult<()> {
         // Build a SerializedModel with metadata and engine state_dict
-        use engine::nn::Module as _;
-        let state = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer.state_dict(),
-            ModuleType::ReLU(layer) => layer.state_dict(),
-            ModuleType::Sigmoid(layer) => layer.state_dict(),
-            ModuleType::Tanh(layer) => layer.state_dict(),
-            ModuleType::Softmax(layer) => layer.state_dict(),
-            ModuleType::LeakyReLU(layer) => layer.state_dict(),
-            ModuleType::Elu(layer) => layer.state_dict(),
-            ModuleType::Gelu(layer) => layer.state_dict(),
-            ModuleType::Sequential(layer) => layer.state_dict(),
-            ModuleType::Conv2d(layer) => layer.state_dict(),
-            ModuleType::BatchNorm1d(layer) => layer.state_dict(),
-            ModuleType::BatchNorm2d(layer) => layer.state_dict(),
-            ModuleType::Dropout(layer) => layer.state_dict(),
-            ModuleType::Dropout2d(layer) => layer.state_dict(),
-        };
+        let state = self.inner.as_module().state_dict();
 
         let metadata = ModelMetadata::new("module".to_string(), "Module".to_string());
         let model = SerializedModel::new(metadata, state);
@@ -679,49 +581,19 @@ impl PyModule {
 
     /// Return a StateDict snapshot of this module
     fn state_dict(&self) -> PyStateDict {
-        use engine::nn::Module as _;
-        let state = match &self.inner {
-            ModuleType::DenseLayer(layer) => layer.state_dict(),
-            ModuleType::ReLU(layer) => layer.state_dict(),
-            ModuleType::Sigmoid(layer) => layer.state_dict(),
-            ModuleType::Tanh(layer) => layer.state_dict(),
-            ModuleType::Softmax(layer) => layer.state_dict(),
-            ModuleType::LeakyReLU(layer) => layer.state_dict(),
-            ModuleType::Elu(layer) => layer.state_dict(),
-            ModuleType::Gelu(layer) => layer.state_dict(),
-            ModuleType::Sequential(layer) => layer.state_dict(),
-            ModuleType::Conv2d(layer) => layer.state_dict(),
-            ModuleType::BatchNorm1d(layer) => layer.state_dict(),
-            ModuleType::BatchNorm2d(layer) => layer.state_dict(),
-            ModuleType::Dropout(layer) => layer.state_dict(),
-            ModuleType::Dropout2d(layer) => layer.state_dict(),
-        };
+        let state = self.inner.as_module().state_dict();
         crate::serialization::PyStateDict::from_engine(state)
     }
 
     /// Load a provided StateDict into this module
     #[pyo3(signature = (state, device=None))]
     fn load_state_dict(&mut self, state: &PyStateDict, device: Option<&PyDevice>) -> PyResult<()> {
-        use engine::nn::Module as _;
         let dev = device.map(|d| d.device());
         let sd_ref = crate::serialization::PyStateDict::inner_ref(state);
-        let res = match &mut self.inner {
-            ModuleType::DenseLayer(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::ReLU(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Sigmoid(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Tanh(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Softmax(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::LeakyReLU(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Elu(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Gelu(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Sequential(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Conv2d(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::BatchNorm1d(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::BatchNorm2d(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Dropout(layer) => layer.load_state_dict(sd_ref, dev),
-            ModuleType::Dropout2d(layer) => layer.load_state_dict(sd_ref, dev),
-        };
-        res.map_err(_convert_error)
+        self.inner
+            .as_module_mut()
+            .load_state_dict(sd_ref, dev)
+            .map_err(_convert_error)
     }
 }
 
@@ -810,6 +682,9 @@ impl PyModule {
         }
     }
 
+    /// Clone the inner layer into a boxed trait object. Written out per variant
+    /// rather than derived from `module_types!` because `Sequential` is not
+    /// `Clone` and is rejected outright.
     pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
         let layer: Box<dyn Layer> = match &self.inner {
             ModuleType::DenseLayer(layer) => Box::new(layer.clone()),

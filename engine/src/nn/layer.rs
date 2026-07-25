@@ -68,10 +68,15 @@ pub trait Module: Layer {
         HashMap::new() // Default empty implementation
     }
 
-    /// Apply a function to all parameters
+    /// Apply a function to all parameters.
+    ///
+    /// `Self: Sized` keeps this generic method out of the vtable so `Module`
+    /// stays dyn-compatible; callers holding a `&mut dyn Module` can iterate
+    /// `parameters_mut()` directly.
     fn apply<F>(&mut self, f: F) -> Result<()>
     where
         F: Fn(&mut Tensor) -> Result<()>,
+        Self: Sized,
     {
         for param in self.parameters_mut() {
             f(param)?;
