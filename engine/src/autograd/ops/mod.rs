@@ -13,6 +13,7 @@ mod activation;
 mod arithmetic;
 mod core;
 mod linalg;
+mod pooling;
 mod reduction;
 mod shape;
 #[cfg(test)]
@@ -22,5 +23,6 @@ pub use self::activation::*;
 pub use self::arithmetic::*;
 pub use self::core::*;
 pub use self::linalg::*;
+pub use self::pooling::*;
 pub use self::reduction::*;
 pub use self::shape::*;

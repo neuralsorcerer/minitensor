@@ -1,5 +1,8 @@
 # Rust
-/target/
+# Unanchored so nested cargo projects are covered too: the plugin example under
+# examples/ is its own workspace, and its README tells readers to build it,
+# which left an untracked `target/` behind.
+target/
 Cargo.lock
 **/*.rs.bk
 

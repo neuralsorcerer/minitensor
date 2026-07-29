@@ -71,15 +71,33 @@ where
 
 /// Sequential core: write `op(lhs[i], rhs[i])` into every element of `out`.
 #[inline(always)]
-fn zip_into<T, U, F>(lhs: &[T], rhs: &[T], out: &mut [MaybeUninit<U>], op: &F)
+fn zip_into<A, B, U, F>(lhs: &[A], rhs: &[B], out: &mut [MaybeUninit<U>], op: &F)
 where
-    T: Copy,
-    F: Fn(T, T) -> U,
+    A: Copy,
+    B: Copy,
+    F: Fn(A, B) -> U,
 {
     debug_assert_eq!(lhs.len(), out.len());
     debug_assert_eq!(rhs.len(), out.len());
     for ((o, &l), &r) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
         o.write(op(l, r));
+    }
+}
+
+/// Sequential core: write `op(a[i], b[i], c[i])` into every element of `out`.
+#[inline(always)]
+fn zip3_into<A, B, C, U, F>(a: &[A], b: &[B], c: &[C], out: &mut [MaybeUninit<U>], op: &F)
+where
+    A: Copy,
+    B: Copy,
+    C: Copy,
+    F: Fn(A, B, C) -> U,
+{
+    debug_assert_eq!(a.len(), out.len());
+    debug_assert_eq!(b.len(), out.len());
+    debug_assert_eq!(c.len(), out.len());
+    for (((o, &x), &y), &z) in out.iter_mut().zip(a.iter()).zip(b.iter()).zip(c.iter()) {
+        o.write(op(x, y, z));
     }
 }
 
@@ -122,13 +140,43 @@ where
     unary_map_threshold(input, PAR_THRESHOLD, op)
 }
 
-/// Zip `op` over two equal-length slices into a fresh, exactly-sized `Vec`.
-/// Parallel above [`BINARY_PAR_THRESHOLD`].
-pub(crate) fn binary_map<T, U, F>(lhs: &[T], rhs: &[T], op: F) -> Vec<U>
+/// Write `op(input[i])` into an existing output slice, parallel above
+/// [`PAR_THRESHOLD`].
+///
+/// The in-place counterpart to [`unary_map`], for kernels that already own a
+/// destination buffer. Chunked rather than indexed, so the bounds stay visible
+/// to the optimizer and no pointer has to be laundered across the rayon
+/// closure boundary.
+pub(crate) fn unary_map_into<T, U, F>(out: &mut [U], input: &[T], op: F)
 where
     T: Copy + Sync,
     U: Copy + Send + Sync,
-    F: Fn(T, T) -> U + Send + Sync,
+    F: Fn(T) -> U + Send + Sync,
+{
+    debug_assert_eq!(out.len(), input.len());
+    let apply = |out: &mut [U], input: &[T]| {
+        for (o, &i) in out.iter_mut().zip(input.iter()) {
+            *o = op(i);
+        }
+    };
+    if out.len() < PAR_THRESHOLD {
+        apply(out, input);
+    } else {
+        out.par_chunks_mut(PAR_CHUNK)
+            .zip(input.par_chunks(PAR_CHUNK))
+            .for_each(|(o, i)| apply(o, i));
+    }
+}
+
+/// Zip `op` over two equal-length slices into a fresh, exactly-sized `Vec`.
+/// Parallel above [`BINARY_PAR_THRESHOLD`]. The two inputs may have different
+/// element types (e.g. zipping values with a boolean mask).
+pub(crate) fn binary_map<A, B, U, F>(lhs: &[A], rhs: &[B], op: F) -> Vec<U>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(A, B) -> U + Send + Sync,
 {
     debug_assert_eq!(lhs.len(), rhs.len());
     let len = lhs.len();
@@ -142,6 +190,41 @@ where
                     .zip(rhs.par_chunks(PAR_CHUNK))
                     .zip(spare.par_chunks_mut(PAR_CHUNK))
                     .for_each(|((lc, rc), oc)| zip_into(lc, rc, oc, &op));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
+    }
+}
+
+/// Zip `op` over three equal-length slices into a fresh, exactly-sized `Vec`.
+/// Parallel above [`BINARY_PAR_THRESHOLD`].
+///
+/// Gradient kernels routinely combine three operands (saved input, saved
+/// output, incoming gradient); expressing that here keeps them on the
+/// write-once output path instead of a zero-then-overwrite buffer.
+pub(crate) fn ternary_map<A, B, C, U, F>(a: &[A], b: &[B], c: &[C], op: F) -> Vec<U>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    C: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(A, B, C) -> U + Send + Sync,
+{
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(a.len(), c.len());
+    let len = a.len();
+    // SAFETY: both branches write every element of the spare slice.
+    unsafe {
+        build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
+            if len < BINARY_PAR_THRESHOLD {
+                zip3_into(a, b, c, spare, &op);
+            } else {
+                a.par_chunks(PAR_CHUNK)
+                    .zip(b.par_chunks(PAR_CHUNK))
+                    .zip(c.par_chunks(PAR_CHUNK))
+                    .zip(spare.par_chunks_mut(PAR_CHUNK))
+                    .for_each(|(((ac, bc), cc), oc)| zip3_into(ac, bc, cc, oc, &op));
             }
             Ok(())
         })

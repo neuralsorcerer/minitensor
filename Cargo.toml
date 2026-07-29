@@ -49,6 +49,29 @@ libm = "0.2"
 pyo3 = { version = "0.29", features = ["auto-initialize", "multiple-pymethods"] }
 numpy = "0.29"
 
-[workspace.metadata.maturin]
-python-source = "py/src"
-module-name = "minitensor"
+
+# Release builds are what ship in the wheel and what every benchmark quotes.
+# Cargo's defaults leave a lot on the table here: no cross-crate inlining, and
+# full debug symbols retained in the artifact.
+# Measured on the extension module, each step over the one above it:
+#
+#   cargo defaults                     17.21 MB    ~75 s
+#   strip only                         12.44 MB     97 s
+#   strip + thin LTO (codegen-units 16) 12.44 MB     92 s
+#   strip + thin LTO + codegen-units 1  9.80 MB    176 s
+#
+# Note the third row: thin LTO on its own changes nothing here. Shrinking the
+# unit count is what lets it merge and inline across the crate boundaries the
+# hot kernels cross constantly -- rayon, matrixmultiply, and the generic
+# `ops::map` combinators -- and that is where both the size and the small
+# runtime gain come from. The two settings only pay off together.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Symbols are a large fraction of the shipped extension and buy nothing at
+# runtime; a backtrace-grade build can override this.
+strip = "symbols"
+# Left at "unwind" deliberately: pyo3 converts Rust panics into Python
+# exceptions, which requires unwinding. "abort" would shrink the binary further
+# and turn every panic into a hard process kill.
+panic = "unwind"

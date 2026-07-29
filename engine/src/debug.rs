@@ -11,6 +11,24 @@ use crate::{
 use std::collections::HashMap;
 
 /// Tensor inspection information
+/// Render a byte count with the largest unit that keeps it >= 1, so small
+/// tensors report `24 B` rather than the `0MB` a fixed megabyte unit produced.
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.2} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.2} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub shape: Shape,
@@ -38,16 +56,22 @@ impl TensorInfo {
         }
     }
 
-    /// Get a formatted summary of the tensor
+    /// Get a formatted summary of the tensor.
+    ///
+    /// The memory figure auto-scales its unit: reporting whole megabytes made
+    /// every tensor under 1 MiB read as `0MB`, which is exactly the size range
+    /// you are looking at when debugging. `Device` is printed through its
+    /// `Display` impl (`cpu`, `cuda:0`) rather than the derived `Debug`, which
+    /// leaked the struct's field names into user-facing output.
     pub fn summary(&self) -> String {
         format!(
-            "Tensor(shape={:?}, dtype={}, device={:?}, numel={}, requires_grad={}, memory={}MB)",
+            "Tensor(shape={:?}, dtype={}, device={}, numel={}, requires_grad={}, memory={})",
             self.shape.dims(),
             self.dtype,
             self.device,
             self.numel,
             self.requires_grad,
-            self.memory_usage_bytes / 1024 / 1024
+            format_bytes(self.memory_usage_bytes)
         )
     }
 
@@ -57,9 +81,9 @@ impl TensorInfo {
             "Tensor Information:\n\
              ├─ Shape: {:?}\n\
              ├─ Data Type: {}\n\
-             ├─ Device: {:?}\n\
+             ├─ Device: {}\n\
              ├─ Elements: {}\n\
-             ├─ Memory: {} bytes ({:.2} MB)\n\
+             ├─ Memory: {} bytes ({})\n\
              ├─ Stride: {:?}\n\
              ├─ Requires Grad: {}\n\
              └─ Is Leaf: {}",
@@ -68,7 +92,7 @@ impl TensorInfo {
             self.device,
             self.numel,
             self.memory_usage_bytes,
-            self.memory_usage_bytes as f64 / 1024.0 / 1024.0,
+            format_bytes(self.memory_usage_bytes),
             self.stride,
             self.requires_grad,
             self.is_leaf
@@ -395,11 +419,11 @@ impl TensorDebugger {
         // Compare devices
         if info1.device != info2.device {
             result.push_str(&format!(
-                "❌ Device: {:?} vs {:?}\n",
+                "❌ Device: {} vs {}\n",
                 info1.device, info2.device
             ));
         } else {
-            result.push_str(&format!("✅ Device: {:?}\n", info1.device));
+            result.push_str(&format!("✅ Device: {}\n", info1.device));
         }
 
         // Compare gradient requirements
@@ -491,6 +515,11 @@ mod tests {
         let summary = info.summary();
         assert!(summary.contains("Tensor(shape=[2, 2], dtype=Float32"));
         assert!(summary.contains("requires_grad=false"));
+        // Device renders via `Display`, not the derived `Debug`.
+        assert!(summary.contains("device=cpu"), "{summary}");
+        assert!(!summary.contains("device_type"), "{summary}");
+        // A 16-byte tensor must not report "0MB".
+        assert!(summary.contains("memory=16 B"), "{summary}");
 
         let detailed = info.detailed();
         assert!(detailed.contains("Tensor Information:"));

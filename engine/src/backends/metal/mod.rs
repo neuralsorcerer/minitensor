@@ -6,7 +6,6 @@
 
 use super::Backend;
 use crate::{device::Device, error::Result};
-use metal::*;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -92,7 +91,7 @@ impl MetalBackend {
                 )
             })?;
 
-        let mut lib = self.library.lock();
+        let mut lib = self.library.write();
         *lib = Some(library);
 
         Ok(())
@@ -109,10 +108,12 @@ impl MetalBackend {
             crate::error::MinitensorError::backend_error("Metal", "No Metal library loaded")
         })?;
 
-        let function = library.get_function(function_name, None).ok_or_else(|| {
+        // `get_function` returns a Result, so the failure carries its own
+        // message; keep it rather than discarding it for a generic one.
+        let function = library.get_function(function_name, None).map_err(|e| {
             crate::error::MinitensorError::backend_error(
                 "Metal",
-                format!("Function '{}' not found in Metal library", function_name),
+                format!("Function '{function_name}' not found in Metal library: {e}"),
             )
         })?;
 
@@ -254,7 +255,6 @@ impl MetalBackend {
         pipeline: &metal::ComputePipelineState,
     ) -> metal::MTLSize {
         let max_threads = pipeline.max_total_threads_per_threadgroup();
-        let thread_execution_width = pipeline.thread_execution_width();
 
         // For 2D operations, use square thread groups
         let side = (max_threads as f64).sqrt() as u64;
@@ -293,7 +293,7 @@ impl Backend for MetalBackend {
             let command_queue = metal_device.new_command_queue();
 
             Ok(Self {
-                device: Device::metal(Some(0)),
+                device: Device::metal(),
                 metal_device,
                 command_queue,
                 library: Arc::new(RwLock::new(None)),

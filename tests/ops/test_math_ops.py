@@ -4,6 +4,8 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+
 import numpy as np
 import pytest
 
@@ -696,11 +698,16 @@ def _make_tensor_values():
     return np.array([-1.234, -0.5, 0.0, 2.718, 3.1415], dtype=np.float32)
 
 
-def _round_half_away_from_zero(values: np.ndarray, decimals: int = 0) -> np.ndarray:
-    multiplier = np.power(10.0, decimals, dtype=values.dtype)
-    scaled = values * multiplier
-    rounded = np.sign(scaled) * np.floor(np.abs(scaled) + 0.5)
-    return rounded / multiplier
+def _round_half_to_even(values: np.ndarray, decimals: int = 0) -> np.ndarray:
+    """Reference rounding: halves go to the even neighbour.
+
+    This is the IEEE 754 default and what NumPy, PyTorch and Python's built-in
+    ``round`` all do, so ``np.round`` is the reference. An earlier version of
+    this helper rounded halves away from zero, matching Rust's ``f32::round``,
+    which the implementation reached for by default; ``-0.5`` came back as
+    ``-1.0`` where every reference library gives ``-0.0``.
+    """
+    return np.round(values, decimals)
 
 
 def test_tensor_round_defaults_to_zero_decimals():
@@ -709,7 +716,7 @@ def test_tensor_round_defaults_to_zero_decimals():
 
     rounded = tensor.round()
 
-    np.testing.assert_allclose(rounded.numpy(), _round_half_away_from_zero(values))
+    np.testing.assert_allclose(rounded.numpy(), _round_half_to_even(values))
     assert rounded.dtype == tensor.dtype
 
 
@@ -719,7 +726,7 @@ def test_tensor_round_with_decimals():
 
     rounded = tensor.round(decimals=2)
 
-    np.testing.assert_allclose(rounded.numpy(), _round_half_away_from_zero(values, 2))
+    np.testing.assert_allclose(rounded.numpy(), _round_half_to_even(values, 2))
     assert rounded.dtype == tensor.dtype
 
 
@@ -974,3 +981,132 @@ def test_pow_incompatible_shapes_error():
     b = mt.Tensor(np.ones((2, 4), dtype=np.float32))
     with pytest.raises(ValueError):
         _ = a**b
+
+
+@pytest.mark.parametrize(
+    "name, reference, domain",
+    [
+        ("log2", math.log2, (0.05, 8.0)),
+        ("log10", math.log10, (0.05, 8.0)),
+        ("erf", math.erf, (-4.0, 4.0)),
+        ("erfc", math.erfc, (-4.0, 4.0)),
+    ],
+)
+def test_elementwise_math_matches_stdlib(name, reference, domain):
+    values = np.linspace(domain[0], domain[1], 41)
+    got = getattr(mt.Tensor(values, dtype="float64"), name)().numpy()
+    expected = np.array([reference(v) for v in values])
+    np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-300)
+
+
+def test_erfc_keeps_the_tail_that_one_minus_erf_loses():
+    """`erfc` exists precisely for the regime where `1 - erf(x)` cancels away.
+
+    Once `erf(x)` rounds to 1 the subtraction returns exactly zero, so the
+    dedicated routine is not an optimisation — it is the difference between an
+    answer and no answer at all.
+    """
+    x = mt.Tensor([6.0, 10.0, 20.0], dtype="float64")
+    direct = x.erfc().numpy()
+    naive = 1.0 - x.erf().numpy()
+
+    np.testing.assert_allclose(
+        direct, [math.erfc(6.0), math.erfc(10.0), math.erfc(20.0)], rtol=1e-12
+    )
+    assert np.all(naive == 0.0), "1 - erf no longer cancels; revisit this test"
+    assert np.all(direct > 0.0)
+
+
+@pytest.mark.parametrize(
+    "name, domain",
+    [
+        ("log2", (0.3, 4.0)),
+        ("log10", (0.3, 4.0)),
+        ("erf", (-3.0, 3.0)),
+        ("erfc", (-3.0, 3.0)),
+    ],
+)
+def test_elementwise_math_gradcheck(name, domain):
+    rng = np.random.default_rng(7)
+    a = rng.uniform(domain[0], domain[1], size=(3, 4))
+    weights = rng.standard_normal((3, 4))
+
+    t = mt.Tensor(a, dtype="float64", requires_grad=True)
+    (getattr(t, name)() * mt.Tensor(weights, dtype="float64")).sum().backward()
+    analytic = t.grad.numpy()
+    mt.clear_autograd_graph()
+
+    h = 1e-6
+    for idx in np.ndindex(3, 4):
+        plus, minus = a.copy(), a.copy()
+        plus[idx] += h
+        minus[idx] -= h
+        central = float(
+            (
+                getattr(mt.Tensor(plus, dtype="float64"), name)().numpy()
+                - getattr(mt.Tensor(minus, dtype="float64"), name)().numpy()
+            )
+            .__mul__(weights)
+            .sum()
+        ) / (2 * h)
+        np.testing.assert_allclose(analytic[idx], central, atol=1e-7)
+
+
+def test_erfc_gradient_is_the_negation_of_erf():
+    # erfc = 1 - erf, so the derivatives differ only in sign. Checking the
+    # relation catches a dropped sign that a lone gradcheck tolerance might not.
+    for x in (-1.0, 0.0, 1.5):
+        a = mt.Tensor([x], dtype="float64", requires_grad=True)
+        a.erf().backward()
+        b = mt.Tensor([x], dtype="float64", requires_grad=True)
+        b.erfc().backward()
+        assert a.grad.item() == pytest.approx(-b.grad.item(), rel=1e-12)
+        mt.clear_autograd_graph()
+
+    # d/dx erf(0) = 2/sqrt(pi)
+    origin = mt.Tensor([0.0], dtype="float64", requires_grad=True)
+    origin.erf().backward()
+    assert origin.grad.item() == pytest.approx(2.0 / math.sqrt(math.pi))
+    mt.clear_autograd_graph()
+
+
+def test_erf_saturates_and_propagates_nan():
+    t = mt.Tensor([float("-inf"), 0.0, float("inf"), float("nan")], dtype="float64")
+    erf = t.erf().numpy()
+    np.testing.assert_array_equal(erf[:3], [-1.0, 0.0, 1.0])
+    assert math.isnan(erf[3])
+
+    erfc = t.erfc().numpy()
+    np.testing.assert_array_equal(erfc[:3], [2.0, 1.0, 0.0])
+    assert math.isnan(erfc[3])
+
+
+@pytest.mark.parametrize("name", ["log2", "log10"])
+def test_log_bases_agree_with_log_on_edge_cases(name):
+    # Whatever `log` does at 0, negatives, inf and NaN, the other bases must do
+    # too -- they are the same function up to a positive constant factor.
+    t = mt.Tensor([0.0, -1.0, float("inf"), float("nan")], dtype="float64")
+    base = t.log().numpy()
+    other = getattr(t, name)().numpy()
+    for b, o in zip(base, other):
+        if math.isnan(b):
+            assert math.isnan(o)
+        else:
+            assert math.copysign(1.0, b) == math.copysign(1.0, o)
+            assert math.isinf(b) == math.isinf(o)
+
+
+@pytest.mark.parametrize("name", ["log2", "log10", "erf", "erfc"])
+@pytest.mark.parametrize("dtype", ["int64", "bool"])
+def test_elementwise_math_rejects_non_float_dtypes(name, dtype):
+    with pytest.raises(Exception):
+        getattr(mt.Tensor([1, 0], dtype=dtype), name)()
+
+
+@pytest.mark.parametrize("name", ["log2", "log10", "erf", "erfc"])
+def test_elementwise_math_available_as_free_functions(name):
+    t = mt.Tensor([1.5, 2.5])
+    np.testing.assert_allclose(
+        getattr(F, name)(t).numpy(), getattr(t, name)().numpy(), rtol=1e-6
+    )
+    assert hasattr(mt, name)

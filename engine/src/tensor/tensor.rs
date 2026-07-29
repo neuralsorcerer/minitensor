@@ -25,14 +25,28 @@ use rayon::prelude::*;
 use std::{borrow::Cow, sync::Arc};
 
 // ===== core: struct definition, constructors, autograd storage =====
-/// Core tensor structure for minitensor
+/// Core tensor structure for minitensor.
+///
+/// # Layout invariant
+///
+/// A tensor's storage always holds its elements in contiguous logical
+/// (row-major) order. Every kernel in the engine relies on this: they fetch
+/// `data().as_*_slice()` and index it directly, and several size their work
+/// from the buffer length rather than the shape. A non-contiguous view would
+/// therefore not merely be slow — it would silently read the wrong elements.
+///
+/// Operations that would otherwise produce a strided view ([`Self::expand`])
+/// materialise it instead. If a stride-aware execution path is ever added,
+/// [`Self::contiguous`] is the choke point that must be threaded through the
+/// kernels first.
 #[derive(Clone)]
 pub struct Tensor {
     /// Tensor data storage
     data: Arc<TensorData>,
     /// Tensor shape (dimensions)
     shape: Shape,
-    /// Memory strides for each dimension
+    /// Memory strides for each dimension. See the layout invariant above:
+    /// these are always the contiguous strides for `shape`.
     strides: Strides,
     /// Data type of tensor elements
     dtype: DataType,
@@ -236,62 +250,68 @@ impl Tensor {
         Ok(cloned)
     }
 
+    /// Gather a strided view over this tensor's storage into a fresh
+    /// contiguous buffer.
+    ///
+    /// `dims`/`strides` describe the view in elements; a stride of 0 repeats
+    /// the element, which is how [`Self::expand`] materialises broadcast axes.
+    /// Every output element is written exactly once (no zeroing pass) and the
+    /// walk parallelises above the map threshold.
+    fn gather_view(&self, dims: &[usize], strides: &[usize], context: &str) -> Result<TensorData> {
+        if !self.device.is_cpu() {
+            return Err(MinitensorError::invalid_operation(format!(
+                "{context} currently supports only CPU tensors"
+            )));
+        }
+
+        macro_rules! gather_arm {
+            ($accessor:ident, $ty:ty, $label:literal) => {{
+                let src = self.data.$accessor().ok_or_else(|| {
+                    MinitensorError::invalid_operation(format!(
+                        "failed to access {} data for {context}",
+                        $label
+                    ))
+                })?;
+                TensorData::from_vec::<$ty>(
+                    crate::ops::map::strided_gather(src, dims, strides),
+                    self.dtype,
+                    self.device,
+                )
+            }};
+        }
+
+        Ok(match self.dtype {
+            DataType::Float32 => gather_arm!(as_f32_slice, f32, "float32"),
+            DataType::Float64 => gather_arm!(as_f64_slice, f64, "float64"),
+            DataType::Int32 => gather_arm!(as_i32_slice, i32, "int32"),
+            DataType::Int64 => gather_arm!(as_i64_slice, i64, "int64"),
+            DataType::Bool => gather_arm!(as_bool_slice, bool, "bool"),
+        })
+    }
+
     /// Materialise the tensor into a contiguous layout.
     pub fn contiguous(&self) -> Result<Self> {
         if self.is_contiguous() && self.data.is_contiguous() {
             return Ok(self.clone());
         }
 
-        if !self.device.is_cpu() {
-            return Err(MinitensorError::invalid_operation(
-                "contiguous currently supports only CPU tensors".to_string(),
-            ));
-        }
-
-        let dtype = self.dtype;
-        let device = self.device;
-        let requires_grad = self.requires_grad;
-        let shape = self.shape.dims().to_vec();
-        let strides = self.strides.as_slice().to_vec();
-
-        /// One dtype arm: gather the strided view into a fresh contiguous
-        /// buffer (parallel above the map threshold, no zeroing pass).
-        macro_rules! gather_arm {
-            ($accessor:ident, $ty:ty, $label:literal) => {{
-                let src = self.data.$accessor().ok_or_else(|| {
-                    MinitensorError::invalid_operation(concat!(
-                        "failed to access ",
-                        $label,
-                        " data for contiguous copy"
-                    ))
-                })?;
-                TensorData::from_vec::<$ty>(
-                    crate::ops::map::strided_gather(src, &shape, &strides),
-                    dtype,
-                    device,
-                )
-            }};
-        }
-
-        let output_data = match dtype {
-            DataType::Float32 => gather_arm!(as_f32_slice, f32, "float32"),
-            DataType::Float64 => gather_arm!(as_f64_slice, f64, "float64"),
-            DataType::Int32 => gather_arm!(as_i32_slice, i32, "int32"),
-            DataType::Int64 => gather_arm!(as_i64_slice, i64, "int64"),
-            DataType::Bool => gather_arm!(as_bool_slice, bool, "bool"),
-        };
+        let output_data = self.gather_view(
+            self.shape.dims(),
+            self.strides.as_slice(),
+            "contiguous copy",
+        )?;
 
         let mut output = Tensor::new(
             Arc::new(output_data),
-            Shape::new(shape),
-            dtype,
-            device,
-            requires_grad,
+            self.shape.clone(),
+            self.dtype,
+            self.device,
+            self.requires_grad,
         );
 
         // The materialized copy passes gradients straight through to the
         // source tensor (identity backward).
-        if requires_grad {
+        if self.requires_grad {
             let grad_fn = Arc::new(CloneBackward {
                 input_id: self.tensor_id,
             });
@@ -643,6 +663,13 @@ impl Tensor {
         logsumexp(self, dim, keepdim)
     }
 
+    /// Vector p-norm reduction
+    #[inline(always)]
+    pub fn norm(&self, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        use crate::ops::reduction::norm;
+        norm(self, p, dim, keepdim)
+    }
+
     /// Product reduction
     #[inline(always)]
     pub fn prod(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
@@ -924,6 +951,34 @@ impl Tensor {
         log(self)
     }
 
+    /// Base-2 logarithm
+    #[inline(always)]
+    pub fn log2(&self) -> Result<Self> {
+        use crate::ops::activation::log2;
+        log2(self)
+    }
+
+    /// Base-10 logarithm
+    #[inline(always)]
+    pub fn log10(&self) -> Result<Self> {
+        use crate::ops::activation::log10;
+        log10(self)
+    }
+
+    /// Gauss error function
+    #[inline(always)]
+    pub fn erf(&self) -> Result<Self> {
+        use crate::ops::activation::erf;
+        erf(self)
+    }
+
+    /// Complementary error function
+    #[inline(always)]
+    pub fn erfc(&self) -> Result<Self> {
+        use crate::ops::activation::erfc;
+        erfc(self)
+    }
+
     /// log1p (log(1 + x))
     #[inline(always)]
     pub fn log1p(&self) -> Result<Self> {
@@ -1171,8 +1226,15 @@ impl Tensor {
         self.reshape(new_shape)
     }
 
-    /// Expand tensor dimensions without allocating new memory
-    #[inline(always)]
+    /// Expand size-1 (and new leading) dimensions to the requested sizes.
+    ///
+    /// Broadcast axes are **materialised**: every kernel in the engine reads
+    /// tensor storage in contiguous logical order, so handing back a stride-0
+    /// view would make each downstream operation read the wrong elements — and
+    /// for the kernels that size their work from the buffer, the wrong *number*
+    /// of elements (`x.expand(...) + y` silently produced a truncated result).
+    /// When no axis actually broadcasts, the storage is shared as before and
+    /// this stays allocation-free.
     pub fn expand(&self, dims: Vec<isize>) -> Result<Self> {
         let orig_dims = self.shape.dims();
         let orig_strides = self.strides.as_slice();
@@ -1235,10 +1297,17 @@ impl Tensor {
             }
         }
 
-        let mut tensor = self.clone();
-        tensor.refresh_autograd_metadata();
-        tensor.shape = Shape::new(new_dims.clone());
-        tensor.strides = Strides::new(new_strides);
+        let new_shape = Shape::new(new_dims);
+        let broadcasts = new_shape.dims() != orig_dims;
+        // Only the broadcasting case needs a new buffer; otherwise the existing
+        // (already contiguous) storage is exactly the result.
+        let data = if broadcasts {
+            Arc::new(self.gather_view(new_shape.dims(), &new_strides, "expand")?)
+        } else {
+            Arc::clone(&self.data)
+        };
+
+        let mut tensor = Self::new(data, new_shape, self.dtype, self.device, self.requires_grad);
 
         if tensor.requires_grad {
             let grad_fn = Arc::new(crate::autograd::ExpandBackward {
@@ -1573,8 +1642,10 @@ impl Tensor {
             ));
         }
 
-        let shape_dims = self.shape.dims();
-        let strides = self.strides.as_slice();
+        let shape_dims = self.shape.dims().to_vec();
+        // Owned so the later `self.data_mut()` can take its whole-struct
+        // mutable borrow.
+        let strides = self.strides.as_slice().to_vec();
         let mut offset = 0usize;
         let mut out_dims = Vec::new();
         let mut orig_dim_map = Vec::new();
@@ -1620,15 +1691,17 @@ impl Tensor {
         }
 
         let out_strides = Strides::from_shape(&out_shape);
-        let data = if let Some(d) = Arc::get_mut(&mut self.data) {
-            d
-        } else {
-            let cloned = self.data.clone_data();
-            self.data = Arc::new(cloned);
-            Arc::get_mut(&mut self.data).unwrap()
-        };
+        // Use the same rule every other in-place write obeys rather than a
+        // second, stricter one: `data_mut` copies when the storage is shared
+        // *and* the tensor is detached or non-leaf, but writes through shared
+        // storage for a leaf parameter. Copying unconditionally here meant an
+        // assignment to a tensor from `parameters()` silently updated a private
+        // copy while the layer kept its old weights -- the write appeared to
+        // succeed and changed nothing.
+        let dtype = self.dtype;
+        let data = self.data_mut();
 
-        match self.dtype {
+        match dtype {
             DataType::Float32 => {
                 let slice = data.as_f32_slice_mut().unwrap();
                 let val_slice = value.data().as_f32_slice().unwrap();
@@ -2911,7 +2984,7 @@ mod tests {
     }
 
     #[test]
-    fn test_view_rejects_non_contiguous_tensor() {
+    fn test_expanded_tensor_is_contiguous_and_viewable() {
         let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
         let tensor = Tensor::new(
             Arc::new(data),
@@ -2921,10 +2994,17 @@ mod tests {
             false,
         );
         let expanded = tensor.expand(vec![4, 3]).unwrap();
-        assert!(!expanded.is_contiguous());
-        // A raw view would silently pair the new shape with storage that only
-        // holds 3 elements; it must be rejected.
-        assert!(expanded.view(Shape::new(vec![12])).is_err());
+        // `expand` materializes broadcast axes, so its result carries all 12
+        // logical elements. When it handed back a stride-0 view instead, this
+        // storage held only 3 and every consumer read the wrong data.
+        assert!(expanded.is_contiguous());
+        assert_eq!(expanded.data().numel(), 12);
+
+        let flat = expanded.view(Shape::new(vec![12])).unwrap();
+        assert_eq!(
+            flat.data().as_f32_slice().unwrap(),
+            &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
+        );
     }
 
     #[test]
@@ -3206,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_contiguous_materialises_expanded_views() {
+    fn test_expand_materialises_broadcast_axes() {
         let base = Tensor::new(
             Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0], Device::cpu())),
             Shape::new(vec![2, 1]),
@@ -3218,16 +3298,63 @@ mod tests {
         let expanded = base
             .expand(vec![2isize, 3isize])
             .expect("expand should succeed");
-        assert!(!expanded.is_contiguous());
-
-        let contiguous = expanded.contiguous().expect("contiguous should copy data");
-        assert!(contiguous.is_contiguous());
-        assert_eq!(contiguous.shape().dims(), &[2, 3]);
-        let values = contiguous
+        assert_eq!(expanded.shape().dims(), &[2, 3]);
+        let values = expanded
             .data()
             .as_f32_slice()
             .expect("materialised data should be accessible")
             .to_vec();
         assert_eq!(values, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+
+        // Already contiguous, so `contiguous()` is a free hand-back rather
+        // than a second copy.
+        let contiguous = expanded.contiguous().expect("contiguous should succeed");
+        assert!(Arc::ptr_eq(expanded.data(), contiguous.data()));
+    }
+
+    /// `index_assign` follows the same rule as every other in-place write:
+    /// shared storage is written through for a leaf parameter, and copied for
+    /// anything detached or non-leaf.
+    #[test]
+    fn test_index_assign_writes_through_shared_leaf_storage() {
+        use crate::device::Device;
+
+        let mut param = Tensor::zeros(
+            Shape::new(vec![3]),
+            DataType::Float64,
+            Device::cpu(),
+            true, // leaf parameter: requires_grad, no grad_fn
+        );
+        // A second handle on the same storage, as `parameters()` produces.
+        let handle = param.clone();
+
+        param
+            .index_assign(
+                &[TensorIndex::Index(1)],
+                &Tensor::ones(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false),
+            )
+            .unwrap();
+
+        // The other handle sees it, because they share one buffer.
+        assert_eq!(handle.data().as_f64_slice().unwrap(), &[0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_index_assign_copies_for_detached_storage() {
+        use crate::device::Device;
+
+        let source = Tensor::zeros(Shape::new(vec![3]), DataType::Float64, Device::cpu(), true);
+        // Detaching clears requires_grad, which selects the copy-on-write path.
+        let mut detached = source.detach();
+
+        detached
+            .index_assign(
+                &[TensorIndex::Index(1)],
+                &Tensor::ones(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false),
+            )
+            .unwrap();
+
+        assert_eq!(detached.data().as_f64_slice().unwrap(), &[0.0, 1.0, 0.0]);
+        assert_eq!(source.data().as_f64_slice().unwrap(), &[0.0, 0.0, 0.0]);
     }
 }

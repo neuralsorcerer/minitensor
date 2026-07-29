@@ -8,6 +8,7 @@ use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{
     autograd::{self, TensorId},
     error::Result,
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
 };
 use rayon::prelude::*;
@@ -191,39 +192,57 @@ impl Lion {
         let beta1 = self.beta1;
         let beta2 = self.beta2;
 
-        match param.dtype() {
-            crate::tensor::DataType::Float32 => {
-                let p = param.data_mut().as_f32_slice_mut().unwrap();
-                let g = grad.data().as_f32_slice().unwrap();
-                let m_buf = m.data_mut().as_f32_slice_mut().unwrap();
-                let lr = lr as f32;
-                let wd = weight_decay as f32;
-                let beta1 = beta1 as f32;
-                let beta2 = beta2 as f32;
-                p.par_iter_mut()
-                    .zip(g.par_iter())
-                    .zip(m_buf.par_iter_mut())
-                    .for_each(|((p_i, &g_i), m_i)| {
+        /// One dtype arm. The math lives in a single chunk closure; the chunk
+        /// loop stays on the calling thread for small parameters, where
+        /// rayon's split overhead dwarfs the arithmetic, and fans out only
+        /// above `PAR_THRESHOLD`.
+        macro_rules! lion_arm {
+            ($ty:ty, $read:ident, $write:ident, $sign:ident, $lr:expr, $b1:expr, $b2:expr,
+             $wd:expr) => {{
+                let (lr, beta1, beta2, wd): ($ty, $ty, $ty, $ty) = ($lr, $b1, $b2, $wd);
+                let p = param.data_mut().$write().unwrap();
+                let g = grad.data().$read().unwrap();
+                let m_buf = m.data_mut().$write().unwrap();
+                let step_chunk = |p: &mut [$ty], g: &[$ty], m: &mut [$ty]| {
+                    for ((p_i, &g_i), m_i) in p.iter_mut().zip(g.iter()).zip(m.iter_mut()) {
                         let m_old = *m_i;
-                        let update = sign_f32(beta1 * m_old + (1.0 - beta1) * g_i);
+                        let update = $sign(beta1 * m_old + (1.0 - beta1) * g_i);
                         *p_i -= lr * (update + wd * *p_i);
                         *m_i = beta2 * m_old + (1.0 - beta2) * g_i;
-                    });
-            }
-            crate::tensor::DataType::Float64 => {
-                let p = param.data_mut().as_f64_slice_mut().unwrap();
-                let g = grad.data().as_f64_slice().unwrap();
-                let m_buf = m.data_mut().as_f64_slice_mut().unwrap();
-                p.par_iter_mut()
-                    .zip(g.par_iter())
-                    .zip(m_buf.par_iter_mut())
-                    .for_each(|((p_i, &g_i), m_i)| {
-                        let m_old = *m_i;
-                        let update = sign_f64(beta1 * m_old + (1.0 - beta1) * g_i);
-                        *p_i -= lr * (update + weight_decay * *p_i);
-                        *m_i = beta2 * m_old + (1.0 - beta2) * g_i;
-                    });
-            }
+                    }
+                };
+                if p.len() < PAR_THRESHOLD {
+                    step_chunk(p, g, m_buf);
+                } else {
+                    p.par_chunks_mut(PAR_CHUNK)
+                        .zip(g.par_chunks(PAR_CHUNK))
+                        .zip(m_buf.par_chunks_mut(PAR_CHUNK))
+                        .for_each(|((p, g), m)| step_chunk(p, g, m));
+                }
+            }};
+        }
+
+        match param.dtype() {
+            crate::tensor::DataType::Float32 => lion_arm!(
+                f32,
+                as_f32_slice,
+                as_f32_slice_mut,
+                sign_f32,
+                lr as f32,
+                beta1 as f32,
+                beta2 as f32,
+                weight_decay as f32
+            ),
+            crate::tensor::DataType::Float64 => lion_arm!(
+                f64,
+                as_f64_slice,
+                as_f64_slice_mut,
+                sign_f64,
+                lr,
+                beta1,
+                beta2,
+                weight_decay
+            ),
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "Lion only supports float32/float64 tensors",

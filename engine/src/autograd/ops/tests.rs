@@ -702,6 +702,75 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_forward_under_no_grad_does_not_grow_the_graph() {
+        // Inference loops must not accumulate graph nodes. The graph is only
+        // released when a backward pass consumes it, so without `NoGradGuard`
+        // a forward-only loop grows without bound -- see the `no_grad()`
+        // section of docs/performance.md.
+        clear_graph().unwrap();
+
+        let x = Tensor::ones(
+            Shape::new(vec![4, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+
+        let after_first = {
+            let _guard = NoGradGuard::new();
+            let y = activation::relu(&arithmetic::mul(&x, &x).unwrap()).unwrap();
+            let _ = reduction::sum(&y, None, false).unwrap();
+            graph_node_count()
+        };
+
+        for _ in 0..50 {
+            let _guard = NoGradGuard::new();
+            let y = activation::relu(&arithmetic::mul(&x, &x).unwrap()).unwrap();
+            let _ = reduction::sum(&y, None, false).unwrap();
+        }
+
+        assert_eq!(
+            graph_node_count(),
+            after_first,
+            "no_grad forward passes must record nothing"
+        );
+        clear_graph().unwrap();
+    }
+
+    #[test]
+    fn test_repeated_backward_does_not_grow_the_graph() {
+        // A training step consumes the graph, so iterating forward/backward
+        // must reach a steady node count rather than climbing every step.
+        clear_graph().unwrap();
+
+        let x = Tensor::ones(
+            Shape::new(vec![4, 4]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+
+        let step = || {
+            let y = activation::relu(&arithmetic::mul(&x, &x).unwrap()).unwrap();
+            let loss = reduction::sum(&y, None, false).unwrap();
+            loss.backward(None).unwrap();
+            zero_gradients();
+            clear_graph().unwrap();
+            graph_node_count()
+        };
+
+        let after_first = step();
+        for _ in 0..50 {
+            assert_eq!(
+                step(),
+                after_first,
+                "forward/backward steps must not accumulate nodes"
+            );
+        }
+        clear_graph().unwrap();
+    }
+
+    #[test]
     fn test_concat_frozen_inputs_receive_no_gradient() {
         clear_graph().unwrap();
 

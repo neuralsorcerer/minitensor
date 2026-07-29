@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::ops::arithmetic::mul;
-use crate::ops::map::unary_map;
+use crate::ops::map::{PAR_THRESHOLD, binary_map, ternary_map, unary_map};
 use crate::{
     error::{MinitensorError, Result},
     ops::{comparison, selection::masked_fill_scalar},
@@ -96,57 +96,34 @@ pub(crate) fn sign_tensor(tensor: &Tensor) -> Result<Tensor> {
 pub(crate) fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
     // Reduced losses are 0-dim scalars; a shape-[1] result breaks float(loss).
     let scalar_shape = Shape::scalar();
-    let mut output_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
-    match tensor.dtype() {
+    let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from tensor")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            let sum: f32 = input_data
-                .par_chunks(CHUNK)
-                .map(|chunk| unsafe {
-                    let mut acc = 0f32;
-                    let ptr = chunk.as_ptr();
-                    for i in 0..chunk.len() {
-                        acc += *ptr.add(i);
-                    }
-                    acc
-                })
-                .sum();
-            output_slice[0] = sum;
+            TensorData::from_vec::<f32>(
+                vec![sum_slice(input_data)],
+                DataType::Float32,
+                tensor.device(),
+            )
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from tensor")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            let sum: f64 = input_data
-                .par_chunks(CHUNK)
-                .map(|chunk| unsafe {
-                    let mut acc = 0f64;
-                    let ptr = chunk.as_ptr();
-                    for i in 0..chunk.len() {
-                        acc += *ptr.add(i);
-                    }
-                    acc
-                })
-                .sum();
-            output_slice[0] = sum;
+            TensorData::from_vec::<f64>(
+                vec![sum_slice(input_data)],
+                DataType::Float64,
+                tensor.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Sum only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -157,57 +134,52 @@ pub(crate) fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
+/// Chunked sum of a float slice, parallel above [`PAR_THRESHOLD`].
+///
+/// Chunking keeps the accumulation order (and therefore the rounding) stable
+/// for a given length regardless of how rayon schedules the chunks.
+fn sum_slice<T>(data: &[T]) -> T
+where
+    T: Copy + Send + Sync + Default + std::iter::Sum<T> + std::ops::Add<Output = T>,
+{
+    let chunk_sum = |chunk: &[T]| chunk.iter().copied().sum::<T>();
+    if data.len() < PAR_THRESHOLD {
+        chunk_sum(data)
+    } else {
+        data.par_chunks(CHUNK).map(chunk_sum).sum()
+    }
+}
+
 /// Divide tensor by a scalar value
 pub(crate) fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
+    let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from tensor")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
             let scalar_f32 = scalar as f32;
-            output_slice
-                .par_chunks_mut(CHUNK)
-                .zip(input_data.par_chunks(CHUNK))
-                .for_each(|(out, inp)| unsafe {
-                    let in_ptr = inp.as_ptr();
-                    let out_ptr = out.as_mut_ptr();
-                    for i in 0..out.len() {
-                        *out_ptr.add(i) = *in_ptr.add(i) / scalar_f32;
-                    }
-                });
+            TensorData::from_vec::<f32>(
+                unary_map(input_data, |v: f32| v / scalar_f32),
+                DataType::Float32,
+                tensor.device(),
+            )
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from tensor")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            output_slice
-                .par_chunks_mut(CHUNK)
-                .zip(input_data.par_chunks(CHUNK))
-                .for_each(|(out, inp)| unsafe {
-                    let in_ptr = inp.as_ptr();
-                    let out_ptr = out.as_mut_ptr();
-                    for i in 0..out.len() {
-                        *out_ptr.add(i) = *in_ptr.add(i) / scalar;
-                    }
-                });
+            TensorData::from_vec::<f64>(
+                unary_map(input_data, |v: f64| v / scalar),
+                DataType::Float64,
+                tensor.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Division only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -257,16 +229,77 @@ pub(crate) fn create_scalar_tensor(
 }
 
 /// Compute Huber loss element-wise
+/// Elementwise binary cross entropy from logits, in the form that stays finite
+/// at every logit magnitude:
+///
+/// ```text
+/// loss = (1 - t) * x + (1 + (w - 1) * t) * (log(1 + exp(-|x|)) + max(-x, 0))
+/// ```
+///
+/// The bracketed term is `-log(sigmoid(x))` rewritten so `exp` is only ever
+/// called on a non-positive argument. Written the obvious way instead —
+/// `-t*log(sigmoid(x)) - (1-t)*log(1-sigmoid(x))` — the inner `sigmoid`
+/// saturates to exactly 0 or 1 in f32 by |x| ~= 89 and the logarithm returns
+/// -inf, so the loss has to be clamped and its gradient is lost. Here nothing
+/// ever saturates, so no clamp is needed and the value is exact.
+pub(crate) fn compute_bce_with_logits_elementwise(
+    logits: &Tensor,
+    targets: &Tensor,
+    pos_weight: Option<&Tensor>,
+) -> Result<Tensor> {
+    macro_rules! loss_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let x = logits.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from logits")
+            })?;
+            let t = targets.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from targets")
+            })?;
+            let compute = |x: $ty, t: $ty, w: $ty| {
+                // -log(sigmoid(x)), evaluated through log1p(exp(-|x|)) so the
+                // exponential argument is never positive.
+                let neg_log_sigmoid = (-x.abs()).exp().ln_1p() + if x < 0.0 { -x } else { 0.0 };
+                (1.0 - t) * x + (1.0 + (w - 1.0) * t) * neg_log_sigmoid
+            };
+            let values = match pos_weight {
+                Some(w) => {
+                    let w = w.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get slice from pos_weight")
+                    })?;
+                    ternary_map(x, t, w, compute)
+                }
+                None => binary_map(x, t, |x: $ty, t: $ty| compute(x, t, 1.0)),
+            };
+            TensorData::from_vec::<$ty>(values, $dtype, logits.device())
+        }};
+    }
+
+    let data = match logits.dtype() {
+        DataType::Float32 => loss_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => loss_for!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "binary_cross_entropy_with_logits requires floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        logits.shape().clone(),
+        logits.dtype(),
+        logits.device(),
+        false,
+    ))
+}
+
 pub(crate) fn compute_huber_elementwise(
     abs_diff: &Tensor,
     diff: &Tensor,
     _delta_tensor: &Tensor,
     delta: f64,
 ) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(abs_diff.numel(), abs_diff.dtype(), abs_diff.device());
-
-    match abs_diff.dtype() {
+    let output_data = match abs_diff.dtype() {
         DataType::Float32 => {
             let abs_data = abs_diff.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from abs_diff")
@@ -274,27 +307,18 @@ pub(crate) fn compute_huber_elementwise(
             let diff_data = diff.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from diff")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
             let delta_f32 = delta as f32;
-            output_slice
-                .par_chunks_mut(CHUNK)
-                .zip(abs_data.par_chunks(CHUNK).zip(diff_data.par_chunks(CHUNK)))
-                .for_each(|(out, (abs_chunk, diff_chunk))| unsafe {
-                    let abs_ptr = abs_chunk.as_ptr();
-                    let diff_ptr = diff_chunk.as_ptr();
-                    let out_ptr = out.as_mut_ptr();
-                    for i in 0..out.len() {
-                        let abs_val = *abs_ptr.add(i);
-                        *out_ptr.add(i) = if abs_val <= delta_f32 {
-                            0.5 * *diff_ptr.add(i) * *diff_ptr.add(i)
-                        } else {
-                            delta_f32 * (abs_val - 0.5 * delta_f32)
-                        };
+            TensorData::from_vec::<f32>(
+                binary_map(abs_data, diff_data, |abs_val: f32, d: f32| {
+                    if abs_val <= delta_f32 {
+                        0.5 * d * d
+                    } else {
+                        delta_f32 * (abs_val - 0.5 * delta_f32)
                     }
-                });
+                }),
+                DataType::Float32,
+                abs_diff.device(),
+            )
         }
         DataType::Float64 => {
             let abs_data = abs_diff.data().as_f64_slice().ok_or_else(|| {
@@ -303,33 +327,24 @@ pub(crate) fn compute_huber_elementwise(
             let diff_data = diff.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from diff")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            output_slice
-                .par_chunks_mut(CHUNK)
-                .zip(abs_data.par_chunks(CHUNK).zip(diff_data.par_chunks(CHUNK)))
-                .for_each(|(out, (abs_chunk, diff_chunk))| unsafe {
-                    let abs_ptr = abs_chunk.as_ptr();
-                    let diff_ptr = diff_chunk.as_ptr();
-                    let out_ptr = out.as_mut_ptr();
-                    for i in 0..out.len() {
-                        let abs_val = *abs_ptr.add(i);
-                        *out_ptr.add(i) = if abs_val <= delta {
-                            0.5 * *diff_ptr.add(i) * *diff_ptr.add(i)
-                        } else {
-                            delta * (abs_val - 0.5 * delta)
-                        };
+            TensorData::from_vec::<f64>(
+                binary_map(abs_data, diff_data, |abs_val: f64, d: f64| {
+                    if abs_val <= delta {
+                        0.5 * d * d
+                    } else {
+                        delta * (abs_val - 0.5 * delta)
                     }
-                });
+                }),
+                DataType::Float64,
+                abs_diff.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Huber loss only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -627,6 +642,141 @@ mod tests {
         let expected_grad = [-(1.0 / 0.8) / 2.0, (1.0 / 0.8) / 2.0];
         assert!((grad_slice[0] - expected_grad[0]).abs() < 1e-6);
         assert!((grad_slice[1] - expected_grad[1]).abs() < 1e-6);
+    }
+
+    /// `(1-t)*x + (1+(w-1)*t) * -log(sigmoid(x))`, in f64 so it can serve as
+    /// the reference for the f32 kernel.
+    fn bce_logits_ref(x: f64, t: f64, w: f64) -> f64 {
+        (1.0 - t) * x + (1.0 + (w - 1.0) * t) * ((-x.abs()).exp().ln_1p() + (-x).max(0.0))
+    }
+
+    #[test]
+    fn test_bce_with_logits_matches_reference_across_logit_range() {
+        for &x in &[
+            -100.0f32, -50.0, -30.0, -8.0, -1.0, 0.0, 1.0, 8.0, 30.0, 100.0,
+        ] {
+            for &t in &[0.0f32, 0.3, 1.0] {
+                let logits = create_test_tensor_f32(vec![x], vec![1], true);
+                let targets = create_test_tensor_f32(vec![t], vec![1], false);
+                let loss =
+                    binary_cross_entropy_with_logits_loss(&logits, &targets, None, "sum").unwrap();
+
+                let got = loss.data().as_f32_slice().unwrap()[0];
+                let want = bce_logits_ref(x as f64, t as f64, 1.0) as f32;
+                assert!(got.is_finite(), "x={x} t={t} loss={got}");
+                assert!(
+                    (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+                    "x={x} t={t}: loss {got} != {want}"
+                );
+
+                // d/dx = sigmoid(x) - t, exact at every magnitude.
+                let grads = crate::autograd::backward_collect(&loss, None).unwrap();
+                let grad = grads
+                    .get(&logits.id())
+                    .unwrap()
+                    .data()
+                    .as_f32_slice()
+                    .unwrap()[0];
+                let sigmoid = (1.0f64 / (1.0 + (-(x as f64)).exp())) as f32;
+                assert!(
+                    (grad - (sigmoid - t)).abs() <= 1e-6,
+                    "x={x} t={t}: grad {grad} != {}",
+                    sigmoid - t
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bce_with_logits_keeps_gradient_where_sigmoid_bce_loses_it() {
+        // A logit of -30 against a target of 1 is a confident and completely
+        // wrong prediction: the gradient should be -1, the strongest signal the
+        // loss can produce. Routing through sigmoid first lets it round to
+        // ~9.4e-14 in f32, and the BCE backward's clamped denominator then
+        // returns roughly -0.09 instead -- the example all but stops training.
+        for &x in &[-30.0f32, -50.0, -100.0] {
+            let targets = create_test_tensor_f32(vec![1.0], vec![1], false);
+
+            let logits = create_test_tensor_f32(vec![x], vec![1], true);
+            let fused =
+                binary_cross_entropy_with_logits_loss(&logits, &targets, None, "sum").unwrap();
+            let fused_grad = crate::autograd::backward_collect(&fused, None).unwrap()[&logits.id()]
+                .data()
+                .as_f32_slice()
+                .unwrap()[0];
+            assert!(
+                (fused_grad + 1.0).abs() <= 1e-6,
+                "x={x}: fused grad {fused_grad} should be -1"
+            );
+
+            let probs_input = create_test_tensor_f32(vec![x], vec![1], true);
+            let probs = crate::ops::activation::sigmoid(&probs_input).unwrap();
+            let split = binary_cross_entropy_loss(&probs, &targets, "sum").unwrap();
+            let split_grad = crate::autograd::backward_collect(&split, None).unwrap()
+                [&probs_input.id()]
+                .data()
+                .as_f32_slice()
+                .unwrap()[0];
+            assert!(
+                split_grad.abs() < 0.5,
+                "x={x}: sigmoid+BCE unexpectedly kept its gradient ({split_grad}); if that \
+                 path was fixed this test no longer demonstrates anything"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bce_with_logits_pos_weight_broadcasts_and_reduces() {
+        let logits_v = vec![-2.0f32, 0.5, 3.0, 1.0, -1.5, 0.0];
+        let targets_v = vec![1.0f32, 0.0, 1.0, 0.0, 1.0, 1.0];
+        let weights_v = vec![0.5f32, 2.0, 3.0]; // per column, broadcast over rows
+
+        let expected: Vec<f64> = (0..6)
+            .map(|i| {
+                bce_logits_ref(
+                    logits_v[i] as f64,
+                    targets_v[i] as f64,
+                    weights_v[i % 3] as f64,
+                )
+            })
+            .collect();
+
+        let logits = create_test_tensor_f32(logits_v, vec![2, 3], false);
+        let targets = create_test_tensor_f32(targets_v, vec![2, 3], false);
+        let weights = create_test_tensor_f32(weights_v, vec![3], false);
+
+        let none = binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "none")
+            .unwrap();
+        for (got, want) in none
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .iter()
+            .zip(expected.iter())
+        {
+            assert!((got - *want as f32).abs() < 1e-5, "{got} != {want}");
+        }
+
+        let sum = binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "sum")
+            .unwrap();
+        let want_sum: f64 = expected.iter().sum();
+        assert!((sum.data().as_f32_slice().unwrap()[0] - want_sum as f32).abs() < 1e-4);
+
+        let mean = binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "mean")
+            .unwrap();
+        let want_mean = want_sum / 6.0;
+        assert!((mean.data().as_f32_slice().unwrap()[0] - want_mean as f32).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bce_with_logits_rejects_non_broadcastable_pos_weight() {
+        let logits = create_test_tensor_f32(vec![0.4, -0.7], vec![2, 1], false);
+        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2, 1], false);
+        let weights = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        assert!(
+            binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "mean")
+                .is_err()
+        );
     }
 
     #[test]

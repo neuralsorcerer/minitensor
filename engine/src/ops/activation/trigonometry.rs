@@ -60,8 +60,8 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         // same-shape fast path.
         let out_shape = base_shape.broadcast_with(&exponent_shape)?;
         let dims: Vec<isize> = out_shape.dims().iter().map(|&d| d as isize).collect();
-        let base_b = base.expand(dims.clone())?.contiguous()?;
-        let exp_b = exponent.expand(dims)?.contiguous()?;
+        let base_b = base.expand(dims.clone())?;
+        let exp_b = exponent.expand(dims)?;
         return pow(&base_b, &exp_b);
     };
 

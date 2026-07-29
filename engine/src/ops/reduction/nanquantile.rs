@@ -12,6 +12,8 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 pub(crate) fn nanquantiles_along_dim(
@@ -459,6 +461,70 @@ pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
     Ok((value, None))
 }
 
+/// Take the median of every 1-D slice along a dimension, parallelizing over the
+/// outer index.
+///
+/// Output is `(outer, inner)`, so each outer position owns a disjoint `inner`
+/// span and `par_chunks_mut` hands them out without overlap. The selection
+/// itself is `select_nth_unstable_by`, so this stays linear per slice; only the
+/// outer loop used to be serial, which left `median` several times slower than
+/// `quantile(0.5)` computing the same thing.
+///
+/// How a dtype represents and detects NaN: the value to emit for a slice that
+/// contains one, and the predicate that finds it. Integer dtypes have neither.
+type NanHandling<T> = Option<(T, fn(&T) -> bool)>;
+
+/// `nan` carries the floating-point NaN handling: a NaN anywhere in a slice
+/// makes that whole median NaN. Integer instantiations pass `None` and skip the
+/// check entirely.
+#[allow(clippy::too_many_arguments)]
+fn median_along_dim_par<T>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    median_pos: usize,
+    nan: NanHandling<T>,
+    compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+) where
+    T: Copy + Send + Sync,
+{
+    values
+        .par_chunks_mut(inner)
+        .zip(indices.par_chunks_mut(inner))
+        .enumerate()
+        .for_each(|(o, (vchunk, ichunk))| {
+            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+            for r in 0..inner {
+                entries.clear();
+                let base = o * outer_stride + r;
+                let mut saw_nan = false;
+                for d in 0..dim_size {
+                    let value = input[base + d * inner];
+                    if let Some((_, is_nan)) = nan
+                        && is_nan(&value)
+                    {
+                        saw_nan = true;
+                        break;
+                    }
+                    entries.push((d, value));
+                }
+
+                if let (true, Some((nan_value, _))) = (saw_nan, nan) {
+                    vchunk[r] = nan_value;
+                    continue;
+                }
+
+                entries.select_nth_unstable_by(median_pos, compare);
+                let (index, value) = entries[median_pos];
+                vchunk[r] = value;
+                ichunk[r] = index as i64;
+            }
+        });
+}
+
 pub(crate) fn median_along_dim(
     tensor: &Tensor,
     dim: usize,
@@ -489,11 +555,6 @@ pub(crate) fn median_along_dim(
     let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
     let mut indices_data = TensorData::zeros_on_device(num_out, DataType::Int64, tensor.device());
 
-    let outer = if dims.is_empty() || dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
     let inner = if dims.is_empty() || dim + 1 >= dims.len() {
         1
     } else {
@@ -515,33 +576,17 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    let mut has_nan = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let value = input[idx];
-                        if value.is_nan() {
-                            has_nan = true;
-                            break;
-                        }
-                        entries.push((d, value));
-                    }
-
-                    let base = o * inner + r;
-                    if has_nan {
-                        values[base] = f32::NAN;
-                        continue;
-                    }
-
-                    entries.select_nth_unstable_by(median_pos, cmp_f32_asc);
-                    let (index, value) = entries[median_pos];
-                    values[base] = value;
-                    indices[base] = index as i64;
-                }
-            }
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                Some((f32::NAN, |v: &f32| v.is_nan())),
+                cmp_f32_asc,
+            );
         }
         DataType::Float64 => {
             let input = tensor
@@ -555,33 +600,17 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    let mut has_nan = false;
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        let value = input[idx];
-                        if value.is_nan() {
-                            has_nan = true;
-                            break;
-                        }
-                        entries.push((d, value));
-                    }
-
-                    let base = o * inner + r;
-                    if has_nan {
-                        values[base] = f64::NAN;
-                        continue;
-                    }
-
-                    entries.select_nth_unstable_by(median_pos, cmp_f64_asc);
-                    let (index, value) = entries[median_pos];
-                    values[base] = value;
-                    indices[base] = index as i64;
-                }
-            }
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                Some((f64::NAN, |v: &f64| v.is_nan())),
+                cmp_f64_asc,
+            );
         }
         DataType::Int32 => {
             let input = tensor
@@ -595,22 +624,17 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    entries.select_nth_unstable_by(median_pos, cmp_i32_asc);
-                    let (index, value) = entries[median_pos];
-                    let base = o * inner + r;
-                    values[base] = value;
-                    indices[base] = index as i64;
-                }
-            }
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                None,
+                cmp_i32_asc,
+            );
         }
         DataType::Int64 => {
             let input = tensor
@@ -624,22 +648,17 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    entries.select_nth_unstable_by(median_pos, cmp_i64_asc);
-                    let (index, value) = entries[median_pos];
-                    let base = o * inner + r;
-                    values[base] = value;
-                    indices[base] = index as i64;
-                }
-            }
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                None,
+                cmp_i64_asc,
+            );
         }
         DataType::Bool => {
             let input = tensor
@@ -653,22 +672,17 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    entries.select_nth_unstable_by(median_pos, cmp_bool_asc);
-                    let (index, value) = entries[median_pos];
-                    let base = o * inner + r;
-                    values[base] = value;
-                    indices[base] = index as i64;
-                }
-            }
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                None,
+                cmp_bool_asc,
+            );
         }
     }
 

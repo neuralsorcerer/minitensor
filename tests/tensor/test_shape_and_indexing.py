@@ -127,6 +127,22 @@ def test_unsqueeze_negative_dim():
         t.unsqueeze(-4)
 
 
+def test_out_of_bounds_subscript_reports_index_axis_and_size():
+    # A bare "Index out of bounds" told the caller neither which axis was
+    # overrun nor how long it is, which are the two facts needed to fix the
+    # call. Match NumPy's information content.
+    t = mt.ones(2, 3)
+
+    with pytest.raises(IndexError, match=r"index 5 .*dimension 0 with size 2"):
+        t[5]
+    with pytest.raises(IndexError, match=r"index -4 .*dimension 0 with size 2"):
+        t[-4]
+    with pytest.raises(IndexError, match=r"index 7 .*dimension 1 with size 3"):
+        t[0, 7]
+    with pytest.raises(IndexError, match=r"2 dimension\(s\) but 3 were indexed"):
+        t[0, 0, 0]
+
+
 def test_squeeze_behavior():
     t = Tensor([[[1.0], [2.0], [3.0]]])  # shape (1,3,1)
     s = t.squeeze()

@@ -204,3 +204,93 @@ def test_bool_mask_setitem_casts_value_dtype():
         np.array([9.7, 8.2], dtype=np.float32)
     )
     np.testing.assert_array_equal(it.numpy(), np.array([9, 1, 8, 3]))
+
+
+def test_assignment_through_parameters_reaches_the_layer():
+    """`parameters()` hands out live handles, so writing to one must stick.
+
+    These share storage with the layer. Copying on write instead made the
+    assignment silently update a private copy: it appeared to succeed and the
+    layer kept its old weights, which is the worst way for this to fail.
+    """
+    from minitensor import nn
+
+    layer = nn.DenseLayer(3, 2)
+    param = layer.parameters()[0]
+    param[...] = mt.Tensor(np.zeros_like(param.numpy()))
+
+    assert np.abs(layer.parameters()[0].numpy()).max() == 0.0
+
+
+def test_assignment_through_an_explicit_copy_stays_independent():
+    """The flip side: only live handles alias, explicit copies never do.
+
+    `clone` deep-copies, `detach` produces a non-gradient tensor and a reshape
+    carries a grad_fn -- all three take the copy-on-write path, so assigning to
+    them must leave the original alone.
+    """
+    original = mt.Tensor([1.0, 2.0], requires_grad=True)
+
+    copy = original.clone()
+    copy[0] = mt.Tensor(99.0)
+    assert original.tolist() == [1.0, 2.0]
+    assert copy.tolist() == [99.0, 2.0]
+
+    detached = original.detach()
+    detached[0] = mt.Tensor(77.0)
+    assert original.tolist() == [1.0, 2.0]
+    assert detached.tolist() == [77.0, 2.0]
+
+    reshaped = original.reshape(2, 1)
+    reshaped[0] = mt.Tensor([55.0])
+    assert original.tolist() == [1.0, 2.0]
+    assert reshaped.tolist() == [[55.0], [2.0]]
+
+
+def test_optimizer_updates_still_reach_the_layer():
+    """Assignment now uses the same write rule optimizers already used.
+
+    Optimizers mutate parameters through shared storage; this guards the path
+    they depend on while the assignment path shares it.
+    """
+    from minitensor import nn
+
+    layer = nn.DenseLayer(3, 2)
+    before = layer.parameters()[0].numpy().copy()
+    optimizer = mt.optim.SGD(layer.parameters(), lr=0.1)
+
+    layer(mt.Tensor(np.ones((4, 3), dtype=np.float32))).sum().backward()
+    optimizer.step()
+
+    assert not np.allclose(before, layer.parameters()[0].numpy())
+    mt.clear_autograd_graph()
+
+
+def test_every_assignment_form_agrees_about_reaching_the_layer():
+    """`__setitem__` has three branches; they must not disagree.
+
+    The boolean-mask branch always went through the shared-write rule, while the
+    slice branch had its own copy-on-write. Same operator, same tensor, opposite
+    outcome depending on how you spelled the index. All three now agree.
+    """
+    from minitensor import nn
+
+    def wrote_through(apply):
+        layer = nn.DenseLayer(3, 2)
+        param = layer.parameters()[0]
+        apply(param)
+        return np.abs(layer.parameters()[0].numpy()).max() == 0.0
+
+    def by_ellipsis(p):
+        p[...] = mt.Tensor(np.zeros_like(p.numpy()))
+
+    def by_mask(p):
+        mask = mt.Tensor(np.ones(p.numpy().shape, dtype=bool), dtype="bool")
+        p[mask] = mt.Tensor(0.0)
+
+    def by_slice(p):
+        p[0:2] = mt.Tensor(np.zeros_like(p.numpy()[0:2]))
+
+    assert wrote_through(by_ellipsis)
+    assert wrote_through(by_mask)
+    assert wrote_through(by_slice)

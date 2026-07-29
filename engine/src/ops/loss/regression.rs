@@ -8,8 +8,9 @@ use super::*;
 
 use crate::{
     autograd::{
-        BCELossBackward, CrossEntropyLossBackward, FocalLossBackward, HuberLossBackward,
-        KLDivLossBackward, MAELossBackward, MSELossBackward, NoGradGuard, add_to_graph,
+        BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
+        HuberLossBackward, KLDivLossBackward, MAELossBackward, MSELossBackward, NoGradGuard,
+        add_to_graph,
     },
     error::{MinitensorError, Result},
     ops::{
@@ -379,6 +380,113 @@ pub fn binary_cross_entropy_loss(
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
+        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+
+        Ok(loss_with_grad)
+    } else {
+        Ok(loss)
+    }
+}
+
+/// Binary cross entropy computed directly from logits.
+///
+/// Mathematically this equals `binary_cross_entropy(sigmoid(logits), targets)`,
+/// but the two are not interchangeable in floating point. Splitting the sigmoid
+/// out lets it saturate — in f32 `sigmoid(-30)` rounds to `9.36e-14` and
+/// `sigmoid(-90)` to exactly `0` — and the logarithm that follows then has to be
+/// clamped to keep the loss finite. The clamp rescues the loss value but not its
+/// derivative: at a logit of -30 against a target of 1, the gradient should be
+/// -1 (the largest signal the loss can produce, from a confident and completely
+/// wrong prediction), yet the split path returns about -0.09, and beyond -50 it
+/// returns 0. Training stalls precisely on the examples it most needs to learn
+/// from.
+///
+/// Fusing the sigmoid in keeps every intermediate in range, so the loss needs no
+/// clamp and the gradient stays exact at any logit magnitude.
+///
+/// # Arguments
+/// * `logits` - Unnormalized scores; **not** probabilities
+/// * `targets` - Ground truth in [0, 1]
+/// * `pos_weight` - Optional weight for the positive class, broadcast against
+///   `targets`. A value above 1 trades precision for recall, which is the usual
+///   reason to reach for it on an imbalanced dataset.
+/// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
+pub fn binary_cross_entropy_with_logits_loss(
+    logits: &Tensor,
+    targets: &Tensor,
+    pos_weight: Option<&Tensor>,
+    reduction: &str,
+) -> Result<Tensor> {
+    validate_loss_inputs(logits, targets)?;
+
+    // Broadcast pos_weight up front so both the forward kernel and the backward
+    // see one flat, aligned buffer rather than re-deriving the mapping.
+    let pos_weight = match pos_weight {
+        Some(w) => {
+            if w.device() != logits.device() {
+                return Err(MinitensorError::device_mismatch(
+                    format!("{:?}", w.device()),
+                    format!("{:?}", logits.device()),
+                ));
+            }
+            if w.dtype() != logits.dtype() {
+                return Err(MinitensorError::type_mismatch(
+                    format!("{:?}", w.dtype()),
+                    format!("{:?}", logits.dtype()),
+                ));
+            }
+            let target_dims: Vec<isize> =
+                logits.shape().dims().iter().map(|&d| d as isize).collect();
+            let expanded = w.detach().expand(target_dims).map_err(|_| {
+                MinitensorError::shape_mismatch(
+                    w.shape().dims().to_vec(),
+                    logits.shape().dims().to_vec(),
+                )
+            })?;
+            Some(expanded.contiguous()?)
+        }
+        None => None,
+    };
+
+    let logits_detached = logits.detach();
+    let targets_detached = targets.detach();
+    let values = compute_bce_with_logits_elementwise(
+        &logits_detached,
+        &targets_detached,
+        pos_weight.as_ref(),
+    )?;
+
+    let loss = match reduction {
+        "mean" => {
+            let sum = sum_all_elements(&values)?;
+            let n = values.numel() as f64;
+            divide_by_scalar(&sum, n)?
+        }
+        "sum" => sum_all_elements(&values)?,
+        "none" => values,
+        _ => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                reduction
+            )));
+        }
+    };
+
+    // The forward runs on detached data (the exact gradient comes from
+    // BCEWithLogitsLossBackward), so gate on the inputs and turn grad back on
+    // explicitly rather than letting it propagate.
+    if logits.requires_grad() || targets.requires_grad() {
+        let grad_fn = Arc::new(BCEWithLogitsLossBackward {
+            input_ids: [logits.id(), targets.id()],
+            input_requires_grad: [logits.requires_grad(), targets.requires_grad()],
+            reduction: reduction.to_string(),
+            logits: logits_detached,
+            targets: targets_detached,
+            pos_weight,
+        });
+
+        let mut loss_with_grad = loss.requires_grad_(true);
+        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
         add_to_graph(&loss_with_grad, Some(grad_fn))?;
 
         Ok(loss_with_grad)

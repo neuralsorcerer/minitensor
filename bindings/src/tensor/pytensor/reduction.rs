@@ -24,6 +24,23 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (p=None, dim=None, keepdim=false))]
+    pub fn norm(
+        &self,
+        p: Option<&Bound<PyAny>>,
+        dim: Option<&Bound<PyAny>>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let order = parse_norm_order(p)?;
+        let dims = normalize_optional_axes(dim)?;
+        let result = self
+            .inner
+            .norm(order, dims, keepdim)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn logsumexp(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -362,4 +379,26 @@ impl PyTensor {
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
+}
+
+/// Interpret the `p` argument of `norm`.
+///
+/// Accepts a number, or the string `"fro"`. Frobenius is the 2-norm of the
+/// flattened tensor, so it is the same computation — it is accepted because
+/// that is the name the matrix case goes by and callers reach for it.
+pub(crate) fn parse_norm_order(p: Option<&Bound<PyAny>>) -> PyResult<f64> {
+    let Some(value) = p else {
+        return Ok(2.0);
+    };
+    if let Ok(name) = value.extract::<String>() {
+        return match name.as_str() {
+            "fro" => Ok(2.0),
+            other => Err(PyValueError::new_err(format!(
+                "unsupported norm order '{other}'; expected a number or 'fro'"
+            ))),
+        };
+    }
+    value
+        .extract::<f64>()
+        .map_err(|_| PyTypeError::new_err("norm order p must be a number or 'fro'"))
 }

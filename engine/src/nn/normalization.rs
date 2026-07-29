@@ -11,29 +11,9 @@ use super::{
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{DataType, Shape, Tensor},
 };
-use std::{collections::HashMap, sync::Arc};
-
-fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
-    let mut data = TensorData::zeros_on_device(1, dtype, device);
-    match dtype {
-        DataType::Float32 => data.as_f32_slice_mut().unwrap()[0] = value as f32,
-        DataType::Float64 => data.as_f64_slice_mut().unwrap()[0] = value,
-        _ => {
-            return Err(MinitensorError::invalid_argument(
-                "BatchNorm only supports floating types".to_string(),
-            ));
-        }
-    }
-    Ok(Tensor::new(
-        Arc::new(data),
-        Shape::new(vec![1]),
-        dtype,
-        device,
-        false,
-    ))
-}
+use std::collections::HashMap;
 
 /// 1D Batch normalization layer
 ///
@@ -52,9 +32,6 @@ pub struct BatchNorm1d {
     eps: f64,
     momentum: f64,
     training: bool,
-    eps_tensor: Tensor,
-    momentum_tensor: Tensor,
-    one_minus_tensor: Tensor,
 }
 
 impl BatchNorm1d {
@@ -88,10 +65,6 @@ impl BatchNorm1d {
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false); // No gradients for running stats
         let running_var = Tensor::ones(param_shape, dtype, device, false); // No gradients for running stats
 
-        let eps_tensor = scalar_tensor(eps, dtype, device)?;
-        let momentum_tensor = scalar_tensor(momentum, dtype, device)?;
-        let one_minus_tensor = scalar_tensor(1.0 - momentum, dtype, device)?;
-
         Ok(Self {
             weight,
             bias,
@@ -101,9 +74,6 @@ impl BatchNorm1d {
             eps,
             momentum,
             training: true,
-            eps_tensor,
-            momentum_tensor,
-            one_minus_tensor,
         })
     }
 
@@ -191,10 +161,8 @@ impl Layer for BatchNorm1d {
             ));
         }
 
-        let _batch_size = input.size(0)?;
-        let num_features = input.size(1)?;
-
         // Validate number of features
+        let num_features = input.size(1)?;
         if num_features != self.num_features {
             return Err(MinitensorError::shape_mismatch(
                 vec![self.num_features],
@@ -202,79 +170,22 @@ impl Layer for BatchNorm1d {
             ));
         }
 
-        // Choose the normalization statistics. In training mode we use the
-        // current batch statistics (biased variance) and update the running
-        // estimates; in eval mode we use the stored running statistics so
-        // inference is independent of the batch (and works for batch size 1).
-        // Mirrors BatchNorm2d.
-        let (mean, var) = if self.training {
-            // Reduce over every axis except the channel axis (dim 1). A flat
-            // `view` must NOT be used here: reinterpreting [N, C, L] as
-            // [N*L, C] interleaves values from different channels.
-            let axes: Vec<isize> = if input.ndim() == 3 {
-                vec![0, 2]
-            } else {
-                vec![0]
-            };
-            let mean = input.mean(Some(axes.clone()), true)?; // [1,C] or [1,C,1]
-            let centered = crate::ops::arithmetic::sub(input, &mean)?;
-            let var = crate::ops::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?; // biased, pre-eps
-
-            // Update running statistics with the batch statistics *before* eps
-            // is added: running = (1 - momentum) * running + momentum * batch.
-            let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
-            let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
-            self.running_mean = crate::ops::arithmetic::add(
-                &crate::ops::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
-                &crate::ops::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
-            )?;
-            self.running_var = crate::ops::arithmetic::add(
-                &crate::ops::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
-                &crate::ops::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
-            )?;
-
-            (mean, var)
-        } else if input.ndim() == 3 {
-            (
-                self.running_mean
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features, 1]))?,
-                self.running_var
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features, 1]))?,
-            )
-        } else {
-            (
-                self.running_mean
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features]))?,
-                self.running_var
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features]))?,
-            )
-        };
-
-        let centered = crate::ops::arithmetic::sub(input, &mean)?;
-        let var = crate::ops::arithmetic::add(&var, &self.eps_tensor)?;
-        let std = crate::ops::activation::sqrt(&var)?;
-        let normalized = crate::ops::arithmetic::div(&centered, &std)?;
-
-        // Scale and shift
-        let mut weight = self.weight.clone();
-        let mut bias = self.bias.clone();
-        if input.ndim() == 3 {
-            weight = weight.unsqueeze(0)?.unsqueeze(2)?;
-            bias = bias.unsqueeze(0)?.unsqueeze(2)?;
-        } else {
-            weight = weight.unsqueeze(0)?;
-            bias = bias.unsqueeze(0)?;
-        }
-        let output = crate::ops::arithmetic::add(
-            &crate::ops::arithmetic::mul(&normalized, &weight)?,
-            &bias,
-        )?;
-
-        Ok(output)
+        // Delegate to the functional kernel rather than re-deriving the
+        // statistics here. That kernel is rank-generic and — critically —
+        // stores the *unbiased* batch variance in `running_var` (Bessel's
+        // correction), matching PyTorch. The copy that used to live here
+        // stored the biased variance, so the layer and `F.batch_norm`
+        // disagreed about eval-time normalization for the same input.
+        crate::ops::normalization::batch_norm(
+            input,
+            Some(&mut self.running_mean),
+            Some(&mut self.running_var),
+            Some(&self.weight),
+            Some(&self.bias),
+            self.training,
+            self.momentum,
+            self.eps,
+        )
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
@@ -315,12 +226,9 @@ pub struct BatchNorm2d {
     running_mean: Tensor,
     running_var: Tensor,
     num_features: usize,
-    _eps: f64,
-    _momentum: f64,
+    eps: f64,
+    momentum: f64,
     training: bool,
-    eps_tensor: Tensor,
-    momentum_tensor: Tensor,
-    one_minus_tensor: Tensor,
 }
 
 impl BatchNorm2d {
@@ -354,22 +262,15 @@ impl BatchNorm2d {
         let running_mean = Tensor::zeros(param_shape.clone(), dtype, device, false);
         let running_var = Tensor::ones(param_shape, dtype, device, false);
 
-        let eps_tensor = scalar_tensor(eps, dtype, device)?;
-        let momentum_tensor = scalar_tensor(momentum, dtype, device)?;
-        let one_minus_tensor = scalar_tensor(1.0 - momentum, dtype, device)?;
-
         Ok(Self {
             weight,
             bias,
             running_mean,
             running_var,
             num_features,
-            _eps: eps,
-            _momentum: momentum,
+            eps,
+            momentum,
             training: true,
-            eps_tensor,
-            momentum_tensor,
-            one_minus_tensor,
         })
     }
 
@@ -415,8 +316,6 @@ impl Layer for BatchNorm2d {
         }
 
         let num_features = input.size(1)?;
-
-        // Validate number of features
         if num_features != self.num_features {
             return Err(MinitensorError::shape_mismatch(
                 vec![self.num_features],
@@ -424,56 +323,17 @@ impl Layer for BatchNorm2d {
             ));
         }
 
-        // Compute statistics per channel over the (N, H, W) axes when training.
-        // A flat `view` of [N, C, H, W] as [N*H*W, C] must NOT be used here:
-        // it interleaves values from different channels.
-        let (mean, var) = if self.training {
-            let axes: Vec<isize> = vec![0, 2, 3];
-            let mean = input.mean(Some(axes.clone()), true)?;
-            let centered = crate::ops::arithmetic::sub(input, &mean)?;
-            let var = crate::ops::arithmetic::mul(&centered, &centered)?.mean(Some(axes), true)?;
-
-            let mean_flat = mean.view(Shape::new(vec![self.num_features]))?.detach();
-            let var_flat = var.view(Shape::new(vec![self.num_features]))?.detach();
-
-            self.running_mean = crate::ops::arithmetic::add(
-                &crate::ops::arithmetic::mul(&self.running_mean, &self.one_minus_tensor)?,
-                &crate::ops::arithmetic::mul(&mean_flat, &self.momentum_tensor)?,
-            )?;
-            self.running_var = crate::ops::arithmetic::add(
-                &crate::ops::arithmetic::mul(&self.running_var, &self.one_minus_tensor)?,
-                &crate::ops::arithmetic::mul(&var_flat, &self.momentum_tensor)?,
-            )?;
-
-            (mean, var)
-        } else {
-            (
-                self.running_mean
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features, 1, 1]))?,
-                self.running_var
-                    .clone()
-                    .view(Shape::new(vec![1, self.num_features, 1, 1]))?,
-            )
-        };
-
-        let centered = crate::ops::arithmetic::sub(input, &mean)?;
-        let var = crate::ops::arithmetic::add(&var, &self.eps_tensor)?;
-        let std = crate::ops::activation::sqrt(&var)?;
-        let normalized = crate::ops::arithmetic::div(&centered, &std)?;
-        let weight = self
-            .weight
-            .clone()
-            .unsqueeze(0)?
-            .unsqueeze(2)?
-            .unsqueeze(3)?;
-        let bias = self.bias.clone().unsqueeze(0)?.unsqueeze(2)?.unsqueeze(3)?;
-        let output = crate::ops::arithmetic::add(
-            &crate::ops::arithmetic::mul(&normalized, &weight)?,
-            &bias,
-        )?;
-
-        Ok(output)
+        // See `BatchNorm1d::forward`: shared kernel, unbiased `running_var`.
+        crate::ops::normalization::batch_norm(
+            input,
+            Some(&mut self.running_mean),
+            Some(&mut self.running_var),
+            Some(&self.weight),
+            Some(&self.bias),
+            self.training,
+            self.momentum,
+            self.eps,
+        )
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
@@ -912,9 +772,10 @@ mod tests {
     #[test]
     fn test_batchnorm1d_eval_uses_running_stats() {
         // With momentum = 1.0 a single training forward sets the running stats
-        // to exactly that batch's (biased) statistics. Eval must then normalize a
-        // *different* batch with those running stats, independent of the eval
-        // batch — not recompute batch statistics.
+        // to exactly that batch's statistics (mean, and the UNBIASED variance
+        // PyTorch stores). Eval must then normalize a *different* batch with
+        // those running stats, independent of the eval batch — not recompute
+        // batch statistics.
         let mut layer =
             BatchNorm1d::new(2, Some(0.0), Some(1.0), Device::cpu(), DataType::Float32).unwrap();
 
@@ -945,12 +806,14 @@ mod tests {
         );
         let out = layer.forward(&test).unwrap();
         let o = out.data().as_f32_slice().unwrap();
-        // (x - running_mean) / sqrt(running_var + eps=0), running_mean=[2,3], var=[1,1].
-        // row0: (5-2, 6-3) = (3, 3); row1: (7-2, 8-3) = (5, 5).
-        assert!((o[0] - 3.0).abs() < 1e-4);
-        assert!((o[1] - 3.0).abs() < 1e-4);
-        assert!((o[2] - 5.0).abs() < 1e-4);
-        assert!((o[3] - 5.0).abs() < 1e-4);
+        // (x - running_mean) / sqrt(running_var + eps=0), running_mean=[2,3].
+        // n = 2, so the stored variance is the unbiased 1 * 2/1 = 2.
+        // row0: (5-2, 6-3) = (3, 3); row1: (7-2, 8-3) = (5, 5), each / sqrt(2).
+        let scale = 2.0f32.sqrt();
+        assert!((o[0] - 3.0 / scale).abs() < 1e-4, "{}", o[0]);
+        assert!((o[1] - 3.0 / scale).abs() < 1e-4, "{}", o[1]);
+        assert!((o[2] - 5.0 / scale).abs() < 1e-4, "{}", o[2]);
+        assert!((o[3] - 5.0 / scale).abs() < 1e-4, "{}", o[3]);
     }
 
     #[test]
@@ -978,8 +841,19 @@ mod tests {
         let var = layer.running_var().data().as_f32_slice().unwrap();
         assert!((mean[0] - 2.5).abs() < 1e-5, "channel 0 mean: {}", mean[0]);
         assert!((mean[1] - 25.0).abs() < 1e-4, "channel 1 mean: {}", mean[1]);
-        assert!((var[0] - 1.25).abs() < 1e-5, "channel 0 var: {}", var[0]);
-        assert!((var[1] - 125.0).abs() < 1e-3, "channel 1 var: {}", var[1]);
+        // `running_var` stores the UNBIASED batch variance (PyTorch's Bessel
+        // correction), while the normalization itself uses the biased one.
+        // n = N * L = 4, so biased 1.25 -> 1.25 * 4/3, and 125 -> 125 * 4/3.
+        assert!(
+            (var[0] - 1.25 * 4.0 / 3.0).abs() < 1e-5,
+            "channel 0 var: {}",
+            var[0]
+        );
+        assert!(
+            (var[1] - 125.0 * 4.0 / 3.0).abs() < 1e-3,
+            "channel 1 var: {}",
+            var[1]
+        );
     }
 
     #[test]
@@ -1011,8 +885,18 @@ mod tests {
             .unwrap();
         assert!((mean[0] - 2.5).abs() < 1e-5, "channel 0 mean: {}", mean[0]);
         assert!((mean[1] - 6.5).abs() < 1e-5, "channel 1 mean: {}", mean[1]);
-        assert!((var[0] - 1.25).abs() < 1e-5, "channel 0 var: {}", var[0]);
-        assert!((var[1] - 1.25).abs() < 1e-5, "channel 1 var: {}", var[1]);
+        // Unbiased (Bessel-corrected) variance in the running buffer:
+        // n = N * H * W = 4, so biased 1.25 -> 1.25 * 4/3.
+        assert!(
+            (var[0] - 1.25 * 4.0 / 3.0).abs() < 1e-5,
+            "channel 0 var: {}",
+            var[0]
+        );
+        assert!(
+            (var[1] - 1.25 * 4.0 / 3.0).abs() < 1e-5,
+            "channel 1 var: {}",
+            var[1]
+        );
 
         // Each channel is normalized with its own statistics.
         let o = out.data().as_f32_slice().unwrap();
@@ -1025,6 +909,91 @@ mod tests {
                     o[c * 4 + i]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_batchnorm_layers_agree_with_functional_batch_norm() {
+        // The layers delegate to `ops::normalization::batch_norm`; this pins
+        // that they cannot drift apart again. They previously stored the
+        // *biased* batch variance in `running_var` while the functional kernel
+        // stored the unbiased one, so the same input normalized differently at
+        // eval time depending on which entry point the caller used.
+        let values = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let make = |dims: Vec<usize>| {
+            Tensor::new(
+                Arc::new(TensorData::from_vec_f32(values.clone(), Device::cpu())),
+                Shape::new(dims),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            )
+        };
+
+        for (dims, is_2d) in [
+            (vec![4usize, 2usize], false),
+            (vec![2, 2, 2], false),
+            (vec![1, 2, 2, 2], true),
+        ] {
+            let input = make(dims.clone());
+
+            let mut rm =
+                Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+            let mut rv = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+            let weight = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+            let bias = Tensor::zeros(Shape::new(vec![2]), DataType::Float32, Device::cpu(), false);
+            let functional_out = crate::ops::normalization::batch_norm(
+                &input,
+                Some(&mut rm),
+                Some(&mut rv),
+                Some(&weight),
+                Some(&bias),
+                true,
+                0.1,
+                1e-5,
+            )
+            .unwrap();
+
+            let layer_out = if is_2d {
+                let mut layer =
+                    BatchNorm2d::new(2, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32)
+                        .unwrap();
+                let out = layer.forward(&input).unwrap();
+                let buffers = layer.named_buffers();
+                assert_eq!(
+                    buffers["running_var"].data().as_f32_slice().unwrap(),
+                    rv.data().as_f32_slice().unwrap(),
+                    "running_var mismatch for {dims:?}"
+                );
+                assert_eq!(
+                    buffers["running_mean"].data().as_f32_slice().unwrap(),
+                    rm.data().as_f32_slice().unwrap(),
+                    "running_mean mismatch for {dims:?}"
+                );
+                out
+            } else {
+                let mut layer =
+                    BatchNorm1d::new(2, Some(1e-5), Some(0.1), Device::cpu(), DataType::Float32)
+                        .unwrap();
+                let out = layer.forward(&input).unwrap();
+                assert_eq!(
+                    layer.running_var().data().as_f32_slice().unwrap(),
+                    rv.data().as_f32_slice().unwrap(),
+                    "running_var mismatch for {dims:?}"
+                );
+                assert_eq!(
+                    layer.running_mean().data().as_f32_slice().unwrap(),
+                    rm.data().as_f32_slice().unwrap(),
+                    "running_mean mismatch for {dims:?}"
+                );
+                out
+            };
+
+            assert_eq!(
+                layer_out.data().as_f32_slice().unwrap(),
+                functional_out.data().as_f32_slice().unwrap(),
+                "output mismatch for {dims:?}"
+            );
         }
     }
 
@@ -1144,7 +1113,9 @@ mod tests {
         );
         let output = layer.forward(&input2).unwrap();
 
-        let expected = (5.0 - 2.5) / (1.25 + layer._eps as f32).sqrt();
+        // n = H * W = 4, so the stored (unbiased) variance is 1.25 * 4/3.
+        let running_var = 1.25f32 * 4.0 / 3.0;
+        let expected = (5.0 - 2.5) / (running_var + layer.eps as f32).sqrt();
         let out_slice = output.data().as_f32_slice().unwrap();
         assert!(out_slice.iter().all(|&v| (v - expected).abs() < 1e-4));
     }

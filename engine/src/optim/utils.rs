@@ -5,39 +5,83 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::LearningRateScheduler;
-use crate::{error::Result, tensor::Tensor};
+use crate::{autograd, error::Result, tensor::Tensor};
 use rayon::prelude::*;
-use smallvec::SmallVec;
 
-/// Utility functions for gradient operations
+/// Utility functions for gradient operations.
+///
+/// Every entry point here resolves a parameter's gradient exactly the way
+/// `Optimizer::step` does — the autograd graph first, then the tensor-local
+/// `.grad` — so clipping acts on the gradient the step will actually consume.
+/// (Reading only `.grad` made clipping a silent no-op after the usual
+/// `loss.backward()`, which stores gradients in the graph.)
+///
+/// The per-parameter loops are deliberately sequential: the autograd graph is
+/// thread-local, so a rayon worker would look at an empty graph. Parallelism
+/// lives in the per-element loops below, where the work actually is.
 pub struct GradientUtils;
+
+/// Element count above which the gradient element loops go parallel; below it
+/// rayon's split overhead dominates the arithmetic.
+const GRAD_PAR_THRESHOLD: usize = 1 << 12;
+
+/// Sum of squares of a float slice, parallel above the threshold.
+fn sum_squares<T: Copy + Send + Sync + Into<f64>>(values: &[T]) -> f64 {
+    let square = |v: &T| {
+        let v: f64 = (*v).into();
+        v * v
+    };
+    if values.len() < GRAD_PAR_THRESHOLD {
+        values.iter().map(square).sum()
+    } else {
+        values.par_iter().map(square).sum()
+    }
+}
+
+/// Apply `op` to every element, parallel above the threshold.
+fn map_in_place<T: Copy + Send + Sync>(values: &mut [T], op: impl Fn(T) -> T + Send + Sync) {
+    if values.len() < GRAD_PAR_THRESHOLD {
+        for v in values.iter_mut() {
+            *v = op(*v);
+        }
+    } else {
+        values.par_iter_mut().for_each(|v| *v = op(*v));
+    }
+}
+
+/// The gradient `Optimizer::step` would use for this parameter, if any.
+fn resolve_gradient(param: &Tensor) -> Option<Tensor> {
+    autograd::get_gradient(param).or_else(|| param.grad().map(|g| (**g).clone()))
+}
+
+/// Read-modify-write a parameter's gradient in place, wherever it lives.
+///
+/// A graph-stored gradient is taken out of the map before being mutated so
+/// the write does not trigger copy-on-write, then put back.
+fn with_gradient_mut(param: &mut Tensor, transform: impl Fn(&mut Tensor)) {
+    if let Some(mut grad) = autograd::clear_gradient(param) {
+        transform(&mut grad);
+        autograd::set_gradient(param, grad);
+        return;
+    }
+    if let Some(grad) = param.grad_mut() {
+        transform(grad);
+    }
+}
 
 impl GradientUtils {
     fn compute_grad_norm_value(parameters: &[&Tensor]) -> f64 {
         let total_sq_norm: f64 = parameters
-            .par_iter()
-            .map(|param| {
-                if let Some(grad) = param.grad() {
-                    match grad.dtype() {
-                        crate::tensor::DataType::Float32 => grad
-                            .data()
-                            .as_f32_slice()
-                            .unwrap()
-                            .par_iter()
-                            .map(|&v| (v as f64) * (v as f64))
-                            .sum::<f64>(),
-                        crate::tensor::DataType::Float64 => grad
-                            .data()
-                            .as_f64_slice()
-                            .unwrap()
-                            .par_iter()
-                            .map(|&v| v * v)
-                            .sum::<f64>(),
-                        _ => 0.0,
-                    }
-                } else {
-                    0.0
+            .iter()
+            .filter_map(|param| resolve_gradient(param))
+            .map(|grad| match grad.dtype() {
+                crate::tensor::DataType::Float32 => {
+                    sum_squares(grad.data().as_f32_slice().unwrap_or_default())
                 }
+                crate::tensor::DataType::Float64 => {
+                    sum_squares(grad.data().as_f64_slice().unwrap_or_default())
+                }
+                _ => 0.0,
             })
             .sum();
         total_sq_norm.sqrt()
@@ -50,30 +94,29 @@ impl GradientUtils {
 
     /// Apply gradient clipping by norm to a set of parameters
     pub fn clip_grad_norm(parameters: &mut [&mut Tensor], max_norm: f64) -> Result<f64> {
-        let mut refs: SmallVec<[&Tensor; 16]> = SmallVec::with_capacity(parameters.len());
-        for p in parameters.iter() {
-            refs.push(&**p);
-        }
-        let total_norm = Self::compute_grad_norm_value(&refs);
-        drop(refs);
+        let total_norm = {
+            let refs: Vec<&Tensor> = parameters.iter().map(|p| &**p).collect();
+            Self::compute_grad_norm_value(&refs)
+        };
+
         if total_norm > max_norm {
             let clip_coef = max_norm / (total_norm + 1e-6);
-            parameters.par_iter_mut().for_each(|param| {
-                if let Some(grad) = param.grad_mut() {
-                    match grad.dtype() {
-                        crate::tensor::DataType::Float32 => {
-                            let g = grad.data_mut().as_f32_slice_mut().unwrap();
-                            let coef = clip_coef as f32;
-                            g.par_iter_mut().for_each(|v| *v *= coef);
+            let coef_f32 = clip_coef as f32;
+            for param in parameters.iter_mut() {
+                with_gradient_mut(param, |grad| match grad.dtype() {
+                    crate::tensor::DataType::Float32 => {
+                        if let Some(g) = grad.data_mut().as_f32_slice_mut() {
+                            map_in_place(g, |v| v * coef_f32);
                         }
-                        crate::tensor::DataType::Float64 => {
-                            let g = grad.data_mut().as_f64_slice_mut().unwrap();
-                            g.par_iter_mut().for_each(|v| *v *= clip_coef);
-                        }
-                        _ => {}
                     }
-                }
-            });
+                    crate::tensor::DataType::Float64 => {
+                        if let Some(g) = grad.data_mut().as_f64_slice_mut() {
+                            map_in_place(g, |v| v * clip_coef);
+                        }
+                    }
+                    _ => {}
+                });
+            }
         }
 
         Ok(total_norm)
@@ -85,41 +128,39 @@ impl GradientUtils {
         min_value: f64,
         max_value: f64,
     ) -> Result<()> {
-        parameters.par_iter_mut().for_each(|param| {
-            if let Some(grad) = param.grad_mut() {
-                match grad.dtype() {
-                    crate::tensor::DataType::Float32 => {
-                        let g = grad.data_mut().as_f32_slice_mut().unwrap();
-                        let min = min_value as f32;
-                        let max = max_value as f32;
-                        g.par_iter_mut().for_each(|v| {
-                            *v = v.clamp(min, max);
-                        });
+        let min_f32 = min_value as f32;
+        let max_f32 = max_value as f32;
+        for param in parameters.iter_mut() {
+            with_gradient_mut(param, |grad| match grad.dtype() {
+                crate::tensor::DataType::Float32 => {
+                    if let Some(g) = grad.data_mut().as_f32_slice_mut() {
+                        map_in_place(g, |v| v.clamp(min_f32, max_f32));
                     }
-                    crate::tensor::DataType::Float64 => {
-                        let g = grad.data_mut().as_f64_slice_mut().unwrap();
-                        g.par_iter_mut().for_each(|v| {
-                            *v = v.clamp(min_value, max_value);
-                        });
-                    }
-                    _ => {}
                 }
-            }
-        });
+                crate::tensor::DataType::Float64 => {
+                    if let Some(g) = grad.data_mut().as_f64_slice_mut() {
+                        map_in_place(g, |v| v.clamp(min_value, max_value));
+                    }
+                }
+                _ => {}
+            });
+        }
 
         Ok(())
     }
 
     /// Check if any parameters have gradients
     pub fn has_gradients(parameters: &[&Tensor]) -> bool {
-        parameters.iter().any(|param| param.grad().is_some())
+        parameters
+            .iter()
+            .any(|param| resolve_gradient(param).is_some())
     }
 
     /// Count the number of parameters with gradients
     pub fn count_parameters_with_gradients(parameters: &[&Tensor]) -> usize {
         parameters
             .iter()
-            .filter(|param| param.grad().is_some())
+            .filter(|param| resolve_gradient(param).is_some())
             .count()
     }
 }

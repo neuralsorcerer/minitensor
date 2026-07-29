@@ -753,14 +753,22 @@ fn full_slice(dim: usize) -> TensorIndex {
     }
 }
 
-fn parse_index(item: &Bound<PyAny>, dim_size: usize) -> PyResult<TensorIndex> {
+/// Parse one entry of a subscript against the axis it addresses.
+///
+/// `axis` is carried purely for the error message: an out-of-range subscript
+/// used to raise a bare "Index out of bounds", which told the caller neither
+/// which axis was overrun nor how long it is — the two facts needed to fix the
+/// call. The engine's `IndexError` already reports all three, so match it.
+fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<TensorIndex> {
     if let Ok(i) = item.extract::<isize>() {
         let mut idx = i;
         if idx < 0 {
             idx += dim_size as isize;
         }
         if idx < 0 || idx >= dim_size as isize {
-            return Err(PyIndexError::new_err("Index out of bounds"));
+            return Err(PyIndexError::new_err(format!(
+                "index {i} is out of bounds for dimension {axis} with size {dim_size}"
+            )));
         }
         Ok(TensorIndex::Index(idx as usize))
     } else if let Ok(slice) = item.cast::<PySlice>() {
@@ -817,7 +825,10 @@ pub(crate) fn parse_getitem_indices(
         .filter(|it| !it.is_none() && !is_ellipsis(it))
         .count();
     if real_count > shape.len() {
-        return Err(PyIndexError::new_err("Too many indices"));
+        return Err(PyIndexError::new_err(format!(
+            "too many indices for tensor: it has {} dimension(s) but {real_count} were indexed",
+            shape.len()
+        )));
     }
 
     let mut real_indices: Vec<TensorIndex> = Vec::with_capacity(shape.len());
@@ -841,7 +852,7 @@ pub(crate) fn parse_getitem_indices(
             }
             continue;
         }
-        let idx = parse_index(item, shape[input_dim])?;
+        let idx = parse_index(item, input_dim, shape[input_dim])?;
         // Integer indices remove the dimension; slices keep it in the output.
         let keeps_dim = matches!(idx, TensorIndex::Slice { .. });
         real_indices.push(idx);
@@ -873,7 +884,10 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
     }
     let real_count = items.iter().filter(|it| !is_ellipsis(it)).count();
     if real_count > shape.len() {
-        return Err(PyIndexError::new_err("Too many indices"));
+        return Err(PyIndexError::new_err(format!(
+            "too many indices for tensor: it has {} dimension(s) but {real_count} were indexed",
+            shape.len()
+        )));
     }
 
     let mut result: Vec<TensorIndex> = Vec::with_capacity(shape.len());
@@ -886,7 +900,7 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
             }
             continue;
         }
-        result.push(parse_index(item, shape[input_dim])?);
+        result.push(parse_index(item, input_dim, shape[input_dim])?);
         input_dim += 1;
     }
     for &dim in &shape[input_dim..] {

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     device::Device,
-    error::Result,
+    error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
@@ -222,6 +222,121 @@ impl Layer for Conv2d {
             params.push(bias);
         }
         params
+    }
+}
+
+/// 1-D convolutional layer over `[N, C_in, L]` signals.
+///
+/// Wraps [`crate::ops::conv1d`], which in turn defers to the 2-D kernel with a
+/// singleton height, so there is one implementation of the windowing and one
+/// backward pass rather than two to keep in step.
+#[derive(Clone)]
+pub struct Conv1d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    stride: usize,
+    padding: usize,
+}
+
+impl Conv1d {
+    /// Create a new 1D convolutional layer.
+    ///
+    /// `stride` defaults to 1 and `padding` to 0, matching the 2-D layer.
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: Option<usize>,
+        bias: bool,
+        device: Device,
+        dtype: DataType,
+    ) -> Result<Self> {
+        if in_channels == 0 || out_channels == 0 || kernel_size == 0 {
+            return Err(MinitensorError::invalid_argument(
+                "Conv1d requires non-zero in_channels, out_channels and kernel_size",
+            ));
+        }
+        if !dtype.is_float() {
+            return Err(MinitensorError::invalid_argument(
+                "Conv1d parameters must have a floating point dtype",
+            ));
+        }
+
+        let weight_shape = Shape::new(vec![out_channels, in_channels, kernel_size]);
+        let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
+        let bias_tensor = if bias {
+            Some(init_bias(Shape::new(vec![out_channels]), dtype, device)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            bias: bias_tensor,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride: stride.unwrap_or(1),
+            padding: padding.unwrap_or(0),
+        })
+    }
+
+    pub fn in_channels(&self) -> usize {
+        self.in_channels
+    }
+
+    pub fn out_channels(&self) -> usize {
+        self.out_channels
+    }
+
+    pub fn kernel_size(&self) -> usize {
+        self.kernel_size
+    }
+
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    pub fn bias(&self) -> Option<&Tensor> {
+        self.bias.as_ref()
+    }
+}
+
+impl Layer for Conv1d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::conv1d(
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+        )
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        match &self.bias {
+            Some(bias) => vec![&self.weight, bias],
+            None => vec![&self.weight],
+        }
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        match &mut self.bias {
+            Some(bias) => vec![&mut self.weight, bias],
+            None => vec![&mut self.weight],
+        }
     }
 }
 

@@ -8,6 +8,9 @@
 mod indexing_impl;
 #[path = "shape_ops/reshape.rs"]
 mod reshape_impl;
+#[path = "shape_ops/scatter.rs"]
+mod scatter_impl;
 
 pub use self::indexing_impl::*;
 pub use self::reshape_impl::*;
+pub use self::scatter_impl::*;

@@ -28,6 +28,19 @@ This will create a shared library file:
 
 ### Loading the Plugin
 
+Dynamic loading is off by default, so the extension has to be built with the
+`dynamic-loading` feature for `load_plugin` to do anything — otherwise it raises
+`NotImplementedError`:
+
+```bash
+maturin develop --release --features extension-module,dynamic-loading
+```
+
+Build the plugin with the same toolchain and the same checkout of this
+repository. The plugin and the host exchange Rust values directly, so a plugin
+built against a different `engine` version or by a different compiler will
+crash rather than fail cleanly.
+
 ```python
 import minitensor.plugins as plugins
 
@@ -47,31 +60,36 @@ print(f"Description: {info.description}")
 
 ### Using Custom Operations
 
+Loading the plugin registers its operations in the same global registry the
+`*_custom_op_py` helpers read from, so they are callable by name:
+
 ```python
 import minitensor as mt
 
 # Create test tensor
 x = mt.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
 
+assert mt.is_custom_op_registered_py("rust_abs")
+
 # Use absolute value operation
-abs_result = mt.execute_custom_op("rust_abs", [x])
+abs_result = mt.execute_custom_op_py("rust_abs", [x])
 print(f"abs({x}) = {abs_result}")
 
 # Use clamp operation
 min_val = mt.tensor([-1.0])
 max_val = mt.tensor([1.0])
-clamp_result = mt.execute_custom_op("rust_clamp", [x, min_val, max_val])
+clamp_result = mt.execute_custom_op_py("rust_clamp", [x, min_val, max_val])
 print(f"clamp({x}, -1, 1) = {clamp_result}")
 
 # Use GELU activation
-gelu_result = mt.execute_custom_op("rust_gelu", [x])
+gelu_result = mt.execute_custom_op_py("rust_gelu", [x])
 print(f"gelu({x}) = {gelu_result}")
 ```
 
 ### Unloading the Plugin
 
 ```python
-# Unload when done
+# Unload when done, which unregisters the operations and unmaps the library
 plugins.unload_plugin("rust_example_plugin")
 ```
 
@@ -80,9 +98,13 @@ plugins.unload_plugin("rust_example_plugin")
 The plugin implements the `Plugin` trait with the following methods:
 
 - `info()`: Returns plugin metadata
-- `initialize()`: Called when the plugin is loaded
-- `cleanup()`: Called when the plugin is unloaded
+- `initialize()`: Called when the plugin is loaded, for the plugin's own setup
+- `cleanup()`: Called when the plugin is unloaded, to undo that setup
 - `custom_operations()`: Returns list of custom operations provided
+
+The host registers everything `custom_operations()` returns after `initialize`
+succeeds and unregisters it on unload, so `initialize` must not register those
+operations itself — that would be a double registration and the load would fail.
 
 ## Custom Operations
 

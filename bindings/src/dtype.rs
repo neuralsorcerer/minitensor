@@ -5,18 +5,18 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::DataType;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyInt};
+use std::sync::LazyLock;
 
-static DEFAULT_DTYPE: Lazy<RwLock<DataType>> = Lazy::new(|| RwLock::new(DataType::Float32));
+static DEFAULT_DTYPE: LazyLock<RwLock<DataType>> = LazyLock::new(|| RwLock::new(DataType::Float32));
 
 #[cfg(test)]
-static DEFAULT_DTYPE_TEST_LOCK: Lazy<parking_lot::Mutex<()>> =
-    Lazy::new(|| parking_lot::Mutex::new(()));
+static DEFAULT_DTYPE_TEST_LOCK: LazyLock<parking_lot::Mutex<()>> =
+    LazyLock::new(|| parking_lot::Mutex::new(()));
 
 #[cfg(test)]
 pub(crate) fn default_dtype_test_guard() -> parking_lot::MutexGuard<'static, ()> {

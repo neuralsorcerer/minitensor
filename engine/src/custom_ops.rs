@@ -18,21 +18,56 @@ use std::sync::{Arc, RwLock};
 // Type aliases to keep function signatures manageable and avoid repeated
 // complex trait bounds that hurt compile times and readability.
 type ForwardFn = Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>;
-type BackwardFn = Arc<
-    dyn Fn(
-            &Tensor,
-            &[TensorId],
-            &[Vec<usize>],
-            &[DataType],
-            &[Device],
-        ) -> Result<FxHashMap<TensorId, Tensor>>
-        + Send
-        + Sync,
->;
+type BackwardFn =
+    Arc<dyn Fn(&BackwardContext) -> Result<FxHashMap<TensorId, Tensor>> + Send + Sync>;
 type ValidateFn = Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>;
 type OutputShapeFn = Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>;
 type OutputDtypeFn = Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>;
 type OutputDeviceFn = Arc<dyn Fn(&[&Device]) -> Result<Device> + Send + Sync>;
+
+/// What a custom operation's backward pass knows about the forward call it is
+/// differentiating.
+///
+/// The saved `inputs` and `output` are what make a correct derivative
+/// expressible: anything non-linear needs the values it was evaluated at, and
+/// without them a backward function can only return constants or pass
+/// `grad_output` straight through. Saving them costs no copies — tensors share
+/// their storage — but it does keep those buffers alive until the graph is
+/// released, which is the usual price of autograd.
+pub struct BackwardContext<'a> {
+    /// Gradient flowing into the operation's output.
+    pub grad_output: &'a Tensor,
+    /// The inputs the forward pass received, in order.
+    pub inputs: &'a [Tensor],
+    /// The value the forward pass produced. Useful when a derivative is cheaper
+    /// in terms of the output, as in `sigmoid'(x) = y(1 - y)`.
+    pub output: &'a Tensor,
+    /// Identifier of each input, in the same order as `inputs`. Returned
+    /// gradients are keyed by these.
+    pub input_ids: &'a [TensorId],
+}
+
+impl BackwardContext<'_> {
+    /// The `i`th input, if the operation received one.
+    pub fn input(&self, i: usize) -> Option<&Tensor> {
+        self.inputs.get(i)
+    }
+
+    /// Shape of the `i`th input, as dimensions.
+    pub fn input_shape(&self, i: usize) -> Option<&[usize]> {
+        self.inputs.get(i).map(|t| t.shape().dims())
+    }
+
+    /// Data type of the `i`th input.
+    pub fn input_dtype(&self, i: usize) -> Option<DataType> {
+        self.inputs.get(i).map(|t| t.dtype())
+    }
+
+    /// Device of the `i`th input.
+    pub fn input_device(&self, i: usize) -> Option<Device> {
+        self.inputs.get(i).map(|t| t.device())
+    }
+}
 
 /// Trait for custom operations that can be registered with the system
 pub trait CustomOp: Send + Sync {
@@ -103,6 +138,36 @@ impl CustomOpRegistry {
 
         ops.insert(name, op);
         Ok(())
+    }
+
+    /// Register a custom operation unless one with the same name is already
+    /// present, returning whether it was inserted.
+    ///
+    /// [`Self::register`] rejects duplicates so that a genuine name collision
+    /// in user code is caught. This variant is for callers that are
+    /// (re)installing a known set and cannot know which members already exist
+    /// — see [`crate::custom_ops::examples::register_example_ops`]. The check
+    /// and the insert share one write lock, so concurrent callers cannot both
+    /// decide the name is free.
+    pub fn register_if_absent(&self, op: Arc<dyn CustomOp>) -> Result<bool> {
+        let name = op.name().to_string();
+
+        if name.is_empty() {
+            return Err(MinitensorError::invalid_argument(
+                "Operation name cannot be empty",
+            ));
+        }
+
+        let mut ops = self.operations.write().map_err(|_| {
+            MinitensorError::internal_error("Failed to acquire registry write lock")
+        })?;
+
+        if ops.contains_key(&name) {
+            return Ok(false);
+        }
+
+        ops.insert(name, op);
+        Ok(true)
     }
 
     /// Unregister a custom operation
@@ -180,12 +245,29 @@ impl Default for CustomOpRegistry {
 }
 
 /// Global custom operation registry
-static GLOBAL_REGISTRY: std::sync::LazyLock<CustomOpRegistry> =
-    std::sync::LazyLock::new(CustomOpRegistry::new);
+static GLOBAL_REGISTRY: std::sync::LazyLock<Arc<CustomOpRegistry>> =
+    std::sync::LazyLock::new(|| Arc::new(CustomOpRegistry::new()));
+
+/// Handle to the process-wide custom operation registry
+///
+/// Subsystems that need to own a registry reference — the plugin manager above
+/// all — must take it from here rather than building their own, so that
+/// everything they register lands in the one namespace the `*_custom_op`
+/// functions and the Python bindings read from.
+pub fn global_registry() -> Arc<CustomOpRegistry> {
+    Arc::clone(&GLOBAL_REGISTRY)
+}
 
 /// Register a custom operation globally
 pub fn register_custom_op(op: Arc<dyn CustomOp>) -> Result<()> {
     GLOBAL_REGISTRY.register(op)
+}
+
+/// Register a custom operation globally unless the name is already taken,
+/// returning whether it was inserted. See
+/// [`CustomOpRegistry::register_if_absent`].
+pub fn register_custom_op_if_absent(op: Arc<dyn CustomOp>) -> Result<bool> {
+    GLOBAL_REGISTRY.register_if_absent(op)
 }
 
 /// Unregister a custom operation globally
@@ -212,21 +294,22 @@ pub fn is_custom_op_registered(name: &str) -> Result<bool> {
 pub struct CustomOpBackward {
     pub op_name: String,
     pub input_ids: Vec<TensorId>,
-    pub input_shapes: Vec<Vec<usize>>,
-    pub input_dtypes: Vec<DataType>,
-    pub input_devices: Vec<Device>,
+    /// Inputs saved from the forward pass, so the backward function can
+    /// evaluate a derivative at the point it was computed.
+    pub inputs: Vec<Tensor>,
+    /// Output saved from the forward pass.
+    pub output: Tensor,
     pub backward_fn: BackwardFn,
 }
 
 impl GradientFunction for CustomOpBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        (self.backward_fn)(
+        (self.backward_fn)(&BackwardContext {
             grad_output,
-            &self.input_ids,
-            &self.input_shapes,
-            &self.input_dtypes,
-            &self.input_devices,
-        )
+            inputs: &self.inputs,
+            output: &self.output,
+            input_ids: &self.input_ids,
+        })
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -271,18 +354,15 @@ impl CustomOpBuilder {
     }
 
     /// Set the backward function
+    ///
+    /// The closure receives a [`BackwardContext`] carrying the incoming
+    /// gradient along with the inputs and output saved from the forward pass,
+    /// and returns a gradient per input keyed by
+    /// [`input_ids`](BackwardContext::input_ids). Omitting an input's entry
+    /// means no gradient flows to it.
     pub fn backward<F>(mut self, f: F) -> Self
     where
-        F: Fn(
-                &Tensor,
-                &[TensorId],
-                &[Vec<usize>],
-                &[DataType],
-                &[Device],
-            ) -> Result<FxHashMap<TensorId, Tensor>>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(&BackwardContext) -> Result<FxHashMap<TensorId, Tensor>> + Send + Sync + 'static,
     {
         self.backward_fn = Some(Arc::new(f));
         self
@@ -386,21 +466,19 @@ impl CustomOp for BuiltCustomOp {
     fn create_gradient_function(
         &self,
         inputs: &[&Tensor],
-        _output: &Tensor,
+        output: &Tensor,
     ) -> Option<Arc<dyn GradientFunction>> {
         if let Some(backward_fn) = &self.backward_fn {
             let input_ids: Vec<TensorId> = inputs.iter().map(|t| t.id()).collect();
-            let input_shapes: Vec<Vec<usize>> =
-                inputs.iter().map(|t| t.shape().dims().to_vec()).collect();
-            let input_dtypes: Vec<DataType> = inputs.iter().map(|t| t.dtype()).collect();
-            let input_devices: Vec<Device> = inputs.iter().map(|t| t.device()).collect();
+            // Cloning a tensor shares its storage, so saving the forward values
+            // costs a refcount rather than a copy.
+            let saved_inputs: Vec<Tensor> = inputs.iter().map(|t| (*t).clone()).collect();
 
             Some(Arc::new(CustomOpBackward {
                 op_name: self.name.clone(),
                 input_ids,
-                input_shapes,
-                input_dtypes,
-                input_devices,
+                inputs: saved_inputs,
+                output: output.clone(),
                 backward_fn: backward_fn.clone(),
             }))
         } else {
@@ -488,6 +566,106 @@ mod tests {
         // Unregister the operation
         registry.unregister("test_add").unwrap();
         assert!(!registry.is_registered("test_add").unwrap());
+    }
+
+    #[test]
+    fn test_backward_can_differentiate_a_nonlinear_operation() {
+        // The backward function used to receive only shapes, dtypes and devices,
+        // so anything non-linear could return constants or pass `grad_output`
+        // through, but never its actual derivative. With the forward inputs
+        // saved, `d(x^3)/dx = 3x^2` is expressible — check it against central
+        // differences, as the custom-op docs tell authors to do.
+        let registry = CustomOpRegistry::new();
+        let op = CustomOpBuilder::new("test_cube", 1)
+            .forward(|inputs| {
+                let sq = crate::ops::arithmetic::mul(inputs[0], inputs[0])?;
+                crate::ops::arithmetic::mul(&sq, inputs[0])
+            })
+            .backward(|ctx| {
+                let mut gradients = FxHashMap::default();
+                let (Some(&id), Some(x)) = (ctx.input_ids.first(), ctx.input(0)) else {
+                    return Ok(gradients);
+                };
+                // 3x^2, without needing a scalar-constant helper.
+                let sq = crate::ops::arithmetic::mul(x, x)?;
+                let two_sq = crate::ops::arithmetic::add(&sq, &sq)?;
+                let dydx = crate::ops::arithmetic::add(&two_sq, &sq)?;
+                gradients.insert(id, crate::ops::arithmetic::mul(ctx.grad_output, &dydx)?);
+                Ok(gradients)
+            })
+            .build()
+            .unwrap();
+        registry.register(op).unwrap();
+
+        let values = [-1.75f32, -0.5, 0.25, 2.0];
+        let x = Tensor::new(
+            Arc::new(crate::tensor::TensorData::from_vec_f32(
+                values.to_vec(),
+                Device::cpu(),
+            )),
+            Shape::new(vec![values.len()]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+
+        let y = registry.execute("test_cube", &[&x]).unwrap();
+        let forward = y.data().as_f32_slice().unwrap();
+        for (i, v) in values.iter().enumerate() {
+            assert!((forward[i] - v * v * v).abs() < 1e-5, "cube at {v}");
+        }
+
+        let loss = crate::ops::reduction::sum(&y, None, false).unwrap();
+        loss.backward(None).unwrap();
+        let grad = crate::autograd::get_gradient(&x).expect("input gradient");
+        let grad = grad.data().as_f32_slice().unwrap();
+
+        // d(sum of x^3)/dx_i = 3 x_i^2, compared against central differences.
+        let h = 1e-2f32;
+        for (i, v) in values.iter().enumerate() {
+            let numeric = ((v + h).powi(3) - (v - h).powi(3)) / (2.0 * h);
+            assert!(
+                (grad[i] - numeric).abs() <= 1e-3 * numeric.abs().max(1.0),
+                "gradient at {v}: analytic {} vs numeric {numeric}",
+                grad[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_backward_receives_the_forward_output() {
+        // `output` is saved too, so derivatives are also expressible in terms of
+        // the value the forward pass produced.
+        let registry = CustomOpRegistry::new();
+        let op = CustomOpBuilder::new("test_output_visible", 1)
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[0]))
+            .backward(|ctx| {
+                let mut gradients = FxHashMap::default();
+                if let Some(&id) = ctx.input_ids.first() {
+                    // Hand back the output itself so the test can observe it.
+                    gradients.insert(id, ctx.output.clone());
+                }
+                Ok(gradients)
+            })
+            .build()
+            .unwrap();
+        registry.register(op).unwrap();
+
+        let x = Tensor::new(
+            Arc::new(crate::tensor::TensorData::from_vec_f32(
+                vec![2.0, 3.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![2]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let y = registry.execute("test_output_visible", &[&x]).unwrap();
+        let loss = crate::ops::reduction::sum(&y, None, false).unwrap();
+        loss.backward(None).unwrap();
+        let grad = crate::autograd::get_gradient(&x).expect("input gradient");
+        assert_eq!(grad.data().as_f32_slice().unwrap(), &[4.0, 9.0]);
     }
 
     #[test]

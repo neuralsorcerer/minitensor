@@ -8,6 +8,7 @@ use super::*;
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
+    ops::map::{binary_map, ternary_map, unary_map_into},
     ops::{activation, arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -287,29 +288,13 @@ impl GradientFunction for HuberLossBackward {
                     MinitensorError::internal_error("Failed to get mutable f32 slice from grad")
                 })?;
                 let delta = self.delta as f32;
-                if numel < PAR_THRESHOLD {
-                    for i in 0..numel {
-                        let d = diff_slice[i];
-                        grad_slice[i] = if d.abs() <= delta {
-                            d
-                        } else {
-                            delta * d.signum()
-                        };
+                unary_map_into(grad_slice, diff_slice, move |d: f32| {
+                    if d.abs() <= delta {
+                        d
+                    } else {
+                        delta * d.signum()
                     }
-                } else {
-                    let diff_ptr = diff_slice.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..numel).into_par_iter().for_each(|i| unsafe {
-                        let diff_ptr = diff_ptr as *const f32;
-                        let grad_ptr = grad_ptr as *mut f32;
-                        let d = *diff_ptr.add(i);
-                        *grad_ptr.add(i) = if d.abs() <= delta {
-                            d
-                        } else {
-                            delta * d.signum()
-                        };
-                    });
-                }
+                });
             }
             DataType::Float64 => {
                 let diff_slice = self.diff.data().as_f64_slice().ok_or_else(|| {
@@ -318,30 +303,14 @@ impl GradientFunction for HuberLossBackward {
                 let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to get mutable f64 slice from grad")
                 })?;
-                if numel < PAR_THRESHOLD {
-                    for i in 0..numel {
-                        let d = diff_slice[i];
-                        grad_slice[i] = if d.abs() <= self.delta {
-                            d
-                        } else {
-                            self.delta * d.signum()
-                        };
+                let delta = self.delta;
+                unary_map_into(grad_slice, diff_slice, move |d: f64| {
+                    if d.abs() <= delta {
+                        d
+                    } else {
+                        delta * d.signum()
                     }
-                } else {
-                    let diff_ptr = diff_slice.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    let delta = self.delta;
-                    (0..numel).into_par_iter().for_each(|i| unsafe {
-                        let diff_ptr = diff_ptr as *const f64;
-                        let grad_ptr = grad_ptr as *mut f64;
-                        let d = *diff_ptr.add(i);
-                        *grad_ptr.add(i) = if d.abs() <= delta {
-                            d
-                        } else {
-                            delta * d.signum()
-                        };
-                    });
-                }
+                });
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -533,6 +502,122 @@ impl GradientFunction for BCELossBackward {
     }
 }
 
+/// Gradient function for binary cross entropy computed from logits.
+///
+/// The whole point of fusing the sigmoid into the loss is that this gradient
+/// has a closed form that never saturates: `d/dx = sigmoid(x) - target`, or
+/// with a positive-class weight `w`,
+///
+/// ```text
+/// d/dx = (1 - target) + (1 + (w - 1) * target) * (sigmoid(x) - 1)
+/// ```
+///
+/// Computing it directly is what keeps a confidently-wrong logit learning.
+/// Going through `sigmoid` and then `binary_cross_entropy` instead multiplies
+/// `1/(p * (1 - p))` by `p * (1 - p)`, and at |x| >= 30 in f32 both factors
+/// have already collapsed to inf/0 — the product is whatever the clamps leave
+/// behind rather than the -1 the maths calls for.
+pub struct BCEWithLogitsLossBackward {
+    pub input_ids: [TensorId; 2],
+    /// Which of [logits, targets] actually need a gradient. Only the logit
+    /// gradient is ever produced; it is skipped when frozen.
+    pub input_requires_grad: [bool; 2],
+    pub reduction: String,
+    pub logits: Tensor,
+    pub targets: Tensor,
+    /// Already broadcast to the logits' shape by the forward pass, so the
+    /// backward is a flat elementwise walk.
+    pub pos_weight: Option<Tensor>,
+}
+
+impl GradientFunction for BCEWithLogitsLossBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        if !self.input_requires_grad[0] {
+            return Ok(gradients);
+        }
+        gradients.reserve(1);
+
+        let scale = if self.reduction == "mean" {
+            1.0 / self.logits.numel() as f64
+        } else {
+            1.0
+        };
+
+        let base_grad =
+            bce_with_logits_grad(&self.logits, &self.targets, self.pos_weight.as_ref(), scale)?;
+        let logit_grad = arithmetic::mul(&base_grad, grad_output)?;
+        accumulate_grad(&mut gradients, self.input_ids[0], logit_grad)?;
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// `scale * [(1 - t) + (1 + (w - 1) * t) * (sigmoid(x) - 1)]`, elementwise.
+///
+/// `sigmoid` is evaluated in the numerically safe direction — `exp` of a
+/// negative argument only — so the factor is exact across the whole logit
+/// range instead of overflowing for large negative `x`.
+fn bce_with_logits_grad(
+    logits: &Tensor,
+    targets: &Tensor,
+    pos_weight: Option<&Tensor>,
+    scale: f64,
+) -> Result<Tensor> {
+    macro_rules! grad_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let x = logits.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from logits")
+            })?;
+            let t = targets.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from targets")
+            })?;
+            let scale = scale as $ty;
+            let compute = |x: $ty, t: $ty, w: $ty| {
+                let s: $ty = if x >= 0.0 {
+                    1.0 / (1.0 + (-x).exp())
+                } else {
+                    let e = x.exp();
+                    e / (1.0 + e)
+                };
+                scale * ((1.0 - t) + (1.0 + (w - 1.0) * t) * (s - 1.0))
+            };
+            let values = match pos_weight {
+                Some(w) => {
+                    let w = w.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get slice from pos_weight")
+                    })?;
+                    ternary_map(x, t, w, compute)
+                }
+                None => binary_map(x, t, |x: $ty, t: $ty| compute(x, t, 1.0)),
+            };
+            TensorData::from_vec::<$ty>(values, $dtype, logits.device())
+        }};
+    }
+
+    let data = match logits.dtype() {
+        DataType::Float32 => grad_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => grad_for!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "binary_cross_entropy_with_logits requires floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        logits.shape().clone(),
+        logits.dtype(),
+        logits.device(),
+        false,
+    ))
+}
+
 /// Gradient function for KL Divergence loss
 pub struct KLDivLossBackward {
     pub predictions_shape: Vec<usize>,
@@ -712,21 +797,7 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get mutable f32 slice from output")
             })?;
             let exp = exponent as f32;
-            let len = input.len();
-            debug_assert_eq!(len, output.len());
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    output[i] = input[i].powf(exp);
-                }
-            } else {
-                let in_ptr = input.as_ptr() as usize;
-                let out_ptr = output.as_mut_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let in_ptr = in_ptr as *const f32;
-                    let out_ptr = out_ptr as *mut f32;
-                    *out_ptr.add(i) = (*in_ptr.add(i)).powf(exp);
-                });
-            }
+            unary_map_into(output, input, move |v: f32| v.powf(exp));
         }
         DataType::Float64 => {
             let input = tensor.data().as_f64_slice().ok_or_else(|| {
@@ -735,21 +806,7 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
             let output = output_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice from output")
             })?;
-            let len = input.len();
-            debug_assert_eq!(len, output.len());
-            if len < PAR_THRESHOLD {
-                for i in 0..len {
-                    output[i] = input[i].powf(exponent);
-                }
-            } else {
-                let in_ptr = input.as_ptr() as usize;
-                let out_ptr = output.as_mut_ptr() as usize;
-                (0..len).into_par_iter().for_each(|i| unsafe {
-                    let in_ptr = in_ptr as *const f64;
-                    let out_ptr = out_ptr as *mut f64;
-                    *out_ptr.add(i) = (*in_ptr.add(i)).powf(exponent);
-                });
-            }
+            unary_map_into(output, input, move |v: f64| v.powf(exponent));
         }
         _ => {
             return Err(MinitensorError::invalid_operation(

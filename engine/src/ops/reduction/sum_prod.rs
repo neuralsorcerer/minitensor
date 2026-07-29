@@ -12,6 +12,104 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+/// Floor on the width of a `dim == 0` column block: at least a cache line
+/// (64 f32 = 256 B), so neighbouring blocks never write into the same line.
+const DIM0_MIN_BLOCK: usize = 64;
+
+/// Row-band shape for the `dim == 0` reductions. The target caps how many
+/// partial buffers are allocated, the floor keeps each band big enough to be
+/// worth a task, and below `DIM0_MIN_BANDS` there is not enough row
+/// parallelism to bother and the column path takes over. All three are
+/// constants so the band layout — which does affect the result — depends only
+/// on the row count.
+const DIM0_TARGET_BANDS: usize = 64;
+const DIM0_MIN_ROW_BAND: usize = 256;
+const DIM0_MIN_BANDS: usize = 4;
+
+/// Reduce a row-major `(rows, cols)` slice along dimension 0, writing one value
+/// per column.
+///
+/// Parallelism runs across the *output* columns, never across rows, so every
+/// output element is accumulated by a single thread walking the rows in index
+/// order. The natural shape for this loop -- fold a per-worker accumulator over
+/// `par_chunks_exact(cols)` and reduce the partials -- instead lets rayon decide
+/// how rows are grouped, and that grouping changes with the thread count. For
+/// floating point that changes the rounding, so the same program produced
+/// different sums on machines with different core counts.
+///
+/// Note what the block width does *not* affect: every output element still
+/// accumulates rows `0..rows` in index order whatever the partition, so the
+/// result is identical for any block size. That leaves the width free to be
+/// chosen purely for locality -- one wide contiguous run per thread rather than
+/// many narrow interleaved ones -- including from the thread count, without
+/// costing reproducibility.
+fn reduce_along_dim0<T, F>(input: &[T], out: &mut [T], cols: usize, init: T, combine: F)
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> T + Send + Sync + Copy,
+{
+    if cols == 0 || out.is_empty() {
+        return;
+    }
+    let rows = input.len() / cols;
+
+    // Contiguous bands of rows, when there are enough of them to go around.
+    // Each band streams the input in memory order, which the prefetcher likes
+    // far more than walking a column band down the matrix, and the partial
+    // buffers it needs cost only `bands * cols`. The band boundaries come from
+    // the row count alone -- never from the thread count -- because here the
+    // partition *does* decide how the partial sums are grouped.
+    let band = rows.div_ceil(DIM0_TARGET_BANDS).max(DIM0_MIN_ROW_BAND);
+    let bands = rows.div_ceil(band);
+    if bands >= DIM0_MIN_BANDS {
+        let partials: Vec<Vec<T>> = (0..bands)
+            .into_par_iter()
+            .map(|index| {
+                let start = index * band;
+                let end = ((index + 1) * band).min(rows);
+                let mut acc = vec![init; cols];
+                for row in input[start * cols..end * cols].chunks_exact(cols) {
+                    for (slot, &value) in acc.iter_mut().zip(row) {
+                        *slot = combine(*slot, value);
+                    }
+                }
+                acc
+            })
+            .collect();
+
+        out.copy_from_slice(&partials[0]);
+        for partial in &partials[1..] {
+            for (slot, &value) in out.iter_mut().zip(partial) {
+                *slot = combine(*slot, value);
+            }
+        }
+        return;
+    }
+
+    // Too few rows to split: give each thread its own band of output columns
+    // instead. Unlike the row split above, the column width cannot change the
+    // result -- each output still accumulates rows in index order -- so it is
+    // free to follow the thread count.
+    let block = cols
+        .div_ceil(rayon::current_num_threads().max(1))
+        .max(DIM0_MIN_BLOCK);
+    out.par_chunks_mut(block)
+        .enumerate()
+        .for_each(|(index, out_block)| {
+            let start = index * block;
+            let width = out_block.len();
+            for slot in out_block.iter_mut() {
+                *slot = init;
+            }
+            for row in input.chunks_exact(cols) {
+                let segment = &row[start..start + width];
+                for (slot, &value) in out_block.iter_mut().zip(segment) {
+                    *slot = combine(*slot, value);
+                }
+            }
+        });
+}
+
 /// Generates a sum-along-dim reduction kernel. The body is identical across
 /// numeric dtypes; only the element type, the additive identity, and the SIMD
 /// row-sum helper differ.
@@ -42,27 +140,7 @@ macro_rules! sum_along_dim_kernel {
                 let cols = input_shape[1];
                 match dim {
                     0 => {
-                        let sums = input_data
-                            .par_chunks_exact(cols)
-                            .fold(
-                                || vec![$zero; cols],
-                                |mut acc, row| {
-                                    for (a, &v) in acc.iter_mut().zip(row) {
-                                        *a += v;
-                                    }
-                                    acc
-                                },
-                            )
-                            .reduce(
-                                || vec![$zero; cols],
-                                |mut a, b| {
-                                    for (x, y) in a.iter_mut().zip(b) {
-                                        *x += y;
-                                    }
-                                    a
-                                },
-                            );
-                        result_slice.copy_from_slice(&sums);
+                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| a + v);
                     }
                     1 => {
                         result_slice
@@ -129,29 +207,9 @@ macro_rules! nansum_along_dim_kernel {
                 let cols = input_shape[1];
                 match dim {
                     0 => {
-                        let sums = input_data
-                            .par_chunks_exact(cols)
-                            .fold(
-                                || vec![$zero; cols],
-                                |mut acc, row| {
-                                    for (a, &v) in acc.iter_mut().zip(row) {
-                                        if !v.is_nan() {
-                                            *a += v;
-                                        }
-                                    }
-                                    acc
-                                },
-                            )
-                            .reduce(
-                                || vec![$zero; cols],
-                                |mut a, b| {
-                                    for (x, y) in a.iter_mut().zip(b) {
-                                        *x += y;
-                                    }
-                                    a
-                                },
-                            );
-                        result_slice.copy_from_slice(&sums);
+                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| {
+                            if v.is_nan() { a } else { a + v }
+                        });
                     }
                     1 => {
                         result_slice
@@ -393,87 +451,136 @@ fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize
 }
 
 // Helper implementations for max/min operations
-pub(crate) fn max_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+//
+// These fold over contiguous chunks rather than reducing element by element.
+// A per-element `par_iter().reduce(..)` hands rayon one work item per value and
+// leaves the comparison behind an opaque closure, so nothing vectorizes; over
+// a few million elements that ran an order of magnitude slower than `sum` on
+// identical data. Splitting into chunks lets the inner loop become plain
+// min/max instructions and keeps the parallel split coarse.
 
-    let max_val = data.par_iter().cloned().reduce(
-        || f32::NEG_INFINITY,
-        |a, b| {
-            if a.is_nan() || b.is_nan() {
-                f32::NAN
-            } else {
-                a.max(b)
-            }
-        },
-    );
+/// Chunk length for the parallel min/max folds. Large enough that the per-chunk
+/// overhead disappears, small enough to keep every core fed.
+const MINMAX_CHUNK: usize = 8 * 1024;
 
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
+/// Float min/max over a chunked parallel fold.
+///
+/// NaN propagates, matching the previous element-wise behaviour: it is tracked
+/// as a separate flag so the value loop stays a bare comparison. `v > best`
+/// (rather than `f32::max`) is deliberate — comparisons against NaN are false,
+/// so NaN never displaces a real value, and the flag decides the result.
+macro_rules! float_extremum_all {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt) => {
+        pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            let data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
 
-    result_slice[0] = max_val;
-    Ok(())
+            let (value, has_nan) = data
+                .par_chunks(MINMAX_CHUNK)
+                .map(|chunk| {
+                    let mut best: $ty = $identity;
+                    let mut nan = false;
+                    for &v in chunk {
+                        if v $better best {
+                            best = v;
+                        }
+                        nan |= v != v;
+                    }
+                    (best, nan)
+                })
+                .reduce(
+                    || ($identity, false),
+                    |a, b| {
+                        (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1)
+                    },
+                );
+
+            let result_slice = result_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
+
+            result_slice[0] = if has_nan { <$ty>::NAN } else { value };
+            Ok(())
+        }
+    };
 }
 
-pub(crate) fn max_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
+/// Integer min/max over the same chunked fold; no NaN to consider.
+macro_rules! int_extremum_all {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt) => {
+        pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+            let data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
 
-    let max_val = data.par_iter().cloned().reduce(
-        || f64::NEG_INFINITY,
-        |a, b| {
-            if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                a.max(b)
-            }
-        },
-    );
+            let value = data
+                .par_chunks(MINMAX_CHUNK)
+                .map(|chunk| {
+                    let mut best: $ty = $identity;
+                    for &v in chunk {
+                        if v $better best {
+                            best = v;
+                        }
+                    }
+                    best
+                })
+                .reduce(|| $identity, |a, b| if b $better a { b } else { a });
 
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
+            let result_slice = result_data.$accessor_mut().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
 
-    result_slice[0] = max_val;
-    Ok(())
+            result_slice[0] = value;
+            Ok(())
+        }
+    };
 }
 
-pub(crate) fn max_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_i32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-
-    let max_val = data.par_iter().copied().max().unwrap_or(i32::MIN);
-
-    let result_slice = result_data
-        .as_i32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
-
-    result_slice[0] = max_val;
-    Ok(())
-}
-
-pub(crate) fn max_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_i64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-
-    let max_val = data.par_iter().copied().max().unwrap_or(i64::MIN);
-
-    let result_slice = result_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    result_slice[0] = max_val;
-    Ok(())
-}
+float_extremum_all!(
+    max_all_f32,
+    as_f32_slice,
+    as_f32_slice_mut,
+    f32,
+    "f32",
+    f32::NEG_INFINITY,
+    >
+);
+float_extremum_all!(
+    max_all_f64,
+    as_f64_slice,
+    as_f64_slice_mut,
+    f64,
+    "f64",
+    f64::NEG_INFINITY,
+    >
+);
+int_extremum_all!(
+    max_all_i32,
+    as_i32_slice,
+    as_i32_slice_mut,
+    i32,
+    "i32",
+    i32::MIN,
+    >
+);
+int_extremum_all!(
+    max_all_i64,
+    as_i64_slice,
+    as_i64_slice_mut,
+    i64,
+    "i64",
+    i64::MIN,
+    >
+);
 
 pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
@@ -492,87 +599,42 @@ pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
 }
 
 // Similar implementations for min functions
-pub(crate) fn min_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-
-    let min_val = data.par_iter().cloned().reduce(
-        || f32::INFINITY,
-        |a, b| {
-            if a.is_nan() || b.is_nan() {
-                f32::NAN
-            } else {
-                a.min(b)
-            }
-        },
-    );
-
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-
-    result_slice[0] = min_val;
-    Ok(())
-}
-
-pub(crate) fn min_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-
-    let min_val = data.par_iter().cloned().reduce(
-        || f64::INFINITY,
-        |a, b| {
-            if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                a.min(b)
-            }
-        },
-    );
-
-    let result_slice = result_data
-        .as_f64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f64 slice"))?;
-
-    result_slice[0] = min_val;
-    Ok(())
-}
-
-pub(crate) fn min_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_i32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-
-    let min_val = data.par_iter().copied().min().unwrap_or(i32::MAX);
-
-    let result_slice = result_data
-        .as_i32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
-
-    result_slice[0] = min_val;
-    Ok(())
-}
-
-pub(crate) fn min_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_i64_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-
-    let min_val = data.par_iter().copied().min().unwrap_or(i64::MAX);
-
-    let result_slice = result_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    result_slice[0] = min_val;
-    Ok(())
-}
+float_extremum_all!(
+    min_all_f32,
+    as_f32_slice,
+    as_f32_slice_mut,
+    f32,
+    "f32",
+    f32::INFINITY,
+    <
+);
+float_extremum_all!(
+    min_all_f64,
+    as_f64_slice,
+    as_f64_slice_mut,
+    f64,
+    "f64",
+    f64::INFINITY,
+    <
+);
+int_extremum_all!(
+    min_all_i32,
+    as_i32_slice,
+    as_i32_slice_mut,
+    i32,
+    "i32",
+    i32::MAX,
+    <
+);
+int_extremum_all!(
+    min_all_i64,
+    as_i64_slice,
+    as_i64_slice_mut,
+    i64,
+    "i64",
+    i64::MAX,
+    <
+);
 
 pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor

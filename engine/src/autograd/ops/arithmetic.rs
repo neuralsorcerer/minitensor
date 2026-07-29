@@ -912,3 +912,105 @@ pub struct SoftplusBackward {
     pub beta: f64,
     pub threshold: f64,
 }
+
+/// Gradient function for `log2` and `log10`.
+///
+/// `d/dx log_b(x) = 1 / (x * ln b)`, so the two bases differ only by the stored
+/// constant and share one implementation.
+pub struct LogBaseBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    /// `ln(base)`: `std::f64::consts::LN_2` or `LN_10`.
+    pub ln_base: f64,
+}
+
+impl GradientFunction for LogBaseBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let derivative = elementwise_derivative(&self.input, |x: f64| 1.0 / (x * self.ln_base))?;
+        let grad = arithmetic::mul(grad_output, &derivative)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for `erf` and `erfc`.
+///
+/// `d/dx erf(x) = 2/sqrt(pi) * exp(-x^2)`, and `erfc = 1 - erf` so its
+/// derivative is the same thing negated — `scale` carries the sign.
+pub struct ErfBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    /// `+2/sqrt(pi)` for `erf`, `-2/sqrt(pi)` for `erfc`.
+    pub scale: f64,
+}
+
+impl GradientFunction for ErfBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let derivative = elementwise_derivative(&self.input, |x: f64| self.scale * (-x * x).exp())?;
+        let grad = arithmetic::mul(grad_output, &derivative)?;
+        gradients.insert(self.input_id, grad);
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Apply `f` elementwise to `input`, producing a tensor of the same dtype.
+///
+/// `f` is written in f64 and its result rounded, so an f32 tensor's derivative
+/// is computed at f64 precision and rounded once rather than accumulating error
+/// through several f32 intermediates.
+fn elementwise_derivative<F>(input: &Tensor, f: F) -> Result<Tensor>
+where
+    F: Fn(f64) -> f64 + Send + Sync,
+{
+    let data = match input.dtype() {
+        DataType::Float32 => {
+            let src = input.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+            })?;
+            TensorData::from_vec::<f32>(
+                crate::ops::map::unary_map(src, |v: f32| f(v as f64) as f32),
+                DataType::Float32,
+                input.device(),
+            )
+        }
+        DataType::Float64 => {
+            let src = input.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+            })?;
+            TensorData::from_vec::<f64>(
+                crate::ops::map::unary_map(src, |v: f64| f(v)),
+                DataType::Float64,
+                input.device(),
+            )
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "derivative is only defined for floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    ))
+}

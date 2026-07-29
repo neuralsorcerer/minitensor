@@ -42,11 +42,6 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
     new_shape.swap(dim0_usize, dim1_usize);
     let new_shape_obj = Shape::new(new_shape);
 
-    // Create new strides with swapped dimensions
-    let old_strides = tensor.strides().as_slice();
-    let mut new_strides = old_strides.to_vec();
-    new_strides.swap(dim0_usize, dim1_usize);
-
     /// One dtype arm: transpose into a fresh buffer (previously this
     /// allocated with `zeros_on_device` — a full memset — and then
     /// overwrote every element).

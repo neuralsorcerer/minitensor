@@ -34,7 +34,7 @@ fn main() {
 
     println!("Execution plan created successfully!");
     println!(
-        "Estimated execution time: {:?}",
+        "Estimated execution time: {:?} (placeholder - the cost model is not implemented)",
         execution_plan.estimated_total_time
     );
     println!(

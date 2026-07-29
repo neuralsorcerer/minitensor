@@ -513,6 +513,54 @@ fn select_topk_entries<T>(
     }
 }
 
+/// Select the top-`k` entries of every 1-D slice along a dimension,
+/// parallelizing over the outer index.
+///
+/// Output is laid out `(outer, k, inner)`, so each outer position owns a
+/// disjoint `k * inner` span of both destinations and `par_chunks_mut` can hand
+/// them out without overlap — the same partitioning `sort_along_dim_par` uses.
+/// The scratch buffer of `(index, value)` pairs is allocated once per chunk
+/// rather than once per slice.
+#[allow(clippy::too_many_arguments)]
+fn topk_along_dim_par<T>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    k: usize,
+    sorted: bool,
+    compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+) where
+    T: Copy + Send + Sync,
+{
+    values
+        .par_chunks_mut(k * inner)
+        .zip(indices.par_chunks_mut(k * inner))
+        .enumerate()
+        .for_each(|(o, (vchunk, ichunk))| {
+            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+            for r in 0..inner {
+                entries.clear();
+                let base = o * outer_stride + r;
+                for d in 0..dim_size {
+                    entries.push((d, input[base + d * inner]));
+                }
+
+                select_topk_entries(&mut entries, k, sorted, compare);
+
+                // Output shape is (outer, k, inner); write row-major so a
+                // non-trailing reduction axis (inner > 1) lands correctly.
+                for (j, &(index, value)) in entries.iter().take(k).enumerate() {
+                    let off = j * inner + r;
+                    vchunk[off] = value;
+                    ichunk[off] = index as i64;
+                }
+            }
+        });
+}
+
 /// Return the top-``k`` values and their indices along ``dim``
 pub fn topk(
     tensor: &Tensor,
@@ -576,11 +624,6 @@ pub fn topk(
         return Ok((values, indices));
     }
 
-    let outer = if dims.is_empty() || axis == 0 {
-        1
-    } else {
-        dims[..axis].iter().product()
-    };
     let inner = if dims.is_empty() || axis + 1 >= dims.len() {
         1
     } else {
@@ -601,28 +644,18 @@ pub fn topk(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    let compare = if largest { cmp_f32_desc } else { cmp_f32_asc };
-                    select_topk_entries(&mut entries, k, sorted, compare);
-
-                    // Output shape is (outer, k, inner); write row-major so a
-                    // non-trailing reduction axis (inner > 1) lands correctly.
-                    for j in 0..k {
-                        let (index, value) = entries[j];
-                        let pos = o * k * inner + j * inner + r;
-                        values[pos] = value;
-                        indices[pos] = index as i64;
-                    }
-                }
-            }
+            let compare = if largest { cmp_f32_desc } else { cmp_f32_asc };
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                compare,
+            );
         }
         DataType::Float64 => {
             let input = tensor
@@ -636,28 +669,18 @@ pub fn topk(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    let compare = if largest { cmp_f64_desc } else { cmp_f64_asc };
-                    select_topk_entries(&mut entries, k, sorted, compare);
-
-                    // Output shape is (outer, k, inner); write row-major so a
-                    // non-trailing reduction axis (inner > 1) lands correctly.
-                    for j in 0..k {
-                        let (index, value) = entries[j];
-                        let pos = o * k * inner + j * inner + r;
-                        values[pos] = value;
-                        indices[pos] = index as i64;
-                    }
-                }
-            }
+            let compare = if largest { cmp_f64_desc } else { cmp_f64_asc };
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                compare,
+            );
         }
         DataType::Int32 => {
             let input = tensor
@@ -671,28 +694,18 @@ pub fn topk(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    let compare = if largest { cmp_i32_desc } else { cmp_i32_asc };
-                    select_topk_entries(&mut entries, k, sorted, compare);
-
-                    // Output shape is (outer, k, inner); write row-major so a
-                    // non-trailing reduction axis (inner > 1) lands correctly.
-                    for j in 0..k {
-                        let (index, value) = entries[j];
-                        let pos = o * k * inner + j * inner + r;
-                        values[pos] = value;
-                        indices[pos] = index as i64;
-                    }
-                }
-            }
+            let compare = if largest { cmp_i32_desc } else { cmp_i32_asc };
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                compare,
+            );
         }
         DataType::Int64 => {
             let input = tensor
@@ -706,28 +719,18 @@ pub fn topk(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    let compare = if largest { cmp_i64_desc } else { cmp_i64_asc };
-                    select_topk_entries(&mut entries, k, sorted, compare);
-
-                    // Output shape is (outer, k, inner); write row-major so a
-                    // non-trailing reduction axis (inner > 1) lands correctly.
-                    for j in 0..k {
-                        let (index, value) = entries[j];
-                        let pos = o * k * inner + j * inner + r;
-                        values[pos] = value;
-                        indices[pos] = index as i64;
-                    }
-                }
-            }
+            let compare = if largest { cmp_i64_desc } else { cmp_i64_asc };
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                compare,
+            );
         }
         DataType::Bool => {
             let input = tensor
@@ -741,28 +744,18 @@ pub fn topk(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            let mut entries = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    entries.clear();
-                    for d in 0..dim_size {
-                        let idx = o * outer_stride + d * inner + r;
-                        entries.push((d, input[idx]));
-                    }
-
-                    let compare = if largest { cmp_bool_desc } else { cmp_bool_asc };
-                    select_topk_entries(&mut entries, k, sorted, compare);
-
-                    // Output shape is (outer, k, inner); write row-major so a
-                    // non-trailing reduction axis (inner > 1) lands correctly.
-                    for j in 0..k {
-                        let (index, value) = entries[j];
-                        let pos = o * k * inner + j * inner + r;
-                        values[pos] = value;
-                        indices[pos] = index as i64;
-                    }
-                }
-            }
+            let compare = if largest { cmp_bool_desc } else { cmp_bool_asc };
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                compare,
+            );
         }
     }
 

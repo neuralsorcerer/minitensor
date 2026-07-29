@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 #[cfg(feature = "dynamic-loading")]
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 /// Version compatibility information for plugins
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,17 +89,45 @@ pub struct PluginInfo {
 }
 
 /// Trait that all plugins must implement
+///
+/// # Who registers custom operations
+///
+/// The [`PluginManager`] owns registration of everything
+/// [`custom_operations`](Plugin::custom_operations) returns: it registers those
+/// ops after [`initialize`](Plugin::initialize) succeeds, and unregisters them
+/// after [`cleanup`](Plugin::cleanup) on unload. Implementations must therefore
+/// **not** register or unregister their own `custom_operations()` — doing so
+/// makes loading fail with "Operation '…' is already registered".
 pub trait Plugin: Send + Sync {
     /// Get plugin information
     fn info(&self) -> &PluginInfo;
 
-    /// Initialize the plugin (called when loaded)
+    /// Initialize the plugin (called when loaded, before its custom operations
+    /// are registered)
+    ///
+    /// Use this for the plugin's own setup — opening handles, allocating
+    /// scratch state, validating the environment. `registry` is provided so a
+    /// plugin can inspect or add ops *beyond* the ones it declares in
+    /// [`custom_operations`](Plugin::custom_operations); registering those
+    /// declared ops here is a double registration (see the trait docs).
+    ///
+    /// Returning an error aborts the load: the plugin is not stored and none of
+    /// its declared operations are registered.
     fn initialize(&self, registry: &CustomOpRegistry) -> Result<()>;
 
-    /// Cleanup the plugin (called when unloaded)
+    /// Cleanup the plugin (called when unloaded, before its custom operations
+    /// are unregistered)
+    ///
+    /// Release whatever `initialize` acquired. The manager unregisters the
+    /// declared [`custom_operations`](Plugin::custom_operations) itself, so
+    /// this should only undo extra registrations the plugin made by hand.
     fn cleanup(&self, registry: &CustomOpRegistry) -> Result<()>;
 
     /// Get custom operations provided by this plugin
+    ///
+    /// Called by the manager on load to register them and on unload to
+    /// unregister them, so it must return the same set of operation names both
+    /// times.
     fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>>;
 
     /// Get custom layers provided by this plugin (optional)
@@ -108,10 +136,54 @@ pub trait Plugin: Send + Sync {
     }
 }
 
+/// A plugin loaded from a shared library, paired with the library itself.
+///
+/// A `dyn Plugin` from a shared library is a fat pointer whose vtable — and the
+/// code it points at — live inside that library, as do the `Arc<dyn CustomOp>`
+/// values it hands out. Dropping the `Library` unmaps all of it, so the library
+/// must outlive the plugin: keeping them together makes that automatic.
+///
+/// Field order is load-bearing. Fields drop in declaration order, so `plugin` is
+/// destroyed while its code is still mapped, and `_library` is unmapped only
+/// afterwards.
+#[cfg(feature = "dynamic-loading")]
+struct LibraryPlugin {
+    plugin: Box<dyn Plugin>,
+    _library: libloading::Library,
+}
+
+#[cfg(feature = "dynamic-loading")]
+impl Plugin for LibraryPlugin {
+    fn info(&self) -> &PluginInfo {
+        self.plugin.info()
+    }
+
+    fn initialize(&self, registry: &CustomOpRegistry) -> Result<()> {
+        self.plugin.initialize(registry)
+    }
+
+    fn cleanup(&self, registry: &CustomOpRegistry) -> Result<()> {
+        self.plugin.cleanup(registry)
+    }
+
+    fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
+        self.plugin.custom_operations()
+    }
+
+    fn custom_layers(&self) -> Vec<Box<dyn Layer>> {
+        self.plugin.custom_layers()
+    }
+}
+
 /// Plugin loading and management system
 pub struct PluginManager {
     loaded_plugins: RwLock<HashMap<String, Arc<dyn Plugin>>>,
     plugin_registry: Arc<CustomOpRegistry>,
+    /// Serializes loads against unloads. Both span several steps — check the
+    /// name, initialize, register ops, insert — that must not interleave, and
+    /// the map lock cannot cover them because plugin callbacks run in between.
+    /// Queries never take this, so they are not blocked by plugin code.
+    lifecycle_lock: Mutex<()>,
 }
 
 impl PluginManager {
@@ -120,7 +192,17 @@ impl PluginManager {
         Self {
             loaded_plugins: RwLock::new(HashMap::new()),
             plugin_registry: registry,
+            lifecycle_lock: Mutex::new(()),
         }
+    }
+
+    /// Take the load/unload lock, ignoring poisoning: it guards a critical
+    /// section rather than data, so a panic inside plugin code must not wedge
+    /// the manager for every later call.
+    fn lock_lifecycle(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lifecycle_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn install_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
@@ -145,6 +227,8 @@ impl PluginManager {
             )));
         }
 
+        let _lifecycle = self.lock_lifecycle();
+
         // Check for name conflicts
         {
             let plugins = self.loaded_plugins.read().map_err(|_| {
@@ -162,9 +246,19 @@ impl PluginManager {
         // Initialize the plugin
         plugin.initialize(&self.plugin_registry)?;
 
-        // Register custom operations
-        for op in plugin.custom_operations() {
-            self.plugin_registry.register(op)?;
+        // Register the operations the plugin declares. Failing part-way through
+        // — usually because one name is already taken — must not leave the
+        // earlier ops registered under a plugin that never loaded, so undo them
+        // and let the plugin release whatever `initialize` acquired.
+        let ops = plugin.custom_operations();
+        for (i, op) in ops.iter().enumerate() {
+            if let Err(err) = self.plugin_registry.register(Arc::clone(op)) {
+                for registered in &ops[..i] {
+                    let _ = self.plugin_registry.unregister(registered.name());
+                }
+                let _ = plugin.cleanup(&self.plugin_registry);
+                return Err(err);
+            }
         }
 
         // Store the plugin
@@ -180,6 +274,20 @@ impl PluginManager {
     }
 
     /// Load a plugin from a shared library file
+    ///
+    /// The library stays mapped for as long as the plugin is loaded and is
+    /// unmapped by [`unload_plugin`](Self::unload_plugin), so the plugin's code,
+    /// vtables and custom operations remain valid for its whole lifetime.
+    ///
+    /// # Safety and build requirements
+    ///
+    /// This is a safe function wrapping an inherently unchecked ABI. The plugin
+    /// must be built by the same Rust toolchain against the same version and
+    /// features of this crate, and must use the same global allocator, because
+    /// the plugin and the host exchange Rust values (`dyn Plugin` fat pointers,
+    /// `Arc<dyn CustomOp>`) that are allocated on one side and freed on the
+    /// other. Loading a library built differently is undefined behaviour that no
+    /// check here can detect.
     #[cfg(feature = "dynamic-loading")]
     pub fn load_plugin<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         use libloading::{Library, Symbol};
@@ -221,9 +329,17 @@ impl PluginManager {
             ));
         }
 
-        let plugin = unsafe { Arc::from_raw(plugin_ptr) };
+        // `create_plugin` hands back a pointer from `Box::into_raw`, so it must be
+        // reclaimed as a `Box`. (It is *not* an `Arc` allocation: reading a
+        // reference count in front of the value would be out of bounds.)
+        // SAFETY: the pointer is non-null and, per this function's build
+        // requirements, was produced by `Box::into_raw` in a matching build.
+        let plugin = unsafe { Box::from_raw(plugin_ptr) };
 
-        self.install_plugin(plugin)
+        self.install_plugin(Arc::new(LibraryPlugin {
+            plugin,
+            _library: lib,
+        }))
     }
 
     /// Register a plugin directly (for statically linked plugins)
@@ -233,6 +349,8 @@ impl PluginManager {
 
     /// Unload a plugin by name
     pub fn unload_plugin(&self, name: &str) -> Result<()> {
+        let _lifecycle = self.lock_lifecycle();
+
         let plugin = {
             let mut plugins = self.loaded_plugins.write().map_err(|_| {
                 MinitensorError::internal_error("Failed to acquire plugins write lock")
@@ -290,8 +408,12 @@ impl PluginManager {
 }
 
 /// Global plugin manager instance
+///
+/// Shares the process-wide custom operation registry: ops a plugin provides are
+/// only useful if `execute_custom_op` and the Python bindings can see them, so
+/// the manager must not have a registry of its own.
 static GLOBAL_PLUGIN_MANAGER: std::sync::LazyLock<PluginManager> =
-    std::sync::LazyLock::new(|| PluginManager::new(Arc::new(CustomOpRegistry::new())));
+    std::sync::LazyLock::new(|| PluginManager::new(crate::custom_ops::global_registry()));
 
 /// Load a plugin globally
 #[cfg(feature = "dynamic-loading")]
@@ -496,17 +618,29 @@ mod tests {
         format!("{prefix}_{id}")
     }
 
+    fn test_op(name: &str) -> Arc<dyn CustomOp> {
+        CustomOpBuilder::new(name, 1)
+            .forward(|inputs| Ok(inputs[0].clone()))
+            .build()
+            .unwrap()
+    }
+
     struct ConfigurablePlugin {
         info: PluginInfo,
         op_name: String,
+        /// Declared after `op_name`, so a collision here exercises rollback of
+        /// the ops the manager already registered for this plugin.
+        extra_op_names: Vec<String>,
         fail_initialize: bool,
         fail_cleanup: bool,
+        cleanup_calls: Arc<AtomicUsize>,
     }
 
     impl ConfigurablePlugin {
         fn with_name(name: String) -> Self {
             Self {
                 op_name: format!("{name}_op"),
+                extra_op_names: Vec::new(),
                 info: PluginInfo {
                     name,
                     version: VersionInfo::new(1, 0, 0),
@@ -517,6 +651,7 @@ mod tests {
                 },
                 fail_initialize: false,
                 fail_cleanup: false,
+                cleanup_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -534,6 +669,7 @@ mod tests {
         }
 
         fn cleanup(&self, _registry: &CustomOpRegistry) -> Result<()> {
+            self.cleanup_calls.fetch_add(1, Ordering::Relaxed);
             if self.fail_cleanup {
                 return Err(MinitensorError::plugin_error("cleanup failed"));
             }
@@ -541,12 +677,10 @@ mod tests {
         }
 
         fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
-            vec![
-                CustomOpBuilder::new(&self.op_name, 1)
-                    .forward(|inputs| Ok(inputs[0].clone()))
-                    .build()
-                    .unwrap(),
-            ]
+            std::iter::once(&self.op_name)
+                .chain(self.extra_op_names.iter())
+                .map(|name| test_op(name))
+                .collect()
         }
     }
 
@@ -623,6 +757,117 @@ mod tests {
     }
 
     #[test]
+    fn test_register_plugin_rolls_back_partially_registered_operations() {
+        // A plugin declaring several ops must not leave the ones registered
+        // before the failing one behind: the plugin did not load, so nothing of
+        // it may stay in the op registry.
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry.clone());
+
+        let taken_op_name = unique_plugin_name("already_taken_op");
+        registry.register(test_op(&taken_op_name)).unwrap();
+
+        let mut plugin = ConfigurablePlugin::with_name(unique_plugin_name("rollback"));
+        plugin.extra_op_names = vec![taken_op_name.clone()];
+
+        let name = plugin.info.name.clone();
+        let first_op_name = plugin.op_name.clone();
+        let cleanup_calls = Arc::clone(&plugin.cleanup_calls);
+
+        let result = manager.register_plugin(Arc::new(plugin));
+        assert!(result.is_err());
+        assert!(!manager.is_plugin_loaded(&name).unwrap());
+        assert!(
+            registry.get(&first_op_name).is_err(),
+            "the op registered before the collision must be rolled back"
+        );
+        // `initialize` succeeded, so the plugin is given the chance to undo it.
+        assert_eq!(cleanup_calls.load(Ordering::Relaxed), 1);
+        // The pre-existing op belongs to someone else and must survive.
+        assert!(registry.get(&taken_op_name).is_ok());
+
+        registry.unregister(&taken_op_name).unwrap();
+    }
+
+    #[test]
+    fn test_manager_owns_registration_of_declared_operations() {
+        // The documented contract: a plugin returns its ops from
+        // `custom_operations()` and the manager registers them on load and
+        // unregisters them on unload. A plugin that also registered them itself
+        // would collide, so this is what plugin authors must rely on.
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry.clone());
+
+        let mut plugin = ConfigurablePlugin::with_name(unique_plugin_name("owned"));
+        let second_op_name = unique_plugin_name("owned_second_op");
+        plugin.extra_op_names = vec![second_op_name.clone()];
+
+        let name = plugin.info.name.clone();
+        let first_op_name = plugin.op_name.clone();
+
+        manager.register_plugin(Arc::new(plugin)).unwrap();
+        assert!(registry.get(&first_op_name).is_ok());
+        assert!(registry.get(&second_op_name).is_ok());
+
+        manager.unload_plugin(&name).unwrap();
+        assert!(registry.get(&first_op_name).is_err());
+        assert!(registry.get(&second_op_name).is_err());
+    }
+
+    #[test]
+    fn test_initialize_may_register_undeclared_operations() {
+        // `initialize` receives the registry so a plugin can add ops it does not
+        // declare. Those are the plugin's own responsibility — the manager never
+        // touches them — so loading must not collide with them.
+        struct InitRegisteringPlugin {
+            info: PluginInfo,
+            undeclared_op_name: String,
+        }
+
+        impl Plugin for InitRegisteringPlugin {
+            fn info(&self) -> &PluginInfo {
+                &self.info
+            }
+
+            fn initialize(&self, registry: &CustomOpRegistry) -> Result<()> {
+                registry.register(test_op(&self.undeclared_op_name))
+            }
+
+            fn cleanup(&self, registry: &CustomOpRegistry) -> Result<()> {
+                registry.unregister(&self.undeclared_op_name)
+            }
+
+            fn custom_operations(&self) -> Vec<Arc<dyn CustomOp>> {
+                Vec::new()
+            }
+        }
+
+        let registry = Arc::new(CustomOpRegistry::new());
+        let manager = PluginManager::new(registry.clone());
+
+        let name = unique_plugin_name("init_registers");
+        let undeclared_op_name = format!("{name}_undeclared");
+        let plugin = InitRegisteringPlugin {
+            info: PluginInfo {
+                name: name.clone(),
+                version: VersionInfo::new(1, 0, 0),
+                description: "Registers an undeclared op during initialize".to_string(),
+                author: "Test Author".to_string(),
+                min_minitensor_version: VersionInfo::new(0, 1, 0),
+                max_minitensor_version: None,
+            },
+            undeclared_op_name: undeclared_op_name.clone(),
+        };
+
+        manager.register_plugin(Arc::new(plugin)).unwrap();
+        assert!(manager.is_plugin_loaded(&name).unwrap());
+        assert!(registry.get(&undeclared_op_name).is_ok());
+
+        manager.unload_plugin(&name).unwrap();
+        assert!(registry.get(&undeclared_op_name).is_err());
+    }
+
+    #[test]
     fn test_global_plugin_functions_register_query_and_unload() {
         let name = unique_plugin_name("global_plugin");
         let plugin = Arc::new(ConfigurablePlugin::with_name(name.clone()));
@@ -635,5 +880,26 @@ mod tests {
 
         unload_plugin(&name).unwrap();
         assert!(!is_plugin_loaded(&name).unwrap());
+    }
+
+    #[test]
+    fn test_global_plugin_operations_reach_the_global_custom_op_registry() {
+        // A plugin's operations are only useful if `execute_custom_op` and the
+        // Python bindings can see them, so the global manager has to share the
+        // process-wide registry instead of owning a private one.
+        let name = unique_plugin_name("shared_registry");
+        let plugin = ConfigurablePlugin::with_name(name.clone());
+        let op_name = plugin.op_name.clone();
+
+        register_plugin(Arc::new(plugin)).unwrap();
+        assert!(crate::custom_ops::is_custom_op_registered(&op_name).unwrap());
+        assert!(
+            crate::custom_ops::list_custom_ops()
+                .unwrap()
+                .contains(&op_name)
+        );
+
+        unload_plugin(&name).unwrap();
+        assert!(!crate::custom_ops::is_custom_op_registered(&op_name).unwrap());
     }
 }

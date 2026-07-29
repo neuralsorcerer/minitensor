@@ -22,6 +22,63 @@ jobs:
         with:
           extra_args: --all-files
 
+  # The `clippy` job below only covers the default feature set, so the optional
+  # backends and the minimal build rot unnoticed: `--features cuda` had already
+  # accumulated failures nobody would see without enabling it.
+  #
+  # Two features are missing here on purpose. `blas` needs a system OpenBLAS.
+  # `metal` links an Apple-only framework, so it can only be built on a macOS
+  # runner and has never been compiled by CI — adding it belongs in
+  # test_macos.yml, but it should be enabled by someone who can confirm the
+  # backend still builds against the current `metal` crate first.
+  features:
+    name: clippy (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: no-default-features
+            args: --no-default-features --features cpu
+          - label: cuda
+            args: --features cuda
+          - label: opencl
+            args: --features opencl
+          - label: dynamic-loading
+            args: --features dynamic-loading
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}
+      - name: Run clippy (deny warnings)
+        run: cargo clippy -p engine --all-targets ${{ matrix.args }} -- -D warnings
+
+  # examples/rust_plugin_example is its own workspace, so neither the
+  # `cargo fmt --all` / `cargo clippy` in pre-commit nor the workspace clippy
+  # job below ever looked at it. It had drifted out of rustfmt compliance and
+  # failed `-D warnings`.
+  plugin-example:
+    name: plugin example
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/rust_plugin_example
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/rust_plugin_example
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   clippy:
     runs-on: ubuntu-latest
     steps:

@@ -13,6 +13,68 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+/// Perform 1D convolution on the input tensor.
+///
+/// # Arguments
+/// * `input` - Input tensor of shape `[N, C_in, L]`
+/// * `weight` - Convolution kernel of shape `[C_out, C_in, K]`
+/// * `bias` - Optional bias tensor of shape `[C_out]`
+/// * `stride` - Stride of the convolution
+/// * `padding` - Zero padding added to both ends of the input
+///
+/// Implemented by giving the signal a singleton height and deferring to
+/// [`conv2d`]. A dedicated kernel would avoid the two reshapes, but it would
+/// also duplicate the windowing arithmetic and its backward pass — the part
+/// most likely to be got wrong — for no behavioural gain. The reshapes are
+/// themselves autograd-aware, so gradients flow without any new plumbing.
+///
+/// Inherits `conv2d`'s restriction to Float32 CPU tensors.
+pub fn conv1d(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: usize,
+    padding: usize,
+) -> Result<Tensor> {
+    if input.ndim() != 3 {
+        return Err(MinitensorError::invalid_operation(
+            "conv1d expects 3D input tensor [N, C_in, L]",
+        ));
+    }
+    if weight.ndim() != 3 {
+        return Err(MinitensorError::invalid_operation(
+            "conv1d expects 3D weight tensor [C_out, C_in, K]",
+        ));
+    }
+    // Checked here rather than left to `conv2d`, whose message would name an
+    // operation the caller never invoked.
+    if input.dtype() != DataType::Float32 {
+        return Err(MinitensorError::invalid_operation(
+            "conv1d is implemented only for Float32 CPU tensors",
+        ));
+    }
+
+    let input_dims = input.shape().dims().to_vec();
+    let weight_dims = weight.shape().dims().to_vec();
+
+    let input_2d = input.reshape(Shape::new(vec![
+        input_dims[0],
+        input_dims[1],
+        1,
+        input_dims[2],
+    ]))?;
+    let weight_2d = weight.reshape(Shape::new(vec![
+        weight_dims[0],
+        weight_dims[1],
+        1,
+        weight_dims[2],
+    ]))?;
+
+    let output = conv2d(&input_2d, &weight_2d, bias, (1, stride), (0, padding))?;
+    let out_dims = output.shape().dims().to_vec();
+    output.reshape(Shape::new(vec![out_dims[0], out_dims[1], out_dims[3]]))
+}
+
 /// Perform 2D convolution on the input tensor.
 ///
 /// # Arguments

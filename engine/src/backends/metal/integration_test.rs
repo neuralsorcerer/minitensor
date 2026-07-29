@@ -25,7 +25,7 @@ mod tests {
             let backend = backend.unwrap();
             assert!(backend.device().is_gpu());
             assert_eq!(
-                backend.device().device_type,
+                backend.device().device_type(),
                 crate::device::DeviceType::Metal
             );
         }
@@ -284,7 +284,9 @@ mod tests {
                 return;
             }
 
-            let ops = ops.unwrap();
+            // Unwrapped to assert construction succeeded; unlike the other
+            // cases in this file the value itself is not used below.
+            let _ops = ops.unwrap();
 
             // Test optimal thread group size calculation
             if let Some(pipeline) = backend.get_compute_pipeline("add_kernel") {

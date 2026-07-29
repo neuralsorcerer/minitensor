@@ -33,8 +33,9 @@ pub mod tensor;
 // Re-export core types
 pub use autograd::{ComputationGraph, GradientFunction};
 pub use custom_ops::{
-    CustomOp, CustomOpBuilder, CustomOpRegistry, execute_custom_op, is_custom_op_registered,
-    list_custom_ops, register_custom_op, unregister_custom_op,
+    BackwardContext, CustomOp, CustomOpBuilder, CustomOpRegistry, execute_custom_op,
+    is_custom_op_registered, list_custom_ops, register_custom_op, register_custom_op_if_absent,
+    unregister_custom_op,
 };
 #[cfg(feature = "debug")]
 pub use debug::{
@@ -52,6 +53,11 @@ pub use plugins::{
     Plugin, PluginInfo, PluginManager, VersionInfo, get_plugin_info, is_plugin_loaded,
     list_plugins, register_plugin, unload_plugin,
 };
+// Only exists when `libloading` is pulled in. Its absence from this list is why
+// `bindings` could not compile with plugin loading enabled: that crate imports
+// `engine::load_plugin`, which resolved to nothing at the crate root.
+#[cfg(feature = "dynamic-loading")]
+pub use plugins::load_plugin;
 pub use random::manual_seed;
 pub use serialization::{
     DeploymentModel, ModelMetadata, ModelSerializer, ModelVersion, SerializationFormat,

@@ -18,6 +18,11 @@ pub struct MemoryInfo {
     pub cache_info: Vec<CacheInfo>,
 }
 
+/// Bytes per cache line on every architecture minitensor targets. A single
+/// byte touched pulls the whole line across the bus, so line-granular access
+/// patterns are billed for the full line.
+const CACHE_LINE_BYTES: usize = 64;
+
 /// Memory bandwidth measurements
 #[derive(Debug, Clone)]
 pub struct MemoryBandwidth {
@@ -275,7 +280,20 @@ impl MemoryInfo {
 }
 
 impl MemoryBandwidth {
-    /// Benchmark memory bandwidth
+    /// Benchmark memory bandwidth.
+    ///
+    /// Every loop below is written to survive optimization. The previous
+    /// versions allocated `vec![0u8; size]` and summed it: LLVM knows the
+    /// allocation is all zeros, folded each load to a constant, and deleted
+    /// the loop — `black_box` on the *result* only forces the final value to
+    /// exist, not the work that produced it. All five benchmarks consequently
+    /// timed an empty loop and reported ~10^6 GiB/s, which then fed
+    /// `PerformanceCharacteristics::memory_throughput` and the execution plans
+    /// `ResourceOptimizer` builds from it.
+    ///
+    /// The fixes: fill buffers with values the compiler cannot predict, and
+    /// pass the buffer itself through `black_box` before each timed loop so
+    /// its contents (and the address) are opaque.
     pub fn benchmark() -> Self {
         let test_size = 64 * 1024 * 1024; // 64MB test buffer
 
@@ -288,24 +306,39 @@ impl MemoryBandwidth {
         }
     }
 
+    /// A buffer whose contents the optimizer cannot constant-fold.
+    fn opaque_buffer(size: usize) -> Vec<u8> {
+        let mut buffer: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        std::hint::black_box(&mut buffer);
+        buffer
+    }
+
+    /// Convert a measured duration into GiB/s, guarding the degenerate case
+    /// where the clock reports no elapsed time at all.
+    fn to_gib_per_second(bytes: usize, avg_time: f64) -> f64 {
+        if avg_time <= 0.0 {
+            return 0.0;
+        }
+        (bytes as f64 / avg_time) / (1024.0 * 1024.0 * 1024.0)
+    }
+
     fn benchmark_sequential_read(size: usize) -> f64 {
-        let buffer = vec![0u8; size];
+        let buffer = Self::opaque_buffer(size);
         let iterations = 10;
         let mut total_time = Duration::ZERO;
 
         for _ in 0..iterations {
+            // Re-opaque each round so the loop cannot be hoisted out of the
+            // repetition either.
+            let buffer = std::hint::black_box(&buffer);
             let start = Instant::now();
 
-            // Sequential read benchmark using u64 chunks for efficiency
             let mut sum = 0u64;
-            let chunks = size / 8;
-            let ptr = buffer.as_ptr() as *const u64;
-            for i in 0..chunks {
-                unsafe {
-                    sum = sum.wrapping_add(*ptr.add(i));
-                }
+            for chunk in buffer.chunks_exact(8) {
+                let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+                sum = sum.wrapping_add(word);
             }
-            for &b in &buffer[chunks * 8..] {
+            for &b in buffer.chunks_exact(8).remainder() {
                 sum = sum.wrapping_add(b as u64);
             }
 
@@ -313,103 +346,102 @@ impl MemoryBandwidth {
             total_time += start.elapsed();
         }
 
-        let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let bytes_per_second = size as f64 / avg_time;
-        bytes_per_second / (1024.0 * 1024.0 * 1024.0)
+        Self::to_gib_per_second(size, total_time.as_secs_f64() / iterations as f64)
     }
 
     fn benchmark_sequential_write(size: usize) -> f64 {
-        let mut buffer = vec![0u8; size];
+        let mut buffer = Self::opaque_buffer(size);
         let iterations = 10;
         let mut total_time = Duration::ZERO;
 
-        for _ in 0..iterations {
+        for round in 0..iterations {
+            let buffer = std::hint::black_box(&mut buffer);
             let start = Instant::now();
 
-            // Sequential write benchmark using raw pointer writes
-            let ptr = buffer.as_mut_ptr();
-            for i in 0..size {
-                unsafe {
-                    *ptr.add(i) = (i % 256) as u8;
-                }
+            let seed = round as u8;
+            for (i, slot) in buffer.iter_mut().enumerate() {
+                *slot = (i as u8).wrapping_add(seed);
             }
 
             total_time += start.elapsed();
+            // Consume the buffer so the stores cannot be dropped as dead.
+            std::hint::black_box(&buffer);
         }
 
-        let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let bytes_per_second = size as f64 / avg_time;
-        bytes_per_second / (1024.0 * 1024.0 * 1024.0)
+        Self::to_gib_per_second(size, total_time.as_secs_f64() / iterations as f64)
     }
 
     fn benchmark_random_read(size: usize) -> f64 {
-        let buffer = vec![0u8; size];
+        let buffer = Self::opaque_buffer(size);
         let iterations = 10;
         let mut total_time = Duration::ZERO;
+        // One byte per cache line: the line is what actually crosses the bus,
+        // so the byte count below counts whole lines.
+        let accesses = size.div_ceil(CACHE_LINE_BYTES);
 
         for _ in 0..iterations {
+            let buffer = std::hint::black_box(&buffer);
             let start = Instant::now();
 
             let mut sum = 0u64;
-            for idx in (0..size).step_by(64) {
-                unsafe {
-                    sum = sum.wrapping_add(*buffer.get_unchecked(idx) as u64);
-                }
+            for idx in (0..size).step_by(CACHE_LINE_BYTES) {
+                sum = sum.wrapping_add(buffer[idx] as u64);
             }
 
             std::hint::black_box(sum);
             total_time += start.elapsed();
         }
 
-        let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let accesses = size.div_ceil(64);
-        let bytes_per_second = (accesses * 64) as f64 / avg_time;
-        bytes_per_second / (1024.0 * 1024.0 * 1024.0)
+        Self::to_gib_per_second(
+            accesses * CACHE_LINE_BYTES,
+            total_time.as_secs_f64() / iterations as f64,
+        )
     }
 
     fn benchmark_random_write(size: usize) -> f64 {
-        let mut buffer = vec![0u8; size];
+        let mut buffer = Self::opaque_buffer(size);
         let iterations = 10;
         let mut total_time = Duration::ZERO;
+        let accesses = size.div_ceil(CACHE_LINE_BYTES);
 
-        for _ in 0..iterations {
+        for round in 0..iterations {
+            let buffer = std::hint::black_box(&mut buffer);
             let start = Instant::now();
 
-            for (i, idx) in (0..size).step_by(64).enumerate() {
-                unsafe {
-                    *buffer.get_unchecked_mut(idx) = (i % 256) as u8;
-                }
+            let seed = round as u8;
+            for (i, idx) in (0..size).step_by(CACHE_LINE_BYTES).enumerate() {
+                buffer[idx] = (i as u8).wrapping_add(seed);
             }
 
             total_time += start.elapsed();
+            std::hint::black_box(&buffer);
         }
 
-        let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let accesses = size.div_ceil(64);
-        let bytes_per_second = (accesses * 64) as f64 / avg_time;
-        bytes_per_second / (1024.0 * 1024.0 * 1024.0)
+        Self::to_gib_per_second(
+            accesses * CACHE_LINE_BYTES,
+            total_time.as_secs_f64() / iterations as f64,
+        )
     }
 
     fn benchmark_copy(size: usize) -> f64 {
-        let src = vec![1u8; size];
+        let src = Self::opaque_buffer(size);
         let mut dst = vec![0u8; size];
         let iterations = 10;
         let mut total_time = Duration::ZERO;
 
         for _ in 0..iterations {
+            let src = std::hint::black_box(&src);
+            let dst = std::hint::black_box(&mut dst);
             let start = Instant::now();
 
-            // Memory copy benchmark
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), size);
-            }
+            dst.copy_from_slice(src);
 
             total_time += start.elapsed();
+            std::hint::black_box(&dst);
         }
 
-        let avg_time = total_time.as_secs_f64() / iterations as f64;
-        let bytes_per_second = (size * 2) as f64 / avg_time;
-        bytes_per_second / (1024.0 * 1024.0 * 1024.0)
+        // A copy moves each byte twice: once read, once written.
+        Self::to_gib_per_second(size * 2, total_time.as_secs_f64() / iterations as f64)
     }
 
     /// Get the effective bandwidth for a given access pattern
@@ -482,11 +514,27 @@ mod tests {
     #[test]
     fn test_memory_bandwidth_benchmark() {
         let bandwidth = MemoryBandwidth::benchmark();
-        assert!(bandwidth.sequential_read > 0.0);
-        assert!(bandwidth.random_read > 0.0);
-        assert!(bandwidth.sequential_write > 0.0);
-        assert!(bandwidth.random_write > 0.0);
-        assert!(bandwidth.copy_bandwidth > 0.0);
+        // A bare `> 0.0` check passed even when every loop was optimized away
+        // and the benchmarks reported ~10^6 GiB/s, so the upper bound is the
+        // assertion that matters: no machine reaches 100 TiB/s of main-memory
+        // bandwidth, and anything above it means the work was eliminated
+        // rather than measured. The lower bound only rules out a zero or
+        // negative result (a broken clock, or a division by a zero duration) —
+        // it deliberately does not assert a floor, because these loops are
+        // byte-at-a-time and an unoptimized `cargo test` build legitimately
+        // measures well under 0.1 GiB/s.
+        for (name, value) in [
+            ("sequential_read", bandwidth.sequential_read),
+            ("sequential_write", bandwidth.sequential_write),
+            ("random_read", bandwidth.random_read),
+            ("random_write", bandwidth.random_write),
+            ("copy", bandwidth.copy_bandwidth),
+        ] {
+            assert!(
+                value.is_finite() && value > 0.0 && value < 100_000.0,
+                "{name} bandwidth is implausible: {value} GiB/s"
+            );
+        }
     }
 
     #[test]

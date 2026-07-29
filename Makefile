@@ -1,6 +1,7 @@
 # Makefile for minitensor development
 
-.PHONY: help install build test lint clean dev-install release check-deps
+.PHONY: help check-deps dev-install install build build-release test test-rust \
+        test-python lint format clean release check-deps-security benchmark dev ci
 
 # Default target
 help:
@@ -16,8 +17,9 @@ help:
 	@echo "  clean        - Clean build artifacts"
 	@echo "  dev-install  - Install development dependencies"
 	@echo "  release      - Build release packages"
-	@echo "  check-deps   - Check for security vulnerabilities"
-	@echo "  benchmark    - Run performance benchmarks"
+	@echo "  check-deps   - Verify cargo/python/maturin are installed"
+	@echo "  check-deps-security - Audit dependencies for advisories"
+	@echo "  benchmark    - Run the bundled performance benchmark"
 
 # Check if required tools are installed
 check-deps:
@@ -85,25 +87,15 @@ check-deps-security:
 	cargo audit
 	pip-audit || echo "pip-audit not available, skipping Python security check"
 
-# Run benchmarks
+# Run the bundled benchmark (examples/performance_benchmark.py). There is no
+# `benchmarks/` directory; this target used to point at one and so always
+# reported "No benchmarks found", including via the `make benchmark` line in
+# docs/performance.md.
 benchmark: install
-	python -m pytest benchmarks/ --benchmark-only || echo "No benchmarks found"
+	python examples/performance_benchmark.py
 
 # Quick development cycle
 dev: format lint test
 
 # CI simulation
 ci: check-deps lint test
-
-# Version management
-version-current:
-	python scripts/version.py --current
-
-version-bump-patch:
-	python scripts/version.py --bump patch
-
-version-bump-minor:
-	python scripts/version.py --bump minor
-
-version-bump-major:
-	python scripts/version.py --bump major

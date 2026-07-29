@@ -812,6 +812,182 @@ def test_bce_loss_positive():
     assert float(loss.numpy().ravel()[0]) > 0
 
 
+def _bce_logits_ref(x, t, w=1.0):
+    """Stable reference: (1-t)*x + (1+(w-1)*t) * -log(sigmoid(x))."""
+    return (1.0 - t) * x + (1.0 + (w - 1.0) * t) * (
+        math.log1p(math.exp(-abs(x))) + max(-x, 0.0)
+    )
+
+
+@pytest.mark.parametrize(
+    "logit", [-100.0, -50.0, -30.0, -8.0, -1.0, 0.0, 1.0, 30.0, 100.0]
+)
+@pytest.mark.parametrize("target", [0.0, 1.0, 0.3])
+def test_bce_with_logits_matches_reference(logit, target):
+    x = mt.Tensor([[logit]], requires_grad=True)
+    loss = F.binary_cross_entropy_with_logits(x, mt.Tensor([[target]]), reduction="sum")
+    expected = _bce_logits_ref(logit, target)
+    np.testing.assert_allclose(loss.numpy().ravel()[0], expected, rtol=1e-5, atol=1e-6)
+
+    # d/dx = sigmoid(x) - target, exact at every magnitude.
+    loss.backward()
+    sigmoid = (
+        1.0 / (1.0 + math.exp(-logit))
+        if logit >= 0
+        else (math.exp(logit) / (1.0 + math.exp(logit)))
+    )
+    np.testing.assert_allclose(
+        x.grad.numpy().ravel()[0], sigmoid - target, rtol=1e-5, atol=1e-7
+    )
+    mt.clear_autograd_graph()
+
+
+@pytest.mark.parametrize("logit", [-30.0, -50.0, -100.0])
+def test_bce_with_logits_keeps_gradient_where_sigmoid_bce_loses_it(logit):
+    """The reason this loss exists.
+
+    A large negative logit against a target of 1 is a confident, completely
+    wrong prediction, and should produce the strongest gradient the loss can
+    give: -1. Computing sigmoid first lets it round to 0 in f32, and the
+    gradient collapses -- at -30 the two-step path returns about -0.09, and
+    past -50 exactly 0, so the example stops contributing anything.
+    """
+    fused = mt.Tensor([[logit]], requires_grad=True)
+    F.binary_cross_entropy_with_logits(
+        fused, mt.Tensor([[1.0]]), reduction="sum"
+    ).backward()
+    np.testing.assert_allclose(fused.grad.numpy().ravel()[0], -1.0, atol=1e-6)
+    mt.clear_autograd_graph()
+
+    split = mt.Tensor([[logit]], requires_grad=True)
+    F.binary_cross_entropy(
+        F.sigmoid(split), mt.Tensor([[1.0]]), reduction="sum"
+    ).backward()
+    assert abs(split.grad.numpy().ravel()[0]) < 0.5, (
+        "sigmoid+BCE unexpectedly kept its gradient; if that path was fixed, "
+        "this test no longer demonstrates anything and should be revisited"
+    )
+    mt.clear_autograd_graph()
+
+
+def test_bce_with_logits_agrees_with_sigmoid_bce_when_well_conditioned():
+    # Where the two-step path is still numerically valid the two must agree.
+    logits = np.linspace(-6.0, 6.0, 25).astype(np.float32).reshape(-1, 1)
+    targets = np.tile([[0.0], [1.0]], (13, 1))[:25].astype(np.float32)
+
+    fused = mt.Tensor(logits, requires_grad=True)
+    fused_loss = F.binary_cross_entropy_with_logits(fused, mt.Tensor(targets))
+    fused_loss.backward()
+    fused_grad = fused.grad.numpy().copy()
+    mt.clear_autograd_graph()
+
+    split = mt.Tensor(logits, requires_grad=True)
+    split_loss = F.binary_cross_entropy(F.sigmoid(split), mt.Tensor(targets))
+    split_loss.backward()
+
+    np.testing.assert_allclose(
+        fused_loss.numpy(), split_loss.numpy(), rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(fused_grad, split.grad.numpy(), rtol=1e-4, atol=1e-6)
+    mt.clear_autograd_graph()
+
+
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_bce_with_logits_pos_weight_broadcasts_over_columns(reduction):
+    logits = [[-2.0, 0.5, 3.0], [1.0, -1.5, 0.0]]
+    targets = [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+    pos_weight = [0.5, 2.0, 3.0]  # one per column, broadcast across rows
+
+    out = F.binary_cross_entropy_with_logits(
+        mt.Tensor(logits), mt.Tensor(targets), mt.Tensor(pos_weight), reduction
+    ).numpy()
+
+    per_element = np.array(
+        [
+            [
+                _bce_logits_ref(logits[i][j], targets[i][j], pos_weight[j])
+                for j in range(3)
+            ]
+            for i in range(2)
+        ]
+    )
+    expected = {
+        "none": per_element,
+        "sum": per_element.sum(),
+        "mean": per_element.mean(),
+    }[reduction]
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_bce_with_logits_pos_weight_gradcheck():
+    logits = [[-2.0, 0.5, 3.0], [1.0, -1.5, 0.0]]
+    targets = [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+    pos_weight = [0.5, 2.0, 3.0]
+
+    x = mt.Tensor(logits, requires_grad=True)
+    F.binary_cross_entropy_with_logits(
+        x, mt.Tensor(targets), mt.Tensor(pos_weight), "mean"
+    ).backward()
+    analytic = x.grad.numpy()
+    mt.clear_autograd_graph()
+
+    def loss_at(values):
+        return F.binary_cross_entropy_with_logits(
+            mt.Tensor(values), mt.Tensor(targets), mt.Tensor(pos_weight), "mean"
+        ).numpy()
+
+    h = 1e-3
+    for i in range(2):
+        for j in range(3):
+            plus = [row[:] for row in logits]
+            plus[i][j] += h
+            minus = [row[:] for row in logits]
+            minus[i][j] -= h
+            central = (loss_at(plus) - loss_at(minus)) / (2 * h)
+            # 1e-4: the difference of two f32 means cannot resolve finer.
+            np.testing.assert_allclose(analytic[i][j], central, atol=1e-4)
+
+
+def test_bce_with_logits_pos_weight_one_matches_unweighted():
+    logits = mt.Tensor([[-2.0, 0.5], [3.0, -1.0]])
+    targets = mt.Tensor([[1.0, 0.0], [1.0, 1.0]])
+    plain = F.binary_cross_entropy_with_logits(logits, targets)
+    weighted = F.binary_cross_entropy_with_logits(
+        logits, targets, mt.Tensor([1.0, 1.0])
+    )
+    np.testing.assert_allclose(plain.numpy(), weighted.numpy(), rtol=1e-6)
+
+
+def test_bce_with_logits_module_and_repr():
+    logits = mt.Tensor([[0.4], [-0.7]])
+    targets = mt.Tensor([[1.0], [0.0]])
+    module = nn.BCEWithLogitsLoss()
+    assert module.reduction == "mean"
+    assert repr(module) == "BCEWithLogitsLoss(reduction='mean')"
+    assert module.pos_weight is None
+    np.testing.assert_allclose(
+        module(logits, targets).numpy(),
+        F.binary_cross_entropy_with_logits(logits, targets).numpy(),
+        rtol=1e-6,
+    )
+
+    weighted = nn.BCEWithLogitsLoss("sum", mt.Tensor([2.0]))
+    assert weighted.pos_weight is not None
+    assert repr(weighted) == "BCEWithLogitsLoss(reduction='sum', pos_weight=...)"
+
+
+def test_bce_with_logits_rejects_bad_inputs():
+    logits = mt.Tensor([[0.4], [-0.7]])
+    targets = mt.Tensor([[1.0], [0.0]])
+    with pytest.raises(Exception):
+        F.binary_cross_entropy_with_logits(logits, targets, reduction="median")
+    with pytest.raises(Exception):
+        F.binary_cross_entropy_with_logits(logits, mt.Tensor([[1.0, 0.0]]))
+    with pytest.raises(Exception):
+        # pos_weight of length 3 cannot broadcast against a width-1 logit
+        F.binary_cross_entropy_with_logits(logits, targets, mt.Tensor([1.0, 2.0, 3.0]))
+
+
 def test_conv2d_basic():
     x = Tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
     w = Tensor([[[[1.0]]]])

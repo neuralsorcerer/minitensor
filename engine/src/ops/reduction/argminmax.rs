@@ -147,6 +147,71 @@ pub(crate) fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Re
     ))
 }
 
+/// Inclusive scan of `input` into `output` along one dimension.
+///
+/// A row-major tensor factors into `outer` independent slabs of
+/// `dim_size * inner` elements; within a slab, position `d` along the scanned
+/// dimension owns the contiguous run `[d * inner, (d + 1) * inner)`. Scanning
+/// therefore reduces to `dim_size` contiguous vector steps per slab, and the
+/// slabs parallelise cleanly because they are disjoint.
+///
+/// This replaces three hand-rolled variants per operation (1-D, 2-D, N-D) that
+/// walked the scanned dimension with stride `inner` — one rayon task per
+/// output *column*, writing through a pointer laundered as `usize` to cross
+/// the closure boundary. The single-element strided writes were also the
+/// worst possible access pattern for the leading-dimension case.
+///
+/// `reverse` scans from the last index toward the first (the `cumsum`
+/// backward pass).
+fn scan_along_dim<T, F>(
+    output: &mut [T],
+    input: &[T],
+    dim_size: usize,
+    inner: usize,
+    reverse: bool,
+    combine: F,
+) where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> T + Send + Sync,
+{
+    let slab = dim_size * inner;
+    if slab == 0 {
+        return;
+    }
+    debug_assert_eq!(output.len(), input.len());
+    debug_assert_eq!(output.len() % slab, 0);
+
+    let run = |out: &mut [T], inp: &[T]| {
+        if reverse {
+            let last = (dim_size - 1) * inner;
+            out[last..].copy_from_slice(&inp[last..]);
+            for d in (0..dim_size.saturating_sub(1)).rev() {
+                let (cur, next) = out[d * inner..(d + 2) * inner].split_at_mut(inner);
+                for i in 0..inner {
+                    cur[i] = combine(next[i], inp[d * inner + i]);
+                }
+            }
+        } else {
+            out[..inner].copy_from_slice(&inp[..inner]);
+            for d in 1..dim_size {
+                let (prev, cur) = out[(d - 1) * inner..(d + 1) * inner].split_at_mut(inner);
+                for i in 0..inner {
+                    cur[i] = combine(prev[i], inp[d * inner + i]);
+                }
+            }
+        }
+    };
+
+    if output.len() == slab {
+        run(output, input);
+    } else {
+        output
+            .par_chunks_mut(slab)
+            .zip(input.par_chunks(slab))
+            .for_each(|(out_slab, in_slab)| run(out_slab, in_slab));
+    }
+}
+
 macro_rules! cumprod_forward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
         pub(crate) fn $name(
@@ -163,68 +228,20 @@ macro_rules! cumprod_forward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if tensor.ndim() == 1 {
-                if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-                }
-                let mut acc: $t = 1 as $t;
-                for i in 0..input_data.len() {
-                    acc *= input_data[i];
-                    output[i] = acc;
-                }
-            } else if tensor.ndim() == 2 {
-                let rows = shape[0];
-                let cols = shape[1];
-                match dim {
-                    0 => {
-                        let out_ptr = output.as_mut_ptr() as usize;
-                        (0..cols).into_par_iter().for_each(|c| {
-                            let out_ptr = out_ptr as *mut $t;
-                            let mut acc: $t = 1 as $t;
-                            for r in 0..rows {
-                                let idx = r * cols + c;
-                                acc *= input_data[idx];
-                                unsafe {
-                                    *out_ptr.add(idx) = acc;
-                                }
-                            }
-                        });
-                    }
-                    1 => {
-                        input_data
-                            .par_chunks_exact(cols)
-                            .zip(output.par_chunks_mut(cols))
-                            .for_each(|(in_row, out_row)| {
-                                let mut acc: $t = 1 as $t;
-                                for i in 0..cols {
-                                    acc *= in_row[i];
-                                    out_row[i] = acc;
-                                }
-                            });
-                    }
-                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
-                }
-            } else {
-                let dim_size = shape[dim];
-                let inner = shape[dim + 1..].iter().product::<usize>();
-                let outer = shape[..dim].iter().product::<usize>();
-                let total = outer * inner;
-                let out_ptr = output.as_mut_ptr() as usize;
-                (0..total).into_par_iter().for_each(|idx| {
-                    let out_ptr = out_ptr as *mut $t;
-                    let o = idx / inner;
-                    let r = idx % inner;
-                    let mut acc: $t = 1 as $t;
-                    let mut base = o * dim_size * inner + r;
-                    for _ in 0..dim_size {
-                        acc *= input_data[base];
-                        unsafe {
-                            *out_ptr.add(base) = acc;
-                        }
-                        base += inner;
-                    }
-                });
+            if dim >= tensor.ndim() {
+                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
             }
+
+            let dim_size = shape[dim];
+            let inner = shape[dim + 1..].iter().product::<usize>();
+            scan_along_dim(
+                output,
+                input_data,
+                dim_size,
+                inner,
+                false,
+                |acc: $t, v: $t| acc * v,
+            );
             Ok(())
         }
     };
@@ -497,68 +514,20 @@ macro_rules! cumsum_forward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if tensor.ndim() == 1 {
-                if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-                }
-                let mut acc: $t = 0 as $t;
-                for i in 0..input_data.len() {
-                    acc += input_data[i];
-                    output[i] = acc;
-                }
-            } else if tensor.ndim() == 2 {
-                let rows = shape[0];
-                let cols = shape[1];
-                match dim {
-                    0 => {
-                        let out_ptr = output.as_mut_ptr() as usize;
-                        (0..cols).into_par_iter().for_each(|c| {
-                            let out_ptr = out_ptr as *mut $t;
-                            let mut acc: $t = 0 as $t;
-                            for r in 0..rows {
-                                let idx = r * cols + c;
-                                acc += input_data[idx];
-                                unsafe {
-                                    *out_ptr.add(idx) = acc;
-                                }
-                            }
-                        });
-                    }
-                    1 => {
-                        input_data
-                            .par_chunks_exact(cols)
-                            .zip(output.par_chunks_mut(cols))
-                            .for_each(|(in_row, out_row)| {
-                                let mut acc: $t = 0 as $t;
-                                for i in 0..cols {
-                                    acc += in_row[i];
-                                    out_row[i] = acc;
-                                }
-                            });
-                    }
-                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
-                }
-            } else {
-                let dim_size = shape[dim];
-                let inner = shape[dim + 1..].iter().product::<usize>();
-                let outer = shape[..dim].iter().product::<usize>();
-                let total = outer * inner;
-                let out_ptr = output.as_mut_ptr() as usize;
-                (0..total).into_par_iter().for_each(|idx| {
-                    let out_ptr = out_ptr as *mut $t;
-                    let o = idx / inner;
-                    let r = idx % inner;
-                    let mut acc: $t = 0 as $t;
-                    let mut base = o * dim_size * inner + r;
-                    for _ in 0..dim_size {
-                        acc += input_data[base];
-                        unsafe {
-                            *out_ptr.add(base) = acc;
-                        }
-                        base += inner;
-                    }
-                });
+            if dim >= tensor.ndim() {
+                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
             }
+
+            let dim_size = shape[dim];
+            let inner = shape[dim + 1..].iter().product::<usize>();
+            scan_along_dim(
+                output,
+                input_data,
+                dim_size,
+                inner,
+                false,
+                |acc: $t, v: $t| acc + v,
+            );
             Ok(())
         }
     };
@@ -580,70 +549,20 @@ macro_rules! cumsum_backward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if tensor.ndim() == 1 {
-                if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
-                }
-                let mut acc: $t = 0 as $t;
-                for i in (0..input_data.len()).rev() {
-                    acc += input_data[i];
-                    output[i] = acc;
-                }
-            } else if tensor.ndim() == 2 {
-                let rows = shape[0];
-                let cols = shape[1];
-                match dim {
-                    0 => {
-                        let out_ptr = output.as_mut_ptr() as usize;
-                        (0..cols).into_par_iter().for_each(|c| {
-                            let out_ptr = out_ptr as *mut $t;
-                            let mut acc: $t = 0 as $t;
-                            for r in (0..rows).rev() {
-                                let idx = r * cols + c;
-                                acc += input_data[idx];
-                                unsafe {
-                                    *out_ptr.add(idx) = acc;
-                                }
-                            }
-                        });
-                    }
-                    1 => {
-                        input_data
-                            .par_chunks_exact(cols)
-                            .zip(output.par_chunks_mut(cols))
-                            .for_each(|(in_row, out_row)| {
-                                let mut acc: $t = 0 as $t;
-                                for i in (0..cols).rev() {
-                                    acc += in_row[i];
-                                    out_row[i] = acc;
-                                }
-                            });
-                    }
-                    _ => return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim())),
-                }
-            } else {
-                let dim_size = shape[dim];
-                let inner = shape[dim + 1..].iter().product::<usize>();
-                let outer = shape[..dim].iter().product::<usize>();
-                let total = outer * inner;
-                let out_ptr = output.as_mut_ptr() as usize;
-                (0..total).into_par_iter().for_each(|idx| {
-                    let out_ptr = out_ptr as *mut $t;
-                    let o = idx / inner;
-                    let r = idx % inner;
-                    let mut acc: $t = 0 as $t;
-                    let mut base = o * dim_size * inner + r + (dim_size - 1) * inner;
-                    for _ in 0..dim_size {
-                        acc += input_data[base];
-                        unsafe {
-                            *out_ptr.add(base) = acc;
-                        }
-                        if base >= inner {
-                            base -= inner;
-                        }
-                    }
-                });
+            if dim >= tensor.ndim() {
+                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
             }
+
+            let dim_size = shape[dim];
+            let inner = shape[dim + 1..].iter().product::<usize>();
+            scan_along_dim(
+                output,
+                input_data,
+                dim_size,
+                inner,
+                true,
+                |acc: $t, v: $t| acc + v,
+            );
             Ok(())
         }
     };

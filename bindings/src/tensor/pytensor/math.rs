@@ -49,6 +49,26 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    pub fn log2(&self) -> PyResult<Self> {
+        let result = self.inner.log2().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn log10(&self) -> PyResult<Self> {
+        let result = self.inner.log10().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn erf(&self) -> PyResult<Self> {
+        let result = self.inner.erf().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    pub fn erfc(&self) -> PyResult<Self> {
+        let result = self.inner.erfc().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

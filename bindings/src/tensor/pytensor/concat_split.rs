@@ -71,6 +71,21 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(result))
     }
 
+    /// Write ``src`` into a copy of this tensor at the positions in ``index``
+    pub fn scatter(&self, dim: isize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
+        let result = engine::ops::shape_ops::scatter(&self.inner, dim, &index.inner, &src.inner)
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    /// Add ``src`` into a copy of this tensor at the positions in ``index``
+    pub fn scatter_add(&self, dim: isize, index: &PyTensor, src: &PyTensor) -> PyResult<PyTensor> {
+        let result =
+            engine::ops::shape_ops::scatter_add(&self.inner, dim, &index.inner, &src.inner)
+                .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
     /// Split tensor into multiple sub-tensors of equal size (``chunk``)
     #[pyo3(signature = (sections, dim=0))]
     pub fn chunk(&self, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {

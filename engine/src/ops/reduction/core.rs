@@ -211,6 +211,14 @@ pub(crate) fn ensure_non_empty(numel: usize) -> Result<()> {
     }
 }
 
+/// Median of the tensor, optionally along one dimension.
+///
+/// For an even number of elements this returns the **lower** of the two middle
+/// values, matching PyTorch's `torch.median` — it does *not* average them the
+/// way `numpy.median` does. That is what lets the reduction also report the
+/// index of the element it selected (returned as the second tuple element when
+/// `dim` is given). Use `quantile(0.5)` for the interpolated, NumPy-compatible
+/// definition.
 pub fn median(
     tensor: &Tensor,
     dim: Option<isize>,
@@ -415,6 +423,10 @@ pub fn nanquantile(
 }
 
 /// Compute the median while ignoring NaN values.
+///
+/// Like [`median`], an even count selects the lower of the two middle values
+/// (PyTorch's convention) rather than averaging them as `numpy.nanmedian`
+/// does; `nanquantile(0.5)` is the interpolated equivalent.
 pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
 

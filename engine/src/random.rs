@@ -13,12 +13,12 @@
 //! [`StdRng`] protected by a `Mutex` and exposes helpers that allow the rest of
 //! the engine to draw random numbers while sharing the global state.
 
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
+use std::sync::LazyLock;
 
 /// Global RNG used across the engine for deterministic sampling.
-static GLOBAL_RNG: Lazy<Mutex<StdRng>> = Lazy::new(|| {
+static GLOBAL_RNG: LazyLock<Mutex<StdRng>> = LazyLock::new(|| {
     let mut thread_rng = rand::rng();
     let seed = thread_rng.random::<u64>();
     Mutex::new(StdRng::seed_from_u64(seed))

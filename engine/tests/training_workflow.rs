@@ -26,8 +26,11 @@ fn create_tensor(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tens
     )
 }
 
+/// End-to-end gradient-descent convergence check: 5000 steps of the full
+/// forward/backward/update loop run in well under a second in release, so this
+/// runs in the normal suite rather than behind `#[ignore]` (where it never ran
+/// in CI at all).
 #[test]
-#[ignore]
 fn test_linear_regression_training() {
     let x = create_tensor(vec![1.0, 2.0, 3.0, 4.0], vec![4, 1], false);
     let y_true = create_tensor(vec![5.0, 7.0, 9.0, 11.0], vec![4, 1], false); // y = 2x + 3

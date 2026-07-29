@@ -759,8 +759,12 @@ fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     })?;
 
     let multiplier = 10.0_f32.powi(decimals);
+    // Ties go to the even neighbour, as NumPy, PyTorch and Python's built-in
+    // `round` all do. Rust's `f32::round` rounds halves away from zero instead,
+    // which disagreed at every exact .5: round(0.5) gave 1 rather than 0, and
+    // round(2.5) gave 3 rather than 2.
     let out = unary_map(input_data, |val: f32| {
-        (val * multiplier).round() / multiplier
+        (val * multiplier).round_ties_even() / multiplier
     });
     Ok(TensorData::from_vec::<f32>(
         out,
@@ -775,8 +779,9 @@ fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     })?;
 
     let multiplier = 10.0_f64.powi(decimals);
+    // Half-to-even, matching NumPy/PyTorch; see `round_f32`.
     let out = unary_map(input_data, |val: f64| {
-        (val * multiplier).round() / multiplier
+        (val * multiplier).round_ties_even() / multiplier
     });
     Ok(TensorData::from_vec::<f64>(
         out,

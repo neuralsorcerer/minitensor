@@ -135,7 +135,7 @@ impl CudaBackend {
     where
         T: cudarc::driver::DeviceRepr + Clone + ValidAsZeroBits,
     {
-        if device_data.len() == 0 {
+        if device_data.is_empty() {
             return Ok(Vec::new());
         }
         self.cuda_device
@@ -707,7 +707,7 @@ mod tests {
         backend.synchronize().unwrap();
 
         let result = backend.copy_from_device(&c).unwrap();
-        let expected = vec![6.0f32, 8.0, 10.0, 12.0];
+        let expected = [6.0f32, 8.0, 10.0, 12.0];
 
         for (r, e) in result.iter().zip(expected.iter()) {
             assert!((r - e).abs() < 1e-6);

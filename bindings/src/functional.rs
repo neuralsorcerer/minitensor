@@ -521,6 +521,34 @@ pub fn gather(input: &Bound<PyAny>, dim: isize, index: &Bound<PyAny>) -> PyResul
     tensor.gather(dim, &index_tensor)
 }
 
+#[pyfunction]
+#[pyo3(signature = (input, dim, index, src))]
+pub fn scatter(
+    input: &Bound<PyAny>,
+    dim: isize,
+    index: &Bound<PyAny>,
+    src: &Bound<PyAny>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let index_tensor = borrow_tensor(index)?;
+    let src_tensor = borrow_tensor(src)?;
+    tensor.scatter(dim, &index_tensor, &src_tensor)
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, dim, index, src))]
+pub fn scatter_add(
+    input: &Bound<PyAny>,
+    dim: isize,
+    index: &Bound<PyAny>,
+    src: &Bound<PyAny>,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    let index_tensor = borrow_tensor(index)?;
+    let src_tensor = borrow_tensor(src)?;
+    tensor.scatter_add(dim, &index_tensor, &src_tensor)
+}
+
 #[pyfunction(name = "where")]
 #[pyo3(signature = (condition, input, other))]
 pub fn where_function(
@@ -792,6 +820,18 @@ pub fn var(
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, p=None, dim=None, keepdim=false))]
+pub fn norm(
+    input: &Bound<PyAny>,
+    p: Option<&Bound<PyAny>>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.norm(p, dim, Some(keepdim))
+}
+
+#[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn logsumexp(
     input: &Bound<PyAny>,
@@ -965,6 +1005,30 @@ pub fn softsign(input: &Bound<PyAny>) -> PyResult<PyTensor> {
 pub fn tanh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.tanh()
+}
+
+#[pyfunction]
+pub fn log2(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.log2()
+}
+
+#[pyfunction]
+pub fn log10(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.log10()
+}
+
+#[pyfunction]
+pub fn erf(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.erf()
+}
+
+#[pyfunction]
+pub fn erfc(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.erfc()
 }
 
 #[pyfunction]
@@ -1391,6 +1455,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(split, parent)?)?;
     parent.add_function(wrap_pyfunction!(index_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(gather, parent)?)?;
+    parent.add_function(wrap_pyfunction!(scatter, parent)?)?;
+    parent.add_function(wrap_pyfunction!(scatter_add, parent)?)?;
     parent.add_function(wrap_pyfunction!(where_function, parent)?)?;
     parent.add_function(wrap_pyfunction!(one_hot, parent)?)?;
     parent.add_function(wrap_pyfunction!(bincount, parent)?)?;
@@ -1412,6 +1478,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(cumprod, parent)?)?;
     parent.add_function(wrap_pyfunction!(std_fn, parent)?)?;
     parent.add_function(wrap_pyfunction!(var, parent)?)?;
+    parent.add_function(wrap_pyfunction!(norm, parent)?)?;
     parent.add_function(wrap_pyfunction!(logsumexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(nansum, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
@@ -1431,6 +1498,10 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(silu, parent)?)?;
     parent.add_function(wrap_pyfunction!(softsign, parent)?)?;
     parent.add_function(wrap_pyfunction!(tanh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(log2, parent)?)?;
+    parent.add_function(wrap_pyfunction!(log10, parent)?)?;
+    parent.add_function(wrap_pyfunction!(erf, parent)?)?;
+    parent.add_function(wrap_pyfunction!(erfc, parent)?)?;
     parent.add_function(wrap_pyfunction!(log1p, parent)?)?;
     parent.add_function(wrap_pyfunction!(expm1, parent)?)?;
     parent.add_function(wrap_pyfunction!(sin, parent)?)?;

@@ -228,13 +228,19 @@ fn is_bool_axis(obj: &Bound<PyAny>) -> PyResult<bool> {
         return Ok(true);
     }
 
-    static NUMPY_BOOL_TYPE: OnceCell<Py<PyAny>> = OnceCell::new();
+    // `None` records that numpy is unavailable, which is also worth caching:
+    // the previous `get_or_try_init` did not remember failures, so every call
+    // on a numpy-less install retried the import.
+    static NUMPY_BOOL_TYPE: OnceLock<Option<Py<PyAny>>> = OnceLock::new();
     let py = obj.py();
-    if let Ok(numpy_bool) = NUMPY_BOOL_TYPE.get_or_try_init(|| -> PyResult<Py<PyAny>> {
-        let numpy = PyModule::import(py, "numpy")?;
-        let bool_obj = numpy.getattr("bool_")?;
-        Ok(bool_obj.unbind())
-    }) && obj.is_instance(numpy_bool.bind(py))?
+    let numpy_bool = NUMPY_BOOL_TYPE.get_or_init(|| {
+        PyModule::import(py, "numpy")
+            .and_then(|numpy| numpy.getattr("bool_"))
+            .map(|bool_obj| bool_obj.unbind())
+            .ok()
+    });
+    if let Some(numpy_bool) = numpy_bool
+        && obj.is_instance(numpy_bool.bind(py))?
     {
         return Ok(true);
     }

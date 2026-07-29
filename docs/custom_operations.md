@@ -83,6 +83,48 @@ let op = CustomOpBuilder::new("my_operation", 2)
     .build()?;
 ```
 
+### Writing a backward pass
+
+`backward` takes a closure receiving a `BackwardContext`, which carries the
+incoming gradient together with the inputs and output saved from the forward
+pass. Return one gradient per input, keyed by `ctx.input_ids`; omitting an
+input's entry means no gradient flows to it.
+
+```rust
+pub struct BackwardContext<'a> {
+    pub grad_output: &'a Tensor,
+    pub inputs: &'a [Tensor],
+    pub output: &'a Tensor,
+    pub input_ids: &'a [TensorId],
+}
+```
+
+The saved values are what make a non-linear derivative expressible — it has to
+be evaluated at the point the forward pass was computed. For $y = x^3$:
+
+```rust
+.backward(|ctx| {
+    let mut gradients = FxHashMap::default();
+    let (Some(&id), Some(x)) = (ctx.input_ids.first(), ctx.input(0)) else {
+        return Ok(gradients);
+    };
+    // dy/dx = 3x^2, times the incoming gradient (chain rule).
+    let sq = arithmetic::mul(x, x)?;
+    let two_sq = arithmetic::add(&sq, &sq)?;
+    let dydx = arithmetic::add(&two_sq, &sq)?;
+    gradients.insert(id, arithmetic::mul(ctx.grad_output, &dydx)?);
+    Ok(gradients)
+})
+```
+
+`ctx.output` is available for derivatives that are cheaper in terms of the
+result, such as $\sigma'(x) = y(1-y)$. Convenience accessors `ctx.input(i)`,
+`ctx.input_shape(i)`, `ctx.input_dtype(i)`, and `ctx.input_device(i)` return
+`None` when the operation received fewer inputs.
+
+Saving the inputs and output copies no data — tensors share their storage — but
+it does keep those buffers alive until the graph is released.
+
 ## Bundled example operations
 
 The registered examples are intentionally simple demonstration operations. They
@@ -107,7 +149,9 @@ $$
 
 The example Rust backward implementation is deliberately simplified and returns
 a tensor of ones with the input shape and dtype. Use it as a registry example,
-not as a numerically exact training primitive.
+not as a numerically exact training primitive. The exact derivative above *is*
+expressible with the builder — see [Writing a backward pass](#writing-a-backward-pass)
+— the bundled examples simply do not implement it.
 
 ### `gelu`
 

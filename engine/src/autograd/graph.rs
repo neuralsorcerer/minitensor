@@ -399,6 +399,13 @@ impl ComputationGraph {
         self.gradients.remove(&tensor_id)
     }
 
+    /// Overwrite the stored gradient for a single tensor. Unlike
+    /// [`Self::accumulate_gradients`] this replaces rather than sums, which is
+    /// what in-place gradient transforms (clipping, scaling) need.
+    pub fn set_gradient(&mut self, tensor_id: TensorId, grad: Tensor) {
+        self.gradients.insert(tensor_id, grad);
+    }
+
     /// Get the number of nodes in the graph
     pub fn num_nodes(&self) -> usize {
         self.nodes.len()

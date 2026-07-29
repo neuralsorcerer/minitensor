@@ -4,8 +4,10 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+pub mod adagrad;
 pub mod adam;
 pub mod lion;
+pub mod nadam;
 pub mod optimizer;
 pub mod rmsprop;
 pub mod sgd;
@@ -14,8 +16,10 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
+pub use adagrad::Adagrad;
 pub use adam::{Adam, AdamW};
 pub use lion::Lion;
+pub use nadam::NAdam;
 pub use optimizer::{
     ConstantLR, CosineAnnealingLR, ExponentialLR, GradientClipping, LearningRateScheduler,
     Optimizer, ParameterGroup, StepLR,

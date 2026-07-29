@@ -131,10 +131,15 @@ impl Allocator for CudaAllocator {
 
 #[cfg(feature = "metal")]
 impl MetalAllocator {
-    /// Create a new Metal allocator
-    pub fn new(device_id: Option<usize>) -> Self {
+    /// Create a new Metal allocator.
+    ///
+    /// The id is accepted so the pool can build all three GPU allocators the
+    /// same way, but Metal exposes a single system device here: `Device::metal`
+    /// takes no id and stores `None`. Dropping the parameter would make this
+    /// the one asymmetric arm of that match for no gain.
+    pub fn new(_device_id: Option<usize>) -> Self {
         Self {
-            device: Device::metal(device_id),
+            device: Device::metal(),
         }
     }
 }

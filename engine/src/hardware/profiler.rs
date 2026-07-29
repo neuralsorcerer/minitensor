@@ -83,10 +83,12 @@ impl HardwareProfiler {
         }
     }
 
-    /// Profile the entire system hardware
+    /// Profile the entire system hardware.
+    ///
+    /// Silent: a library has no business writing to the caller's stdout, and
+    /// the progress line this used to print duplicated the one the
+    /// `hardware_detection` example prints itself.
     pub fn profile_system(&self) -> HardwareProfile {
-        println!("Profiling system hardware...");
-
         let cpu_info = CpuInfo::detect();
         let gpu_devices = GpuDevice::detect_all();
         let memory_info = MemoryInfo::detect();
@@ -144,8 +146,6 @@ impl HardwareProfiler {
         gpu_devices: &[GpuDevice],
         memory_info: &MemoryInfo,
     ) -> PerformanceCharacteristics {
-        println!("Running detailed performance benchmarks...");
-
         let cpu_single_thread_score = self.benchmark_cpu_single_thread();
         let cpu_multi_thread_score = self.benchmark_cpu_multi_thread(cpu_info.cores);
         let memory_latency = self.benchmark_memory_latency();
@@ -239,26 +239,48 @@ impl HardwareProfiler {
         ops_per_second / 1_000_000.0 // Normalize to millions of ops per second
     }
 
+    /// Measure main-memory load latency by pointer chasing.
+    ///
+    /// Latency requires *dependent* loads: each access must wait on the
+    /// previous one. The earlier version derived the next index arithmetically
+    /// (`index = (index + 1009) % len`), so the loads were independent and the
+    /// CPU pipelined them — it measured throughput, not latency. Worse, it
+    /// read a `vec![0u64; ...]` whose contents LLVM knows are zero, so the
+    /// loads folded away entirely and the whole benchmark reported 0 ns.
+    ///
+    /// Here each slot holds the index of the next slot to visit, so the
+    /// address of load N+1 is the *result* of load N and the chain cannot be
+    /// reordered or elided.
     fn benchmark_memory_latency(&self) -> Duration {
-        let size = 1024 * 1024; // 1MB buffer
-        let buffer = vec![0u64; size / 8];
-        let iterations = 1000;
+        // A prime stride of ~8 KiB jumps a page at a time, so neither the
+        // cache-line nor the stride prefetcher can run ahead of the chain.
+        // Being prime (and not a factor of the power-of-two slot count) makes
+        // the walk a single cycle covering every slot.
+        const STRIDE_SLOTS: usize = 1013;
+        let slots = (32 * 1024 * 1024) / std::mem::size_of::<usize>(); // 32 MiB
+        let mut buffer = vec![0usize; slots];
 
-        let start = Instant::now();
-
-        // Random memory access pattern to measure latency
-        let mut sum = 0u64;
-        let mut index = 0;
-        for _ in 0..iterations {
-            sum += buffer[index];
-            index = (index + 1009) % buffer.len(); // Prime number for pseudo-random access
+        // Build a single cycle through the buffer: slot i points at the next
+        // one to visit. The walk is a permutation, so it never terminates
+        // early and every step is a real dependent load.
+        let mut next = 0usize;
+        for _ in 0..slots {
+            let following = (next + STRIDE_SLOTS) % slots;
+            buffer[next] = following;
+            next = following;
         }
+        std::hint::black_box(&mut buffer);
 
-        // Prevent optimization
-        std::hint::black_box(sum);
-
+        let iterations = slots.min(200_000);
+        let start = Instant::now();
+        let mut index = 0usize;
+        for _ in 0..iterations {
+            index = buffer[index];
+        }
+        std::hint::black_box(index);
         let total_time = start.elapsed();
-        total_time / iterations
+
+        total_time / iterations as u32
     }
 
     fn benchmark_gpu_compute(&self, gpu: &GpuDevice) -> f64 {
@@ -598,6 +620,35 @@ mod tests {
         assert!(profile.cpu_info.cores > 0);
         assert!(profile.memory_info.total_ram > 0);
         assert!(!profile.system_info.os_name.is_empty());
+    }
+
+    #[test]
+    fn test_detailed_profiling_measures_plausible_characteristics() {
+        // The detailed path runs real benchmarks. Each of these used to report
+        // a value that proved the loop had been optimized away (0 ns latency,
+        // ~10^6 GiB/s throughput) while still passing a bare "is it positive"
+        // assertion. The bounds below are one-sided in the direction that
+        // elimination pushes the value — latency toward zero, throughput toward
+        // infinity — and deliberately loose on the other side, because an
+        // unoptimized `cargo test` build is legitimately slow.
+        let profiler = HardwareProfiler::with_detailed_profiling(Duration::from_millis(50));
+        let profile = profiler.profile_system();
+        let perf = &profile.performance_characteristics;
+
+        let latency_ns = perf.memory_latency.as_nanos();
+        assert!(
+            latency_ns >= 1,
+            "memory latency is implausible: {latency_ns} ns"
+        );
+        assert!(
+            perf.memory_throughput.is_finite()
+                && perf.memory_throughput > 0.0
+                && perf.memory_throughput < 100_000.0,
+            "memory throughput is implausible: {} GiB/s",
+            perf.memory_throughput
+        );
+        assert!(perf.cpu_single_thread_score > 0.0);
+        assert!(perf.cpu_multi_thread_score > 0.0);
     }
 
     #[test]

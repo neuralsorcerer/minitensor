@@ -7,6 +7,7 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
+    ops::map::{PAR_CHUNK, binary_map, ternary_map},
     ops::reduction,
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
@@ -255,6 +256,49 @@ impl GradientFunction for Conv2dBackward {
     }
 }
 
+/// Write `grad_out[i]` where `mask[i]` is set and `0` elsewhere.
+///
+/// This is the *select* form used by hardshrink: a cleared mask yields an
+/// exact zero, discarding any NaN in the incoming gradient. Kernels that must
+/// propagate NaN (ReLU) multiply by the mask via [`zip_mask_into`] instead.
+///
+/// Chunked so it stays on the calling thread for small gradients and
+/// vectorises inside each chunk; replaces the raw-pointer parallel loops these
+/// kernels used to hand-roll (which laundered pointers through `usize` to
+/// cross the rayon closure boundary).
+fn mask_select_into<T: Copy + Default + Send + Sync>(out: &mut [T], grad_out: &[T], mask: &[bool]) {
+    zip_mask_into(
+        out,
+        grad_out,
+        mask,
+        |g, keep| if keep { g } else { T::default() },
+    );
+}
+
+/// Generalisation of [`mask_select_into`] for masks that scale rather than
+/// replace the gradient (ReLU, leaky ReLU).
+fn zip_mask_into<T, F>(out: &mut [T], grad_out: &[T], mask: &[bool], op: F)
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, bool) -> T + Send + Sync,
+{
+    debug_assert_eq!(out.len(), grad_out.len());
+    debug_assert_eq!(out.len(), mask.len());
+    let apply = |out: &mut [T], grad_out: &[T], mask: &[bool]| {
+        for ((o, &g), &m) in out.iter_mut().zip(grad_out.iter()).zip(mask.iter()) {
+            *o = op(g, m);
+        }
+    };
+    if out.len() < PAR_THRESHOLD {
+        apply(out, grad_out, mask);
+    } else {
+        out.par_chunks_mut(PAR_CHUNK)
+            .zip(grad_out.par_chunks(PAR_CHUNK))
+            .zip(mask.par_chunks(PAR_CHUNK))
+            .for_each(|((o, g), m)| apply(o, g, m));
+    }
+}
+
 impl GradientFunction for PowBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
@@ -276,74 +320,33 @@ impl GradientFunction for PowBackward {
                 })?;
 
                 if self.base_requires_grad {
-                    let mut grad_data = TensorData::zeros_on_device(
-                        self.base.numel(),
-                        self.base.dtype(),
-                        self.base.device(),
-                    );
-                    let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                        MinitensorError::internal_error(
-                            "Failed to get mutable f32 slice from grad_data",
-                        )
-                    })?;
-
-                    match self.broadcast {
-                        PowBroadcast::None => {
-                            let len = base_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] = exp_slice[i]
-                                        * base_slice[i].powf(exp_slice[i] - 1.0)
-                                        * grad_out[i];
-                                }
-                            } else {
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let exp_ptr = exp_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let base_ptr = base_ptr as *const f32;
-                                    let exp_ptr = exp_ptr as *const f32;
-                                    let go_ptr = go_ptr as *const f32;
-                                    let grad_ptr = grad_ptr as *mut f32;
-                                    *grad_ptr.add(i) = *exp_ptr.add(i)
-                                        * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
-                                        * *go_ptr.add(i);
-                                });
-                            }
-                        }
+                    // d/db (b^e) = e * b^(e-1)
+                    let values: Vec<f32> = match self.broadcast {
+                        PowBroadcast::None => ternary_map(
+                            exp_slice,
+                            base_slice,
+                            grad_out,
+                            |e: f32, b: f32, g: f32| e * b.powf(e - 1.0) * g,
+                        ),
                         PowBroadcast::BaseScalar => {
+                            // The scalar base receives the sum over every output.
                             let base_val = base_slice[0];
                             let mut accum = 0.0_f32;
                             for i in 0..grad_out.len() {
                                 accum +=
                                     exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
                             }
-                            grad_slice[0] = accum;
+                            vec![accum]
                         }
                         PowBroadcast::ExponentScalar => {
                             let exp_val = exp_slice[0];
-                            let len = base_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] =
-                                        exp_val * base_slice[i].powf(exp_val - 1.0) * grad_out[i];
-                                }
-                            } else {
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let base_ptr = base_ptr as *const f32;
-                                    let go_ptr = go_ptr as *const f32;
-                                    let grad_ptr = grad_ptr as *mut f32;
-                                    *grad_ptr.add(i) = exp_val
-                                        * (*base_ptr.add(i)).powf(exp_val - 1.0)
-                                        * *go_ptr.add(i);
-                                });
-                            }
+                            binary_map(base_slice, grad_out, move |b: f32, g: f32| {
+                                exp_val * b.powf(exp_val - 1.0) * g
+                            })
                         }
-                    }
+                    };
+                    let grad_data =
+                        TensorData::from_vec::<f32>(values, self.base.dtype(), self.base.device());
 
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -356,53 +359,32 @@ impl GradientFunction for PowBackward {
                 }
 
                 if self.exp_requires_grad {
-                    let mut grad_data = TensorData::zeros_on_device(
-                        self.exponent.numel(),
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                    );
-                    let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                        MinitensorError::internal_error(
-                            "Failed to get mutable f32 slice from grad_data",
-                        )
-                    })?;
-
-                    match self.broadcast {
-                        PowBroadcast::None => {
-                            let len = exp_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
-                                }
-                            } else {
-                                let out_ptr = out_slice.as_ptr() as usize;
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let out_ptr = out_ptr as *const f32;
-                                    let base_ptr = base_ptr as *const f32;
-                                    let go_ptr = go_ptr as *const f32;
-                                    let grad_ptr = grad_ptr as *mut f32;
-                                    *grad_ptr.add(i) =
-                                        *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
-                                });
-                            }
-                        }
+                    // d/de (b^e) = b^e * ln(b)
+                    let values: Vec<f32> = match self.broadcast {
+                        PowBroadcast::None => ternary_map(
+                            out_slice,
+                            base_slice,
+                            grad_out,
+                            |o: f32, b: f32, g: f32| o * b.ln() * g,
+                        ),
                         PowBroadcast::BaseScalar => {
-                            let base_val = base_slice[0];
-                            for i in 0..grad_out.len() {
-                                grad_slice[i] = out_slice[i] * base_val.ln() * grad_out[i];
-                            }
+                            let log_base = base_slice[0].ln();
+                            binary_map(out_slice, grad_out, move |o: f32, g: f32| o * log_base * g)
                         }
                         PowBroadcast::ExponentScalar => {
+                            // The scalar exponent receives the sum over every output.
                             let mut accum = 0.0_f32;
                             for i in 0..grad_out.len() {
                                 accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
                             }
-                            grad_slice[0] = accum;
+                            vec![accum]
                         }
-                    }
+                    };
+                    let grad_data = TensorData::from_vec::<f32>(
+                        values,
+                        self.exponent.dtype(),
+                        self.exponent.device(),
+                    );
 
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -429,74 +411,33 @@ impl GradientFunction for PowBackward {
                 })?;
 
                 if self.base_requires_grad {
-                    let mut grad_data = TensorData::zeros_on_device(
-                        self.base.numel(),
-                        self.base.dtype(),
-                        self.base.device(),
-                    );
-                    let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                        MinitensorError::internal_error(
-                            "Failed to get mutable f64 slice from grad_data",
-                        )
-                    })?;
-
-                    match self.broadcast {
-                        PowBroadcast::None => {
-                            let len = base_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] = exp_slice[i]
-                                        * base_slice[i].powf(exp_slice[i] - 1.0)
-                                        * grad_out[i];
-                                }
-                            } else {
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let exp_ptr = exp_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let base_ptr = base_ptr as *const f64;
-                                    let exp_ptr = exp_ptr as *const f64;
-                                    let go_ptr = go_ptr as *const f64;
-                                    let grad_ptr = grad_ptr as *mut f64;
-                                    *grad_ptr.add(i) = *exp_ptr.add(i)
-                                        * (*base_ptr.add(i)).powf(*exp_ptr.add(i) - 1.0)
-                                        * *go_ptr.add(i);
-                                });
-                            }
-                        }
+                    // d/db (b^e) = e * b^(e-1)
+                    let values: Vec<f64> = match self.broadcast {
+                        PowBroadcast::None => ternary_map(
+                            exp_slice,
+                            base_slice,
+                            grad_out,
+                            |e: f64, b: f64, g: f64| e * b.powf(e - 1.0) * g,
+                        ),
                         PowBroadcast::BaseScalar => {
+                            // The scalar base receives the sum over every output.
                             let base_val = base_slice[0];
                             let mut accum = 0.0_f64;
                             for i in 0..grad_out.len() {
                                 accum +=
                                     exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
                             }
-                            grad_slice[0] = accum;
+                            vec![accum]
                         }
                         PowBroadcast::ExponentScalar => {
                             let exp_val = exp_slice[0];
-                            let len = base_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] =
-                                        exp_val * base_slice[i].powf(exp_val - 1.0) * grad_out[i];
-                                }
-                            } else {
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let base_ptr = base_ptr as *const f64;
-                                    let go_ptr = go_ptr as *const f64;
-                                    let grad_ptr = grad_ptr as *mut f64;
-                                    *grad_ptr.add(i) = exp_val
-                                        * (*base_ptr.add(i)).powf(exp_val - 1.0)
-                                        * *go_ptr.add(i);
-                                });
-                            }
+                            binary_map(base_slice, grad_out, move |b: f64, g: f64| {
+                                exp_val * b.powf(exp_val - 1.0) * g
+                            })
                         }
-                    }
+                    };
+                    let grad_data =
+                        TensorData::from_vec::<f64>(values, self.base.dtype(), self.base.device());
 
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -509,53 +450,32 @@ impl GradientFunction for PowBackward {
                 }
 
                 if self.exp_requires_grad {
-                    let mut grad_data = TensorData::zeros_on_device(
-                        self.exponent.numel(),
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                    );
-                    let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                        MinitensorError::internal_error(
-                            "Failed to get mutable f64 slice from grad_data",
-                        )
-                    })?;
-
-                    match self.broadcast {
-                        PowBroadcast::None => {
-                            let len = exp_slice.len();
-                            if len < PAR_THRESHOLD {
-                                for i in 0..len {
-                                    grad_slice[i] = out_slice[i] * base_slice[i].ln() * grad_out[i];
-                                }
-                            } else {
-                                let out_ptr = out_slice.as_ptr() as usize;
-                                let base_ptr = base_slice.as_ptr() as usize;
-                                let go_ptr = grad_out.as_ptr() as usize;
-                                let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                                (0..len).into_par_iter().for_each(|i| unsafe {
-                                    let out_ptr = out_ptr as *const f64;
-                                    let base_ptr = base_ptr as *const f64;
-                                    let go_ptr = go_ptr as *const f64;
-                                    let grad_ptr = grad_ptr as *mut f64;
-                                    *grad_ptr.add(i) =
-                                        *out_ptr.add(i) * (*base_ptr.add(i)).ln() * *go_ptr.add(i);
-                                });
-                            }
-                        }
+                    // d/de (b^e) = b^e * ln(b)
+                    let values: Vec<f64> = match self.broadcast {
+                        PowBroadcast::None => ternary_map(
+                            out_slice,
+                            base_slice,
+                            grad_out,
+                            |o: f64, b: f64, g: f64| o * b.ln() * g,
+                        ),
                         PowBroadcast::BaseScalar => {
-                            let base_val = base_slice[0];
-                            for i in 0..grad_out.len() {
-                                grad_slice[i] = out_slice[i] * base_val.ln() * grad_out[i];
-                            }
+                            let log_base = base_slice[0].ln();
+                            binary_map(out_slice, grad_out, move |o: f64, g: f64| o * log_base * g)
                         }
                         PowBroadcast::ExponentScalar => {
+                            // The scalar exponent receives the sum over every output.
                             let mut accum = 0.0_f64;
                             for i in 0..grad_out.len() {
                                 accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
                             }
-                            grad_slice[0] = accum;
+                            vec![accum]
                         }
-                    }
+                    };
+                    let grad_data = TensorData::from_vec::<f64>(
+                        values,
+                        self.exponent.dtype(),
+                        self.exponent.device(),
+                    );
 
                     let grad_tensor = Tensor::new(
                         Arc::new(grad_data),
@@ -609,25 +529,7 @@ impl GradientFunction for HardshrinkBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f32;
-                        let grad_ptr = grad_ptr as *mut f32;
-                        if *mask.get_unchecked(i) {
-                            *grad_ptr.add(i) = *go_ptr.add(i);
-                        } else {
-                            *grad_ptr.add(i) = 0.0;
-                        }
-                    });
-                }
+                mask_select_into(grad_slice, go, &self.mask);
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
@@ -638,25 +540,7 @@ impl GradientFunction for HardshrinkBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { 0.0 };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f64;
-                        let grad_ptr = grad_ptr as *mut f64;
-                        if *mask.get_unchecked(i) {
-                            *grad_ptr.add(i) = *go_ptr.add(i);
-                        } else {
-                            *grad_ptr.add(i) = 0.0;
-                        }
-                    });
-                }
+                mask_select_into(grad_slice, go, &self.mask);
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -806,22 +690,12 @@ impl GradientFunction for ReluBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = go[i] * if self.mask[i] { 1.0 } else { 0.0 };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f32;
-                        let grad_ptr = grad_ptr as *mut f32;
-                        let m = if *mask.get_unchecked(i) { 1.0 } else { 0.0 };
-                        *grad_ptr.add(i) = *go_ptr.add(i) * m;
-                    });
-                }
+                zip_mask_into(grad_slice, go, &self.mask, |g: f32, keep| {
+                    // Multiply rather than select: a NaN gradient must stay
+                    // NaN even where the mask is clear (NaN inputs are not
+                    // `> 0`, and PyTorch propagates NaN through relu).
+                    g * if keep { 1.0 } else { 0.0 }
+                });
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
@@ -832,22 +706,12 @@ impl GradientFunction for ReluBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = go[i] * if self.mask[i] { 1.0 } else { 0.0 };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f64;
-                        let grad_ptr = grad_ptr as *mut f64;
-                        let m = if *mask.get_unchecked(i) { 1.0 } else { 0.0 };
-                        *grad_ptr.add(i) = *go_ptr.add(i) * m;
-                    });
-                }
+                zip_mask_into(grad_slice, go, &self.mask, |g: f64, keep| {
+                    // Multiply rather than select: a NaN gradient must stay
+                    // NaN even where the mask is clear (NaN inputs are not
+                    // `> 0`, and PyTorch propagates NaN through relu).
+                    g * if keep { 1.0 } else { 0.0 }
+                });
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -901,27 +765,15 @@ impl GradientFunction for LeakyReluBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
                 let slope = self.negative_slope as f32;
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { go[i] * slope };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f32;
-                        let grad_ptr = grad_ptr as *mut f32;
-                        let val = if *mask.get_unchecked(i) {
-                            *go_ptr.add(i)
-                        } else {
-                            *go_ptr.add(i) * slope
-                        };
-                        *grad_ptr.add(i) = val;
-                    });
-                }
+                zip_mask_into(
+                    grad_slice,
+                    go,
+                    &self.mask,
+                    |g: f32, keep| {
+                        if keep { g } else { g * slope }
+                    },
+                );
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
@@ -932,27 +784,15 @@ impl GradientFunction for LeakyReluBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                let len = go.len();
                 let slope = self.negative_slope;
-                if len < PAR_THRESHOLD {
-                    for i in 0..len {
-                        grad_slice[i] = if self.mask[i] { go[i] } else { go[i] * slope };
-                    }
-                } else {
-                    let mask = &self.mask;
-                    let go_ptr = go.as_ptr() as usize;
-                    let grad_ptr = grad_slice.as_mut_ptr() as usize;
-                    (0..len).into_par_iter().for_each(|i| unsafe {
-                        let go_ptr = go_ptr as *const f64;
-                        let grad_ptr = grad_ptr as *mut f64;
-                        let val = if *mask.get_unchecked(i) {
-                            *go_ptr.add(i)
-                        } else {
-                            *go_ptr.add(i) * slope
-                        };
-                        *grad_ptr.add(i) = val;
-                    });
-                }
+                zip_mask_into(
+                    grad_slice,
+                    go,
+                    &self.mask,
+                    |g: f64, keep| {
+                        if keep { g } else { g * slope }
+                    },
+                );
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -1662,4 +1502,106 @@ pub struct MaskedLogSoftmaxBackward {
     pub output: Tensor,
     pub mask: Tensor,
     pub dim: usize,
+}
+
+/// Gradient function for `scatter_add`.
+///
+/// `out = input.clone(); out[index] += src`, so the input passes its gradient
+/// through untouched — every original value still contributes exactly once —
+/// while each source element collects the gradient at the slot it was added to.
+/// Duplicate indices need no special handling: addition is linear, so several
+/// sources landing on one slot all see that slot's gradient.
+pub struct ScatterAddBackward {
+    /// [input, src]. Both must be listed: the engine walks this to reach each
+    /// operand's own grad_fn, so omitting `src` silently truncates the graph
+    /// whenever `src` is computed rather than a leaf.
+    pub input_ids: [TensorId; 2],
+    /// Which of [input, src] need a gradient; each half is skipped when frozen.
+    pub input_requires_grad: [bool; 2],
+    pub src_shape: Shape,
+    pub dim: usize,
+    pub indices: Vec<i64>,
+}
+
+impl GradientFunction for ScatterAddBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+
+        if self.input_requires_grad[0] {
+            accumulate_grad(&mut gradients, self.input_ids[0], grad_output.clone())?;
+        }
+
+        if self.input_requires_grad[1] {
+            let dims = grad_output.shape().dims();
+            let inner: usize = dims[self.dim + 1..].iter().product();
+            let src_grad = crate::ops::shape_ops::gather_grad_for_src(
+                grad_output,
+                &self.src_shape,
+                inner,
+                dims[self.dim],
+                self.src_shape.dims()[self.dim],
+                &self.indices,
+                None,
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[1], src_grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for `scatter`.
+///
+/// Overwriting, unlike accumulating, severs the dependency: a slot that was
+/// written no longer depends on the input's original value there, and when two
+/// indices name the same slot only the surviving writer affected the output.
+/// `winners` records which one that was, so both halves of the gradient stay
+/// exact even with duplicate indices.
+pub struct ScatterBackward {
+    /// [input, src]; see [`ScatterAddBackward`] on why both belong here.
+    pub input_ids: [TensorId; 2],
+    pub input_requires_grad: [bool; 2],
+    pub src_shape: Shape,
+    pub dim: usize,
+    pub inner: usize,
+    pub input_dim: usize,
+    pub index_dim: usize,
+    pub indices: Vec<i64>,
+    /// Per destination slot, the index-axis position that wrote it last, or
+    /// `usize::MAX` where nothing did.
+    pub winners: Vec<usize>,
+}
+
+impl GradientFunction for ScatterBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+
+        if self.input_requires_grad[0] {
+            let masked = crate::ops::shape_ops::mask_overwritten(grad_output, &self.winners)?;
+            accumulate_grad(&mut gradients, self.input_ids[0], masked)?;
+        }
+
+        if self.input_requires_grad[1] {
+            let src_grad = crate::ops::shape_ops::gather_grad_for_src(
+                grad_output,
+                &self.src_shape,
+                self.inner,
+                self.input_dim,
+                self.index_dim,
+                &self.indices,
+                Some(&self.winners),
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[1], src_grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
 }

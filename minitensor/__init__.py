@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys as _sys
 import types as _types
-from contextlib import contextmanager
+from contextlib import contextmanager as _contextmanager
 
 from . import _api as _api_helpers
 from . import _core as _C
@@ -171,7 +171,7 @@ for _name in _OPTIONAL_TOP_LEVEL_EXPORTS:
         globals()[_name] = _member
 
 
-@contextmanager
+@_contextmanager
 def default_dtype(dtype: str):
     """Temporarily switch the global default dtype within a ``with`` block.
 

@@ -44,3 +44,24 @@ jobs:
         run: |
           source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
           pytest -v tests/
+
+  # `engine/src/backends/metal` is ~1000 lines that no CI job has ever
+  # compiled. The `metal` crate pulls in Apple frameworks, so the feature
+  # cannot even be type-checked off macOS -- `cargo check --features metal` on
+  # Linux fails inside `core-graphics-types` before reaching our code. This is
+  # the only runner that can look at it.
+  #
+  # Advisory until it has been seen green: nobody knows whether that code still
+  # compiles against the pinned `metal` release, and a first run that fails
+  # should report a problem, not block unrelated work. Drop
+  # `continue-on-error` once it passes, so the coverage actually holds.
+  metal-backend:
+    name: metal backend (advisory)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Type-check the Metal backend
+        run: cargo check -p engine --features metal --all-targets

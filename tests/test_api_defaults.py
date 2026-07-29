@@ -32,6 +32,21 @@ def test_numpy_compat_join_split_default_axis(t22):
     assert len(parts) == 2 and tuple(parts[0].shape) == (1, 2)
 
 
+def test_public_namespace_has_no_import_artifacts():
+    # `minitensor/__init__.py` aliases its imports privately (`import sys as
+    # _sys`, ...) so they stay out of the public namespace. `contextmanager`
+    # was the one exception and showed up on `dir(minitensor)` as if it were
+    # part of the API. `annotations` is the unavoidable `__future__` binding
+    # every module using it has.
+    public = {name for name in dir(mt) if not name.startswith("_")}
+    unadvertised = public - set(mt.__all__)
+    assert unadvertised == {"annotations"}, sorted(unadvertised)
+
+    # Everything advertised must actually resolve, with no duplicates.
+    assert [name for name in mt.__all__ if not hasattr(mt, name)] == []
+    assert len(mt.__all__) == len(set(mt.__all__))
+
+
 def test_device_constructors_default_id():
     assert str(mt.Device.cuda()) == "cuda:0"
     assert str(mt.Device.opencl()) == "opencl:0"

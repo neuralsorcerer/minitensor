@@ -872,3 +872,136 @@ def test_topk_out_of_range():
     x = mt.tensor([[1.0, 2.0, 3.0]])
     with pytest.raises(RuntimeError, match="selected index k out of range"):
         x.topk(4, dim=1)
+
+
+def _norm_ref(a, p, axis, keepdims):
+    """p-norm computed in float64, independent of the implementation."""
+    a = np.asarray(a, dtype=np.float64)
+    if p == math.inf:
+        return np.max(np.abs(a), axis=axis, keepdims=keepdims)
+    if p == -math.inf:
+        return np.min(np.abs(a), axis=axis, keepdims=keepdims)
+    if p == 0:
+        return np.sum(a != 0, axis=axis, keepdims=keepdims).astype(np.float64)
+    return np.sum(np.abs(a) ** p, axis=axis, keepdims=keepdims) ** (1.0 / p)
+
+
+@pytest.mark.parametrize("p", [1.0, 2.0, 3.0, 0.5, 0.0, math.inf, -math.inf])
+@pytest.mark.parametrize("dim", [None, 0, 1, 2, [0, 2], [1, 2]])
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_norm_matches_reference(p, dim, keepdim):
+    rng = np.random.default_rng(0)
+    a = (rng.standard_normal((4, 5, 3)) * 3).astype(np.float32)
+    axis = None if dim is None else (tuple(dim) if isinstance(dim, list) else dim)
+
+    got = mt.Tensor(a).norm(p, dim, keepdim).numpy()
+    expected = _norm_ref(a, p, axis, keepdim)
+    if keepdim and axis is None:
+        expected = expected.reshape((1, 1, 1))
+
+    assert np.asarray(got).shape == np.asarray(expected).shape
+    np.testing.assert_allclose(got, expected, rtol=2e-5, atol=1e-6)
+
+
+def test_norm_defaults_to_two_and_fro_is_the_same():
+    t = mt.Tensor([[3.0, 4.0]])
+    assert t.norm().item() == pytest.approx(5.0)
+    assert t.norm("fro").item() == pytest.approx(5.0)
+    assert F.norm(t).item() == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("p", [1.0, 2.0, 3.0])
+def test_norm_gradient_is_zero_at_the_origin(p):
+    """The p-norm has a corner at 0, so the least-magnitude subgradient is 0.
+
+    Composing the 2-norm out of `sqrt((x*x).sum())` instead yields 0/0 = NaN,
+    which then spreads to every parameter it touches.
+    """
+    x = mt.Tensor([0.0, 0.0, 0.0], requires_grad=True)
+    x.norm(p).backward()
+    np.testing.assert_array_equal(x.grad.numpy(), np.zeros(3))
+    mt.clear_autograd_graph()
+
+
+def test_norm_two_avoids_the_overflow_of_squaring_first():
+    """`sqrt(sum(x^2))` overflows f32 near 1e20 for a norm that is representable.
+
+    That matters because detecting a blow-up is the main reason to take a norm,
+    so returning inf exactly when the values get large defeats the purpose.
+    """
+    big = mt.Tensor([1e20, 1e20])
+    assert not np.isfinite(
+        (big * big).sum().sqrt().numpy()
+    ), "squaring first no longer overflows; this test needs revisiting"
+    np.testing.assert_allclose(big.norm().item(), 1e20 * math.sqrt(2.0), rtol=1e-6)
+
+
+def test_norm_two_agrees_with_naive_form_when_well_conditioned():
+    # Scaling must not change the answer where the direct form is already fine.
+    rng = np.random.default_rng(1)
+    for scale in (1e-3, 1.0, 1e3):
+        a = (rng.standard_normal(6) * scale).astype(np.float32)
+        t = mt.Tensor(a)
+        np.testing.assert_allclose(
+            t.norm().item(), (t * t).sum().sqrt().item(), rtol=1e-5
+        )
+
+
+@pytest.mark.parametrize("p", [1.0, 2.0, 3.0, 0.5, math.inf, -math.inf])
+def test_norm_gradcheck(p):
+    rng = np.random.default_rng(3)
+    a = rng.standard_normal((3, 4)) * 2
+
+    t = mt.Tensor(a, dtype="float64", requires_grad=True)
+    t.norm(p, 1).sum().backward()
+    analytic = t.grad.numpy()
+    mt.clear_autograd_graph()
+
+    # float64 throughout: in float32 an h this small is pure cancellation noise
+    # and the check would compare against garbage.
+    h = 1e-6
+    for i in range(3):
+        for j in range(4):
+            plus, minus = a.copy(), a.copy()
+            plus[i, j] += h
+            minus[i, j] -= h
+            central = (
+                mt.Tensor(plus, dtype="float64").norm(p, 1).sum().item()
+                - mt.Tensor(minus, dtype="float64").norm(p, 1).sum().item()
+            ) / (2 * h)
+            np.testing.assert_allclose(analytic[i, j], central, atol=1e-7)
+
+
+def test_norm_inf_splits_gradient_among_ties():
+    # |x| peaks at 3 in three places; each gets a third, signed. This matches
+    # how min/max reductions in this library share gradient across ties.
+    x = mt.Tensor([3.0, -3.0, 1.0, 3.0], requires_grad=True)
+    x.norm(math.inf).backward()
+    np.testing.assert_allclose(x.grad.numpy(), [1 / 3, -1 / 3, 0.0, 1 / 3], rtol=1e-6)
+    mt.clear_autograd_graph()
+
+
+def test_norm_zero_order_counts_nonzeros_and_has_no_gradient():
+    x = mt.Tensor([0.0, 1.0, 0.0, 2.0], requires_grad=True)
+    out = x.norm(0.0)
+    assert out.item() == pytest.approx(2.0)
+    # A step function: zero derivative wherever it exists, so no graph edge.
+    assert x.grad is None
+
+
+def test_norm_of_empty_is_zero():
+    empty = mt.Tensor(np.zeros((0, 3), dtype=np.float32))
+    np.testing.assert_array_equal(empty.norm(2.0, 0).numpy(), np.zeros(3))
+
+
+def test_norm_rejects_unsupported_orders_and_dtypes():
+    with pytest.raises(Exception):
+        mt.Tensor([1.0]).norm(-2.0)
+    with pytest.raises(Exception):
+        mt.Tensor([1.0]).norm(float("nan"))
+    with pytest.raises(Exception):
+        mt.Tensor([1, 2], dtype="int64").norm(2.0)
+    with pytest.raises(ValueError):
+        mt.Tensor([1.0]).norm("nuc")
+    with pytest.raises(Exception):
+        mt.Tensor([1.0]).norm(2.0, 5)

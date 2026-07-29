@@ -14,6 +14,8 @@ pub mod init;
 pub mod layer;
 pub mod loss;
 pub mod normalization;
+pub mod pooling;
+pub mod recurrent;
 pub mod sequential;
 pub mod utils;
 
@@ -25,8 +27,11 @@ pub use embedding::Embedding;
 pub use init::{InitMethod, init_bias, init_parameter};
 pub use layer::{Layer, Module};
 pub use loss::{
-    BCELoss, CrossEntropyLoss, FocalLoss, HuberLoss, LogCoshLoss, MAELoss, MSELoss, SmoothL1Loss,
+    BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, FocalLoss, HuberLoss, LogCoshLoss, MAELoss,
+    MSELoss, SmoothL1Loss,
 };
+pub use pooling::{AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d};
+pub use recurrent::{CellKind, GRU, LSTM, Recurrent};
 pub use sequential::{Sequential, SequentialBuilder};
 
 pub use conv::*;

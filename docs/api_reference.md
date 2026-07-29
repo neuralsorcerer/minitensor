@@ -380,7 +380,56 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 ### Indexing & reordering
 
 - `index_select`, `gather`, `narrow`
+- `scatter(dim, index, src)`, `scatter_add(dim, index, src)`
 - `flip`, `roll`
+
+`scatter` and `scatter_add` write into a copy of the tensor at the positions
+named by `index`, overwriting and accumulating respectively. `index` and `src`
+must have the same shape, and must match the tensor on every axis except `dim` —
+the same rule `gather` uses, which makes `scatter_add` its adjoint:
+`<gather(x, i), v>` equals `<x, zeros.scatter_add(i, v)>` for every `x` and `v`.
+
+Duplicate indices are the interesting case, and the two behave differently:
+
+- `scatter_add` accumulates every value addressed at a destination, which is
+  what makes it the natural spelling for segment sums and embedding-style
+  gradient accumulation. Because float addition is not associative, the
+  accumulation order is fixed rather than left to thread scheduling, so repeated
+  runs are bit-for-bit identical.
+- `scatter` keeps the last write. PyTorch leaves this case explicitly
+  non-deterministic; here the order is defined, and the gradient follows it —
+  a source element whose value was overwritten receives exactly zero, as does
+  an input slot that was written over.
+
+`scatter_add` is not defined for boolean tensors, since bool has no addition.
+
+```python
+import minitensor as mt
+
+counts = mt.Tensor([[0.0, 0.0, 0.0]])
+index = mt.Tensor([[0, 0, 2]], dtype="int64")
+updates = mt.Tensor([[1.0, 2.0, 3.0]])
+print(counts.scatter(1, index, updates).tolist())
+print(counts.scatter_add(1, index, updates).tolist())
+```
+
+```text
+[[2.0, 0.0, 3.0]]
+[[3.0, 0.0, 3.0]]
+```
+
+Assignment (`t[key] = value`) writes in place. Whether another handle on the
+same tensor sees the write follows the rule every in-place operation here uses:
+
+- A **live handle on a leaf parameter** — what `layer.parameters()` and the
+  `weight`/`bias` getters return — shares the layer's storage, so assigning to
+  one updates the layer. This is the same path optimizers use to apply their
+  steps.
+- An **explicit copy** never aliases. `clone()` deep-copies, `detach()` yields a
+  non-gradient tensor, and a reshape or any other view carries a `grad_fn`; all
+  three copy on write, so assigning to them leaves the original untouched.
+
+`load_state_dict` remains the tidier way to set a whole module's parameters.
 
 `__getitem__` supports basic indexing (ints, slices with positive steps,
 `None`/`np.newaxis`, and `...`/Ellipsis) plus NumPy-style fancy forms:
@@ -414,9 +463,49 @@ supported and raise.
 - `var(dim=None, unbiased=True, keepdim=False)`
 - `nansum`, `nanmean`, `nanmax`, `nanmin`
 - `logsumexp`
+- `norm(p=2, dim=None, keepdim=False)`
 - `isclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
+
+`norm(p=2, dim=None, keepdim=False)` takes the vector p-norm over `dim`, or over
+the flattened tensor when `dim` is `None`. It accepts the same dimension forms as
+`sum`. Supported orders are any finite `p > 0`, `float("inf")` (largest
+magnitude), `float("-inf")` (smallest magnitude), `0` (count of non-zeros), and
+the string `"fro"` as an alias for `p=2`. Finite negative orders raise
+`ValueError`.
+
+Two behaviours are worth knowing:
+
+- The p-norm has a corner at the origin, so it has no derivative there. `norm`
+  reports a gradient of `0` — the subgradient of least magnitude, matching
+  PyTorch. Building the same quantity out of `(x * x).sum().sqrt()` yields
+  `0 / 0 = NaN` instead, which then spreads to everything downstream.
+- The 2-norm is computed by scaling with the largest magnitude rather than
+  summing squares directly, so it stays finite for inputs whose squares would
+  overflow. `mt.Tensor([1e20, 1e20]).norm()` returns `1.41e20`, where
+  `(x * x).sum().sqrt()` returns `inf`. Since detecting a blow-up is the usual
+  reason to take a norm, saturating exactly then would defeat the purpose.
+
+```python
+import minitensor as mt
+
+grid = mt.Tensor([[3.0, 4.0], [5.0, 12.0]])
+print(grid.norm().item())
+print(grid.norm(1.0, 1).tolist())
+print(grid.norm(float("inf"), 1).tolist())
+
+point = mt.Tensor([3.0, 4.0], requires_grad=True)
+point.norm().backward()
+print(point.grad.tolist())
+```
+
+```text
+13.928388595581055
+[7.0, 17.0]
+[4.0, 12.0]
+[0.6000000238418579, 0.800000011920929]
+```
 
 `std` and `var` accept the same dimension forms as multi-axis reductions such
 as `sum` and `mean`: `None` reduces all axes, an integer reduces one axis, and
@@ -427,6 +516,12 @@ those axes are removed after the reduction. `unbiased=True` applies the sample
 variance correction (`N / (N - 1)`) over the total number of reduced elements,
 and reductions with one or fewer samples return `NaN` rather than emitting a
 Python warning.
+
+`median` and `nanmedian` follow PyTorch: with an even number of elements they
+return the **lower** of the two middle values rather than averaging them the
+way `numpy.median` does. That is also what lets `median(dim=...)` report the
+index of the element it selected. Use `quantile(0.5)` / `nanquantile(0.5)` when
+you want the interpolated, NumPy-compatible definition.
 
 `nanmedian(dim=None, keepdim=False)` is available as a tensor method,
 functional helper, and top-level helper. It ignores `NaN` values in floating
@@ -454,7 +549,15 @@ assert row_std.shape == (2, 3)
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
 - `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
-- `round`, `floor`, `ceil`
+- `round`, `floor`, `ceil` — `round` sends halves to the even neighbour
+  (`round(0.5) == 0`, `round(2.5) == 2`), matching NumPy, PyTorch and Python's
+  built-in `round`. It takes an optional `decimals` argument.
+- `log2`, `log10` — the natural log rescaled; they share `log`'s behaviour at
+  `0`, negatives, infinities and NaN
+- `erf`, `erfc` — the Gauss error function and its complement. `erfc` uses a
+  dedicated routine rather than computing `1 - erf(x)`: past about `x = 6` in
+  float64 `erf(x)` rounds to 1 and that subtraction returns exactly zero, which
+  is precisely the tail `erfc` exists to give you (`erfc(20) ≈ 5.4e-176`).
 - `sin`, `cos`, `tan`
 - `asin`, `acos`, `atan`
 - `sinh`, `cosh`, `asinh`, `acosh`, `atanh`
@@ -554,9 +657,10 @@ Each of the following names is accessible from:
 - `minitensor.functional.<name>`
 
 ```
-cat, stack, split, chunk, index_select, gather, narrow, topk, sort, argsort,
+cat, stack, split, chunk, index_select, gather, scatter, scatter_add, narrow,
+topk, sort, argsort,
 median, nanmedian, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, isnan,
-isinf, isfinite, nan_to_num, logsumexp, softmax, log_softmax,
+isinf, isfinite, nan_to_num, logsumexp, norm, softmax, log_softmax,
 masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
@@ -565,7 +669,8 @@ rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
 trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
-acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, expm1, logaddexp, maximum,
+acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, log2, log10, erf, erfc,
+expm1, logaddexp, maximum,
 minimum, isclose, array_equal, allclose, where, one_hot, bincount, masked_fill
 ```
 
@@ -807,12 +912,16 @@ when you already hold the weights and do not want a module:
 | --- | --- |
 | `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. |
 | `conv2d(input, weight, bias=None, stride=None, padding=None)` | 2-D convolution. |
+| `conv1d(input, weight, bias=None, stride=1, padding=0)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Float32 CPU tensors only, inherited from `conv2d`. |
+| `max_pool1d(input, kernel_size, stride=None, padding=0)` | 1-D max pooling; `stride` defaults to `kernel_size`. |
+| `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling. |
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |
 | `dropout2d(input, p)` | Channel-wise dropout. |
 | `mse_loss(predictions, targets, reduction="mean")` | Mean squared error. |
 | `smooth_l1_loss(predictions, targets, ...)` | Smooth L1 / Huber-style loss. |
 | `log_cosh_loss(predictions, targets, ...)` | Log-cosh loss. |
-| `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy. |
+| `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy over probabilities. |
+| `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
 
 ```python
@@ -836,6 +945,15 @@ print(round(float(F.binary_cross_entropy(predictions, targets).numpy()), 4))
 logits = mt.Tensor([[2.0, 1.0, 0.1]])
 labels = mt.Tensor([[1.0, 0.0, 0.0]])
 print(round(float(F.cross_entropy(logits, labels).numpy()), 4))
+
+# A logit of -30 against a target of 1 is a confident, completely wrong
+# prediction, so the gradient should be -1 -- the strongest signal the loss
+# can give. Taking sigmoid first would round it to zero and lose that.
+binary_logit = mt.Tensor([[-30.0]], requires_grad=True)
+binary_loss = F.binary_cross_entropy_with_logits(binary_logit, mt.Tensor([[1.0]]))
+print(round(float(binary_loss.numpy()), 4))
+binary_loss.backward()
+print(binary_logit.grad.tolist())
 ```
 
 ```text
@@ -844,6 +962,8 @@ True
 0.04
 0.2231
 0.417
+30.0
+[[-1.0]]
 ```
 
 ## 6) Neural network module (`minitensor.nn`)
@@ -853,14 +973,53 @@ True
 - `Module` (base class)
 - `DenseLayer`
 - `Conv2d`
+- `Conv1d(in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, device=None, dtype=None)`
+- `MaxPool2d(kernel_size, stride=None, padding=None)`
+- `AvgPool2d(kernel_size, stride=None, padding=None, count_include_pad=True)`
+- `MaxPool1d(kernel_size, stride=None, padding=0)`
+- `AvgPool1d(kernel_size, stride=None, padding=0, count_include_pad=True)`
 - `BatchNorm1d`
 - `BatchNorm2d`
 - `LayerNorm(normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None)`
 - `RMSNorm(normalized_shape, eps=1e-6, elementwise_affine=True, device=None, dtype=None)`
 - `Embedding(num_embeddings, embedding_dim, padding_idx=None, device=None, dtype=None)`
+- `LSTM(input_size, hidden_size, num_layers=1, bias=True, batch_first=False, bidirectional=False, device=None, dtype=None)`
+- `GRU(input_size, hidden_size, num_layers=1, bias=True, batch_first=False, bidirectional=False, device=None, dtype=None)`
 - `MultiheadAttention(embed_dim, num_heads, bias=True, is_causal=False, device=None, dtype=None)`
 - `Dropout`, `Dropout2d`
 - `Sequential` (container of modules)
+
+#### Pooling layers
+
+`MaxPool2d` and `AvgPool2d` take `[N, C, H, W]` inputs and reduce each
+`kernel_size` window of every channel. `stride` defaults to `kernel_size` --
+pooling's convention, and unlike convolution, which defaults to 1 -- so
+`MaxPool2d((2, 2))` halves both spatial dimensions. `padding` may not exceed
+half the window, since a window lying entirely in the padding has no defined
+maximum.
+
+For `AvgPool2d`, `count_include_pad` decides whether padded cells count towards
+the divisor. The functional forms are `functional.max_pool2d(input,
+kernel_size, stride=None, padding=None)` and `functional.avg_pool2d(input,
+kernel_size, stride=None, padding=None, count_include_pad=True)`.
+
+```python
+import minitensor as mt
+
+features = mt.nn.Sequential(
+    [
+        mt.nn.Conv2d(1, 8, (3, 3), padding=(1, 1)),
+        mt.nn.ReLU(),
+        mt.nn.MaxPool2d((2, 2)),
+    ]
+)
+out = features(mt.Tensor([[[[0.0] * 8] * 8]]))
+print(out.shape)
+```
+
+```text
+Shape([1, 8, 4, 4])
+```
 
 #### Transformer layers
 
@@ -917,7 +1076,74 @@ hidden = hidden + attn(norm(hidden))  # pre-norm residual block
 - `SmoothL1Loss`
 - `CrossEntropyLoss`
 - `BCELoss`
+- `BCEWithLogitsLoss(reduction="mean", pos_weight=None)`
 - `FocalLoss`
+
+The 1-D convolution and pooling operations are implemented by giving the signal
+a singleton height and deferring to their 2-D counterparts, so there is one
+implementation of the window arithmetic and one backward pass rather than two to
+keep in agreement. The reshapes are autograd-aware, so gradients flow normally.
+As for the 2-D forms, `stride` defaults to `kernel_size` for pooling but to 1
+for convolution — the same value produces different output lengths through the
+two, so it is worth being explicit.
+
+`LSTM` and `GRU` take `(seq, batch, input_size)`, or `(batch, seq, input_size)`
+when `batch_first=True`. Calling the layer returns just the output sequence;
+`forward_with_state(input, hx=None, cx=None)` also returns the final states,
+shaped `(num_layers, batch, hidden_size)` regardless of `batch_first`:
+
+- `LSTM` returns `(output, (h_n, c_n))` and accepts both `hx` and `cx`.
+- `GRU` returns `(output, h_n)` and rejects a cell state.
+
+States default to zeros when omitted. Parameters are drawn from
+`U(-1/sqrt(hidden_size), 1/sqrt(hidden_size))`, biases included — the convention
+for recurrent layers, unlike the zero biases elsewhere in `nn`. Gate blocks are
+packed along the first axis of each weight matrix in the order `i, f, g, o` for
+LSTM and `r, z, n` for GRU.
+
+The GRU candidate is `tanh(W_in x + r * (W_hn h + b_hn))` — the reset gate scales
+the *projected* hidden term, so it also scales `b_hn`. That is not the same
+function as `tanh(W_in x + W_hn (r * h) + b_hn)`, and the difference is large
+rather than a rounding artefact.
+
+With `bidirectional=True` each layer also runs over the reversed sequence and
+the two passes are concatenated along the feature axis, so `output_size` becomes
+`2 * hidden_size` and every layer after the first consumes that width. The
+reverse pass is realigned onto the input's timeline before being joined, so
+position `t` of the output always pairs the two directions' states *for that
+timestep*. State tensors gain a row per direction — `(num_layers * directions,
+batch, hidden_size)` — ordered layer-0-forward, layer-0-reverse, layer-1-forward
+and so on, which matches how PyTorch names `*_l{k}` and `*_l{k}_reverse`.
+
+Both layers are built from ordinary autograd-aware operations rather than a
+fused kernel, so the backward pass through the unrolled sequence is derived by
+the existing graph rather than hand-written. That is the safer choice for a
+recurrence; a fused kernel would be faster and is the obvious later change.
+Packed (variable-length) sequences are not implemented.
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+lstm = nn.LSTM(input_size=3, hidden_size=4, num_layers=2)
+sequence = mt.zeros(5, 2, 3)
+output, (h_n, c_n) = lstm.forward_with_state(sequence)
+print(output.shape, h_n.shape, c_n.shape)
+
+gru = nn.GRU(input_size=3, hidden_size=4, batch_first=True)
+print(gru(mt.zeros(2, 5, 3)).shape)
+
+# Bidirectional: the feature axis carries both directions.
+bi = nn.GRU(input_size=3, hidden_size=4, bidirectional=True)
+output, h_n = bi.forward_with_state(mt.zeros(5, 2, 3))
+print(output.shape, h_n.shape, bi.output_size)
+```
+
+```text
+Shape([5, 2, 4]) Shape([2, 2, 4]) Shape([2, 2, 4])
+Shape([2, 5, 4])
+Shape([5, 2, 8]) Shape([2, 2, 4]) 8
+```
 
 ### Common utilities
 
@@ -932,7 +1158,31 @@ hidden = hidden + attn(norm(hidden))  # pre-norm residual block
 - `Adam`
 - `AdamW`
 - `RMSprop`
+- `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004)`
+- `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, epsilon=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
+
+`NAdam` (Dozat, 2016) is Adam with Nesterov momentum: the step uses the momentum
+the *next* iterate will carry rather than the current one, so it begins
+decelerating before overshooting rather than after. Its momentum coefficient is
+scheduled rather than fixed —
+`mu_t = beta1 * (1 - 0.5 * 0.96^(t * momentum_decay))` — starting near
+`beta1 / 2` and rising toward `beta1`, which damps the first steps while the
+moment estimates are still poor. The running product of every `mu` so far
+replaces Adam's `beta1^t` in the bias correction, so it is optimizer state rather
+than something recomputed per step.
+
+`Adagrad` accumulates a running *sum* of squared gradients where RMSprop keeps
+an exponential moving average. The denominator therefore never shrinks, and each
+parameter's effective step `lr / (sqrt(sum) + eps)` decays monotonically — under
+a constant gradient, exactly as `1/sqrt(t)`. That is the point of the method: a
+coordinate whose gradient is rare accumulates little and keeps moving at close to
+the full learning rate, which is what makes it suit sparse features. It is also
+why Adagrad stalls on long runs, and why the moving-average methods exist.
+`lr_decay` shrinks the rate further as `lr / (1 + (t - 1) * lr_decay)`, and
+`initial_accumulator_value` starts the sum above zero to damp the first steps.
+Its `epsilon` default is `1e-10` rather than the `1e-8` used elsewhere, because
+it floors a quantity that only grows.
 
 `Lion` (Chen et al., 2023) updates parameters by the *sign* of an interpolated
 momentum, so every parameter moves by exactly `lr` regardless of gradient

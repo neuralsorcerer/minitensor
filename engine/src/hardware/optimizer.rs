@@ -11,7 +11,18 @@ use crate::device::{Device, DeviceType};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// Resource optimization engine
+/// Resource optimization engine.
+///
+/// # Status
+///
+/// The workload *analysis* here is real: it walks the computation graph and
+/// derives operation counts, memory requirements and parallelization
+/// opportunities from the hardware profile. The **cost model is not
+/// implemented** — the timings in the plan it returns come from fixed
+/// placeholders, not from measurement or a model of the target hardware (grep
+/// this module for "Placeholder"). Treat [`ExecutionPlan::estimated_total_time`]
+/// and [`DevicePlacement::estimated_execution_time`] as structural
+/// scaffolding rather than predictions, and do not schedule against them.
 pub struct ResourceOptimizer {
     _hardware_profile: HardwareProfile,
     workload_analyzer: WorkloadAnalyzer,
@@ -493,13 +504,18 @@ impl ResourceOptimizer {
     }
 }
 
-/// Complete execution plan
+/// Complete execution plan.
+///
+/// See [`ResourceOptimizer`]: the device placement, memory strategy and
+/// parallelization fields are derived from the workload and the hardware
+/// profile, but the time estimates are placeholders.
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {
     pub device_placement: DevicePlacement,
     pub memory_plan: MemoryOptimizationPlan,
     pub parallelization_strategy: ParallelizationStrategy,
     pub workload_analysis: WorkloadAnalysis,
+    /// Placeholder, not a prediction — see [`ResourceOptimizer`].
     pub estimated_total_time: Duration,
 }
 

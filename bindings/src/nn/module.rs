@@ -19,26 +19,33 @@ use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
 use engine::Device;
 use engine::nn::{
-    BCELoss, CrossEntropyLoss, DenseLayer, FocalLoss, HuberLoss, Layer, LogCoshLoss, MAELoss,
-    MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
+    BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, DenseLayer, FocalLoss, HuberLoss, Layer,
+    LogCoshLoss, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
     activation::{ELU, GELU, LeakyReLU},
     attention::MultiheadAttention,
-    conv::Conv2d,
+    conv::{Conv1d, Conv2d},
     dropout::{Dropout, Dropout2d},
     embedding::Embedding,
     normalization::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm},
+    pooling::{AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d},
+    recurrent::{CellKind, Recurrent},
     utils::{LayerUtils, SequentialUtils},
 };
 use engine::ops::batch_norm as batch_norm_op;
+use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
 use engine::ops::linalg::matmul as matmul_op;
 use engine::ops::loss::cross_entropy as cross_entropy_op;
+use engine::ops::pooling::{
+    avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, max_pool1d as max_pool1d_op,
+    max_pool2d as max_pool2d_op,
+};
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use pyo3::PyClassInitializer;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module};
+use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module, PyTuple};
 
 fn borrow_tensor<'py>(value: &'py Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
     if let Ok(tensor) = value.extract::<PyRef<PyTensor>>() {
@@ -167,6 +174,109 @@ fn conv2d(
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
         padding,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0))]
+fn conv1d(
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+    stride: usize,
+    padding: usize,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    let result = conv1d_op(
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
+        stride,
+        padding,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=0))]
+fn max_pool1d(
+    input: &Bound<PyAny>,
+    kernel_size: usize,
+    stride: Option<usize>,
+    padding: usize,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    // Pooling defaults its stride to the window, unlike convolution.
+    let stride = stride.unwrap_or(kernel_size);
+    let result = max_pool1d_op(input_tensor.tensor(), kernel_size, stride, padding)
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=0, count_include_pad=true))]
+fn avg_pool1d(
+    input: &Bound<PyAny>,
+    kernel_size: usize,
+    stride: Option<usize>,
+    padding: usize,
+    count_include_pad: bool,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let stride = stride.unwrap_or(kernel_size);
+    let result = avg_pool1d_op(
+        input_tensor.tensor(),
+        kernel_size,
+        stride,
+        padding,
+        count_include_pad,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=None))]
+fn max_pool2d(
+    input: &Bound<PyAny>,
+    kernel_size: &Bound<PyAny>,
+    stride: Option<&Bound<PyAny>>,
+    padding: Option<&Bound<PyAny>>,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let kernel = parse_pair_arg("kernel_size", Some(kernel_size), (1, 1))?;
+    // Pooling defaults its stride to the window, unlike convolution.
+    let stride = parse_pair_arg("stride", stride, kernel)?;
+    let padding = parse_pair_arg("padding", padding, (0, 0))?;
+    let result =
+        max_pool2d_op(input_tensor.tensor(), kernel, stride, padding).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=None, count_include_pad=true))]
+fn avg_pool2d(
+    input: &Bound<PyAny>,
+    kernel_size: &Bound<PyAny>,
+    stride: Option<&Bound<PyAny>>,
+    padding: Option<&Bound<PyAny>>,
+    count_include_pad: bool,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let kernel = parse_pair_arg("kernel_size", Some(kernel_size), (1, 1))?;
+    let stride = parse_pair_arg("stride", stride, kernel)?;
+    let padding = parse_pair_arg("padding", padding, (0, 0))?;
+    let result = avg_pool2d_op(
+        input_tensor.tensor(),
+        kernel,
+        stride,
+        padding,
+        count_include_pad,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -328,6 +438,29 @@ fn binary_cross_entropy_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+#[pyfunction(name = "binary_cross_entropy_with_logits")]
+#[pyo3(signature = (input, target, pos_weight=None, reduction="mean"))]
+fn binary_cross_entropy_with_logits_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    pos_weight: Option<&Bound<PyAny>>,
+    reduction: &str,
+) -> PyResult<PyTensor> {
+    let logits = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let loss = match pos_weight {
+        Some(w) => {
+            let w = borrow_tensor(w)?;
+            BCEWithLogitsLoss::with_pos_weight(reduction, w.tensor().clone())
+        }
+        None => BCEWithLogitsLoss::new(reduction),
+    };
+    let result = loss
+        .forward(logits.tensor(), target_tensor.tensor())
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 /// Base class for neural network modules
 #[pyclass(name = "Module", subclass)]
 pub struct PyModule {
@@ -344,26 +477,31 @@ pub struct PyModule {
 /// downcast getters) is written out per variant.
 macro_rules! module_types {
     ($($variant:ident($ty:ty)),+ $(,)?) => {
+        /// Payloads are boxed uniformly: the layer structs differ in size by
+        /// almost 2x (`MultiheadAttention` carries eight tensors), and an
+        /// unboxed enum would pad every module — including a bare `ReLU` — out
+        /// to the largest one. Modules are constructed once, so the single
+        /// allocation is free in exchange.
         enum ModuleType {
-            $($variant($ty),)+
+            $($variant(Box<$ty>),)+
         }
 
         impl ModuleType {
             fn as_layer(&self) -> &dyn Layer {
                 match self {
-                    $(ModuleType::$variant(layer) => layer,)+
+                    $(ModuleType::$variant(layer) => &**layer,)+
                 }
             }
 
             fn as_module(&self) -> &dyn engine::nn::Module {
                 match self {
-                    $(ModuleType::$variant(layer) => layer,)+
+                    $(ModuleType::$variant(layer) => &**layer,)+
                 }
             }
 
             fn as_module_mut(&mut self) -> &mut dyn engine::nn::Module {
                 match self {
-                    $(ModuleType::$variant(layer) => layer,)+
+                    $(ModuleType::$variant(layer) => &mut **layer,)+
                 }
             }
 
@@ -390,6 +528,12 @@ module_types! {
     LayerNorm(LayerNorm),
     RMSNorm(RMSNorm),
     MultiheadAttention(MultiheadAttention),
+    MaxPool2d(MaxPool2d),
+    AvgPool2d(AvgPool2d),
+    Recurrent(Recurrent),
+    Conv1d(Conv1d),
+    MaxPool1d(MaxPool1d),
+    AvgPool1d(AvgPool1d),
 }
 
 #[pymethods]
@@ -509,6 +653,12 @@ impl PyModule {
 
     /// String representation
     fn __repr__(&self) -> String {
+        // Python spells its booleans `True`/`False`; Rust's `Display` gives
+        // `true`/`false`, which is not valid Python in a `__repr__`.
+        fn py_bool(value: bool) -> &'static str {
+            if value { "True" } else { "False" }
+        }
+
         match &self.inner {
             ModuleType::DenseLayer(layer) => format!(
                 "DenseLayer(in_features={}, out_features={})",
@@ -549,20 +699,67 @@ impl PyModule {
                 "LayerNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
                 layer.normalized_shape(),
                 layer.eps(),
-                layer.elementwise_affine()
+                py_bool(layer.elementwise_affine())
             ),
             ModuleType::RMSNorm(layer) => format!(
                 "RMSNorm(normalized_shape={:?}, eps={}, elementwise_affine={})",
                 layer.normalized_shape(),
                 layer.eps(),
-                layer.elementwise_affine()
+                py_bool(layer.elementwise_affine())
             ),
             ModuleType::MultiheadAttention(layer) => format!(
                 "MultiheadAttention(embed_dim={}, num_heads={}, head_dim={}, is_causal={})",
                 layer.embed_dim(),
                 layer.num_heads(),
                 layer.head_dim(),
-                layer.is_causal()
+                py_bool(layer.is_causal())
+            ),
+            ModuleType::MaxPool2d(layer) => format!(
+                "MaxPool2d(kernel_size={:?}, stride={:?}, padding={:?})",
+                layer.kernel_size(),
+                layer.stride(),
+                layer.padding()
+            ),
+            ModuleType::AvgPool2d(layer) => format!(
+                "AvgPool2d(kernel_size={:?}, stride={:?}, padding={:?}, count_include_pad={})",
+                layer.kernel_size(),
+                layer.stride(),
+                layer.padding(),
+                py_bool(layer.count_include_pad())
+            ),
+            ModuleType::Conv1d(layer) => format!(
+                "Conv1d(in_channels={}, out_channels={}, kernel_size={}, stride={}, padding={})",
+                layer.in_channels(),
+                layer.out_channels(),
+                layer.kernel_size(),
+                layer.stride(),
+                layer.padding()
+            ),
+            ModuleType::MaxPool1d(layer) => format!(
+                "MaxPool1d(kernel_size={}, stride={}, padding={})",
+                layer.kernel_size(),
+                layer.stride(),
+                layer.padding()
+            ),
+            ModuleType::AvgPool1d(layer) => format!(
+                "AvgPool1d(kernel_size={}, stride={}, padding={}, count_include_pad={})",
+                layer.kernel_size(),
+                layer.stride(),
+                layer.padding(),
+                py_bool(layer.count_include_pad())
+            ),
+            ModuleType::Recurrent(layer) => format!(
+                "{}(input_size={}, hidden_size={}, num_layers={}, bias={}, batch_first={}, bidirectional={})",
+                match layer.kind() {
+                    CellKind::Lstm => "LSTM",
+                    CellKind::Gru => "GRU",
+                },
+                layer.input_size(),
+                layer.hidden_size(),
+                layer.num_layers(),
+                py_bool(layer.has_bias()),
+                py_bool(layer.batch_first()),
+                py_bool(layer.bidirectional())
             ),
         }
     }
@@ -631,109 +828,145 @@ impl PyModule {
 impl PyModule {
     pub fn from_dense_layer(dense_layer: DenseLayer) -> Self {
         Self {
-            inner: ModuleType::DenseLayer(dense_layer),
+            inner: ModuleType::DenseLayer(Box::new(dense_layer)),
         }
     }
 
     pub fn from_relu(relu: ReLU) -> Self {
         Self {
-            inner: ModuleType::ReLU(relu),
+            inner: ModuleType::ReLU(Box::new(relu)),
         }
     }
 
     pub fn from_sigmoid(sigmoid: Sigmoid) -> Self {
         Self {
-            inner: ModuleType::Sigmoid(sigmoid),
+            inner: ModuleType::Sigmoid(Box::new(sigmoid)),
         }
     }
 
     pub fn from_tanh(tanh: Tanh) -> Self {
         Self {
-            inner: ModuleType::Tanh(tanh),
+            inner: ModuleType::Tanh(Box::new(tanh)),
         }
     }
 
     pub fn from_softmax(softmax: Softmax) -> Self {
         Self {
-            inner: ModuleType::Softmax(softmax),
+            inner: ModuleType::Softmax(Box::new(softmax)),
         }
     }
 
     pub fn from_leaky_relu(leaky_relu: LeakyReLU) -> Self {
         Self {
-            inner: ModuleType::LeakyReLU(leaky_relu),
+            inner: ModuleType::LeakyReLU(Box::new(leaky_relu)),
         }
     }
 
     pub fn from_elu(elu: ELU) -> Self {
         Self {
-            inner: ModuleType::Elu(elu),
+            inner: ModuleType::Elu(Box::new(elu)),
         }
     }
 
     pub fn from_gelu(gelu: GELU) -> Self {
         Self {
-            inner: ModuleType::Gelu(gelu),
+            inner: ModuleType::Gelu(Box::new(gelu)),
         }
     }
 
     pub fn from_sequential(sequential: Sequential) -> Self {
         Self {
-            inner: ModuleType::Sequential(sequential),
+            inner: ModuleType::Sequential(Box::new(sequential)),
         }
     }
 
     pub fn from_conv2d(conv2d: Conv2d) -> Self {
         Self {
-            inner: ModuleType::Conv2d(conv2d),
+            inner: ModuleType::Conv2d(Box::new(conv2d)),
+        }
+    }
+
+    pub fn from_max_pool2d(max_pool2d: MaxPool2d) -> Self {
+        Self {
+            inner: ModuleType::MaxPool2d(Box::new(max_pool2d)),
+        }
+    }
+
+    pub fn from_avg_pool2d(avg_pool2d: AvgPool2d) -> Self {
+        Self {
+            inner: ModuleType::AvgPool2d(Box::new(avg_pool2d)),
         }
     }
 
     pub fn from_batch_norm1d(batch_norm1d: BatchNorm1d) -> Self {
         Self {
-            inner: ModuleType::BatchNorm1d(batch_norm1d),
+            inner: ModuleType::BatchNorm1d(Box::new(batch_norm1d)),
         }
     }
 
     pub fn from_batch_norm2d(batch_norm2d: BatchNorm2d) -> Self {
         Self {
-            inner: ModuleType::BatchNorm2d(batch_norm2d),
+            inner: ModuleType::BatchNorm2d(Box::new(batch_norm2d)),
         }
     }
 
     pub fn from_dropout(dropout: Dropout) -> Self {
         Self {
-            inner: ModuleType::Dropout(dropout),
+            inner: ModuleType::Dropout(Box::new(dropout)),
         }
     }
 
     pub fn from_dropout2d(dropout: Dropout2d) -> Self {
         Self {
-            inner: ModuleType::Dropout2d(dropout),
+            inner: ModuleType::Dropout2d(Box::new(dropout)),
         }
     }
 
     pub fn from_embedding(embedding: Embedding) -> Self {
         Self {
-            inner: ModuleType::Embedding(embedding),
+            inner: ModuleType::Embedding(Box::new(embedding)),
         }
     }
 
     pub fn from_layer_norm(layer_norm: LayerNorm) -> Self {
         Self {
-            inner: ModuleType::LayerNorm(layer_norm),
+            inner: ModuleType::LayerNorm(Box::new(layer_norm)),
         }
     }
 
     pub fn from_rms_norm(rms_norm: RMSNorm) -> Self {
         Self {
-            inner: ModuleType::RMSNorm(rms_norm),
+            inner: ModuleType::RMSNorm(Box::new(rms_norm)),
+        }
+    }
+
+    pub fn from_conv1d(conv1d: Conv1d) -> Self {
+        Self {
+            inner: ModuleType::Conv1d(Box::new(conv1d)),
+        }
+    }
+
+    pub fn from_max_pool1d(layer: MaxPool1d) -> Self {
+        Self {
+            inner: ModuleType::MaxPool1d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_avg_pool1d(layer: AvgPool1d) -> Self {
+        Self {
+            inner: ModuleType::AvgPool1d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_recurrent(recurrent: Recurrent) -> Self {
+        Self {
+            inner: ModuleType::Recurrent(Box::new(recurrent)),
         }
     }
 
     pub fn from_multihead_attention(mha: MultiheadAttention) -> Self {
         Self {
-            inner: ModuleType::MultiheadAttention(mha),
+            inner: ModuleType::MultiheadAttention(Box::new(mha)),
         }
     }
 
@@ -742,28 +975,34 @@ impl PyModule {
     /// `Clone` and is rejected outright.
     pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
         let layer: Box<dyn Layer> = match &self.inner {
-            ModuleType::DenseLayer(layer) => Box::new(layer.clone()),
-            ModuleType::ReLU(layer) => Box::new(layer.clone()),
-            ModuleType::Sigmoid(layer) => Box::new(layer.clone()),
-            ModuleType::Tanh(layer) => Box::new(layer.clone()),
-            ModuleType::Softmax(layer) => Box::new(layer.clone()),
-            ModuleType::LeakyReLU(layer) => Box::new(layer.clone()),
-            ModuleType::Elu(layer) => Box::new(layer.clone()),
-            ModuleType::Gelu(layer) => Box::new(layer.clone()),
+            ModuleType::DenseLayer(layer) => layer.clone(),
+            ModuleType::ReLU(layer) => layer.clone(),
+            ModuleType::Sigmoid(layer) => layer.clone(),
+            ModuleType::Tanh(layer) => layer.clone(),
+            ModuleType::Softmax(layer) => layer.clone(),
+            ModuleType::LeakyReLU(layer) => layer.clone(),
+            ModuleType::Elu(layer) => layer.clone(),
+            ModuleType::Gelu(layer) => layer.clone(),
             ModuleType::Sequential(_) => {
                 return Err(PyTypeError::new_err(
                     "Nested Sequential modules are not supported",
                 ));
             }
-            ModuleType::Conv2d(layer) => Box::new(layer.clone()),
-            ModuleType::BatchNorm1d(layer) => Box::new(layer.clone()),
-            ModuleType::BatchNorm2d(layer) => Box::new(layer.clone()),
-            ModuleType::Dropout(layer) => Box::new(layer.clone()),
-            ModuleType::Dropout2d(layer) => Box::new(layer.clone()),
-            ModuleType::Embedding(layer) => Box::new(layer.clone()),
-            ModuleType::MultiheadAttention(layer) => Box::new(layer.clone()),
-            ModuleType::LayerNorm(layer) => Box::new(layer.clone()),
-            ModuleType::RMSNorm(layer) => Box::new(layer.clone()),
+            ModuleType::Conv2d(layer) => layer.clone(),
+            ModuleType::BatchNorm1d(layer) => layer.clone(),
+            ModuleType::BatchNorm2d(layer) => layer.clone(),
+            ModuleType::Dropout(layer) => layer.clone(),
+            ModuleType::Dropout2d(layer) => layer.clone(),
+            ModuleType::Embedding(layer) => layer.clone(),
+            ModuleType::MultiheadAttention(layer) => layer.clone(),
+            ModuleType::LayerNorm(layer) => layer.clone(),
+            ModuleType::RMSNorm(layer) => layer.clone(),
+            ModuleType::MaxPool2d(layer) => layer.clone(),
+            ModuleType::AvgPool2d(layer) => layer.clone(),
+            ModuleType::Recurrent(layer) => layer.clone(),
+            ModuleType::Conv1d(layer) => layer.clone(),
+            ModuleType::MaxPool1d(layer) => layer.clone(),
+            ModuleType::AvgPool1d(layer) => layer.clone(),
         };
 
         Ok(layer)

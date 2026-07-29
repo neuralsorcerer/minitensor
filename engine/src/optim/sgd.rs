@@ -8,6 +8,7 @@ use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{
     autograd::{self, TensorId},
     error::Result,
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
 };
 use rayon::prelude::*;
@@ -176,24 +177,41 @@ impl SGD {
     ) -> Result<()> {
         self.validate_param_grad(param, grad)?;
 
+        /// One dtype arm. The math lives in a single chunk closure; the chunk
+        /// loop stays on the calling thread for small parameters (biases, norm
+        /// scales, small layers), where rayon's split overhead dwarfs the
+        /// arithmetic, and fans out only above `PAR_THRESHOLD`.
+        macro_rules! simple_arm {
+            ($ty:ty, $read:ident, $write:ident, $lr:expr, $wd:expr) => {{
+                let (lr, wd): ($ty, $ty) = ($lr, $wd);
+                let p = param.data_mut().$write().unwrap();
+                let g = grad.data().$read().unwrap();
+                let step_chunk = |p: &mut [$ty], g: &[$ty]| {
+                    for (p_i, &g_i) in p.iter_mut().zip(g.iter()) {
+                        let grad_val = g_i + wd * *p_i;
+                        *p_i -= lr * grad_val;
+                    }
+                };
+                if p.len() < PAR_THRESHOLD {
+                    step_chunk(p, g);
+                } else {
+                    p.par_chunks_mut(PAR_CHUNK)
+                        .zip(g.par_chunks(PAR_CHUNK))
+                        .for_each(|(p, g)| step_chunk(p, g));
+                }
+            }};
+        }
+
         match param.dtype() {
-            crate::tensor::DataType::Float32 => {
-                let p = param.data_mut().as_f32_slice_mut().unwrap();
-                let g = grad.data().as_f32_slice().unwrap();
-                let lr = lr as f32;
-                let wd = weight_decay as f32;
-                p.par_iter_mut().zip(g.par_iter()).for_each(|(p_i, &g_i)| {
-                    let grad_val = g_i + wd * *p_i;
-                    *p_i -= lr * grad_val;
-                });
-            }
+            crate::tensor::DataType::Float32 => simple_arm!(
+                f32,
+                as_f32_slice,
+                as_f32_slice_mut,
+                lr as f32,
+                weight_decay as f32
+            ),
             crate::tensor::DataType::Float64 => {
-                let p = param.data_mut().as_f64_slice_mut().unwrap();
-                let g = grad.data().as_f64_slice().unwrap();
-                p.par_iter_mut().zip(g.par_iter()).for_each(|(p_i, &g_i)| {
-                    let grad_val = g_i + weight_decay * *p_i;
-                    *p_i -= lr * grad_val;
-                });
+                simple_arm!(f64, as_f64_slice, as_f64_slice_mut, lr, weight_decay)
             }
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
@@ -248,20 +266,17 @@ impl SGD {
             ),
         };
 
-        match param.dtype() {
-            crate::tensor::DataType::Float32 => {
-                let p = param.data_mut().as_f32_slice_mut().unwrap();
-                let g = grad.data().as_f32_slice().unwrap();
-                let v = velocity.data_mut().as_f32_slice_mut().unwrap();
-                let lr = lr as f32;
-                let momentum = self.momentum as f32;
-                let damp = self.dampening as f32;
-                let wd = weight_decay as f32;
-                let nesterov = self.nesterov;
-                p.par_iter_mut()
-                    .zip(g.par_iter())
-                    .zip(v.par_iter_mut())
-                    .for_each(|((p_i, &g_i), v_i)| {
+        let nesterov = self.nesterov;
+
+        /// One dtype arm; see `simple_arm!` above for the threshold rationale.
+        macro_rules! momentum_arm {
+            ($ty:ty, $read:ident, $write:ident, $lr:expr, $mom:expr, $damp:expr, $wd:expr) => {{
+                let (lr, momentum, damp, wd): ($ty, $ty, $ty, $ty) = ($lr, $mom, $damp, $wd);
+                let p = param.data_mut().$write().unwrap();
+                let g = grad.data().$read().unwrap();
+                let v = velocity.data_mut().$write().unwrap();
+                let step_chunk = |p: &mut [$ty], g: &[$ty], v: &mut [$ty]| {
+                    for ((p_i, &g_i), v_i) in p.iter_mut().zip(g.iter()).zip(v.iter_mut()) {
                         let grad_val = g_i + wd * *p_i;
                         *v_i = if is_new {
                             grad_val
@@ -274,33 +289,38 @@ impl SGD {
                             *v_i
                         };
                         *p_i -= lr * update;
-                    });
-            }
-            crate::tensor::DataType::Float64 => {
-                let p = param.data_mut().as_f64_slice_mut().unwrap();
-                let g = grad.data().as_f64_slice().unwrap();
-                let v = velocity.data_mut().as_f64_slice_mut().unwrap();
-                let momentum = self.momentum;
-                let damp = self.dampening;
-                let nesterov = self.nesterov;
-                p.par_iter_mut()
-                    .zip(g.par_iter())
-                    .zip(v.par_iter_mut())
-                    .for_each(|((p_i, &g_i), v_i)| {
-                        let grad_val = g_i + weight_decay * *p_i;
-                        *v_i = if is_new {
-                            grad_val
-                        } else {
-                            momentum * *v_i + (1.0 - damp) * grad_val
-                        };
-                        let update = if nesterov {
-                            grad_val + momentum * *v_i
-                        } else {
-                            *v_i
-                        };
-                        *p_i -= lr * update;
-                    });
-            }
+                    }
+                };
+                if p.len() < PAR_THRESHOLD {
+                    step_chunk(p, g, v);
+                } else {
+                    p.par_chunks_mut(PAR_CHUNK)
+                        .zip(g.par_chunks(PAR_CHUNK))
+                        .zip(v.par_chunks_mut(PAR_CHUNK))
+                        .for_each(|((p, g), v)| step_chunk(p, g, v));
+                }
+            }};
+        }
+
+        match param.dtype() {
+            crate::tensor::DataType::Float32 => momentum_arm!(
+                f32,
+                as_f32_slice,
+                as_f32_slice_mut,
+                lr as f32,
+                self.momentum as f32,
+                self.dampening as f32,
+                weight_decay as f32
+            ),
+            crate::tensor::DataType::Float64 => momentum_arm!(
+                f64,
+                as_f64_slice,
+                as_f64_slice_mut,
+                lr,
+                self.momentum,
+                self.dampening,
+                weight_decay
+            ),
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "SGD only supports float32/float64 tensors",

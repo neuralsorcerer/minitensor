@@ -152,6 +152,14 @@ A compiled plugin implements the Rust `Plugin` trait and exports a constructor
 symbol. The exact ABI is controlled by the engine crate and by whether the
 consumer build enables dynamic loading.
 
+The plugin manager owns registration of the operations a plugin declares: it
+registers everything `custom_operations()` returns once `initialize` succeeds,
+and unregisters them after `cleanup` on unload. So `initialize` must not
+register those operations itself — that is a double registration and the load
+fails with `Operation '<name>' is already registered`. `initialize` receives the
+registry so a plugin *can* add operations beyond the ones it declares; those it
+must unregister itself in `cleanup`.
+
 ```rust
 use minitensor_engine::{CustomOp, CustomOpRegistry, Plugin, PluginInfo, Result, VersionInfo};
 use std::sync::Arc;
@@ -215,6 +223,8 @@ minitensor-engine = { path = "../engine" }
 - Treat plugin names as globally unique registry keys.
 - Declare realistic minimum and maximum supported MiniTensor versions.
 - Keep initialization and cleanup idempotent where possible.
+- Return the same operation names from `custom_operations()` on every call — the
+  manager uses it both to register on load and to unregister on unload.
 - Validate tensor shapes, dtypes, and devices in Rust `CustomOp` code.
 - Test duplicate registration, missing plugin names, missing parameters, and
   builds without the `dynamic-loading` feature.

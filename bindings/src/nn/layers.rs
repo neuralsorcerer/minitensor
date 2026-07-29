@@ -201,6 +201,283 @@ impl PyDropout2d {
     }
 }
 
+/// Conv1d layer
+#[pyclass(name = "Conv1d", extends = PyModule)]
+pub struct PyConv1d;
+
+#[pymethods]
+impl PyConv1d {
+    /// Create a new Conv1d layer
+    #[new]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, bias=true, device=None, dtype=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        bias: bool,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let dtype = dtype::resolve_dtype_arg(dtype)?;
+        let layer = Conv1d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            Some(stride),
+            Some(padding),
+            bias,
+            device,
+            dtype,
+        )
+        .map_err(_convert_error)?;
+        Ok(PyClassInitializer::from(PyModule::from_conv1d(layer)).add_subclass(Self))
+    }
+
+    #[getter]
+    fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::Conv1d(layer) => Ok(layer.in_channels()),
+            _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
+        }
+    }
+
+    #[getter]
+    fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::Conv1d(layer) => Ok(layer.out_channels()),
+            _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
+        }
+    }
+
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::Conv1d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
+        }
+    }
+
+    #[getter]
+    fn stride(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::Conv1d(layer) => Ok(layer.stride()),
+            _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
+        }
+    }
+
+    #[getter]
+    fn padding(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::Conv1d(layer) => Ok(layer.padding()),
+            _ => Err(PyTypeError::new_err("Not a Conv1d layer")),
+        }
+    }
+}
+
+/// MaxPool1d layer
+#[pyclass(name = "MaxPool1d", extends = PyModule)]
+pub struct PyMaxPool1d;
+
+#[pymethods]
+impl PyMaxPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride=None, padding=0))]
+    fn new(
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        // Pooling defaults its stride to the window, unlike convolution.
+        let layer = MaxPool1d::new(kernel_size, stride, Some(padding));
+        Ok(PyClassInitializer::from(PyModule::from_max_pool1d(layer)).add_subclass(Self))
+    }
+
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool1d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
+        }
+    }
+
+    #[getter]
+    fn stride(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool1d(layer) => Ok(layer.stride()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
+        }
+    }
+
+    #[getter]
+    fn padding(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool1d(layer) => Ok(layer.padding()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool1d layer")),
+        }
+    }
+}
+
+/// AvgPool1d layer
+#[pyclass(name = "AvgPool1d", extends = PyModule)]
+pub struct PyAvgPool1d;
+
+#[pymethods]
+impl PyAvgPool1d {
+    #[new]
+    #[pyo3(signature = (kernel_size, stride=None, padding=0, count_include_pad=true))]
+    fn new(
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        count_include_pad: bool,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let layer = AvgPool1d::new(kernel_size, stride, Some(padding), count_include_pad);
+        Ok(PyClassInitializer::from(PyModule::from_avg_pool1d(layer)).add_subclass(Self))
+    }
+
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool1d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
+        }
+    }
+
+    #[getter]
+    fn stride(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool1d(layer) => Ok(layer.stride()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
+        }
+    }
+
+    #[getter]
+    fn padding(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool1d(layer) => Ok(layer.padding()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
+        }
+    }
+
+    #[getter]
+    fn count_include_pad(slf: PyRef<Self>) -> PyResult<bool> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool1d(layer) => Ok(layer.count_include_pad()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool1d layer")),
+        }
+    }
+}
+
+/// MaxPool2d layer
+#[pyclass(name = "MaxPool2d", extends = PyModule)]
+pub struct PyMaxPool2d;
+
+#[pymethods]
+impl PyMaxPool2d {
+    /// Create a new MaxPool2d layer
+    #[new]
+    #[pyo3(signature = (kernel_size, stride=None, padding=None))]
+    fn new(
+        kernel_size: &Bound<PyAny>,
+        stride: Option<&Bound<PyAny>>,
+        padding: Option<&Bound<PyAny>>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let kernel_size = parse_tuple2(kernel_size)?;
+        // Pooling defaults its stride to the window, unlike convolution.
+        let stride = match stride {
+            Some(s) => Some(parse_tuple2(s)?),
+            None => None,
+        };
+        let padding = match padding {
+            Some(p) => Some(parse_tuple2(p)?),
+            None => None,
+        };
+        let layer = MaxPool2d::new(kernel_size, stride, padding);
+        Ok(PyClassInitializer::from(PyModule::from_max_pool2d(layer)).add_subclass(Self))
+    }
+
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool2d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
+        }
+    }
+
+    #[getter]
+    fn stride(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool2d(layer) => Ok(layer.stride()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
+        }
+    }
+
+    #[getter]
+    fn padding(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::MaxPool2d(layer) => Ok(layer.padding()),
+            _ => Err(PyTypeError::new_err("Not a MaxPool2d layer")),
+        }
+    }
+}
+
+/// AvgPool2d layer
+#[pyclass(name = "AvgPool2d", extends = PyModule)]
+pub struct PyAvgPool2d;
+
+#[pymethods]
+impl PyAvgPool2d {
+    /// Create a new AvgPool2d layer
+    #[new]
+    #[pyo3(signature = (kernel_size, stride=None, padding=None, count_include_pad=true))]
+    fn new(
+        kernel_size: &Bound<PyAny>,
+        stride: Option<&Bound<PyAny>>,
+        padding: Option<&Bound<PyAny>>,
+        count_include_pad: bool,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let kernel_size = parse_tuple2(kernel_size)?;
+        let stride = match stride {
+            Some(s) => Some(parse_tuple2(s)?),
+            None => None,
+        };
+        let padding = match padding {
+            Some(p) => Some(parse_tuple2(p)?),
+            None => None,
+        };
+        let layer = AvgPool2d::new(kernel_size, stride, padding, Some(count_include_pad));
+        Ok(PyClassInitializer::from(PyModule::from_avg_pool2d(layer)).add_subclass(Self))
+    }
+
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool2d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
+        }
+    }
+
+    #[getter]
+    fn stride(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool2d(layer) => Ok(layer.stride()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
+        }
+    }
+
+    #[getter]
+    fn count_include_pad(slf: PyRef<Self>) -> PyResult<bool> {
+        match &slf.as_ref().inner {
+            ModuleType::AvgPool2d(layer) => Ok(layer.count_include_pad()),
+            _ => Err(PyTypeError::new_err("Not an AvgPool2d layer")),
+        }
+    }
+}
+
 /// Conv2d layer
 #[pyclass(name = "Conv2d", extends = PyModule)]
 pub struct PyConv2d;
@@ -581,6 +858,174 @@ impl PyRMSNorm {
 }
 
 /// Multi-head attention block
+/// Shared constructor and state-carrying forward for the recurrent layers.
+macro_rules! recurrent_class {
+    ($py_name:literal, $ty:ident, $ctor:ident, $doc:literal, $returns_cell:literal) => {
+        #[doc = $doc]
+        #[pyclass(name = $py_name, extends = PyModule)]
+        pub struct $ty;
+
+        #[pymethods]
+        impl $ty {
+            #[new]
+            // Kept on one line: rustfmt re-indents attribute bodies inside a
+            // macro on every pass and never converges.
+            #[pyo3(signature = (input_size, hidden_size, num_layers=1, bias=true, batch_first=false, bidirectional=false, device=None, dtype=None))]
+            #[allow(clippy::too_many_arguments)]
+            fn new(
+                input_size: usize,
+                hidden_size: usize,
+                num_layers: usize,
+                bias: bool,
+                batch_first: bool,
+                bidirectional: bool,
+                device: Option<&PyDevice>,
+                dtype: Option<&str>,
+            ) -> PyResult<PyClassInitializer<Self>> {
+                let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+                let dtype = dtype::resolve_dtype_arg(dtype)?;
+                let layer = Recurrent::$ctor(
+                    input_size,
+                    hidden_size,
+                    num_layers,
+                    bias,
+                    batch_first,
+                    bidirectional,
+                    device,
+                    dtype,
+                )
+                .map_err(_convert_error)?;
+                Ok(PyClassInitializer::from(PyModule::from_recurrent(layer)).add_subclass(Self))
+            }
+
+            /// Run the stack and return the final states alongside the output.
+            ///
+            /// `hx` supplies the initial hidden state shaped
+            /// `(num_layers, batch, hidden_size)`; zeros are used when omitted.
+            /// LSTM additionally accepts `cx` and returns `(output, (h_n, c_n))`;
+            /// GRU returns `(output, h_n)`.
+            #[pyo3(signature = (input, hx=None, cx=None))]
+            fn forward_with_state<'py>(
+                slf: PyRef<'py, Self>,
+                py: Python<'py>,
+                input: &Bound<'py, PyAny>,
+                hx: Option<&Bound<'py, PyAny>>,
+                cx: Option<&Bound<'py, PyAny>>,
+            ) -> PyResult<Py<PyAny>> {
+                let module = slf.as_ref();
+                let ModuleType::Recurrent(layer) = &module.inner else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Invalid layer type",
+                    ));
+                };
+
+                let x = borrow_tensor(input)?;
+                let h0 = borrow_optional_tensor(hx)?;
+                let c0 = borrow_optional_tensor(cx)?;
+                if h0.is_none() && c0.is_some() {
+                    return Err(PyValueError::new_err(
+                        "cx was given without hx; pass both initial states or neither",
+                    ));
+                }
+                let state = h0
+                    .as_ref()
+                    .map(|h| (h.tensor(), c0.as_ref().map(|c| c.tensor())));
+
+                let (output, h_n, c_n) = layer
+                    .forward_with_state(x.tensor(), state)
+                    .map_err(_convert_error)?;
+
+                let output = Py::new(py, PyTensor::from_tensor(output))?.into_any();
+                let h_n = Py::new(py, PyTensor::from_tensor(h_n))?.into_any();
+                if $returns_cell {
+                    let c_n = c_n.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                            "LSTM did not produce a cell state",
+                        )
+                    })?;
+                    let c_n = Py::new(py, PyTensor::from_tensor(c_n))?.into_any();
+                    let states = PyTuple::new(py, [h_n, c_n])?.into_any().unbind();
+                    Ok(PyTuple::new(py, [output, states])?.into_any().unbind())
+                } else {
+                    Ok(PyTuple::new(py, [output, h_n])?.into_any().unbind())
+                }
+            }
+
+            /// Width of each input vector
+            #[getter]
+            fn input_size(slf: PyRef<Self>) -> PyResult<usize> {
+                Self::with_layer(slf, |l| l.input_size())
+            }
+
+            /// Width of the hidden state
+            #[getter]
+            fn hidden_size(slf: PyRef<Self>) -> PyResult<usize> {
+                Self::with_layer(slf, |l| l.hidden_size())
+            }
+
+            /// Number of stacked layers
+            #[getter]
+            fn num_layers(slf: PyRef<Self>) -> PyResult<usize> {
+                Self::with_layer(slf, |l| l.num_layers())
+            }
+
+            /// Whether inputs are `(batch, seq, feature)`
+            #[getter]
+            fn batch_first(slf: PyRef<Self>) -> PyResult<bool> {
+                Self::with_layer(slf, |l| l.batch_first())
+            }
+
+            /// Whether the layers carry additive biases
+            #[getter]
+            fn bias(slf: PyRef<Self>) -> PyResult<bool> {
+                Self::with_layer(slf, |l| l.has_bias())
+            }
+
+            /// Whether each layer also runs over the reversed sequence
+            #[getter]
+            fn bidirectional(slf: PyRef<Self>) -> PyResult<bool> {
+                Self::with_layer(slf, |l| l.bidirectional())
+            }
+
+            /// Width of the output feature axis (`hidden_size * directions`)
+            #[getter]
+            fn output_size(slf: PyRef<Self>) -> PyResult<usize> {
+                Self::with_layer(slf, |l| l.output_size())
+            }
+        }
+
+        impl $ty {
+            fn with_layer<T>(slf: PyRef<Self>, f: impl Fn(&Recurrent) -> T) -> PyResult<T> {
+                let module = slf.as_ref();
+                let ModuleType::Recurrent(layer) = &module.inner else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Invalid layer type",
+                    ));
+                };
+                Ok(f(layer))
+            }
+        }
+    };
+}
+
+recurrent_class!(
+    "LSTM",
+    PyLSTM,
+    lstm,
+    "Long Short-Term Memory layer. Inputs are `(seq, batch, input_size)`, or \
+     `(batch, seq, input_size)` when `batch_first`.",
+    true
+);
+
+recurrent_class!(
+    "GRU",
+    PyGRU,
+    gru,
+    "Gated Recurrent Unit layer. Inputs are `(seq, batch, input_size)`, or \
+     `(batch, seq, input_size)` when `batch_first`.",
+    false
+);
+
 #[pyclass(name = "MultiheadAttention", extends = PyModule)]
 pub struct PyMultiheadAttention;
 
@@ -1106,6 +1551,71 @@ impl PyBCELoss {
     }
 }
 
+/// Binary Cross Entropy Loss function taking logits instead of probabilities
+#[pyclass(name = "BCEWithLogitsLoss")]
+pub struct PyBCEWithLogitsLoss {
+    inner: BCEWithLogitsLoss,
+}
+
+#[pymethods]
+impl PyBCEWithLogitsLoss {
+    /// Create a new BCE-with-logits loss
+    #[new]
+    #[pyo3(signature = (reduction=None, pos_weight=None))]
+    fn new(reduction: Option<&str>, pos_weight: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        let reduction = reduction.unwrap_or("mean");
+        let inner = match pos_weight {
+            Some(w) => {
+                let w = borrow_tensor(w)?;
+                BCEWithLogitsLoss::with_pos_weight(reduction, w.tensor().clone())
+            }
+            None => BCEWithLogitsLoss::new(reduction),
+        };
+        Ok(Self { inner })
+    }
+
+    /// Compute the loss from raw logits
+    fn forward(&self, logits: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        let logits = borrow_tensor(logits)?;
+        let targets = borrow_tensor(targets)?;
+        let result = self
+            .inner
+            .forward(logits.tensor(), targets.tensor())
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(result))
+    }
+
+    #[pyo3(name = "__call__")]
+    fn call(&self, logits: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+        self.forward(logits, targets)
+    }
+
+    /// Get the reduction mode
+    #[getter]
+    fn reduction(&self) -> &str {
+        self.inner.reduction()
+    }
+
+    /// Get the positive-class weight, if one was set
+    #[getter]
+    fn pos_weight(&self) -> Option<PyTensor> {
+        self.inner
+            .pos_weight()
+            .map(|w: &engine::tensor::Tensor| PyTensor::from_tensor(w.clone()))
+    }
+
+    /// String representation
+    fn __repr__(&self) -> String {
+        match self.inner.pos_weight() {
+            Some(_) => format!(
+                "BCEWithLogitsLoss(reduction='{}', pos_weight=...)",
+                self.inner.reduction()
+            ),
+            None => format!("BCEWithLogitsLoss(reduction='{}')", self.inner.reduction()),
+        }
+    }
+}
+
 /// Focal Loss function
 #[pyclass(name = "FocalLoss")]
 pub struct PyFocalLoss {
@@ -1188,6 +1698,8 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyDropout>()?;
     nn_module.add_class::<PyDropout2d>()?;
     nn_module.add_class::<PyConv2d>()?;
+    nn_module.add_class::<PyMaxPool2d>()?;
+    nn_module.add_class::<PyAvgPool2d>()?;
     nn_module.add_class::<PyBatchNorm1d>()?;
     nn_module.add_class::<PyBatchNorm2d>()?;
     nn_module.add_class::<PyEmbedding>()?;
@@ -1199,6 +1711,11 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     // Add functional APIs
     nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(conv1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(max_pool1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(avg_pool1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(max_pool2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(avg_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(batch_norm, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(cross_entropy, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(dropout_functional, &nn_module)?)?;
@@ -1210,6 +1727,10 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
         binary_cross_entropy_functional,
         &nn_module
     )?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        binary_cross_entropy_with_logits_functional,
+        &nn_module
+    )?)?;
 
     // Add loss function classes
     nn_module.add_class::<PyMSELoss>()?;
@@ -1218,7 +1739,13 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PySmoothL1Loss>()?;
     nn_module.add_class::<PyLogCoshLoss>()?;
     nn_module.add_class::<PyCrossEntropyLoss>()?;
+    nn_module.add_class::<PyConv1d>()?;
+    nn_module.add_class::<PyMaxPool1d>()?;
+    nn_module.add_class::<PyAvgPool1d>()?;
+    nn_module.add_class::<PyLSTM>()?;
+    nn_module.add_class::<PyGRU>()?;
     nn_module.add_class::<PyBCELoss>()?;
+    nn_module.add_class::<PyBCEWithLogitsLoss>()?;
     nn_module.add_class::<PyFocalLoss>()?;
 
     parent_module.add_submodule(&nn_module)?;

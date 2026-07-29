@@ -9,8 +9,8 @@
 mod tests {
     use crate::optim::optimizer::LearningRateScheduler;
     use crate::optim::{
-        Adam, AdamW, CosineAnnealingLR, GradientClipping, GradientUtils, Optimizer, ParameterGroup,
-        RMSprop, SGD,
+        Adagrad, Adam, AdamW, CosineAnnealingLR, GradientClipping, GradientUtils, NAdam, Optimizer,
+        ParameterGroup, RMSprop, SGD,
     };
     use crate::{
         device::Device,
@@ -401,6 +401,133 @@ mod tests {
         rmsprop.step(&mut params).unwrap();
         let data = tensor.data().as_f32_slice().unwrap();
         assert!(data.iter().all(|&v| v < 1.0));
+    }
+
+    /// One RMSprop step from `p = 1`, `g = 2` with `alpha = 0.9`, `lr = 0.1`,
+    /// no weight decay, for a tensor of `numel` elements.
+    fn rmsprop_one_step(centered: bool, momentum: f64, numel: usize) -> Vec<f32> {
+        let mut opt = RMSprop::new(0.1, Some(0.9), Some(1e-8), Some(0.0), Some(momentum))
+            .with_centered(centered);
+        let mut p = Tensor::ones(
+            Shape::new(vec![numel]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let mut g = Tensor::ones(
+            Shape::new(vec![numel]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        g.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = 2.0);
+        p.set_grad(Some(g));
+        opt.step(&mut [&mut p]).unwrap();
+        p.data().as_f32_slice().unwrap().to_vec()
+    }
+
+    #[test]
+    fn test_rmsprop_all_state_combinations_match_reference() {
+        // The four (momentum buffer × centering) combinations used to be four
+        // separate kernels per dtype; they now share one. Pin each against a
+        // hand-computed step so the shared path cannot drift.
+        //   sq = 0.9*0 + 0.1*g^2 = 0.4
+        //   plain/momentum:  denom = sqrt(0.4)
+        //   centered:        ga = 0.2, var = 0.4 - 0.04 = 0.36, denom = 0.6
+        let sqrt_04 = 0.4f32.sqrt();
+        let cases: &[(bool, f64, f32)] = &[
+            (false, 0.0, 1.0 - 0.1 * 2.0 / sqrt_04),
+            (false, 0.9, 1.0 - 0.1 * (2.0 / sqrt_04)),
+            (true, 0.0, 1.0 - 0.1 * 2.0 / 0.6),
+            (true, 0.9, 1.0 - 0.1 * (2.0 / 0.6)),
+        ];
+        for &(centered, momentum, expected) in cases {
+            let got = rmsprop_one_step(centered, momentum, 4)[0];
+            assert!(
+                (got - expected).abs() < 1e-5,
+                "centered={centered} momentum={momentum}: got {got}, want {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rmsprop_parallel_path_matches_sequential() {
+        // Above `PAR_THRESHOLD` the update runs over rayon chunks; the result
+        // must be identical to the single-threaded path element for element.
+        for &(centered, momentum) in &[(false, 0.0), (false, 0.9), (true, 0.0), (true, 0.9)] {
+            let small = rmsprop_one_step(centered, momentum, 8)[0];
+            let large = rmsprop_one_step(centered, momentum, 10_000);
+            assert_eq!(large.len(), 10_000);
+            for (i, &v) in large.iter().enumerate() {
+                assert!(
+                    (v - small).abs() < 1e-6,
+                    "centered={centered} momentum={momentum} index {i}: {v} vs {small}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_optimizers_parallel_path_matches_sequential() {
+        // Same cross-check for the other optimizers' chunked updates.
+        fn one_step<F>(numel: usize, make: F) -> Vec<f32>
+        where
+            F: FnOnce() -> Box<dyn Optimizer>,
+        {
+            let mut opt = make();
+            let mut p = Tensor::ones(
+                Shape::new(vec![numel]),
+                DataType::Float32,
+                Device::cpu(),
+                true,
+            );
+            let mut g = Tensor::ones(
+                Shape::new(vec![numel]),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            );
+            g.data_mut()
+                .as_f32_slice_mut()
+                .unwrap()
+                .iter_mut()
+                .for_each(|v| *v = 2.0);
+            p.set_grad(Some(g));
+            opt.step(&mut [&mut p]).unwrap();
+            p.data().as_f32_slice().unwrap().to_vec()
+        }
+
+        type Builder = fn() -> Box<dyn Optimizer>;
+        let builders: Vec<(&str, Builder)> = vec![
+            ("sgd", || Box::new(SGD::new(0.1, None, Some(0.01)))),
+            ("sgd_momentum", || {
+                Box::new(SGD::new(0.1, Some(0.9), Some(0.01)))
+            }),
+            ("adam", || {
+                Box::new(Adam::new(0.1, None, None, None, Some(0.01)))
+            }),
+            ("adamw", || {
+                Box::new(AdamW::new(0.1, None, None, None, Some(0.01)))
+            }),
+            ("adam_amsgrad", || {
+                Box::new(Adam::new(0.1, None, None, None, None).with_amsgrad(true))
+            }),
+            ("lion", || {
+                Box::new(crate::optim::Lion::new(0.1, None, None, Some(0.01)))
+            }),
+        ];
+
+        for (name, build) in builders {
+            let small = one_step(8, build)[0];
+            let large = one_step(10_000, build);
+            for (i, &v) in large.iter().enumerate() {
+                assert!((v - small).abs() < 1e-6, "{name} index {i}: {v} vs {small}");
+            }
+        }
     }
 
     #[test]
@@ -961,5 +1088,346 @@ mod tests {
         assert!((scheduler.get_lr(0, 0.3) - 0.0).abs() < 1e-12);
         assert!((scheduler.get_lr(1, 0.3) - 0.3).abs() < 1e-12);
         assert!((scheduler.get_lr(2, 0.3) - 0.3).abs() < 1e-12);
+    }
+
+    /// Build `y = sum(x * x)` and run backward, so the gradient for `x` lives
+    /// in the autograd graph (`autograd::get_gradient`) rather than in the
+    /// tensor-local `.grad` — the arrangement every real training loop uses.
+    fn param_with_graph_gradient(value: f32) -> Tensor {
+        use crate::ops::{arithmetic::mul, reduction::sum};
+
+        crate::autograd::clear_graph().unwrap();
+        let mut x = Tensor::ones(Shape::new(vec![3]), DataType::Float32, Device::cpu(), true);
+        x.data_mut()
+            .as_f32_slice_mut()
+            .unwrap()
+            .iter_mut()
+            .for_each(|v| *v = value);
+        let y = sum(&mul(&x, &x).unwrap(), None, false).unwrap();
+        crate::autograd::backward(&y, None).unwrap();
+        assert!(x.grad().is_none(), "gradient should live in the graph only");
+        x
+    }
+
+    #[test]
+    fn test_clip_grad_norm_clips_graph_stored_gradients() {
+        // Regression: clipping used to read only the tensor-local `.grad`,
+        // so after a real `backward()` it silently did nothing while
+        // `step()` went on to consume the unclipped graph gradient.
+        let mut x = param_with_graph_gradient(3.0); // grad = 2*x = [6, 6, 6]
+        let before = GradientUtils::compute_grad_norm(&[&x]).unwrap();
+        assert!((before - (108.0f64).sqrt()).abs() < 1e-6, "got {before}");
+
+        GradientUtils::clip_grad_norm(&mut [&mut x], 1.0).unwrap();
+
+        let after = GradientUtils::compute_grad_norm(&[&x]).unwrap();
+        assert!(after <= 1.0 + 1e-4, "norm not clipped: {after}");
+        // The optimizer's own view of the gradient must be the clipped one.
+        let stored = crate::autograd::get_gradient(&x).unwrap();
+        let values = stored.data().as_f32_slice().unwrap();
+        for &v in values {
+            assert!((v - 1.0 / (3.0f32).sqrt()).abs() < 1e-3, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_value_clips_graph_stored_gradients() {
+        let mut x = param_with_graph_gradient(3.0); // grad = [6, 6, 6]
+        GradientUtils::clip_grad_value(&mut [&mut x], -1.0, 1.0).unwrap();
+
+        let stored = crate::autograd::get_gradient(&x).unwrap();
+        assert_eq!(stored.data().as_f32_slice().unwrap(), &[1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_clipped_graph_gradient_is_what_the_step_applies() {
+        let mut x = param_with_graph_gradient(3.0); // grad = [6, 6, 6]
+        let mut sgd = SGD::new(0.1, None, None).with_gradient_clipping(GradientClipping::ByValue {
+            min_value: -1.0,
+            max_value: 1.0,
+        });
+        sgd.step(&mut [&mut x]).unwrap();
+        // Clipped: 3.0 - 0.1 * 1.0. Unclipped it would have been 3.0 - 0.6.
+        for &v in x.data().as_f32_slice().unwrap() {
+            assert!((v - 2.9).abs() < 1e-5, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_gradient_helpers_see_graph_stored_gradients() {
+        let x = param_with_graph_gradient(2.0);
+        assert!(GradientUtils::has_gradients(&[&x]));
+        assert_eq!(GradientUtils::count_parameters_with_gradients(&[&x]), 1);
+    }
+
+    #[test]
+    fn test_apply_lr_scheduler_does_not_compound_decay() {
+        use crate::optim::ExponentialLR;
+
+        // Regression: the base learning rate used to be read back from the
+        // optimizer after each update, so repeated application decayed from
+        // the already-decayed rate (gamma^(1+2+...+n) instead of gamma^n).
+        let base_lr = 1.0;
+        let scheduler = ExponentialLR::new(0.5);
+        let mut sgd = SGD::new(base_lr, None, None);
+        let mut param = Tensor::zeros(Shape::new(vec![1]), DataType::Float32, Device::cpu(), true);
+        param.set_grad(Some(Tensor::zeros(
+            Shape::new(vec![1]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )));
+
+        for expected_step in 1..=3usize {
+            sgd.step(&mut [&mut param]).unwrap();
+            sgd.apply_lr_scheduler(&scheduler, base_lr);
+            let expected = 0.5f64.powi(expected_step as i32);
+            assert!(
+                (sgd.learning_rate() - expected).abs() < 1e-12,
+                "step {expected_step}: got {}, want {expected}",
+                sgd.learning_rate()
+            );
+        }
+    }
+
+    /// Run `grads` through Adagrad and return the parameter trajectory.
+    fn adagrad_trajectory(
+        start: f64,
+        grads: &[f64],
+        lr: f64,
+        lr_decay: f64,
+        weight_decay: f64,
+        initial: f64,
+    ) -> Vec<f64> {
+        let mut p = Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+        p.data_mut().as_f64_slice_mut().unwrap()[0] = start;
+        let mut opt = Adagrad::new(
+            lr,
+            Some(lr_decay),
+            Some(weight_decay),
+            Some(initial),
+            Some(1e-10),
+        );
+
+        let mut out = Vec::with_capacity(grads.len());
+        for &g in grads {
+            let mut grad =
+                Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+            grad.data_mut().as_f64_slice_mut().unwrap()[0] = g;
+            p.set_grad(Some(grad));
+            {
+                let mut params = vec![&mut p];
+                opt.step(&mut params).unwrap();
+            }
+            out.push(p.data().as_f64_slice().unwrap()[0]);
+        }
+        out
+    }
+
+    #[test]
+    fn test_adagrad_matches_the_update_rule() {
+        // Straight transcription of
+        //   sum += g^2 ; clr = lr / (1 + (t-1)*lr_decay) ; p -= clr*g/(sqrt(sum)+eps)
+        let grads = [0.5f64, -2.0, 1.0, 0.25];
+        for &(lr, lr_decay, wd, init) in &[
+            (0.1f64, 0.0f64, 0.0f64, 0.0f64),
+            (0.1, 0.5, 0.0, 0.0),
+            (0.1, 0.0, 0.05, 0.0),
+            (0.05, 0.2, 0.01, 0.1),
+        ] {
+            let got = adagrad_trajectory(1.0, &grads, lr, lr_decay, wd, init);
+
+            let eps = 1e-10;
+            let mut p = 1.0f64;
+            let mut sum = init;
+            for (i, &g) in grads.iter().enumerate() {
+                let g = g + wd * p;
+                sum += g * g;
+                let clr = lr / (1.0 + i as f64 * lr_decay);
+                p -= clr * g / (sum.sqrt() + eps);
+                assert!(
+                    (got[i] - p).abs() < 1e-12,
+                    "lr={lr} decay={lr_decay} wd={wd} init={init} step {i}: {} != {p}",
+                    got[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_adagrad_step_decays_like_one_over_sqrt_t() {
+        // Under a constant unit gradient the accumulator after t steps is t, so
+        // the step is lr/(sqrt(t) + eps). RMSprop's moving average would instead
+        // settle to a constant step -- this is the difference between them.
+        // eps is only 1e-10 but it moves the answer by more than 1e-11, so it
+        // belongs in the expected value rather than in the tolerance.
+        let grads = [1.0f64; 10];
+        let trajectory = adagrad_trajectory(0.0, &grads, 0.1, 0.0, 0.0, 0.0);
+
+        let mut previous = 0.0;
+        for (i, &value) in trajectory.iter().enumerate() {
+            let step = previous - value;
+            let expected = 0.1 / (((i + 1) as f64).sqrt() + 1e-10);
+            assert!(
+                (step - expected).abs() < 1e-12,
+                "step {i}: {step} != {expected}"
+            );
+            previous = value;
+        }
+    }
+
+    #[test]
+    fn test_adagrad_accumulator_never_lets_the_step_grow() {
+        // Gradients of wildly varying size: the accumulator only ever adds, so
+        // no ordering of them can make a later step larger than an earlier one.
+        let grads = [3.0f64, 0.01, -5.0, 0.001, 2.0, -0.02];
+        let trajectory = adagrad_trajectory(0.0, &grads, 0.1, 0.0, 0.0, 0.0);
+
+        let mut previous_value = 0.0;
+        let mut previous_step = f64::INFINITY;
+        for (i, &value) in trajectory.iter().enumerate() {
+            let step = (previous_value - value).abs();
+            // The step also scales with |grad|, so compare the *effective learning
+            // rate* -- step divided by the gradient that produced it.
+            let effective = step / grads[i].abs();
+            assert!(
+                effective <= previous_step + 1e-12,
+                "effective lr grew at step {i}: {effective} > {previous_step}"
+            );
+            previous_step = effective;
+            previous_value = value;
+        }
+    }
+
+    #[test]
+    fn test_adagrad_initial_accumulator_damps_the_first_step() {
+        // Starting the accumulator at 3 makes the first denominator sqrt(1+3)=2.
+        // Epsilon shifts both by ~1e-11, so carry it in the expectation.
+        let eps = 1e-10;
+        let plain = adagrad_trajectory(0.0, &[1.0], 0.1, 0.0, 0.0, 0.0)[0];
+        let damped = adagrad_trajectory(0.0, &[1.0], 0.1, 0.0, 0.0, 3.0)[0];
+        assert!((plain + 0.1 / (1.0 + eps)).abs() < 1e-15, "{plain}");
+        assert!((damped + 0.1 / (2.0 + eps)).abs() < 1e-15, "{damped}");
+    }
+
+    #[test]
+    fn test_adagrad_creation_and_defaults() {
+        let adagrad = Adagrad::new(0.01, None, None, None, None);
+        assert_eq!(adagrad.learning_rate(), 0.01);
+        assert_eq!(adagrad.lr_decay(), 0.0);
+        assert_eq!(adagrad.weight_decay(), 0.0);
+        assert_eq!(adagrad.initial_accumulator_value(), 0.0);
+        // Adagrad floors a sum that only grows, so its epsilon is smaller than
+        // the 1e-8 the moving-average optimizers use.
+        assert_eq!(adagrad.epsilon(), 1e-10);
+        assert_eq!(adagrad.step_count(), 0);
+    }
+
+    #[test]
+    fn test_adagrad_rejects_non_float_parameters() {
+        let mut p = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), true);
+        let grad = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), false);
+        p.set_grad(Some(grad));
+        let mut opt = Adagrad::new(0.1, None, None, None, None);
+        let mut params = vec![&mut p];
+        assert!(opt.step(&mut params).is_err());
+    }
+
+    #[test]
+    fn test_nadam_matches_the_published_update() {
+        // Direct transcription of the NAdam recurrence, including the running
+        // product of the momentum schedule.
+        let grads = [0.5f64, -2.0, 1.0, 0.25];
+        let (lr, b1, b2, eps, psi) = (0.01f64, 0.9f64, 0.999f64, 1e-8f64, 0.004f64);
+
+        let mut p = Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+        p.data_mut().as_f64_slice_mut().unwrap()[0] = 1.0;
+        let mut opt = NAdam::new(lr, Some(b1), Some(b2), Some(eps), Some(0.0), Some(psi));
+
+        let (mut m, mut v, mut mu_product) = (0.0f64, 0.0f64, 1.0f64);
+        let mut expected = 1.0f64;
+
+        for (i, &g) in grads.iter().enumerate() {
+            let t = (i + 1) as f64;
+            let mu = b1 * (1.0 - 0.5 * 0.96f64.powf(t * psi));
+            let mu_next = b1 * (1.0 - 0.5 * 0.96f64.powf((t + 1.0) * psi));
+            mu_product *= mu;
+            let mu_product_next = mu_product * mu_next;
+
+            m = b1 * m + (1.0 - b1) * g;
+            v = b2 * v + (1.0 - b2) * g * g;
+            let denom = (v / (1.0 - b2.powf(t))).sqrt() + eps;
+            expected -= lr
+                * ((1.0 - mu) / (1.0 - mu_product) * g + mu_next / (1.0 - mu_product_next) * m)
+                / denom;
+
+            let mut grad =
+                Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+            grad.data_mut().as_f64_slice_mut().unwrap()[0] = g;
+            p.set_grad(Some(grad));
+            {
+                let mut params = vec![&mut p];
+                opt.step(&mut params).unwrap();
+            }
+            let got = p.data().as_f64_slice().unwrap()[0];
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "step {i}: {got} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nadam_schedule_advances_once_per_step_not_per_parameter() {
+        // The momentum product is shared across parameters, so it must be
+        // advanced in `step` rather than inside the per-parameter loop. Two
+        // parameters with the same state and gradient must stay identical; a
+        // per-parameter advance would put the second one a step ahead.
+        let make = || {
+            let mut t = Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+            t.data_mut().as_f64_slice_mut().unwrap()[0] = 1.0;
+            t
+        };
+        let (mut a, mut b) = (make(), make());
+        let mut opt = NAdam::new(0.1, None, None, None, None, None);
+
+        for _ in 0..5 {
+            for t in [&mut a, &mut b] {
+                let mut grad =
+                    Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+                grad.data_mut().as_f64_slice_mut().unwrap()[0] = 1.0;
+                t.set_grad(Some(grad));
+            }
+            let mut params = vec![&mut a, &mut b];
+            opt.step(&mut params).unwrap();
+        }
+
+        let (va, vb) = (
+            a.data().as_f64_slice().unwrap()[0],
+            b.data().as_f64_slice().unwrap()[0],
+        );
+        assert_eq!(va, vb, "parameters diverged: {va} vs {vb}");
+    }
+
+    #[test]
+    fn test_nadam_creation_and_defaults() {
+        let nadam = NAdam::new(0.002, None, None, None, None, None);
+        assert_eq!(nadam.learning_rate(), 0.002);
+        assert_eq!(nadam.beta1(), 0.9);
+        assert_eq!(nadam.beta2(), 0.999);
+        assert_eq!(nadam.epsilon(), 1e-8);
+        assert_eq!(nadam.weight_decay(), 0.0);
+        assert_eq!(nadam.momentum_decay(), 0.004);
+        assert_eq!(nadam.step_count(), 0);
+    }
+
+    #[test]
+    fn test_nadam_rejects_non_float_parameters() {
+        let mut p = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), true);
+        let grad = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), false);
+        p.set_grad(Some(grad));
+        let mut opt = NAdam::new(0.01, None, None, None, None, None);
+        let mut params = vec![&mut p];
+        assert!(opt.step(&mut params).is_err());
     }
 }

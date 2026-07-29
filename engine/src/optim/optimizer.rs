@@ -221,18 +221,23 @@ pub trait Optimizer: Send + Sync {
         GradientUtils::clip_grad_value(parameters, min_value, max_value)
     }
 
-    /// Apply learning rate scheduling
-    fn apply_lr_scheduler(&mut self, scheduler: &dyn LearningRateScheduler) {
+    /// Set the learning rate from `scheduler` for the current step.
+    ///
+    /// `base_lr` must be the *initial* learning rate, not the current one:
+    /// the schedulers in this module are stateless functions of
+    /// `(step, base_lr)`, so feeding them the already-decayed rate compounds
+    /// the decay on every call (`ExponentialLR` would apply
+    /// `gamma^(1 + 2 + … + n)` instead of `gamma^n`). Callers that vary the
+    /// base rate per group should drive `set_learning_rate` /
+    /// [`ParameterGroup::lr`] directly.
+    fn apply_lr_scheduler(&mut self, scheduler: &dyn LearningRateScheduler, base_lr: f64) {
         let step = self.step_count();
+        let new_lr = scheduler.get_lr(step, base_lr);
 
-        // For single parameter group optimizers
         if self.param_groups().is_empty() {
-            let new_lr = scheduler.get_lr(step, self.learning_rate());
             self.set_learning_rate(new_lr);
         } else {
-            // For multi parameter group optimizers
             for group in self.param_groups_mut() {
-                let new_lr = scheduler.get_lr(step, group.lr);
                 group.lr = new_lr;
             }
         }

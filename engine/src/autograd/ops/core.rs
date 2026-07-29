@@ -219,9 +219,22 @@ pub fn zero_gradients() {
     GLOBAL_GRAPH.with(|graph| graph.borrow_mut().zero_grad());
 }
 
-/// Remove the stored gradient for a single tensor from the global graph.
+/// Remove the stored gradient for a single tensor from the global graph,
+/// returning it. Also the "take" half of a read-modify-write on a stored
+/// gradient (see [`set_gradient`]) — taking it out first keeps the mutation
+/// from having to copy on write.
 pub fn clear_gradient(tensor: &Tensor) -> Option<Tensor> {
     GLOBAL_GRAPH.with(|graph| graph.borrow_mut().remove_gradient(tensor.id()))
+}
+
+/// Store `grad` as the gradient for `tensor` in the global graph, replacing
+/// any gradient already recorded for it.
+///
+/// This is an overwrite, not an accumulation: it exists so in-place gradient
+/// transforms (gradient clipping, custom scaling) can write their result back
+/// to the map that [`get_gradient`] and the optimizers read from.
+pub fn set_gradient(tensor: &Tensor, grad: Tensor) {
+    GLOBAL_GRAPH.with(|graph| graph.borrow_mut().set_gradient(tensor.id(), grad));
 }
 
 /// Clear the global computation graph

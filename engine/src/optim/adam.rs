@@ -8,6 +8,7 @@ use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
 use crate::{
     autograd::{self, TensorId},
     error::Result,
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
 };
 use rayon::prelude::*;
@@ -252,119 +253,117 @@ impl Adam {
         let bc2_inv = 1.0 / (1.0 - beta2_pow);
         let use_decoupled_weight_decay = self.decoupled_weight_decay && weight_decay != 0.0;
 
+        /// One dtype arm. The per-element math lives in a single closure over
+        /// whole chunks; the chunk loop runs on the calling thread for small
+        /// parameters — the common case (biases, norm scales, small layers),
+        /// where rayon's split overhead dwarfed the arithmetic — and fans out
+        /// over rayon only once the tensor is large enough to pay for it.
+        macro_rules! adam_arm {
+            ($ty:ty, $read:ident, $write:ident, $lr:expr, $b1:expr, $b2:expr, $bc1:expr,
+             $bc2:expr, $eps:expr, $wd:expr) => {{
+                let (lr, beta1, beta2, bc1_inv, bc2_inv, eps, wd): (
+                    $ty,
+                    $ty,
+                    $ty,
+                    $ty,
+                    $ty,
+                    $ty,
+                    $ty,
+                ) = ($lr, $b1, $b2, $bc1, $bc2, $eps, $wd);
+                let p = param.data_mut().$write().unwrap();
+                let g = grad.data().$read().unwrap();
+                let m_buf = m.data_mut().$write().unwrap();
+                let v_buf = v.data_mut().$write().unwrap();
+                let len = p.len();
+
+                let step_chunk = |p: &mut [$ty],
+                                  g: &[$ty],
+                                  m: &mut [$ty],
+                                  v: &mut [$ty],
+                                  mut vhat: Option<&mut [$ty]>| {
+                    for i in 0..p.len() {
+                        let p_i = &mut p[i];
+                        if use_decoupled_weight_decay {
+                            *p_i -= lr * wd * *p_i;
+                        }
+                        let g_val = if use_decoupled_weight_decay {
+                            g[i]
+                        } else {
+                            g[i] + wd * *p_i
+                        };
+                        m[i] = beta1 * m[i] + (1.0 - beta1) * g_val;
+                        v[i] = beta2 * v[i] + (1.0 - beta2) * g_val * g_val;
+                        let second_moment = match vhat.as_deref_mut() {
+                            Some(vhat) => {
+                                if v[i] > vhat[i] {
+                                    vhat[i] = v[i];
+                                }
+                                vhat[i]
+                            }
+                            None => v[i],
+                        };
+                        let m_hat = m[i] * bc1_inv;
+                        let v_hat_corr = second_moment * bc2_inv;
+                        *p_i -= lr * m_hat / (v_hat_corr.sqrt() + eps);
+                    }
+                };
+
+                match v_hat_opt {
+                    Some(vhat) => {
+                        let vhat = vhat.data_mut().$write().unwrap();
+                        if len < PAR_THRESHOLD {
+                            step_chunk(p, g, m_buf, v_buf, Some(vhat));
+                        } else {
+                            p.par_chunks_mut(PAR_CHUNK)
+                                .zip(g.par_chunks(PAR_CHUNK))
+                                .zip(m_buf.par_chunks_mut(PAR_CHUNK))
+                                .zip(v_buf.par_chunks_mut(PAR_CHUNK))
+                                .zip(vhat.par_chunks_mut(PAR_CHUNK))
+                                .for_each(|((((p, g), m), v), vhat)| {
+                                    step_chunk(p, g, m, v, Some(vhat))
+                                });
+                        }
+                    }
+                    None => {
+                        if len < PAR_THRESHOLD {
+                            step_chunk(p, g, m_buf, v_buf, None);
+                        } else {
+                            p.par_chunks_mut(PAR_CHUNK)
+                                .zip(g.par_chunks(PAR_CHUNK))
+                                .zip(m_buf.par_chunks_mut(PAR_CHUNK))
+                                .zip(v_buf.par_chunks_mut(PAR_CHUNK))
+                                .for_each(|(((p, g), m), v)| step_chunk(p, g, m, v, None));
+                        }
+                    }
+                }
+            }};
+        }
+
         match param.dtype() {
-            crate::tensor::DataType::Float32 => {
-                let p = param.data_mut().as_f32_slice_mut().unwrap();
-                let g = grad.data().as_f32_slice().unwrap();
-                let m_buf = m.data_mut().as_f32_slice_mut().unwrap();
-                let v_buf = v.data_mut().as_f32_slice_mut().unwrap();
-                let lr = lr as f32;
-                let beta1_f = beta1 as f32;
-                let beta2_f = beta2 as f32;
-                let bc1_inv = bc1_inv as f32;
-                let bc2_inv = bc2_inv as f32;
-                let wd = weight_decay as f32;
-                let apply_weight_decay = |p: &mut f32| {
-                    if use_decoupled_weight_decay {
-                        *p -= lr * wd * *p;
-                    }
-                };
-                if let Some(vhat) = v_hat_opt {
-                    let vhat_slice = vhat.data_mut().as_f32_slice_mut().unwrap();
-                    p.par_iter_mut()
-                        .zip(g.par_iter())
-                        .zip(m_buf.par_iter_mut())
-                        .zip(v_buf.par_iter_mut())
-                        .zip(vhat_slice.par_iter_mut())
-                        .for_each(|((((p_i, &g_i), m_i), v_i), vhat_i)| {
-                            apply_weight_decay(p_i);
-                            let g_val = if use_decoupled_weight_decay {
-                                g_i
-                            } else {
-                                g_i + wd * *p_i
-                            };
-                            *m_i = beta1_f * *m_i + (1.0 - beta1_f) * g_val;
-                            *v_i = beta2_f * *v_i + (1.0 - beta2_f) * g_val * g_val;
-                            if *v_i > *vhat_i {
-                                *vhat_i = *v_i;
-                            }
-                            let m_hat = *m_i * bc1_inv;
-                            let v_hat_corr = *vhat_i * bc2_inv;
-                            *p_i -= lr * m_hat / (v_hat_corr.sqrt() + eps as f32);
-                        });
-                } else {
-                    p.par_iter_mut()
-                        .zip(g.par_iter())
-                        .zip(m_buf.par_iter_mut())
-                        .zip(v_buf.par_iter_mut())
-                        .for_each(|(((p_i, &g_i), m_i), v_i)| {
-                            apply_weight_decay(p_i);
-                            let g_val = if use_decoupled_weight_decay {
-                                g_i
-                            } else {
-                                g_i + wd * *p_i
-                            };
-                            *m_i = beta1_f * *m_i + (1.0 - beta1_f) * g_val;
-                            *v_i = beta2_f * *v_i + (1.0 - beta2_f) * g_val * g_val;
-                            let m_hat = *m_i * bc1_inv;
-                            let v_hat_corr = *v_i * bc2_inv;
-                            *p_i -= lr * m_hat / (v_hat_corr.sqrt() + eps as f32);
-                        });
-                }
-            }
-            crate::tensor::DataType::Float64 => {
-                let p = param.data_mut().as_f64_slice_mut().unwrap();
-                let g = grad.data().as_f64_slice().unwrap();
-                let m_buf = m.data_mut().as_f64_slice_mut().unwrap();
-                let v_buf = v.data_mut().as_f64_slice_mut().unwrap();
-                let apply_weight_decay = |p: &mut f64| {
-                    if use_decoupled_weight_decay {
-                        *p -= lr * weight_decay * *p;
-                    }
-                };
-                if let Some(vhat) = v_hat_opt {
-                    let vhat_slice = vhat.data_mut().as_f64_slice_mut().unwrap();
-                    p.par_iter_mut()
-                        .zip(g.par_iter())
-                        .zip(m_buf.par_iter_mut())
-                        .zip(v_buf.par_iter_mut())
-                        .zip(vhat_slice.par_iter_mut())
-                        .for_each(|((((p_i, &g_i), m_i), v_i), vhat_i)| {
-                            apply_weight_decay(p_i);
-                            let g_val = if use_decoupled_weight_decay {
-                                g_i
-                            } else {
-                                g_i + weight_decay * *p_i
-                            };
-                            *m_i = beta1 * *m_i + (1.0 - beta1) * g_val;
-                            *v_i = beta2 * *v_i + (1.0 - beta2) * g_val * g_val;
-                            if *v_i > *vhat_i {
-                                *vhat_i = *v_i;
-                            }
-                            let m_hat = *m_i * bc1_inv;
-                            let v_hat_corr = *vhat_i * bc2_inv;
-                            *p_i -= lr * m_hat / (v_hat_corr.sqrt() + eps);
-                        });
-                } else {
-                    p.par_iter_mut()
-                        .zip(g.par_iter())
-                        .zip(m_buf.par_iter_mut())
-                        .zip(v_buf.par_iter_mut())
-                        .for_each(|(((p_i, &g_i), m_i), v_i)| {
-                            apply_weight_decay(p_i);
-                            let g_val = if use_decoupled_weight_decay {
-                                g_i
-                            } else {
-                                g_i + weight_decay * *p_i
-                            };
-                            *m_i = beta1 * *m_i + (1.0 - beta1) * g_val;
-                            *v_i = beta2 * *v_i + (1.0 - beta2) * g_val * g_val;
-                            let m_hat = *m_i * bc1_inv;
-                            let v_hat_corr = *v_i * bc2_inv;
-                            *p_i -= lr * m_hat / (v_hat_corr.sqrt() + eps);
-                        });
-                }
-            }
+            crate::tensor::DataType::Float32 => adam_arm!(
+                f32,
+                as_f32_slice,
+                as_f32_slice_mut,
+                lr as f32,
+                beta1 as f32,
+                beta2 as f32,
+                bc1_inv as f32,
+                bc2_inv as f32,
+                eps as f32,
+                weight_decay as f32
+            ),
+            crate::tensor::DataType::Float64 => adam_arm!(
+                f64,
+                as_f64_slice,
+                as_f64_slice_mut,
+                lr,
+                beta1,
+                beta2,
+                bc1_inv,
+                bc2_inv,
+                eps,
+                weight_decay
+            ),
             _ => {
                 return Err(crate::error::MinitensorError::invalid_operation(
                     "Adam only supports float32/float64 tensors",

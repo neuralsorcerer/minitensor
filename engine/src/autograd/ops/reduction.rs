@@ -1153,3 +1153,227 @@ impl GradientFunction for QuantileBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+
+/// Gradient function for [`crate::ops::reduction::norm`].
+///
+/// For a finite order `p > 0` the derivative is
+///
+/// ```text
+/// d||x||_p / dx_i = sign(x_i) * (|x_i| / ||x||_p)^(p - 1)
+/// ```
+///
+/// written with the ratio inside the power rather than as
+/// `|x_i|^(p-1) / ||x||^(p-1)`: the ratio is bounded by 1, so neither half can
+/// overflow on its own for large `p` or large inputs.
+///
+/// Two points are genuinely undefined rather than merely awkward, and both are
+/// resolved the way PyTorch resolves them:
+///
+/// * At `x = 0` the p-norm has a corner and no derivative. The gradient is
+///   reported as 0 (the subgradient of least magnitude). Composing this out of
+///   `sqrt(sum(x*x))` instead yields `0/0` = NaN, which then poisons every
+///   parameter it touches — a weight-decay term on a freshly zeroed parameter
+///   is enough to trigger it.
+/// * For `p = ±inf` the norm depends only on the extreme entries, so the
+///   gradient is zero elsewhere. When several entries tie, the gradient is
+///   split equally among them, matching the min/max reductions in this crate.
+pub struct NormBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    /// The norm, kept at reduced rank so it broadcasts back over the input.
+    pub norm: Tensor,
+    pub p: f64,
+    pub dims: Vec<usize>,
+    pub keepdim_shape: Shape,
+}
+
+impl GradientFunction for NormBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        if self.input.numel() == 0 {
+            gradients.insert(
+                self.input_id,
+                Tensor::zeros(
+                    self.input.shape().clone(),
+                    self.input.dtype(),
+                    self.input.device(),
+                    false,
+                ),
+            );
+            return Ok(gradients);
+        }
+
+        let full_dims: Vec<isize> = self
+            .input
+            .shape()
+            .dims()
+            .iter()
+            .map(|&d| d as isize)
+            .collect();
+
+        // grad_output arrives at the output's rank; restore the reduced rank so
+        // it lines up with the input before broadcasting.
+        let grad_kd = grad_output.reshape(self.keepdim_shape.clone())?;
+        let grad_full = grad_kd.expand(full_dims.clone())?.contiguous()?;
+        let norm_full = self.norm.expand(full_dims.clone())?.contiguous()?;
+
+        let grad_input = if self.p.is_infinite() {
+            // Only the extreme entries move the norm. Build the selection mask,
+            // count the ties per reduced slice, and share the gradient equally.
+            let mask = extremum_mask(&self.input, &norm_full)?;
+            let dims_isize: Vec<isize> = self.dims.iter().map(|&d| d as isize).collect();
+            let counts = reduction::sum(&mask, Some(dims_isize), true)?;
+            let counts_full = counts.expand(full_dims)?.contiguous()?;
+            norm_grad_kernel(&self.input, &counts_full, &grad_full, self.p, Some(&mask))?
+        } else {
+            norm_grad_kernel(&self.input, &norm_full, &grad_full, self.p, None)?
+        };
+
+        gradients.insert(self.input_id, grad_input);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// 1.0 where `|x|` equals the (already broadcast) extremum, 0.0 elsewhere.
+fn extremum_mask(input: &Tensor, extremum: &Tensor) -> Result<Tensor> {
+    macro_rules! mask_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let x = input.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from norm input")
+            })?;
+            let m = extremum.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from norm extremum")
+            })?;
+            TensorData::from_vec::<$ty>(
+                crate::ops::map::binary_map(
+                    x,
+                    m,
+                    |x: $ty, m: $ty| {
+                        if x.abs() == m { 1.0 } else { 0.0 }
+                    },
+                ),
+                $dtype,
+                input.device(),
+            )
+        }};
+    }
+
+    let data = match input.dtype() {
+        DataType::Float32 => mask_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => mask_for!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "norm requires floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    ))
+}
+
+/// The elementwise gradient itself. `divisor` is the broadcast norm for a
+/// finite order, or the broadcast tie count when `mask` is supplied for
+/// `p = ±inf`.
+fn norm_grad_kernel(
+    input: &Tensor,
+    divisor: &Tensor,
+    grad: &Tensor,
+    p: f64,
+    mask: Option<&Tensor>,
+) -> Result<Tensor> {
+    macro_rules! grad_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let x = input.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from norm input")
+            })?;
+            let d = divisor.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from norm divisor")
+            })?;
+            let g = grad.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from norm grad")
+            })?;
+            let p_ty = p as $ty;
+
+            let values: Vec<$ty> = match mask {
+                Some(mask) => {
+                    let m = mask.data().$slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get slice from norm mask")
+                    })?;
+                    // d is the tie count here, never zero where m is 1.
+                    (0..x.len())
+                        .map(|i| {
+                            if m[i] == 0.0 {
+                                0.0
+                            } else {
+                                g[i] * sign_of(x[i]) / d[i]
+                            }
+                        })
+                        .collect()
+                }
+                None => (0..x.len())
+                    .map(|i| {
+                        let n = d[i];
+                        if n == 0.0 {
+                            // Every entry of this slice is zero: the norm has a
+                            // corner here, so take the zero subgradient rather
+                            // than dividing 0 by 0.
+                            0.0
+                        } else if p == 1.0 {
+                            g[i] * sign_of(x[i])
+                        } else if p == 2.0 {
+                            g[i] * x[i] / n
+                        } else {
+                            let ratio = x[i].abs() / n;
+                            g[i] * sign_of(x[i]) * ratio.powf(p_ty - 1.0)
+                        }
+                    })
+                    .collect(),
+            };
+            TensorData::from_vec::<$ty>(values, $dtype, input.device())
+        }};
+    }
+
+    let data = match input.dtype() {
+        DataType::Float32 => grad_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => grad_for!(f64, as_f64_slice, DataType::Float64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "norm requires floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    ))
+}
+
+fn sign_of<T>(v: T) -> T
+where
+    T: PartialOrd + Default + Copy + std::ops::Neg<Output = T> + From<f32>,
+{
+    let zero = T::default();
+    if v > zero {
+        T::from(1.0f32)
+    } else if v < zero {
+        T::from(-1.0f32)
+    } else {
+        zero
+    }
+}

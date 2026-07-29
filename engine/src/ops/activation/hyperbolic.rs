@@ -12,7 +12,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
 };
-use libm::{erf, erff};
+use libm::{erf, erfc, erfcf, erff};
 use std::sync::Arc;
 
 /// Masked softmax activation function with gradient support.
@@ -354,6 +354,25 @@ float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
         val.ln_1p()
     }
 });
+
+float_unary_kernel!(log2_f32, as_f32_slice, f32, Float32, "f32", f32::log2);
+
+float_unary_kernel!(log2_f64, as_f64_slice, f64, Float64, "f64", f64::log2);
+
+float_unary_kernel!(log10_f32, as_f32_slice, f32, Float32, "f32", f32::log10);
+
+float_unary_kernel!(log10_f64, as_f64_slice, f64, Float64, "f64", f64::log10);
+
+// libm's erf, already used by the exact GELU path in this file.
+float_unary_kernel!(erf_f32, as_f32_slice, f32, Float32, "f32", erff);
+
+float_unary_kernel!(erf_f64, as_f64_slice, f64, Float64, "f64", erf);
+
+// erfc is not `1 - erf(x)`: for large x that subtraction cancels away every
+// significant digit, and libm's dedicated routine keeps them.
+float_unary_kernel!(erfc_f32, as_f32_slice, f32, Float32, "f32", erfcf);
+
+float_unary_kernel!(erfc_f64, as_f64_slice, f64, Float64, "f64", erfc);
 
 float_unary_kernel!(expm1_f32, as_f32_slice, f32, Float32, "f32", f32::exp_m1);
 

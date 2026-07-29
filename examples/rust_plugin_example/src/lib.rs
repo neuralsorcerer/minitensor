@@ -5,15 +5,21 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::{
-    Plugin, PluginInfo, VersionInfo, CustomOp, CustomOpRegistry, CustomOpBuilder,
-    Result, MinitensorError,
+    CustomOp, CustomOpBuilder, CustomOpRegistry, MinitensorError, Plugin, PluginInfo, Result,
+    VersionInfo,
 };
-use std::sync::Arc;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// Example plugin implementation
 pub struct RustExamplePlugin {
     info: PluginInfo,
+}
+
+impl Default for RustExamplePlugin {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RustExamplePlugin {
@@ -37,19 +43,17 @@ impl Plugin for RustExamplePlugin {
         &self.info
     }
 
-    fn initialize(&self, registry: &CustomOpRegistry) -> Result<()> {
+    // The host registers and unregisters everything `custom_operations`
+    // returns, so these hooks only cover this plugin's own setup and teardown —
+    // registering the declared ops here would be a double registration and the
+    // load would fail.
+    fn initialize(&self, _registry: &CustomOpRegistry) -> Result<()> {
         println!("Rust example plugin initialized!");
-        for op in self.custom_operations() {
-            registry.register(op)?;
-        }
         Ok(())
     }
 
-    fn cleanup(&self, registry: &CustomOpRegistry) -> Result<()> {
+    fn cleanup(&self, _registry: &CustomOpRegistry) -> Result<()> {
         println!("Rust example plugin cleaned up!");
-        for op in self.custom_operations() {
-            let _ = registry.unregister(op.name());
-        }
         Ok(())
     }
 
@@ -65,10 +69,10 @@ impl Plugin for RustExamplePlugin {
 fn create_abs_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_abs", 1)
         .forward(|inputs| inputs[0].abs())
-        .backward(|grad_output, input_ids, _, _, _| {
+        .backward(|ctx| {
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = input_ids.first() {
-                gradients.insert(id, grad_output.clone());
+            if let Some(&id) = ctx.input_ids.first() {
+                gradients.insert(id, ctx.grad_output.clone());
             }
             Ok(gradients)
         })
@@ -82,7 +86,7 @@ fn create_abs_operation() -> Arc<dyn CustomOp> {
         })
         .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
         .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(input_devices[0].clone()))
+        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }
@@ -103,10 +107,10 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
             let max_val = max_slice[0] as f64;
             x.clamp(Some(min_val), Some(max_val))
         })
-        .backward(|grad_output, input_ids, _, _, _| {
+        .backward(|ctx| {
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = input_ids.first() {
-                gradients.insert(id, grad_output.clone());
+            if let Some(&id) = ctx.input_ids.first() {
+                gradients.insert(id, ctx.grad_output.clone());
             }
             Ok(gradients)
         })
@@ -125,7 +129,7 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
         })
         .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
         .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(input_devices[0].clone()))
+        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }
@@ -133,10 +137,10 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
 fn create_gelu_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_gelu", 1)
         .forward(|inputs| Ok(inputs[0].clone()))
-        .backward(|grad_output, input_ids, _, _, _| {
+        .backward(|ctx| {
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = input_ids.first() {
-                gradients.insert(id, grad_output.clone());
+            if let Some(&id) = ctx.input_ids.first() {
+                gradients.insert(id, ctx.grad_output.clone());
             }
             Ok(gradients)
         })
@@ -150,29 +154,32 @@ fn create_gelu_operation() -> Arc<dyn CustomOp> {
         })
         .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
         .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(input_devices[0].clone()))
+        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }
 
+// `create_plugin` is the whole ABI the host looks for, and it passes a
+// Rust-native type across the `extern "C"` boundary: a `*mut dyn Plugin` is a fat
+// pointer carrying a vtable address, which has no stable layout, so clippy's
+// `improper_ctypes_definitions` fires — correctly.
+//
+// This is inherent to the host's plugin ABI, not a mistake here: the loader in
+// `engine::plugins` resolves `create_plugin` as
+// `unsafe extern "C" fn() -> *mut dyn Plugin`, the identical signature. Host and
+// plugin therefore agree, but only as long as both are built by the same rustc
+// against the same `engine` version and with the same global allocator — the
+// host reclaims this `Box`, and frees the `Arc<dyn CustomOp>` values handed to
+// it. A plugin compiled against a different engine build, or by a different
+// compiler, will produce a mismatched vtable and corrupt at the first call.
+// Anyone adapting this example must ship plugins alongside the exact host build;
+// a `repr(C)` shim ABI would be needed to relax that, and it would be a redesign
+// of the plugin system rather than a change here.
+#[allow(improper_ctypes_definitions)]
 #[unsafe(no_mangle)]
 pub extern "C" fn create_plugin() -> *mut dyn Plugin {
     let plugin = RustExamplePlugin::new();
     Box::into_raw(Box::new(plugin))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn destroy_plugin(plugin: *mut dyn Plugin) {
-    if !plugin.is_null() {
-        unsafe {
-            let _ = Box::from_raw(plugin);
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn get_plugin_info() -> PluginInfo {
-    RustExamplePlugin::new().info().clone()
 }
 
 #[cfg(test)]

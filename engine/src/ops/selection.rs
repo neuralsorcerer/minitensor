@@ -331,7 +331,7 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
             )));
         }
         let dims: Vec<isize> = sel_shape.dims().iter().map(|&d| d as isize).collect();
-        values_cast.expand(dims)?.contiguous()?
+        values_cast.expand(dims)?
     };
 
     if inner == 0 || selected.is_empty() {

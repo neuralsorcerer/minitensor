@@ -198,7 +198,7 @@ impl TensorData {
     /// built on it) and is what the element-wise arithmetic, `where`,
     /// `tril`/`triu`, and gather kernels now use; those no longer allocate
     /// through here at all. Migrating the remaining zero-then-overwrite kernels
-    /// onto that path is the tracked follow-up in docs/architecture_review.md.
+    /// onto that path is an incremental follow-up.
     ///
     /// Measured cost of the `memset` this path still pays (interleaved A/B,
     /// release): ~25–35% on the pure element-wise microbenchmark (bound by

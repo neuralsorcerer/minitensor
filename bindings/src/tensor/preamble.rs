@@ -60,7 +60,6 @@ use engine::random;
 use engine::tensor::{Shape, TensorData};
 use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
-use once_cell::sync::OnceCell;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{
     PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
@@ -77,6 +76,7 @@ use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 fn register_leaf_tensor(tensor: &Tensor) {
     if tensor.requires_grad() && tensor.grad_fn().is_none() {
@@ -330,9 +330,11 @@ impl PyTensor {
     /// Create from inner tensor
     pub fn from_tensor(tensor: Tensor) -> Self {
         // The engine's kernels read tensor storage in contiguous logical
-        // order, so a non-contiguous view (today only `expand` produces one)
-        // must be materialised before it becomes visible to Python; otherwise
-        // every downstream operation would read the wrong elements.
+        // order, so a non-contiguous tensor must be materialised before it
+        // becomes visible to Python; otherwise every downstream operation
+        // would read the wrong elements. The engine no longer produces one
+        // (`expand` materialises its broadcast axes), so this is a cheap
+        // guard against the invariant regressing, not a hot path.
         let tensor = if tensor.is_contiguous() {
             tensor
         } else {
@@ -393,6 +395,11 @@ impl PyTensor {
                 let indices_tensor = indices_opt.map(Self::from_tensor);
                 Ok((values_tensor, indices_tensor))
             }
+            // Deliberate departure from `_convert_error`, which maps
+            // `InvalidArgument` to `ValueError`: PyTorch raises `RuntimeError`
+            // for `median()` on an empty tensor, and
+            // `test_median_empty_tensor_raises` pins that. Everything else
+            // keeps the standard mapping.
             Err(err @ MinitensorError::InvalidArgument { .. }) => {
                 Err(PyRuntimeError::new_err(err.detailed_message()))
             }

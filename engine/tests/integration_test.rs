@@ -505,6 +505,89 @@ fn test_matmul_batch_dimensions() {
 }
 
 #[test]
+fn test_matmul_batched_lhs_with_shared_2d_rhs() {
+    // A 2-D rhs applies to every batch, so this folds the batch axes into the
+    // rows and runs one GEMM instead of broadcasting the rhs per batch. Check
+    // the fold against an explicit per-batch reference, over ranks 3 and 4.
+    for batch_dims in [vec![2usize], vec![2, 3]] {
+        let batch: usize = batch_dims.iter().product();
+        let (m, k, n) = (3usize, 4usize, 5usize);
+
+        let a: Vec<f32> = (0..batch * m * k).map(|v| (v % 7) as f32 - 3.0).collect();
+        let b: Vec<f32> = (0..k * n).map(|v| (v % 5) as f32 - 2.0).collect();
+
+        let mut a_dims = batch_dims.clone();
+        a_dims.extend_from_slice(&[m, k]);
+        let lhs = create_test_tensor_f32(a.clone(), a_dims.clone(), false);
+        let rhs = create_test_tensor_f32(b.clone(), vec![k, n], false);
+
+        let result = linalg::matmul(&lhs, &rhs).unwrap();
+        let mut want_dims = batch_dims.clone();
+        want_dims.extend_from_slice(&[m, n]);
+        assert_eq!(result.shape().dims(), want_dims.as_slice());
+
+        let mut expected = vec![0.0f32; batch * m * n];
+        for bi in 0..batch {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for kk in 0..k {
+                        acc += a[bi * m * k + i * k + kk] * b[kk * n + j];
+                    }
+                    expected[bi * m * n + i * n + j] = acc;
+                }
+            }
+        }
+        assert_eq!(result.data().as_f32_slice().unwrap(), expected.as_slice());
+    }
+    let _ = autograd::clear_graph();
+}
+
+#[test]
+fn test_matmul_batched_lhs_with_2d_rhs_gradients() {
+    // Folding goes through grad-aware reshapes, so both operands must still
+    // receive the gradients the un-folded form would produce.
+    let (b, m, k, n) = (2usize, 3usize, 4usize, 2usize);
+    let lhs = create_test_tensor_f32(
+        (0..b * m * k).map(|v| (v % 5) as f32 - 2.0).collect(),
+        vec![b, m, k],
+        true,
+    );
+    let rhs = create_test_tensor_f32(
+        (0..k * n).map(|v| (v % 3) as f32 - 1.0).collect(),
+        vec![k, n],
+        true,
+    );
+
+    let out = reduction::sum(&linalg::matmul(&lhs, &rhs).unwrap(), None, false).unwrap();
+    out.backward(None).unwrap();
+
+    // d(sum(A@B))/dA = ones @ B^T, so each entry is the row sum of B.
+    let rhs_data = rhs.data().as_f32_slice().unwrap().to_vec();
+    let lhs_grad = autograd::get_gradient(&lhs).expect("lhs gradient");
+    let lhs_grad = lhs_grad.data().as_f32_slice().unwrap();
+    assert_eq!(lhs_grad.len(), b * m * k);
+    for (idx, g) in lhs_grad.iter().enumerate() {
+        let row_sum: f32 = (0..n).map(|j| rhs_data[(idx % k) * n + j]).sum();
+        assert!((g - row_sum).abs() < 1e-5, "lhs grad at {idx}: {g}");
+    }
+
+    // d(sum(A@B))/dB sums each lhs column over every batch and row.
+    let lhs_data = lhs.data().as_f32_slice().unwrap().to_vec();
+    let rhs_grad = autograd::get_gradient(&rhs).expect("rhs gradient");
+    let rhs_grad = rhs_grad.data().as_f32_slice().unwrap();
+    assert_eq!(rhs_grad.len(), k * n);
+    for kk in 0..k {
+        let col_sum: f32 = (0..b * m).map(|r| lhs_data[r * k + kk]).sum();
+        for j in 0..n {
+            let g = rhs_grad[kk * n + j];
+            assert!((g - col_sum).abs() < 1e-5, "rhs grad at ({kk},{j}): {g}");
+        }
+    }
+    let _ = autograd::clear_graph();
+}
+
+#[test]
 fn test_matmul_shape_mismatch_error() {
     let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
     let b = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);

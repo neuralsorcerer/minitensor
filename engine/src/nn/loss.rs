@@ -7,8 +7,8 @@
 use crate::{
     error::Result,
     ops::loss::{
-        binary_cross_entropy_loss, cross_entropy_loss, focal_loss, huber_loss, log_cosh_loss,
-        mae_loss, mse_loss, smooth_l1_loss,
+        binary_cross_entropy_loss, binary_cross_entropy_with_logits_loss, cross_entropy_loss,
+        focal_loss, huber_loss, log_cosh_loss, mae_loss, mse_loss, smooth_l1_loss,
     },
     tensor::Tensor,
 };
@@ -488,6 +488,77 @@ impl BCELoss {
     /// Set the reduction mode
     pub fn set_reduction(&mut self, reduction: impl Into<String>) {
         self.reduction = reduction.into();
+    }
+}
+
+/// Binary Cross Entropy loss layer that takes logits rather than probabilities.
+///
+/// Prefer this to `Sigmoid` followed by [`BCELoss`]: it is the same function
+/// mathematically, but it stays numerically exact at logit magnitudes where the
+/// two-step form has already lost its gradient. See
+/// [`binary_cross_entropy_with_logits_loss`] for the details.
+#[derive(Debug, Clone)]
+pub struct BCEWithLogitsLoss {
+    reduction: String,
+    pos_weight: Option<Tensor>,
+}
+
+impl BCEWithLogitsLoss {
+    /// Create a new BCE-with-logits loss with the specified reduction
+    pub fn new(reduction: impl Into<String>) -> Self {
+        Self {
+            reduction: reduction.into(),
+            pos_weight: None,
+        }
+    }
+
+    /// Create the loss with a weight applied to the positive class, broadcast
+    /// against the targets
+    pub fn with_pos_weight(reduction: impl Into<String>, pos_weight: Tensor) -> Self {
+        Self {
+            reduction: reduction.into(),
+            pos_weight: Some(pos_weight),
+        }
+    }
+
+    /// Create BCE-with-logits loss with mean reduction (default)
+    pub fn mean() -> Self {
+        Self::new("mean")
+    }
+
+    /// Create BCE-with-logits loss with sum reduction
+    pub fn sum() -> Self {
+        Self::new("sum")
+    }
+
+    /// Create BCE-with-logits loss with no reduction (element-wise)
+    pub fn none() -> Self {
+        Self::new("none")
+    }
+
+    /// Compute the loss between raw logits and targets
+    pub fn forward(&self, logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        binary_cross_entropy_with_logits_loss(
+            logits,
+            targets,
+            self.pos_weight.as_ref(),
+            &self.reduction,
+        )
+    }
+
+    /// Get the reduction mode
+    pub fn reduction(&self) -> &str {
+        &self.reduction
+    }
+
+    /// Set the reduction mode
+    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
+        self.reduction = reduction.into();
+    }
+
+    /// Get the positive-class weight, if one was set
+    pub fn pos_weight(&self) -> Option<&Tensor> {
+        self.pos_weight.as_ref()
     }
 }
 
