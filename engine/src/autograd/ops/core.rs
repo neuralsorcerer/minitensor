@@ -332,6 +332,93 @@ pub(crate) fn reduce_gradient_for_broadcasting(
     Ok(grad)
 }
 
+/// Build the gradient of a unary element-wise operation from one saved operand
+/// and the incoming gradient.
+///
+/// Every such gradient has the same shape: dispatch on the float dtype, fetch
+/// the two slices, walk them in lockstep, and write `f(saved[i],
+/// grad_output[i])` into a fresh buffer. Spelling that out per operation cost
+/// ~70 lines of identical boilerplate each, and left the walk sequential over a
+/// buffer that `TensorData::uninitialized_on_device` had just `memset` to zero.
+/// Routing it through [`binary_map`](crate::ops::map::binary_map) writes every
+/// output element exactly once (no zeroing pass) and parallelizes above the
+/// binary threshold.
+///
+/// `saved` is whichever operand the local derivative is expressed in — the
+/// input for SiLU/GELU/softplus/softsign, the output for ELU/SELU — so the
+/// caller keeps that choice. The two closures let each dtype compute in its own
+/// precision instead of promoting f32 work to f64.
+pub(crate) fn unary_chain_grad<F32Op, F64Op>(
+    saved: &Tensor,
+    grad_output: &Tensor,
+    op: &str,
+    f32_op: F32Op,
+    f64_op: F64Op,
+) -> Result<Tensor>
+where
+    F32Op: Fn(f32, f32) -> f32 + Send + Sync,
+    F64Op: Fn(f64, f64) -> f64 + Send + Sync,
+{
+    // The zipped loops this replaces truncated to the shorter operand, so a
+    // mismatched gradient silently produced a partly-zero result instead of an
+    // error. Element-wise ops always hand back a gradient shaped like their
+    // output, so this only fires on a genuine bug.
+    if grad_output.numel() != saved.numel() {
+        return Err(MinitensorError::shape_mismatch(
+            grad_output.shape().dims().to_vec(),
+            saved.shape().dims().to_vec(),
+        ));
+    }
+    if grad_output.dtype() != saved.dtype() {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", saved.dtype()),
+            format!("{:?}", grad_output.dtype()),
+        ));
+    }
+
+    macro_rules! chain_arm {
+        ($accessor:ident, $ty:ty, $variant:ident, $tyname:literal, $f:expr) => {{
+            let saved_slice = saved.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from saved tensor"
+                ))
+            })?;
+            let grad_slice = grad_output.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from grad_output tensor"
+                ))
+            })?;
+            TensorData::from_vec::<$ty>(
+                crate::ops::map::binary_map(saved_slice, grad_slice, $f),
+                DataType::$variant,
+                saved.device(),
+            )
+        }};
+    }
+
+    let data = match saved.dtype() {
+        DataType::Float32 => chain_arm!(as_f32_slice, f32, Float32, "f32", f32_op),
+        DataType::Float64 => chain_arm!(as_f64_slice, f64, Float64, "f64", f64_op),
+        _ => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "{op} backward only supports floating point tensors"
+            )));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        saved.shape().clone(),
+        saved.dtype(),
+        saved.device(),
+        false,
+    ))
+}
+
 // Gradient function implementations for common operations
 
 /// Accumulate a gradient contribution for `input_id` into `gradients`.

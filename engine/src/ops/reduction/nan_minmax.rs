@@ -863,23 +863,17 @@ pub(crate) fn nanmax_along_dim_with_indices(
             let values = values_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = f32::NAN;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if !val.is_nan() && (max_val.is_nan() || val > max_val) {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = max_val;
-                    indices[out_idx] = max_idx as i64;
-                }
-            }
+            // Seeding with NaN and skipping NaN candidates leaves an all-NaN
+            // slice reporting NaN at index 0, matching NumPy's `nanmax`.
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                f32::NAN,
+                |v, b| !v.is_nan() && (b.is_nan() || v > b),
+                |_| None,
+            );
         }
         DataType::Float64 => {
             let input = tensor
@@ -889,23 +883,15 @@ pub(crate) fn nanmax_along_dim_with_indices(
             let values = values_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = f64::NAN;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if !val.is_nan() && (max_val.is_nan() || val > max_val) {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    let out_idx = o * layout.inner + r;
-                    values[out_idx] = max_val;
-                    indices[out_idx] = max_idx as i64;
-                }
-            }
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                f64::NAN,
+                |v, b| !v.is_nan() && (b.is_nan() || v > b),
+                |_| None,
+            );
         }
         _ => {
             return Err(MinitensorError::invalid_operation(

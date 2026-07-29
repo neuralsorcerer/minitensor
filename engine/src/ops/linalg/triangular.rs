@@ -196,6 +196,108 @@ mod tests {
         assert_eq!(result.data().as_i32_slice().unwrap(), &[0, 0, 0, 0, 0, 0]);
     }
 
+    /// Textbook `i`/`j`/`l` reference for the reordered integer kernel.
+    fn reference_matmul_i32(a: &[i32], b: &[i32], m: usize, k: usize, n: usize) -> Vec<i32> {
+        let mut out = vec![0i32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0i32;
+                for l in 0..k {
+                    sum += a[i * k + l] * b[l * n + j];
+                }
+                out[i * n + j] = sum;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_matmul_i32_matches_reference_across_par_threshold() {
+        // `m * n * k` straddles PAR_THRESHOLD (4096) so both the sequential and
+        // the row-parallel branch of the reordered kernel are exercised.
+        for &(m, k, n) in &[(2usize, 3usize, 4usize), (7, 5, 9), (16, 17, 18)] {
+            let a: Vec<i32> = (0..m * k).map(|x| (x as i32 % 11) - 5).collect();
+            let b: Vec<i32> = (0..k * n).map(|x| (x as i32 % 7) - 3).collect();
+            let ta = create_test_tensor_i32(a.clone(), vec![m, k]);
+            let tb = create_test_tensor_i32(b.clone(), vec![k, n]);
+
+            let got = matmul(&ta, &tb).unwrap();
+            assert_eq!(got.shape().dims(), &[m, n]);
+            assert_eq!(
+                got.data().as_i32_slice().unwrap(),
+                reference_matmul_i32(&a, &b, m, k, n).as_slice(),
+                "matmul {m}x{k} @ {k}x{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matmul_i32_batched_matches_reference() {
+        let (batch, m, k, n) = (3usize, 4usize, 5usize, 6usize);
+        let a: Vec<i32> = (0..batch * m * k).map(|x| (x as i32 % 9) - 4).collect();
+        let b: Vec<i32> = (0..batch * k * n).map(|x| (x as i32 % 5) - 2).collect();
+        let ta = create_test_tensor_i32(a.clone(), vec![batch, m, k]);
+        let tb = create_test_tensor_i32(b.clone(), vec![batch, k, n]);
+
+        let got = matmul(&ta, &tb).unwrap();
+        assert_eq!(got.shape().dims(), &[batch, m, n]);
+
+        let mut expected = Vec::with_capacity(batch * m * n);
+        for bi in 0..batch {
+            expected.extend(reference_matmul_i32(
+                &a[bi * m * k..(bi + 1) * m * k],
+                &b[bi * k * n..(bi + 1) * k * n],
+                m,
+                k,
+                n,
+            ));
+        }
+        assert_eq!(got.data().as_i32_slice().unwrap(), expected.as_slice());
+    }
+
+    #[test]
+    fn test_solve_batched_parallel_path_matches_per_batch_solution() {
+        // Enough batches to cross into the parallel grouping in `solve_batched`,
+        // each an independent 2x2 system with a known solution.
+        const BATCH: usize = 64;
+        let mut lhs = Vec::with_capacity(BATCH * 4);
+        let mut rhs = Vec::with_capacity(BATCH * 2);
+        let mut expected = Vec::with_capacity(BATCH * 2);
+        for b in 0..BATCH {
+            // [[2, 0], [0, s]] x = [2*b, s*(b+1)]  =>  x = [b, b+1]
+            let s = (b % 5) as f64 + 1.0;
+            lhs.extend_from_slice(&[2.0, 0.0, 0.0, s]);
+            rhs.extend_from_slice(&[2.0 * b as f64, s * (b as f64 + 1.0)]);
+            expected.extend_from_slice(&[b as f64, b as f64 + 1.0]);
+        }
+
+        let a = create_test_tensor_f64(lhs, vec![BATCH, 2, 2], false);
+        let b = create_test_tensor_f64(rhs, vec![BATCH, 2], false);
+        let x = solve(&a, &b).unwrap();
+        assert_eq!(x.shape().dims(), &[BATCH, 2]);
+        for (got, want) in x.data().as_f64_slice().unwrap().iter().zip(&expected) {
+            assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn test_solve_batched_reports_singular_matrix_in_any_batch() {
+        // A singular system anywhere in the batch must fail the whole call,
+        // including when it is scheduled on a non-first parallel task.
+        const BATCH: usize = 64;
+        let mut lhs = Vec::with_capacity(BATCH * 4);
+        for b in 0..BATCH {
+            if b == BATCH - 1 {
+                lhs.extend_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            } else {
+                lhs.extend_from_slice(&[1.0, 0.0, 0.0, 1.0]);
+            }
+        }
+        let a = create_test_tensor_f64(lhs, vec![BATCH, 2, 2], false);
+        let b = create_test_tensor_f64(vec![1.0; BATCH * 2], vec![BATCH, 2], false);
+        assert!(solve(&a, &b).is_err());
+    }
+
     #[test]
     fn test_transpose_2d() {
         let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);

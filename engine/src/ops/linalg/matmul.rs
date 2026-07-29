@@ -645,6 +645,12 @@ fn solve_f64(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usiz
     )
 }
 
+/// Solve every matrix in the batch independently.
+///
+/// Each system needs its own scratch copy of the matrix (elimination is
+/// destructive), so the batches share nothing and run in parallel. Each task
+/// allocates its scratch once and reuses it across the batches it is handed,
+/// rather than once per system.
 fn solve_batched<T>(
     lhs_shape: &[usize],
     rhs_cols: usize,
@@ -671,24 +677,56 @@ where
         .product::<usize>()
         .max(1);
     let rhs_stride = n * rhs_cols;
-
     let matrix_stride = n * n;
-    let mut matrix = vec![T::default(); matrix_stride];
-    let mut rhs_buf = vec![T::default(); rhs_stride];
 
-    for batch_idx in 0..batch {
-        let lhs_offset = batch_idx * matrix_stride;
-        let rhs_offset = batch_idx * rhs_stride;
+    // Solve batches `first..first + out_group.len() / rhs_stride`, writing each
+    // solution into `out_group`. The scratch buffers are allocated once per
+    // call rather than once per system.
+    let solve_group = |first: usize, count: usize, out_group: &mut [T]| -> Result<()> {
+        let mut matrix = vec![T::default(); matrix_stride];
+        let mut rhs_buf = vec![T::default(); rhs_stride];
+        for local in 0..count {
+            let batch_idx = first + local;
+            let lhs_offset = batch_idx * matrix_stride;
+            let rhs_offset = batch_idx * rhs_stride;
 
-        matrix.copy_from_slice(&lhs_slice[lhs_offset..lhs_offset + matrix_stride]);
-        rhs_buf[..rhs_stride].copy_from_slice(&rhs_slice[rhs_offset..rhs_offset + rhs_stride]);
+            matrix.copy_from_slice(&lhs_slice[lhs_offset..lhs_offset + matrix_stride]);
+            rhs_buf.copy_from_slice(&rhs_slice[rhs_offset..rhs_offset + rhs_stride]);
 
-        gaussian_elimination(&mut matrix, &mut rhs_buf, n, rhs_cols)?;
+            // Runs even with no right-hand-side columns: elimination is what
+            // detects a singular `lhs`, and that must still be reported.
+            gaussian_elimination(&mut matrix, &mut rhs_buf, n, rhs_cols)?;
 
-        out_slice[rhs_offset..rhs_offset + rhs_stride].copy_from_slice(&rhs_buf[..rhs_stride]);
+            out_group[local * rhs_stride..(local + 1) * rhs_stride].copy_from_slice(&rhs_buf);
+        }
+        Ok(())
+    };
+
+    // With no right-hand-side columns there is no output to split over, so the
+    // parallel path has nothing to chunk; a single batch is not worth a task.
+    if batch == 1 || rhs_stride == 0 {
+        return solve_group(0, batch, out_slice);
     }
 
-    Ok(())
+    // One system per task is too fine-grained for small `n`; group them so each
+    // rayon task carries a comparable amount of arithmetic (~n^3 per system).
+    let per_task = (PAR_THRESHOLD / (n * n * n).max(1)).clamp(1, batch);
+
+    // A singular matrix in any batch fails the whole call, as before. Which
+    // singular batch is reported is unspecified, but the error is identical for
+    // all of them ("solve received a singular matrix"), so the message does not
+    // depend on the scheduling.
+    out_slice
+        .par_chunks_mut(per_task * rhs_stride)
+        .enumerate()
+        .map(|(group_idx, out_group)| {
+            solve_group(
+                group_idx * per_task,
+                out_group.len() / rhs_stride,
+                out_group,
+            )
+        })
+        .collect::<Result<()>>()
 }
 
 fn gaussian_elimination<T>(matrix: &mut [T], rhs: &mut [T], n: usize, rhs_cols: usize) -> Result<()>

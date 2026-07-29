@@ -6,118 +6,51 @@
 
 use super::*;
 use crate::{
-    error::{MinitensorError, Result},
+    error::Result,
     ops::arithmetic,
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{Shape, Tensor},
 };
 use libm::{erf, erff};
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+
+/// Wrap a single-input gradient into the map a [`GradientFunction`] returns.
+#[inline]
+fn single(input_id: TensorId, grad: Tensor) -> FxHashMap<TensorId, Tensor> {
+    let mut gradients = FxHashMap::default();
+    gradients.reserve(1);
+    gradients.insert(input_id, grad);
+    gradients
+}
 
 impl GradientFunction for SoftplusBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.input.dtype() {
-            DataType::Float32 => {
-                let input_slice = self.input.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float32,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                let beta = self.beta as f32;
-                let threshold = self.threshold as f32;
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let scaled = beta * x;
-                    *grad_slot = if scaled > threshold {
-                        gout
-                    } else {
-                        gout / (1.0 + (-scaled).exp())
-                    };
+        // d/dx softplus(x) = sigmoid(beta * x); above the threshold the forward
+        // pass is the identity, so the gradient passes straight through.
+        let beta32 = self.beta as f32;
+        let thr32 = self.threshold as f32;
+        let (beta64, thr64) = (self.beta, self.threshold);
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            "Softplus",
+            move |x: f32, gout: f32| {
+                let scaled = beta32 * x;
+                if scaled > thr32 {
+                    gout
+                } else {
+                    gout / (1.0 + (-scaled).exp())
                 }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float32,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let input_slice = self.input.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float64,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                let beta = self.beta;
-                let threshold = self.threshold;
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let scaled = beta * x;
-                    *grad_slot = if scaled > threshold {
-                        gout
-                    } else {
-                        gout / (1.0 + (-scaled).exp())
-                    };
+            },
+            move |x: f64, gout: f64| {
+                let scaled = beta64 * x;
+                if scaled > thr64 {
+                    gout
+                } else {
+                    gout / (1.0 + (-scaled).exp())
                 }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float64,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "Softplus gradient only defined for floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+            },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -132,140 +65,59 @@ pub struct GeluBackward {
     pub approximate: bool,
 }
 
+/// The cubic coefficient of GELU's tanh approximation.
+const GELU_CUBIC_F32: f32 = 0.044_715;
+const GELU_CUBIC_F64: f64 = 0.044_715;
+
 impl GradientFunction for GeluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.input.dtype() {
-            DataType::Float32 => {
-                let input_slice = self.input.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float32,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                if self.approximate {
-                    let coeff = (2.0f32 / std::f32::consts::PI).sqrt();
-                    for ((grad_slot, &x), &gout) in grad_slice
-                        .iter_mut()
-                        .zip(input_slice.iter())
-                        .zip(grad_out_slice.iter())
-                    {
-                        let x2 = x * x;
-                        let inner = coeff * (x + 0.044715f32 * x * x2);
-                        let tanh_inner = inner.tanh();
-                        let sech2 = 1.0f32 - tanh_inner * tanh_inner;
-                        let grad_val = 0.5f32 * (1.0f32 + tanh_inner)
-                            + 0.5f32 * x * sech2 * coeff * (1.0f32 + 3.0f32 * 0.044715f32 * x2);
-                        *grad_slot = gout * grad_val;
-                    }
+        // Exact:  d/dx x*Phi(x) = Phi(x) + x*phi(x).
+        // Tanh approximation: differentiate 0.5*x*(1 + tanh(c*(x + a*x^3))).
+        //
+        // The two irrational coefficients are derived once here rather than
+        // written as decimal literals, so each dtype keeps the exact rounding
+        // of its own `sqrt`.
+        let approximate = self.approximate;
+        let coeff32 = (2.0f32 / std::f32::consts::PI).sqrt();
+        let coeff64 = (2.0f64 / std::f64::consts::PI).sqrt();
+        let inv_sqrt_2pi32 = 1.0f32 / (2.0f32 * std::f32::consts::PI).sqrt();
+        let inv_sqrt_2pi64 = 1.0f64 / (2.0f64 * std::f64::consts::PI).sqrt();
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            "GELU",
+            move |x: f32, gout: f32| {
+                let local = if approximate {
+                    let x2 = x * x;
+                    let inner = coeff32 * (x + GELU_CUBIC_F32 * x * x2);
+                    let tanh_inner = inner.tanh();
+                    let sech2 = 1.0 - tanh_inner * tanh_inner;
+                    0.5 * (1.0 + tanh_inner)
+                        + 0.5 * x * sech2 * coeff32 * (1.0 + 3.0 * GELU_CUBIC_F32 * x2)
                 } else {
-                    let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
-                    let inv_sqrt_2pi = 1.0f32 / ((2.0f32 * std::f32::consts::PI).sqrt());
-                    for ((grad_slot, &x), &gout) in grad_slice
-                        .iter_mut()
-                        .zip(input_slice.iter())
-                        .zip(grad_out_slice.iter())
-                    {
-                        let cdf = 0.5f32 * (1.0f32 + erff(x * inv_sqrt_2));
-                        let pdf = (-0.5f32 * x * x).exp() * inv_sqrt_2pi;
-                        let grad_val = cdf + x * pdf;
-                        *grad_slot = gout * grad_val;
-                    }
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float32,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let input_slice = self.input.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float64,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                if self.approximate {
-                    let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
-                    for ((grad_slot, &x), &gout) in grad_slice
-                        .iter_mut()
-                        .zip(input_slice.iter())
-                        .zip(grad_out_slice.iter())
-                    {
-                        let x2 = x * x;
-                        let inner = coeff * (x + 0.044715f64 * x * x2);
-                        let tanh_inner = inner.tanh();
-                        let sech2 = 1.0f64 - tanh_inner * tanh_inner;
-                        let grad_val = 0.5f64 * (1.0f64 + tanh_inner)
-                            + 0.5f64 * x * sech2 * coeff * (1.0f64 + 3.0f64 * 0.044715f64 * x2);
-                        *grad_slot = gout * grad_val;
-                    }
+                    let cdf = 0.5 * (1.0 + erff(x * std::f32::consts::FRAC_1_SQRT_2));
+                    let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi32;
+                    cdf + x * pdf
+                };
+                gout * local
+            },
+            move |x: f64, gout: f64| {
+                let local = if approximate {
+                    let x2 = x * x;
+                    let inner = coeff64 * (x + GELU_CUBIC_F64 * x * x2);
+                    let tanh_inner = inner.tanh();
+                    let sech2 = 1.0 - tanh_inner * tanh_inner;
+                    0.5 * (1.0 + tanh_inner)
+                        + 0.5 * x * sech2 * coeff64 * (1.0 + 3.0 * GELU_CUBIC_F64 * x2)
                 } else {
-                    let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
-                    let inv_sqrt_2pi = 1.0f64 / ((2.0f64 * std::f64::consts::PI).sqrt());
-                    for ((grad_slot, &x), &gout) in grad_slice
-                        .iter_mut()
-                        .zip(input_slice.iter())
-                        .zip(grad_out_slice.iter())
-                    {
-                        let cdf = 0.5f64 * (1.0f64 + erf(x * inv_sqrt_2));
-                        let pdf = (-0.5f64 * x * x).exp() * inv_sqrt_2pi;
-                        let grad_val = cdf + x * pdf;
-                        *grad_slot = gout * grad_val;
-                    }
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float64,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "GELU backward only supports floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+                    let cdf = 0.5 * (1.0 + erf(x * std::f64::consts::FRAC_1_SQRT_2));
+                    let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi64;
+                    cdf + x * pdf
+                };
+                gout * local
+            },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -282,101 +134,18 @@ pub struct EluBackward {
 
 impl GradientFunction for EluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.output.dtype() {
-            DataType::Float32 => {
-                let output_slice = self.output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from output tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    output_slice.len(),
-                    DataType::Float32,
-                    self.output.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                let alpha = self.alpha as f32;
-                for ((grad_slot, &out), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(output_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let local_grad = if out > 0.0f32 { 1.0f32 } else { out + alpha };
-                    *grad_slot = gout * local_grad;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.output.shape().clone(),
-                    DataType::Float32,
-                    self.output.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let output_slice = self.output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from output tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    output_slice.len(),
-                    DataType::Float64,
-                    self.output.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                for ((grad_slot, &out), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(output_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let local_grad = if out > 0.0f64 {
-                        1.0f64
-                    } else {
-                        out + self.alpha
-                    };
-                    *grad_slot = gout * local_grad;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.output.shape().clone(),
-                    DataType::Float64,
-                    self.output.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "ELU backward only supports floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+        // Expressed in the saved *output*: for x <= 0, elu(x) = alpha*(e^x - 1)
+        // so d/dx = alpha*e^x = elu(x) + alpha.
+        let alpha32 = self.alpha as f32;
+        let alpha64 = self.alpha;
+        let grad = unary_chain_grad(
+            &self.output,
+            grad_output,
+            "ELU",
+            move |out: f32, gout: f32| gout * if out > 0.0 { 1.0 } else { out + alpha32 },
+            move |out: f64, gout: f64| gout * if out > 0.0 { 1.0 } else { out + alpha64 },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -390,110 +159,36 @@ pub struct SeluBackward {
     pub output: Tensor,
 }
 
+/// SELU's fixed constants (Klambauer et al., 2017).
+const SELU_SCALE_F32: f32 = 1.050_701;
+const SELU_ALPHA_F32: f32 = 1.673_263_2;
+const SELU_SCALE_F64: f64 = 1.050_700_987_355_480_5;
+const SELU_ALPHA_F64: f64 = 1.673_263_242_354_377_2;
+
 impl GradientFunction for SeluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.output.dtype() {
-            DataType::Float32 => {
-                let output_slice = self.output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from output tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    output_slice.len(),
-                    DataType::Float32,
-                    self.output.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                const SCALE: f32 = 1.050701;
-                const ALPHA: f32 = 1.6732632;
-                for ((grad_slot, &out), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(output_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let local_grad = if out > 0.0f32 {
-                        SCALE
-                    } else {
-                        out + SCALE * ALPHA
-                    };
-                    *grad_slot = gout * local_grad;
+        // As with ELU, in terms of the saved output: for x <= 0,
+        // selu(x) = scale*alpha*(e^x - 1), so d/dx = selu(x) + scale*alpha.
+        let grad = unary_chain_grad(
+            &self.output,
+            grad_output,
+            "SELU",
+            |out: f32, gout: f32| {
+                gout * if out > 0.0 {
+                    SELU_SCALE_F32
+                } else {
+                    out + SELU_SCALE_F32 * SELU_ALPHA_F32
                 }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.output.shape().clone(),
-                    DataType::Float32,
-                    self.output.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let output_slice = self.output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from output tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    output_slice.len(),
-                    DataType::Float64,
-                    self.output.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                const SCALE: f64 = 1.050_700_987_355_480_5;
-                const ALPHA: f64 = 1.673_263_242_354_377_2;
-                for ((grad_slot, &out), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(output_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let local_grad = if out > 0.0f64 {
-                        SCALE
-                    } else {
-                        out + SCALE * ALPHA
-                    };
-                    *grad_slot = gout * local_grad;
+            },
+            |out: f64, gout: f64| {
+                gout * if out > 0.0 {
+                    SELU_SCALE_F64
+                } else {
+                    out + SELU_SCALE_F64 * SELU_ALPHA_F64
                 }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.output.shape().clone(),
-                    DataType::Float64,
-                    self.output.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "SELU backward only supports floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+            },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -509,98 +204,21 @@ pub struct SiluBackward {
 
 impl GradientFunction for SiluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.input.dtype() {
-            DataType::Float32 => {
-                let input_slice = self.input.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float32,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let sigmoid = stable_sigmoid_f32(x);
-                    let grad_val = sigmoid * (1.0f32 + x * (1.0f32 - sigmoid));
-                    *grad_slot = gout * grad_val;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float32,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let input_slice = self.input.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float64,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let sigmoid = stable_sigmoid_f64(x);
-                    let grad_val = sigmoid * (1.0f64 + x * (1.0f64 - sigmoid));
-                    *grad_slot = gout * grad_val;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float64,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "SiLU backward only supports floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+        // d/dx x*sigmoid(x) = sigmoid(x) * (1 + x*(1 - sigmoid(x))).
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            "SiLU",
+            |x: f32, gout: f32| {
+                let s = stable_sigmoid_f32(x);
+                gout * (s * (1.0 + x * (1.0 - s)))
+            },
+            |x: f64, gout: f64| {
+                let s = stable_sigmoid_f64(x);
+                gout * (s * (1.0 + x * (1.0 - s)))
+            },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -608,11 +226,12 @@ impl GradientFunction for SiluBackward {
     }
 }
 
+/// Sigmoid evaluated through whichever of `e^-x` / `e^x` cannot overflow, so
+/// large-magnitude inputs saturate to 1/0 instead of producing inf/inf = NaN.
 #[inline]
 fn stable_sigmoid_f32(x: f32) -> f32 {
     if x >= 0.0 {
-        let exp_neg = (-x).exp();
-        1.0 / (1.0 + exp_neg)
+        1.0 / (1.0 + (-x).exp())
     } else {
         let exp_pos = x.exp();
         exp_pos / (1.0 + exp_pos)
@@ -622,8 +241,7 @@ fn stable_sigmoid_f32(x: f32) -> f32 {
 #[inline]
 fn stable_sigmoid_f64(x: f64) -> f64 {
     if x >= 0.0 {
-        let exp_neg = (-x).exp();
-        1.0 / (1.0 + exp_neg)
+        1.0 / (1.0 + (-x).exp())
     } else {
         let exp_pos = x.exp();
         exp_pos / (1.0 + exp_pos)
@@ -638,98 +256,21 @@ pub struct SoftsignBackward {
 
 impl GradientFunction for SoftsignBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        match self.input.dtype() {
-            DataType::Float32 => {
-                let input_slice = self.input.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float32,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from gradient tensor",
-                    )
-                })?;
-
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let denom = 1.0f32 + x.abs();
-                    let local_grad = 1.0f32 / (denom * denom);
-                    *grad_slot = gout * local_grad;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float32,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            DataType::Float64 => {
-                let input_slice = self.input.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-                })?;
-                let grad_out_slice = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from grad_output tensor",
-                    )
-                })?;
-
-                let mut grad_data = TensorData::uninitialized_on_device(
-                    input_slice.len(),
-                    DataType::Float64,
-                    self.input.device(),
-                );
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from gradient tensor",
-                    )
-                })?;
-
-                for ((grad_slot, &x), &gout) in grad_slice
-                    .iter_mut()
-                    .zip(input_slice.iter())
-                    .zip(grad_out_slice.iter())
-                {
-                    let denom = 1.0f64 + x.abs();
-                    let local_grad = 1.0f64 / (denom * denom);
-                    *grad_slot = gout * local_grad;
-                }
-
-                let grad_tensor = Tensor::new(
-                    Arc::new(grad_data),
-                    self.input.shape().clone(),
-                    DataType::Float64,
-                    self.input.device(),
-                    false,
-                );
-                gradients.insert(self.input_id, grad_tensor);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "Softsign backward only supports floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
+        // d/dx x/(1 + |x|) = 1 / (1 + |x|)^2.
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            "Softsign",
+            |x: f32, gout: f32| {
+                let denom = 1.0 + x.abs();
+                gout / (denom * denom)
+            },
+            |x: f64, gout: f64| {
+                let denom = 1.0 + x.abs();
+                gout / (denom * denom)
+            },
+        )?;
+        Ok(single(self.input_id, grad))
     }
 
     fn input_ids(&self) -> &[TensorId] {

@@ -468,7 +468,21 @@ pub(crate) fn matmul_i64(
     )
 }
 
-/// Naive matrix multiplication implementation (O(n^3)) with batch support
+/// Integer matrix multiplication (O(n^3)) with batch support.
+///
+/// Only the integer dtypes reach here; f32/f64 go through the packed GEMM in
+/// [`optimized_matmul_f32`]/[`optimized_matmul_f64`].
+///
+/// The loop nest is `i` → `l` → `j`, not the textbook `i` → `j` → `l`. With `j`
+/// innermost, `rhs[l * n + j]` and the output element both advance
+/// contiguously while `lhs[i * k + l]` stays fixed for the whole run, so each
+/// pass streams two cache lines forward and vectorizes. The textbook order
+/// instead walks `rhs` down a column with stride `n`, touching a fresh cache
+/// line on every multiply.
+///
+/// The reordering accumulates into the output instead of a register; the buffer
+/// arrives zeroed from `TensorData::zeros_on_device`, which is exactly the
+/// starting point that needs.
 fn naive_matmul<T>(
     lhs_data: &[T],
     rhs_data: &[T],
@@ -478,8 +492,12 @@ fn naive_matmul<T>(
     _output_shape: &Shape,
 ) -> Result<()>
 where
-    T: Copy + std::ops::Add<Output = T> + std::ops::Mul<Output = T> + Default + Send + Sync,
+    T: Copy + std::ops::Mul<Output = T> + std::ops::AddAssign + Default + PartialEq + Send + Sync,
 {
+    debug_assert!(
+        output_data.iter().all(|v| *v == T::default()),
+        "naive_matmul accumulates into its output; the buffer must arrive zeroed"
+    );
     let lhs_dims = lhs_shape.dims();
     let rhs_dims = rhs_shape.dims();
 
@@ -487,18 +505,21 @@ where
     let k = lhs_dims[lhs_dims.len() - 1];
     let n = rhs_dims[rhs_dims.len() - 1];
     let batch = lhs_data.len() / (m * k);
-    if batch == 1 && m * n * k < PAR_THRESHOLD {
-        // For small single-batch matrices, avoid parallel overhead
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = T::default();
-                for l in 0..k {
-                    let lhs_idx = i * k + l;
-                    let rhs_idx = l * n + j;
-                    sum = sum + lhs_data[lhs_idx] * rhs_data[rhs_idx];
-                }
-                output_data[i * n + j] = sum;
+
+    // One output row: accumulate `lhs_row[l] * rhs_row(l)` over l.
+    let mul_row = |out_row: &mut [T], lhs_row: &[T], rhs_batch: &[T]| {
+        for (l, &a) in lhs_row.iter().enumerate() {
+            let rhs_row = &rhs_batch[l * n..l * n + n];
+            for (o, &b) in out_row.iter_mut().zip(rhs_row.iter()) {
+                *o += a * b;
             }
+        }
+    };
+
+    if batch == 1 && m * n * k < PAR_THRESHOLD {
+        // For small single-batch matrices, avoid parallel overhead.
+        for (i, out_row) in output_data.chunks_mut(n).enumerate() {
+            mul_row(out_row, &lhs_data[i * k..i * k + k], rhs_data);
         }
     } else {
         output_data
@@ -507,17 +528,15 @@ where
             .for_each(|(b, chunk)| {
                 let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
                 let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
-                chunk.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
-                    for j in 0..n {
-                        let mut sum = T::default();
-                        for l in 0..k {
-                            let lhs_idx = i * k + l;
-                            let rhs_idx = l * n + j;
-                            sum = sum + lhs_batch[lhs_idx] * rhs_batch[rhs_idx];
-                        }
-                        row[j] = sum;
-                    }
-                });
+                // Rows within a batch are independent too, so split them as
+                // well; a single-batch call would otherwise leave every core
+                // but one idle.
+                chunk
+                    .par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(i, out_row)| {
+                        mul_row(out_row, &lhs_batch[i * k..i * k + k], rhs_batch);
+                    });
             });
     }
 
