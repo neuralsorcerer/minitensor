@@ -388,10 +388,12 @@ pub(crate) fn argmin_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> 
     Ok(())
 }
 
+/// A dimension reduction seen as `outer` independent slabs of
+/// `dim_size * inner` elements: within a slab, position `d` along the reduced
+/// dimension owns the run `[d * inner, (d + 1) * inner)`.
 pub(crate) struct DimReductionLayout {
     pub(crate) output_shape: Shape,
     pub(crate) dim_size: usize,
-    pub(crate) outer: usize,
     pub(crate) inner: usize,
     pub(crate) outer_stride: usize,
 }
@@ -413,14 +415,12 @@ pub(crate) fn reduction_layout(
         output_shape.remove(dim);
     }
     let dim_size = input_shape[dim];
-    let outer = input_shape[..dim].iter().product::<usize>();
     let inner = input_shape[dim + 1..].iter().product::<usize>();
     let outer_stride = dim_size * inner;
 
     Ok(DimReductionLayout {
         output_shape: Shape::new(output_shape),
         dim_size,
-        outer,
         inner,
         outer_stride,
     })
@@ -705,215 +705,4 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
             *vout = best;
             *iout = best_i as i64;
         });
-}
-
-pub(crate) fn max_along_dim_with_indices(
-    tensor: &Tensor,
-    dim: usize,
-    keepdim: bool,
-) -> Result<(Tensor, Tensor)> {
-    let layout = reduction_layout(tensor, dim, keepdim)?;
-    let mut values_data =
-        TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
-    let mut indices_data = TensorData::zeros_on_device(
-        layout.output_shape.numel(),
-        DataType::Int64,
-        tensor.device(),
-    );
-
-    let indices = indices_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f32::NEG_INFINITY,
-                |v, b| v > b,
-                |v| if v.is_nan() { Some(f32::NAN) } else { None },
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f64::NEG_INFINITY,
-                |v, b| v > b,
-                |v| if v.is_nan() { Some(f64::NAN) } else { None },
-            );
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                i32::MIN,
-                |v, b| v > b,
-                |_| None,
-            );
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                i64::MIN,
-                |v, b| v > b,
-                |_| None,
-            );
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                false,
-                |_, _| false,
-                |v| if v { Some(true) } else { None },
-            );
-        }
-    }
-
-    Ok((
-        Tensor::new(
-            Arc::new(values_data),
-            layout.output_shape.clone(),
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        ),
-        Tensor::new(
-            Arc::new(indices_data),
-            layout.output_shape,
-            DataType::Int64,
-            tensor.device(),
-            false,
-        ),
-    ))
-}
-
-pub(crate) fn nanmax_along_dim_with_indices(
-    tensor: &Tensor,
-    dim: usize,
-    keepdim: bool,
-) -> Result<(Tensor, Tensor)> {
-    let layout = reduction_layout(tensor, dim, keepdim)?;
-    let mut values_data =
-        TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
-    let mut indices_data = TensorData::zeros_on_device(
-        layout.output_shape.numel(),
-        DataType::Int64,
-        tensor.device(),
-    );
-
-    let indices = indices_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            // Seeding with NaN and skipping NaN candidates leaves an all-NaN
-            // slice reporting NaN at index 0, matching NumPy's `nanmax`.
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f32::NAN,
-                |v, b| !v.is_nan() && (b.is_nan() || v > b),
-                |_| None,
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f64::NAN,
-                |v, b| !v.is_nan() && (b.is_nan() || v > b),
-                |_| None,
-            );
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "nanmax only supports floating point tensors",
-            ));
-        }
-    }
-
-    Ok((
-        Tensor::new(
-            Arc::new(values_data),
-            layout.output_shape.clone(),
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        ),
-        Tensor::new(
-            Arc::new(indices_data),
-            layout.output_shape,
-            DataType::Int64,
-            tensor.device(),
-            false,
-        ),
-    ))
 }

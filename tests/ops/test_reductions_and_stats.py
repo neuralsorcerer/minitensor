@@ -1005,3 +1005,58 @@ def test_norm_rejects_unsupported_orders_and_dtypes():
         mt.Tensor([1.0]).norm("nuc")
     with pytest.raises(Exception):
         mt.Tensor([1.0]).norm(2.0, 5)
+
+
+# min/max/argmin/argmax along a dimension all run through one shared reducer,
+# so sweep every dtype, rank and axis rather than the single 2-D f32 case the
+# individual tests above cover.
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+@pytest.mark.parametrize("shape", [(9,), (5, 7), (3, 4, 5)])
+def test_extremum_reductions_match_numpy_across_dtypes_and_axes(dtype, shape):
+    rng = np.random.default_rng(20240719)
+    raw = rng.standard_normal(shape) * 5
+    x = raw.astype(dtype) if dtype.startswith("float") else (raw * 4).astype(dtype)
+    t = mt.Tensor(x)
+
+    for axis in range(len(shape)):
+        np.testing.assert_array_equal(
+            t.argmax(dim=axis).numpy(), np.argmax(x, axis=axis)
+        )
+        np.testing.assert_array_equal(
+            t.argmin(dim=axis).numpy(), np.argmin(x, axis=axis)
+        )
+
+        values, indices = t.max(dim=axis)
+        np.testing.assert_allclose(values.numpy(), x.max(axis=axis))
+        np.testing.assert_array_equal(indices.numpy(), np.argmax(x, axis=axis))
+
+        values, indices = t.min(dim=axis)
+        np.testing.assert_allclose(values.numpy(), x.min(axis=axis))
+        np.testing.assert_array_equal(indices.numpy(), np.argmin(x, axis=axis))
+
+
+def test_bool_extremum_reductions_short_circuit_like_numpy():
+    # Bool has two values, so the reducer stops at the first True (max) or
+    # first False (min) instead of comparing the whole slice; the index it
+    # reports must still be NumPy's.
+    data = np.array([[False, True, True], [False, False, False], [True, False, True]])
+    t = mt.Tensor(data).astype("bool")
+    np.testing.assert_array_equal(t.argmax(dim=1).numpy(), np.argmax(data, axis=1))
+    np.testing.assert_array_equal(t.argmin(dim=1).numpy(), np.argmin(data, axis=1))
+
+
+def test_nan_wins_plain_extremum_but_not_the_nan_aware_form():
+    # torch.max propagates NaN; np.nanmax skips it. Both forms share one kernel,
+    # so pin the difference.
+    x = np.array([[1.0, np.nan, 3.0], [np.nan, np.nan, np.nan]], dtype=np.float32)
+    t = mt.Tensor(x)
+
+    values, indices = t.max(dim=1)
+    assert np.all(np.isnan(values.numpy()))
+    np.testing.assert_array_equal(indices.numpy(), [1, 0])
+
+    values, indices = t.nanmax(dim=1)
+    got = values.numpy()
+    assert got[0] == pytest.approx(3.0)
+    assert np.isnan(got[1])  # an all-NaN slice has no non-NaN value to report
+    np.testing.assert_array_equal(indices.numpy(), [2, 0])

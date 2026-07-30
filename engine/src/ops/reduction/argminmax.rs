@@ -4,148 +4,11 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{DataType, Tensor, TensorData},
+    tensor::{Tensor, TensorData},
 };
 use rayon::prelude::*;
-use std::sync::Arc;
-
-pub(crate) fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    let layout = reduction_layout(tensor, dim, keepdim)?;
-    let mut result_data = TensorData::zeros_on_device(
-        layout.output_shape.numel(),
-        DataType::Int64,
-        tensor.device(),
-    );
-
-    let output = result_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = f32::INFINITY;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            min_idx = d;
-                            break;
-                        }
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = min_idx as i64;
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = f64::INFINITY;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            min_idx = d;
-                            break;
-                        }
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = min_idx as i64;
-                }
-            }
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = i32::MAX;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = min_idx as i64;
-                }
-            }
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_val = i64::MAX;
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val < min_val {
-                            min_val = val;
-                            min_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = min_idx as i64;
-                }
-            }
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut min_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        if !input[idx] {
-                            min_idx = d;
-                            break;
-                        }
-                    }
-                    output[o * layout.inner + r] = min_idx as i64;
-                }
-            }
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(result_data),
-        layout.output_shape,
-        DataType::Int64,
-        tensor.device(),
-        false,
-    ))
-}
 
 /// Inclusive scan of `input` into `output` along one dimension.
 ///
@@ -589,8 +452,11 @@ cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Sibling reduction entry points under test; the non-test build of this
+    // module does not reference them.
     use crate::device::Device;
-    use crate::tensor::Shape;
+    use crate::ops::reduction::*;
+    use crate::tensor::{DataType, Shape};
     use std::sync::Arc;
 
     fn create_tensor_f32(data: Vec<f32>, shape: Vec<usize>) -> Tensor {

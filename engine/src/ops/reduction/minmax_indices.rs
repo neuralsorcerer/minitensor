@@ -11,10 +11,32 @@ use crate::{
 };
 use std::sync::Arc;
 
-pub(crate) fn min_along_dim_with_indices(
+/// Which extremum an indexed dimension reduction is looking for.
+///
+/// `min` and `max` differ only in their seed and their "is this better"
+/// comparison, and the NaN-skipping forms differ from the plain ones only in
+/// seeding with NaN instead of an infinity. Spelling all four out cost four
+/// copies of the same dtype dispatch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Extremum {
+    Min,
+    Max,
+}
+
+/// Reduce `dim` to its extremum, reporting the value and the index of the
+/// first element attaining it.
+///
+/// A NaN anywhere in a float slice wins outright (`reduce_arg_along_dim_par`'s
+/// short-circuit), matching `torch.min`/`torch.max`; `nan_aware` instead skips
+/// NaNs entirely, so an all-NaN slice reports NaN at index 0 as NumPy's
+/// `nanmin`/`nanmax` do. Integer and bool dtypes have no NaN and are rejected
+/// in the NaN-aware form.
+pub(crate) fn extremum_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,
     keepdim: bool,
+    which: Extremum,
+    nan_aware: bool,
 ) -> Result<(Tensor, Tensor)> {
     let layout = reduction_layout(tensor, dim, keepdim)?;
     let mut values_data =
@@ -29,97 +51,118 @@ pub(crate) fn min_along_dim_with_indices(
         .as_i64_slice_mut()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
 
+    /// One float dtype: NaN either wins immediately or is skipped, depending on
+    /// `nan_aware`.
+    macro_rules! float_arm {
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+            let values = values_data.$mut_accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
+            let is_max = which == Extremum::Max;
+            if nan_aware {
+                reduce_arg_along_dim_par(
+                    input,
+                    values,
+                    indices,
+                    &layout,
+                    <$ty>::NAN,
+                    move |v: $ty, b: $ty| {
+                        !v.is_nan() && (b.is_nan() || if is_max { v > b } else { v < b })
+                    },
+                    |_| None,
+                );
+            } else {
+                let seed = if is_max {
+                    <$ty>::NEG_INFINITY
+                } else {
+                    <$ty>::INFINITY
+                };
+                reduce_arg_along_dim_par(
+                    input,
+                    values,
+                    indices,
+                    &layout,
+                    seed,
+                    move |v: $ty, b: $ty| if is_max { v > b } else { v < b },
+                    |v: $ty| if v.is_nan() { Some(<$ty>::NAN) } else { None },
+                );
+            }
+        }};
+    }
+
+    /// One non-float dtype: no NaN to consider, so only the plain form exists.
+    macro_rules! exact_arm {
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal, $min_seed:expr, $max_seed:expr, $short:expr) => {{
+            if nan_aware {
+                return Err(MinitensorError::invalid_operation(
+                    "nan-aware min/max only supports floating point tensors",
+                ));
+            }
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+            let values = values_data.$mut_accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
+            let is_max = which == Extremum::Max;
+            let seed = if is_max { $max_seed } else { $min_seed };
+            let short = $short;
+            reduce_arg_along_dim_par(
+                input,
+                values,
+                indices,
+                &layout,
+                seed,
+                move |v: $ty, b: $ty| if is_max { v > b } else { v < b },
+                move |v: $ty| short(v, is_max),
+            );
+        }};
+    }
+
     match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f32::INFINITY,
-                |v, b| v < b,
-                |v| if v.is_nan() { Some(f32::NAN) } else { None },
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f64::INFINITY,
-                |v, b| v < b,
-                |v| if v.is_nan() { Some(f64::NAN) } else { None },
-            );
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                i32::MAX,
-                |v, b| v < b,
-                |_| None,
-            );
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                i64::MAX,
-                |v, b| v < b,
-                |_| None,
-            );
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                true,
-                |_, _| false,
-                |v| if !v { Some(false) } else { None },
-            );
-        }
+        DataType::Float32 => float_arm!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
+        DataType::Float64 => float_arm!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
+        DataType::Int32 => exact_arm!(
+            as_i32_slice,
+            as_i32_slice_mut,
+            i32,
+            "i32",
+            i32::MAX,
+            i32::MIN,
+            |_v: i32, _is_max: bool| None
+        ),
+        DataType::Int64 => exact_arm!(
+            as_i64_slice,
+            as_i64_slice_mut,
+            i64,
+            "i64",
+            i64::MAX,
+            i64::MIN,
+            |_v: i64, _is_max: bool| None
+        ),
+        // Bool has only two values, so the first `true` (for max) or first
+        // `false` (for min) is already the answer: short-circuit and never
+        // compare.
+        DataType::Bool => exact_arm!(
+            as_bool_slice,
+            as_bool_slice_mut,
+            bool,
+            "bool",
+            true,
+            false,
+            |v: bool, is_max: bool| if v == is_max { Some(v) } else { None }
+        ),
     }
 
     Ok((
@@ -138,6 +181,22 @@ pub(crate) fn min_along_dim_with_indices(
             false,
         ),
     ))
+}
+
+pub(crate) fn min_along_dim_with_indices(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
+    extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Min, false)
+}
+
+pub(crate) fn max_along_dim_with_indices(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
+    extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Max, false)
 }
 
 pub(crate) fn nanmin_along_dim_with_indices(
@@ -145,214 +204,33 @@ pub(crate) fn nanmin_along_dim_with_indices(
     dim: usize,
     keepdim: bool,
 ) -> Result<(Tensor, Tensor)> {
-    let layout = reduction_layout(tensor, dim, keepdim)?;
-    let mut values_data =
-        TensorData::zeros_on_device(layout.output_shape.numel(), tensor.dtype(), tensor.device());
-    let mut indices_data = TensorData::zeros_on_device(
-        layout.output_shape.numel(),
-        DataType::Int64,
-        tensor.device(),
-    );
-
-    let indices = indices_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            // Seeding with NaN and skipping NaN candidates leaves an all-NaN
-            // slice reporting NaN at index 0, matching NumPy's `nanmin`.
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f32::NAN,
-                |v, b| !v.is_nan() && (b.is_nan() || v < b),
-                |_| None,
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            reduce_arg_along_dim_par(
-                input,
-                values,
-                indices,
-                &layout,
-                f64::NAN,
-                |v, b| !v.is_nan() && (b.is_nan() || v < b),
-                |_| None,
-            );
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "nanmin only supports floating point tensors",
-            ));
-        }
-    }
-
-    Ok((
-        Tensor::new(
-            Arc::new(values_data),
-            layout.output_shape.clone(),
-            tensor.dtype(),
-            tensor.device(),
-            tensor.requires_grad(),
-        ),
-        Tensor::new(
-            Arc::new(indices_data),
-            layout.output_shape,
-            DataType::Int64,
-            tensor.device(),
-            false,
-        ),
-    ))
+    extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Min, true)
 }
 
+pub(crate) fn nanmax_along_dim_with_indices(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+) -> Result<(Tensor, Tensor)> {
+    extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Max, true)
+}
+
+/// Index of the extremum along `dim`.
+///
+/// The index-only reductions are the value-and-index reduction with the values
+/// discarded -- identical seeds, identical comparisons, identical NaN-wins and
+/// bool short-circuits. They had their own hand-written copies, each a
+/// sequential five-arm dtype dispatch whose inner loop strode by `inner`;
+/// routing them here parallelizes them. The discarded value buffer is
+/// `outer * inner` elements, a factor of `dim_size` smaller than the input the
+/// reduction already has to read.
 pub(crate) fn argmax_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    let layout = reduction_layout(tensor, dim, keepdim)?;
-    let mut result_data = TensorData::zeros_on_device(
-        layout.output_shape.numel(),
-        DataType::Int64,
-        tensor.device(),
-    );
+    let (_, indices) = extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Max, false)?;
+    Ok(indices)
+}
 
-    let output = result_data
-        .as_i64_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = f32::NEG_INFINITY;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            max_idx = d;
-                            break;
-                        }
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = max_idx as i64;
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = f64::NEG_INFINITY;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val.is_nan() {
-                            max_idx = d;
-                            break;
-                        }
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = max_idx as i64;
-                }
-            }
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = i32::MIN;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = max_idx as i64;
-                }
-            }
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_val = i64::MIN;
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        let val = input[idx];
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = d;
-                        }
-                    }
-                    output[o * layout.inner + r] = max_idx as i64;
-                }
-            }
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            for o in 0..layout.outer {
-                for r in 0..layout.inner {
-                    let mut max_idx = 0usize;
-                    for d in 0..layout.dim_size {
-                        let idx = o * layout.outer_stride + d * layout.inner + r;
-                        if input[idx] {
-                            max_idx = d;
-                            break;
-                        }
-                    }
-                    output[o * layout.inner + r] = max_idx as i64;
-                }
-            }
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(result_data),
-        layout.output_shape,
-        DataType::Int64,
-        tensor.device(),
-        false,
-    ))
+/// See [`argmax_along_dim`].
+pub(crate) fn argmin_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+    let (_, indices) = extremum_along_dim_with_indices(tensor, dim, keepdim, Extremum::Min, false)?;
+    Ok(indices)
 }
