@@ -81,157 +81,6 @@ impl PyTensor {
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
         Ok(Self::from_tensor(tensor))
     }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn xavier_uniform(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::XavierUniform,
-            "xavier_uniform",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn xavier_normal(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::XavierNormal,
-            "xavier_normal",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn he_uniform(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::HeUniform,
-            "he_uniform",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn he_normal(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::HeNormal,
-            "he_normal",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn lecun_uniform(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::LecunUniform,
-            "lecun_uniform",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
-    fn lecun_normal(
-        shape: &Bound<PyTuple>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let dims = parse_shape_tuple(shape, "shape")?;
-        let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
-        let requires_grad = requires_grad.unwrap_or(false);
-
-        let shape = Shape::new(dims);
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::LecunNormal,
-            "lecun_normal",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     fn rand(
@@ -327,196 +176,82 @@ impl PyTensor {
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
         Ok(Self::from_tensor(tensor))
     }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn xavier_uniform_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::XavierUniform,
-            "xavier_uniform_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn xavier_normal_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::XavierNormal,
-            "xavier_normal_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn he_uniform_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::HeUniform,
-            "he_uniform_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn he_normal_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::HeNormal,
-            "he_normal_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn lecun_uniform_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::LecunUniform,
-            "lecun_uniform_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
-    fn lecun_normal_like(
-        input: &Bound<PyAny>,
-        dtype: Option<&str>,
-        device: Option<&PyDevice>,
-        requires_grad: Option<bool>,
-    ) -> PyResult<Self> {
-        let reference = PyTensor::from_python_value(input)?;
-        let reference_tensor = reference.tensor();
-
-        let dtype = match dtype {
-            Some(name) => dtype::parse_dtype(name)?,
-            None => reference_tensor.dtype(),
-        };
-
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
-        let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
-        let shape = Shape::new(reference.shape_vec());
-        let tensor = create_fan_init_tensor(
-            shape,
-            dtype,
-            device,
-            requires_grad,
-            FanInitKind::LecunNormal,
-            "lecun_normal_like",
-        )?;
-        Ok(Self::from_tensor(tensor))
-    }
 }
+
+/// The fan-in/fan-out initialisers differ only in which [`FanInitKind`] they
+/// pass through; every one of them otherwise repeated the same argument
+/// resolution and the same call, once for the `*shape` form and once for the
+/// `_like` form. Twelve constructors were twelve verbatim copies of two bodies.
+///
+/// The macro emits the whole `#[pymethods]` block rather than individual
+/// methods: pyo3's attribute macro reads the impl block's tokens, so a
+/// `macro_rules!` call sitting *inside* one would never be expanded in time.
+macro_rules! fan_init_constructors {
+    ($(($name:ident, $like:ident, $kind:ident)),* $(,)?) => {
+        #[pymethods]
+        impl PyTensor {
+            $(
+                #[staticmethod]
+                #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
+                fn $name(
+                    shape: &Bound<PyTuple>,
+                    dtype: Option<&str>,
+                    device: Option<&PyDevice>,
+                    requires_grad: Option<bool>,
+                ) -> PyResult<Self> {
+                    let dims = parse_shape_tuple(shape, "shape")?;
+                    let dtype = dtype::resolve_dtype_arg(dtype)?;
+                    let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+                    let tensor = create_fan_init_tensor(
+                        Shape::new(dims),
+                        dtype,
+                        device,
+                        requires_grad.unwrap_or(false),
+                        FanInitKind::$kind,
+                        stringify!($name),
+                    )?;
+                    Ok(Self::from_tensor(tensor))
+                }
+
+                #[staticmethod]
+                #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
+                fn $like(
+                    input: &Bound<PyAny>,
+                    dtype: Option<&str>,
+                    device: Option<&PyDevice>,
+                    requires_grad: Option<bool>,
+                ) -> PyResult<Self> {
+                    let reference = PyTensor::from_python_value(input)?;
+                    let reference_tensor = reference.tensor();
+                    let dtype = match dtype {
+                        Some(name) => dtype::parse_dtype(name)?,
+                        None => reference_tensor.dtype(),
+                    };
+                    let device = device
+                        .map(|d| d.device())
+                        .unwrap_or_else(|| reference_tensor.device());
+                    let requires_grad =
+                        requires_grad.unwrap_or(reference_tensor.requires_grad());
+                    let tensor = create_fan_init_tensor(
+                        Shape::new(reference.shape_vec()),
+                        dtype,
+                        device,
+                        requires_grad,
+                        FanInitKind::$kind,
+                        stringify!($like),
+                    )?;
+                    Ok(Self::from_tensor(tensor))
+                }
+            )*
+        }
+    };
+}
+
+fan_init_constructors!(
+    (xavier_uniform, xavier_uniform_like, XavierUniform),
+    (xavier_normal, xavier_normal_like, XavierNormal),
+    (he_uniform, he_uniform_like, HeUniform),
+    (he_normal, he_normal_like, HeNormal),
+    (lecun_uniform, lecun_uniform_like, LecunUniform),
+    (lecun_normal, lecun_normal_like, LecunNormal),
+);
