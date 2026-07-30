@@ -136,9 +136,10 @@ impl PyOptimizer {
     fn __repr__(&self) -> String {
         match &self.inner {
             OptimizerType::Sgd(optimizer) => format!(
-                "SGD(lr={}, momentum={})",
+                "SGD(lr={}, momentum={}, dampening={})",
                 optimizer.learning_rate(),
-                optimizer.momentum()
+                optimizer.momentum(),
+                optimizer.dampening()
             ),
             OptimizerType::Adam(optimizer) => format!(
                 "Adam(lr={}, betas=({}, {}), eps={}, weight_decay={}, decoupled_weight_decay={})",
@@ -348,12 +349,13 @@ pub struct PySGD;
 impl PySGD {
     /// Create a new SGD optimizer
     #[new]
-    #[pyo3(signature = (parameters, lr, momentum=None, weight_decay=None, nesterov=None))]
+    #[pyo3(signature = (parameters, lr, momentum=None, dampening=None, weight_decay=None, nesterov=None))]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,
         lr: f64,
         momentum: Option<f64>,
+        dampening: Option<f64>,
         weight_decay: Option<f64>,
         nesterov: Option<bool>,
     ) -> PyResult<PyClassInitializer<Self>> {
@@ -373,14 +375,26 @@ impl PySGD {
             return Err(PyValueError::new_err("Weight decay must be non-negative."));
         }
 
+        let dampening = dampening.unwrap_or(0.0);
+
         let nesterov = nesterov.unwrap_or(false);
         if nesterov && momentum <= 0.0 {
             return Err(PyValueError::new_err(
                 "Nesterov momentum requires a positive momentum value.",
             ));
         }
+        // Nesterov's lookahead is `grad + momentum * buf`, which is only the
+        // correct extrapolation when `buf` accumulated the full gradient.
+        // PyTorch rejects the combination for the same reason.
+        if nesterov && dampening != 0.0 {
+            return Err(PyValueError::new_err(
+                "Nesterov momentum requires zero dampening.",
+            ));
+        }
 
-        let sgd = SGD::new(lr, Some(momentum), Some(weight_decay)).with_nesterov(nesterov);
+        let sgd = SGD::new(lr, Some(momentum), Some(weight_decay))
+            .with_dampening(dampening)
+            .with_nesterov(nesterov);
 
         Ok(PyClassInitializer::from(PyOptimizer::from_sgd(sgd, params)).add_subclass(Self))
     }
@@ -391,6 +405,17 @@ impl PySGD {
         let optimizer = slf.as_ref();
         if let OptimizerType::Sgd(sgd) = &optimizer.inner {
             Ok(sgd.momentum())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Get momentum dampening parameter
+    #[getter]
+    fn dampening(slf: PyRef<Self>) -> PyResult<f64> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
+            Ok(sgd.dampening())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
         }

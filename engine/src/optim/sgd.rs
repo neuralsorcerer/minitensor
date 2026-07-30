@@ -125,6 +125,11 @@ impl SGD {
         self.weight_decay = weight_decay;
     }
 
+    /// Get the momentum dampening coefficient
+    pub fn dampening(&self) -> f64 {
+        self.dampening
+    }
+
     /// Check if using Nesterov momentum
     pub fn is_nesterov(&self) -> bool {
         self.nesterov

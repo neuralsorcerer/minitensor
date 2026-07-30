@@ -1154,13 +1154,20 @@ Shape([5, 2, 8]) Shape([2, 2, 4]) 8
 
 ### Built-in optimizers
 
-- `SGD`
+- `SGD(params, lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False)`
 - `Adam`
 - `AdamW`
 - `RMSprop`
 - `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004)`
 - `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, epsilon=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
+
+`SGD`'s `dampening` scales the incoming gradient by `1 - dampening` before it
+enters the momentum buffer, so the buffer leans further on its history. The
+first step is exempt: the buffer is seeded with the gradient itself, as PyTorch
+does, rather than being damped from nothing. `nesterov=True` requires
+`dampening=0` — the lookahead `grad + momentum * buf` is only the right
+extrapolation when `buf` accumulated the undamped gradient.
 
 `NAdam` (Dozat, 2016) is Adam with Nesterov momentum: the step uses the momentum
 the *next* iterate will carry rather than the current one, so it begins
