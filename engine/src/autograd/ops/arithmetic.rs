@@ -929,8 +929,10 @@ impl GradientFunction for LogBaseBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let derivative = elementwise_derivative(&self.input, |x: f64| 1.0 / (x * self.ln_base))?;
-        let grad = arithmetic::mul(grad_output, &derivative)?;
+        let ln_base = self.ln_base;
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "log_base", move |x| {
+            1.0 / (x * ln_base)
+        })?;
         gradients.insert(self.input_id, grad);
 
         Ok(gradients)
@@ -957,8 +959,10 @@ impl GradientFunction for ErfBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let derivative = elementwise_derivative(&self.input, |x: f64| self.scale * (-x * x).exp())?;
-        let grad = arithmetic::mul(grad_output, &derivative)?;
+        let scale = self.scale;
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "erf", move |x| {
+            scale * (-x * x).exp()
+        })?;
         gradients.insert(self.input_id, grad);
 
         Ok(gradients)
@@ -967,50 +971,4 @@ impl GradientFunction for ErfBackward {
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
     }
-}
-
-/// Apply `f` elementwise to `input`, producing a tensor of the same dtype.
-///
-/// `f` is written in f64 and its result rounded, so an f32 tensor's derivative
-/// is computed at f64 precision and rounded once rather than accumulating error
-/// through several f32 intermediates.
-fn elementwise_derivative<F>(input: &Tensor, f: F) -> Result<Tensor>
-where
-    F: Fn(f64) -> f64 + Send + Sync,
-{
-    let data = match input.dtype() {
-        DataType::Float32 => {
-            let src = input.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-            })?;
-            TensorData::from_vec::<f32>(
-                crate::ops::map::unary_map(src, |v: f32| f(v as f64) as f32),
-                DataType::Float32,
-                input.device(),
-            )
-        }
-        DataType::Float64 => {
-            let src = input.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-            })?;
-            TensorData::from_vec::<f64>(
-                crate::ops::map::unary_map(src, |v: f64| f(v)),
-                DataType::Float64,
-                input.device(),
-            )
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "derivative is only defined for floating point tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(data),
-        input.shape().clone(),
-        input.dtype(),
-        input.device(),
-        false,
-    ))
 }

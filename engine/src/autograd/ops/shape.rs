@@ -1367,7 +1367,7 @@ impl GradientFunction for SoftmaxBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                softmax_backward_f32(go, y, grad_slice, self.output.shape().dims(), self.dim);
+                softmax_backward(go, y, grad_slice, self.output.shape().dims(), self.dim);
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
@@ -1381,7 +1381,7 @@ impl GradientFunction for SoftmaxBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                softmax_backward_f64(go, y, grad_slice, self.output.shape().dims(), self.dim);
+                softmax_backward(go, y, grad_slice, self.output.shape().dims(), self.dim);
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(
@@ -1441,13 +1441,7 @@ impl GradientFunction for LogSoftmaxBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                log_softmax_backward_f32(
-                    go,
-                    log_y,
-                    grad_slice,
-                    self.output.shape().dims(),
-                    self.dim,
-                );
+                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
             }
             DataType::Float64 => {
                 let go = grad_output.data().as_f64_slice().ok_or_else(|| {
@@ -1463,13 +1457,7 @@ impl GradientFunction for LogSoftmaxBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                log_softmax_backward_f64(
-                    go,
-                    log_y,
-                    grad_slice,
-                    self.output.shape().dims(),
-                    self.dim,
-                );
+                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
             }
             _ => {
                 return Err(MinitensorError::invalid_operation(

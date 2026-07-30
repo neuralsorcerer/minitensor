@@ -10,6 +10,7 @@ use crate::{
     ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
+use num_traits::Float;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -58,7 +59,7 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                         "Failed to get mutable f32 slice from grad_data",
                     )
                 })?;
-                masked_log_softmax_backward_f32(
+                masked_log_softmax_backward(
                     go,
                     log_y,
                     mask_data,
@@ -87,7 +88,7 @@ impl GradientFunction for MaskedLogSoftmaxBackward {
                         "Failed to get mutable f64 slice from grad_data",
                     )
                 })?;
-                masked_log_softmax_backward_f64(
+                masked_log_softmax_backward(
                     go,
                     log_y,
                     mask_data,
@@ -247,270 +248,136 @@ impl GradientFunction for LayerNormBackward {
     }
 }
 
-pub(crate) fn softmax_backward_f32(
-    grad_output: &[f32],
-    y: &[f32],
-    grad_input: &mut [f32],
+/// Run `block` over aligned `group`-sized blocks of the three slices,
+/// sequentially below [`PAR_THRESHOLD`] and in parallel above it.
+///
+/// Every softmax-family backward kernel has this shape, and each one used to
+/// spell both branches out with the block body copied verbatim into each --
+/// twice per kernel, times two dtypes.
+fn zip_blocks_maybe_par<T, F>(
+    grad_output: &[T],
+    saved: &[T],
+    grad_input: &mut [T],
+    group: usize,
+    block: F,
+) where
+    T: Send + Sync,
+    F: Fn(usize, &[T], &[T], &mut [T]) + Send + Sync,
+{
+    if grad_output.len() < PAR_THRESHOLD {
+        for (block_idx, ((go, sv), out)) in grad_output
+            .chunks(group)
+            .zip(saved.chunks(group))
+            .zip(grad_input.chunks_mut(group))
+            .enumerate()
+        {
+            block(block_idx, go, sv, out);
+        }
+    } else {
+        grad_output
+            .par_chunks(group)
+            .zip(saved.par_chunks(group))
+            .zip(grad_input.par_chunks_mut(group))
+            .enumerate()
+            .for_each(|(block_idx, ((go, sv), out))| block(block_idx, go, sv, out));
+    }
+}
+
+/// Geometry shared by the softmax-family backward kernels: the reduced
+/// dimension's size, the number of trailing elements per slice (`after`), and
+/// the size of one contiguous block spanning the reduced dimension.
+///
+/// `None` means there is nothing left to compute: a 0-d tensor (whose single
+/// gradient element is zeroed here, the reduction being a constant) or an empty
+/// reduced dimension (no output elements to write).
+fn softmax_geometry<T: Float>(
+    grad_input: &mut [T],
     dims: &[usize],
     dim: usize,
-) {
+) -> Option<(usize, usize, usize)> {
     if dims.is_empty() {
         if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
+            *first = T::zero();
         }
-        return;
+        return None;
     }
 
     let dim_size = dims[dim];
     if dim_size == 0 {
-        return;
+        return None;
     }
+
     let after: usize = if dim + 1 >= dims.len() {
         1
     } else {
         dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
-    if grad_output.len() < PAR_THRESHOLD {
-        for ((go_block, y_block), out_block) in grad_output
-            .chunks(group)
-            .zip(y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-        {
-            for a in 0..after {
-                let base = a;
-                let mut dot = 0.0f32;
+    Some((dim_size, after, dim_size * after))
+}
+
+/// `softmax` backward: `dx = y * (dy - sum_k(dy_k * y_k))` along `dim`.
+pub(crate) fn softmax_backward<T: Float + Send + Sync>(
+    grad_output: &[T],
+    y: &[T],
+    grad_input: &mut [T],
+    dims: &[usize],
+    dim: usize,
+) {
+    let Some((dim_size, after, group)) = softmax_geometry(grad_input, dims, dim) else {
+        return;
+    };
+
+    zip_blocks_maybe_par(
+        grad_output,
+        y,
+        grad_input,
+        group,
+        |_, go_block, y_block, out_block| {
+            for base in 0..after {
+                let mut dot = T::zero();
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    dot += go_block[idx] * y_block[idx];
+                    dot = dot + go_block[idx] * y_block[idx];
                 }
                 for k in 0..dim_size {
                     let idx = base + k * after;
                     out_block[idx] = y_block[idx] * (go_block[idx] - dot);
                 }
             }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .for_each(|((go_block, y_block), out_block)| {
-                for a in 0..after {
-                    let base = a;
-                    let mut dot = 0.0f32;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        dot += go_block[idx] * y_block[idx];
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = y_block[idx] * (go_block[idx] - dot);
-                    }
-                }
-            });
-    }
+        },
+    );
 }
 
-pub(crate) fn softmax_backward_f64(
-    grad_output: &[f64],
-    y: &[f64],
-    grad_input: &mut [f64],
+/// `log_softmax` backward: `dx = dy - exp(log_y) * sum_k(dy_k)` along `dim`.
+pub(crate) fn log_softmax_backward<T: Float + Send + Sync>(
+    grad_output: &[T],
+    log_y: &[T],
+    grad_input: &mut [T],
     dims: &[usize],
     dim: usize,
 ) {
-    if dims.is_empty() {
-        if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
-        }
+    let Some((dim_size, after, group)) = softmax_geometry(grad_input, dims, dim) else {
         return;
-    }
-
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return;
-    }
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
-    if grad_output.len() < PAR_THRESHOLD {
-        for ((go_block, y_block), out_block) in grad_output
-            .chunks(group)
-            .zip(y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-        {
-            for a in 0..after {
-                let base = a;
-                let mut dot = 0.0f64;
+
+    zip_blocks_maybe_par(
+        grad_output,
+        log_y,
+        grad_input,
+        group,
+        |_, go_block, log_block, out_block| {
+            for base in 0..after {
+                let mut sum = T::zero();
                 for k in 0..dim_size {
-                    let idx = base + k * after;
-                    dot += go_block[idx] * y_block[idx];
+                    sum = sum + go_block[base + k * after];
                 }
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    out_block[idx] = y_block[idx] * (go_block[idx] - dot);
+                    out_block[idx] = go_block[idx] - log_block[idx].exp() * sum;
                 }
             }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .for_each(|((go_block, y_block), out_block)| {
-                for a in 0..after {
-                    let base = a;
-                    let mut dot = 0.0f64;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        dot += go_block[idx] * y_block[idx];
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = y_block[idx] * (go_block[idx] - dot);
-                    }
-                }
-            });
-    }
-}
-
-pub(crate) fn log_softmax_backward_f32(
-    grad_output: &[f32],
-    log_y: &[f32],
-    grad_input: &mut [f32],
-    dims: &[usize],
-    dim: usize,
-) {
-    if dims.is_empty() {
-        if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
-        }
-        return;
-    }
-
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return;
-    }
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-
-    if grad_output.len() < PAR_THRESHOLD {
-        for ((go_block, log_block), out_block) in grad_output
-            .chunks(group)
-            .zip(log_y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-        {
-            for a in 0..after {
-                let base = a;
-                let mut sum = 0.0f32;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    sum += go_block[idx];
-                }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let prob = log_block[idx].exp();
-                    out_block[idx] = go_block[idx] - prob * sum;
-                }
-            }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(log_y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .for_each(|((go_block, log_block), out_block)| {
-                for a in 0..after {
-                    let base = a;
-                    let mut sum = 0.0f32;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        sum += go_block[idx];
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let prob = log_block[idx].exp();
-                        out_block[idx] = go_block[idx] - prob * sum;
-                    }
-                }
-            });
-    }
-}
-
-pub(crate) fn log_softmax_backward_f64(
-    grad_output: &[f64],
-    log_y: &[f64],
-    grad_input: &mut [f64],
-    dims: &[usize],
-    dim: usize,
-) {
-    if dims.is_empty() {
-        if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
-        }
-        return;
-    }
-
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return;
-    }
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-
-    if grad_output.len() < PAR_THRESHOLD {
-        for ((go_block, log_block), out_block) in grad_output
-            .chunks(group)
-            .zip(log_y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-        {
-            for a in 0..after {
-                let base = a;
-                let mut sum = 0.0f64;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    sum += go_block[idx];
-                }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let prob = log_block[idx].exp();
-                    out_block[idx] = go_block[idx] - prob * sum;
-                }
-            }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(log_y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .for_each(|((go_block, log_block), out_block)| {
-                for a in 0..after {
-                    let base = a;
-                    let mut sum = 0.0f64;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        sum += go_block[idx];
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let prob = log_block[idx].exp();
-                        out_block[idx] = go_block[idx] - prob * sum;
-                    }
-                }
-            });
-    }
+        },
+    );
 }
 
 fn broadcast_mask_index(
@@ -543,288 +410,63 @@ fn broadcast_mask_index(
     mask_index
 }
 
-fn masked_log_softmax_backward_f32(
-    grad_output: &[f32],
-    log_y: &[f32],
+/// `log_softmax` backward restricted to the unmasked positions.
+///
+/// Masked entries contribute nothing to their slice's sum and receive a zero
+/// gradient. `mask` may be a broadcast of the output shape, in which case
+/// `output_strides`/`mask_strides` describe how to map an output position onto
+/// it; when the shapes already agree both are `None` and the index is used
+/// directly.
+fn masked_log_softmax_backward<T: Float + Send + Sync>(
+    grad_output: &[T],
+    log_y: &[T],
     mask: &[bool],
-    grad_input: &mut [f32],
+    grad_input: &mut [T],
     dims: &[usize],
     dim: usize,
     mask_dims: &[usize],
     output_strides: Option<&[usize]>,
     mask_strides: Option<&[usize]>,
 ) {
-    if dims.is_empty() {
-        if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
-        }
+    let Some((dim_size, after, group)) = softmax_geometry(grad_input, dims, dim) else {
         return;
-    }
-
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return;
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
-    let same_shape = output_strides.is_none();
 
-    if grad_output.len() < PAR_THRESHOLD {
-        for (((go_block, log_block), out_block), block_idx) in grad_output
-            .chunks(group)
-            .zip(log_y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-            .zip(0..)
-        {
+    // Resolving a mask position once, here, is what lets the two passes below
+    // read the same whether or not the mask is broadcast.
+    let is_masked = |linear_idx: usize| match (output_strides, mask_strides) {
+        (Some(out_strides), Some(m_strides)) => {
+            mask[broadcast_mask_index(linear_idx, dims, out_strides, mask_dims, m_strides)]
+        }
+        _ => mask[linear_idx],
+    };
+
+    zip_blocks_maybe_par(
+        grad_output,
+        log_y,
+        grad_input,
+        group,
+        |block_idx, go_block, log_block, out_block| {
             let block_offset = block_idx * group;
-            for a in 0..after {
-                let base = a;
-                let mut sum = 0.0f32;
+            for base in 0..after {
+                let mut sum = T::zero();
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.unwrap(),
-                            mask_dims,
-                            mask_strides.unwrap(),
-                        );
-                        mask[mask_index]
-                    };
-                    if !masked {
-                        sum += go_block[idx];
+                    if !is_masked(block_offset + idx) {
+                        sum = sum + go_block[idx];
                     }
                 }
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask[linear_idx]
+                    out_block[idx] = if is_masked(block_offset + idx) {
+                        T::zero()
                     } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.unwrap(),
-                            mask_dims,
-                            mask_strides.unwrap(),
-                        );
-                        mask[mask_index]
+                        go_block[idx] - log_block[idx].exp() * sum
                     };
-                    if masked {
-                        out_block[idx] = 0.0;
-                    } else {
-                        let prob = log_block[idx].exp();
-                        out_block[idx] = go_block[idx] - prob * sum;
-                    }
                 }
             }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(log_y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .enumerate()
-            .for_each(|(block_idx, ((go_block, log_block), out_block))| {
-                let block_offset = block_idx * group;
-                for a in 0..after {
-                    let base = a;
-                    let mut sum = 0.0f32;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        let masked = if same_shape {
-                            mask[linear_idx]
-                        } else {
-                            let mask_index = broadcast_mask_index(
-                                linear_idx,
-                                dims,
-                                output_strides.unwrap(),
-                                mask_dims,
-                                mask_strides.unwrap(),
-                            );
-                            mask[mask_index]
-                        };
-                        if !masked {
-                            sum += go_block[idx];
-                        }
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        let masked = if same_shape {
-                            mask[linear_idx]
-                        } else {
-                            let mask_index = broadcast_mask_index(
-                                linear_idx,
-                                dims,
-                                output_strides.unwrap(),
-                                mask_dims,
-                                mask_strides.unwrap(),
-                            );
-                            mask[mask_index]
-                        };
-                        if masked {
-                            out_block[idx] = 0.0;
-                        } else {
-                            let prob = log_block[idx].exp();
-                            out_block[idx] = go_block[idx] - prob * sum;
-                        }
-                    }
-                }
-            });
-    }
-}
-
-fn masked_log_softmax_backward_f64(
-    grad_output: &[f64],
-    log_y: &[f64],
-    mask: &[bool],
-    grad_input: &mut [f64],
-    dims: &[usize],
-    dim: usize,
-    mask_dims: &[usize],
-    output_strides: Option<&[usize]>,
-    mask_strides: Option<&[usize]>,
-) {
-    if dims.is_empty() {
-        if let Some(first) = grad_input.first_mut() {
-            *first = 0.0;
-        }
-        return;
-    }
-
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return;
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-    let same_shape = output_strides.is_none();
-
-    if grad_output.len() < PAR_THRESHOLD {
-        for (((go_block, log_block), out_block), block_idx) in grad_output
-            .chunks(group)
-            .zip(log_y.chunks(group))
-            .zip(grad_input.chunks_mut(group))
-            .zip(0..)
-        {
-            let block_offset = block_idx * group;
-            for a in 0..after {
-                let base = a;
-                let mut sum = 0.0f64;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.unwrap(),
-                            mask_dims,
-                            mask_strides.unwrap(),
-                        );
-                        mask[mask_index]
-                    };
-                    if !masked {
-                        sum += go_block[idx];
-                    }
-                }
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.unwrap(),
-                            mask_dims,
-                            mask_strides.unwrap(),
-                        );
-                        mask[mask_index]
-                    };
-                    if masked {
-                        out_block[idx] = 0.0;
-                    } else {
-                        let prob = log_block[idx].exp();
-                        out_block[idx] = go_block[idx] - prob * sum;
-                    }
-                }
-            }
-        }
-    } else {
-        grad_output
-            .par_chunks(group)
-            .zip(log_y.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .enumerate()
-            .for_each(|(block_idx, ((go_block, log_block), out_block))| {
-                let block_offset = block_idx * group;
-                for a in 0..after {
-                    let base = a;
-                    let mut sum = 0.0f64;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        let masked = if same_shape {
-                            mask[linear_idx]
-                        } else {
-                            let mask_index = broadcast_mask_index(
-                                linear_idx,
-                                dims,
-                                output_strides.unwrap(),
-                                mask_dims,
-                                mask_strides.unwrap(),
-                            );
-                            mask[mask_index]
-                        };
-                        if !masked {
-                            sum += go_block[idx];
-                        }
-                    }
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        let masked = if same_shape {
-                            mask[linear_idx]
-                        } else {
-                            let mask_index = broadcast_mask_index(
-                                linear_idx,
-                                dims,
-                                output_strides.unwrap(),
-                                mask_dims,
-                                mask_strides.unwrap(),
-                            );
-                            mask[mask_index]
-                        };
-                        if masked {
-                            out_block[idx] = 0.0;
-                        } else {
-                            let prob = log_block[idx].exp();
-                            out_block[idx] = go_block[idx] - prob * sum;
-                        }
-                    }
-                }
-            });
-    }
+        },
+    );
 }
 
 /// Gradient function for reshape operation

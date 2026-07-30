@@ -419,6 +419,33 @@ where
     ))
 }
 
+/// [`unary_chain_grad`] for derivatives written once in f64.
+///
+/// `local` returns the local derivative at f64 precision; for an f32 tensor it
+/// is rounded once to f32 and multiplied there, so the result matches
+/// evaluating the derivative in f64 and rounding — not a chain of f32
+/// intermediates. Use this when the derivative involves transcendentals whose
+/// f32 error would otherwise compound (`erf`, `1/(x ln b)`); use
+/// [`unary_chain_grad`] when native f32 arithmetic is both accurate enough and
+/// meaningfully faster.
+pub(crate) fn unary_chain_grad_f64<F>(
+    saved: &Tensor,
+    grad_output: &Tensor,
+    op: &str,
+    local: F,
+) -> Result<Tensor>
+where
+    F: Fn(f64) -> f64 + Copy + Send + Sync,
+{
+    unary_chain_grad(
+        saved,
+        grad_output,
+        op,
+        move |x: f32, gout: f32| gout * (local(x as f64) as f32),
+        move |x: f64, gout: f64| gout * local(x),
+    )
+}
+
 // Gradient function implementations for common operations
 
 /// Accumulate a gradient contribution for `input_id` into `gradients`.
