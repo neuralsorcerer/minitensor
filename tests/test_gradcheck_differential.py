@@ -396,3 +396,97 @@ def test_gradcheck_every_differentiable_op(name, fn, src):
         np.isnan(analytic) & ~np.isnan(numeric)
     ).any(), f"{name}: analytic gradient has NaN where the numeric one does not"
     np.testing.assert_allclose(analytic, numeric, rtol=2e-3, atol=2e-3)
+
+
+# --------------------------------------------------------------------------- #
+# Convolution in double precision
+# --------------------------------------------------------------------------- #
+
+
+def _conv2d_reference(x, w, b, stride, padding):
+    """Explicit cross-correlation, independent of the im2col + GEMM lowering."""
+    n, c_in, h, ww = x.shape
+    c_out, _, kh, kw = w.shape
+    padded = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    out_h = (h + 2 * padding - kh) // stride + 1
+    out_w = (ww + 2 * padding - kw) // stride + 1
+    out = np.zeros((n, c_out, out_h, out_w))
+    for i in range(n):
+        for co in range(c_out):
+            for oh in range(out_h):
+                for ow in range(out_w):
+                    window = padded[
+                        i,
+                        :,
+                        oh * stride : oh * stride + kh,
+                        ow * stride : ow * stride + kw,
+                    ]
+                    out[i, co, oh, ow] = (window * w[co]).sum() + (
+                        0 if b is None else b[co]
+                    )
+    return out
+
+
+@pytest.mark.parametrize("stride,padding", [(1, 0), (2, 0), (1, 1), (2, 1)])
+def test_conv2d_float64_matches_reference(stride, padding):
+    rng = np.random.default_rng(20240726)
+    x = rng.standard_normal((2, 2, 5, 5))
+    w = rng.standard_normal((3, 2, 3, 3))
+    b = rng.standard_normal(3)
+    got = mt.functional.conv2d(
+        mt.Tensor(x, dtype="float64"),
+        mt.Tensor(w, dtype="float64"),
+        mt.Tensor(b, dtype="float64"),
+        stride,
+        padding,
+    )
+    assert got.dtype == "float64"
+    np.testing.assert_allclose(
+        got.numpy(), _conv2d_reference(x, w, b, stride, padding), rtol=1e-12, atol=1e-12
+    )
+
+
+@pytest.mark.parametrize("which", ["input", "weight", "bias"])
+def test_conv2d_float64_gradcheck(which):
+    # Double precision lets the convolution gradients be checked at a step fine
+    # enough to be meaningful; the float32-only implementation could only ever
+    # be checked at 1e-2.
+    rng = np.random.default_rng(20240727)
+    src = {
+        "input": rng.standard_normal((1, 2, 4, 4)),
+        "weight": rng.standard_normal((2, 2, 3, 3)),
+        "bias": rng.standard_normal(2),
+    }
+    fixed = {k: mt.Tensor(v, dtype="float64") for k, v in src.items() if k != which}
+
+    def build(value):
+        args = dict(fixed)
+        args[which] = value
+        return mt.functional.conv2d(args["input"], args["weight"], args["bias"])
+
+    x = mt.Tensor(src[which], dtype="float64", requires_grad=True)
+    build(x).sum().backward()
+    analytic = x.grad.numpy().copy()
+    mt.clear_autograd_graph()
+
+    flat = src[which].reshape(-1)
+    numeric = np.zeros_like(flat)
+    eps = 1e-6
+    for i in range(flat.size):
+        plus, minus = flat.copy(), flat.copy()
+        plus[i] += eps
+        minus[i] -= eps
+        fp = (
+            build(mt.Tensor(plus.reshape(src[which].shape), dtype="float64"))
+            .sum()
+            .item()
+        )
+        fm = (
+            build(mt.Tensor(minus.reshape(src[which].shape), dtype="float64"))
+            .sum()
+            .item()
+        )
+        numeric[i] = (fp - fm) / (2 * eps)
+    np.testing.assert_allclose(
+        analytic, numeric.reshape(src[which].shape), rtol=1e-5, atol=1e-6
+    )

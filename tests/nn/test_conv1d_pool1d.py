@@ -148,8 +148,10 @@ def test_conv1d_gradient_matches_central_differences():
             (F.conv1d(mt.Tensor(values), mt.Tensor(w_np)).numpy() * weights).sum()
         )
 
-    # conv1d inherits conv2d's float32-only restriction, so the step has to be
-    # large enough to survive f32 cancellation; 1e-3 is the resulting floor.
+    # This case is deliberately run in float32, so the step has to be large
+    # enough to survive f32 cancellation; 1e-3 is the resulting floor. The
+    # float64 path is gradchecked at a much finer step in
+    # tests/test_gradcheck_differential.py.
     h = 1e-2
     for idx in np.ndindex(*x_np.shape):
         plus, minus = x_np.copy(), x_np.copy()
@@ -208,10 +210,19 @@ def test_conv1d_reports_its_own_name_on_a_dtype_error():
     conv1d is implemented on top of conv2d, but a caller who never mentioned
     conv2d should not be told about it.
     """
-    x = mt.Tensor(np.zeros((1, 1, 4)), dtype="float64")
-    w = mt.Tensor(np.zeros((1, 1, 2)), dtype="float64")
+    x = mt.Tensor(np.zeros((1, 1, 4), dtype=np.int64), dtype="int64")
+    w = mt.Tensor(np.zeros((1, 1, 2), dtype=np.int64), dtype="int64")
     with pytest.raises(Exception, match="conv1d"):
         F.conv1d(x, w)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_conv1d_supports_both_float_dtypes(dtype):
+    x = mt.Tensor(np.arange(8, dtype=np.float64).reshape(1, 1, 8), dtype=dtype)
+    w = mt.Tensor(np.array([[[1.0, -1.0]]]), dtype=dtype)
+    out = F.conv1d(x, w)
+    assert out.dtype == dtype
+    np.testing.assert_allclose(out.numpy(), np.full((1, 1, 7), -1.0), rtol=1e-6)
 
 
 def test_conv1d_rejects_wrong_rank():

@@ -6,12 +6,64 @@
 
 use crate::{
     autograd::{Conv2dBackward, add_to_graph},
+    device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::sync::Arc;
+
+/// The floating-point types convolution is implemented for.
+///
+/// Convolution lowers to im2col + GEMM in both directions, so the only things
+/// that vary with the dtype are the slice accessors and which BLAS entry point
+/// to call. Capturing that in one trait lets the forward and both gradient
+/// kernels be written once instead of once per dtype -- which is why they were
+/// f32-only: nobody wanted to copy them.
+pub(crate) trait ConvScalar: Copy + Default + Send + Sync + std::ops::AddAssign {
+    const DTYPE: DataType;
+    fn slice(data: &TensorData) -> Option<&[Self]>;
+    fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData;
+    /// Row-major `C[m, n] = A[m, k] @ B[k, n]`.
+    ///
+    /// # Safety
+    /// `a`, `b` and `c` must point to contiguous row-major buffers of at least
+    /// `m * k`, `k * n` and `m * n` elements; see [`crate::ops::linalg::gemm_f32`].
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
+}
+
+impl ConvScalar for f32 {
+    const DTYPE: DataType = DataType::Float32;
+    #[inline]
+    fn slice(data: &TensorData) -> Option<&[Self]> {
+        data.as_f32_slice()
+    }
+    #[inline]
+    fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData {
+        TensorData::from_vec_f32(values, device)
+    }
+    #[inline]
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_f32(m, k, n, a, b, c) }
+    }
+}
+
+impl ConvScalar for f64 {
+    const DTYPE: DataType = DataType::Float64;
+    #[inline]
+    fn slice(data: &TensorData) -> Option<&[Self]> {
+        data.as_f64_slice()
+    }
+    #[inline]
+    fn into_tensor_data(values: Vec<Self>, device: Device) -> TensorData {
+        TensorData::from_vec_f64(values, device)
+    }
+    #[inline]
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_f64(m, k, n, a, b, c) }
+    }
+}
 
 /// Perform 1D convolution on the input tensor.
 ///
@@ -28,7 +80,7 @@ use std::sync::Arc;
 /// most likely to be got wrong — for no behavioural gain. The reshapes are
 /// themselves autograd-aware, so gradients flow without any new plumbing.
 ///
-/// Inherits `conv2d`'s restriction to Float32 CPU tensors.
+/// Inherits `conv2d`'s restriction to CPU tensors.
 pub fn conv1d(
     input: &Tensor,
     weight: &Tensor,
@@ -48,9 +100,9 @@ pub fn conv1d(
     }
     // Checked here rather than left to `conv2d`, whose message would name an
     // operation the caller never invoked.
-    if input.dtype() != DataType::Float32 {
+    if !matches!(input.dtype(), DataType::Float32 | DataType::Float64) {
         return Err(MinitensorError::invalid_operation(
-            "conv1d is implemented only for Float32 CPU tensors",
+            "conv1d is implemented only for floating point tensors",
         ));
     }
 
@@ -144,160 +196,235 @@ pub fn conv2d(
     let output_width = (input_width + 2 * padding.1 - kernel_w) / stride.1 + 1;
     let output_shape = Shape::new(vec![batch_size, out_channels, output_height, output_width]);
 
-    match (
-        input.dtype(),
-        weight.dtype(),
-        bias.map(|b| b.dtype()),
-        input.device().is_cpu(),
-        weight.device().is_cpu(),
-    ) {
-        (DataType::Float32, DataType::Float32, Some(DataType::Float32), true, true)
-        | (DataType::Float32, DataType::Float32, None, true, true) => {
-            let input_data = input
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::invalid_operation("Expected f32 input data"))?;
-            let weight_data = weight
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::invalid_operation("Expected f32 weight data"))?;
-            let bias_data =
-                if let Some(bias) = bias {
-                    Some(bias.data().as_f32_slice().ok_or_else(|| {
-                        MinitensorError::invalid_operation("Expected f32 bias data")
-                    })?)
-                } else {
-                    None
-                };
-
-            // im2col + GEMM. Lower each output position's receptive field into a
-            // column of `cols` ([K, N*out_h*out_w], K = C_in*kH*kW), then a single
-            // matrix multiply `weight[C_out, K] @ cols` produces `[C_out,
-            // N*out_h*out_w]`, which is scattered (with bias) into the
-            // `[N, C_out, out_h, out_w]` output. `weight` is already laid out as
-            // `[C_out, K]`, so it needs no repacking. This routes the arithmetic
-            // through the tuned GEMM instead of a naive per-output accumulation,
-            // and produces the same cross-correlation result as before.
-            let ohw = output_height * output_width;
-            let k_dim = in_channels * kernel_h * kernel_w;
-            let n_cols = batch_size * ohw;
-            let kh_kw = kernel_h * kernel_w;
-
-            let mut output_vec = vec![0f32; batch_size * out_channels * ohw];
-
-            if !output_vec.is_empty() {
-                // Build cols row by row (one row per kernel-input index `k`), so
-                // each row is written contiguously.
-                let mut cols = vec![0f32; k_dim * n_cols];
-                cols.par_chunks_mut(n_cols)
-                    .enumerate()
-                    .for_each(|(k, row)| {
-                        let ic = k / kh_kw;
-                        let rem = k % kh_kw;
-                        let ky = rem / kernel_w;
-                        let kx = rem % kernel_w;
-                        for (c, slot) in row.iter_mut().enumerate() {
-                            let n = c / ohw;
-                            let p = c % ohw;
-                            let oh = p / output_width;
-                            let ow = p % output_width;
-                            let ih = oh * stride.0 + ky;
-                            let iw = ow * stride.1 + kx;
-                            // Padded coordinate; the valid (unpadded) region is
-                            // [padding, dim + padding); everything else is zero pad.
-                            if ih >= padding.0
-                                && iw >= padding.1
-                                && ih < input_height + padding.0
-                                && iw < input_width + padding.1
-                            {
-                                let ih = ih - padding.0;
-                                let iw = iw - padding.1;
-                                let idx =
-                                    ((n * in_channels + ic) * input_height + ih) * input_width + iw;
-                                *slot = input_data[idx];
-                            }
-                        }
-                    });
-
-                let mut gemm_out = vec![0f32; out_channels * n_cols];
-                // SAFETY: `weight_data` is [C_out, k_dim], `cols` is [k_dim,
-                // n_cols], and `gemm_out` is [C_out, n_cols]; all are contiguous
-                // row-major and the dimensions match the GEMM signature.
-                unsafe {
-                    crate::ops::linalg::gemm_f32(
-                        out_channels,
-                        k_dim,
-                        n_cols,
-                        weight_data.as_ptr(),
-                        cols.as_ptr(),
-                        gemm_out.as_mut_ptr(),
-                    );
-                }
-
-                // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a
-                // given (n, oc) the source and destination are contiguous `ohw`
-                // slabs.
-                output_vec
-                    .par_chunks_mut(ohw)
-                    .enumerate()
-                    .for_each(|(chunk_idx, out_chunk)| {
-                        let n = chunk_idx / out_channels;
-                        let oc = chunk_idx % out_channels;
-                        let b = bias_data.map(|bd| bd[oc]).unwrap_or(0.0);
-                        let base = oc * n_cols + n * ohw;
-                        for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
-                            *o = v + b;
-                        }
-                    });
-            }
-
-            let requires_grad = input.requires_grad()
-                || weight.requires_grad()
-                || bias.is_some_and(|b| b.requires_grad());
-            let output_data = TensorData::from_vec_f32(output_vec, input.device());
-            let mut output = Tensor::new(
-                Arc::new(output_data),
-                output_shape,
-                DataType::Float32,
-                input.device(),
-                requires_grad,
-            );
-
-            if requires_grad {
-                let mut deps: SmallVec<[_; 3]> = SmallVec::new();
-                if input.requires_grad() {
-                    deps.push(input.id());
-                }
-                if weight.requires_grad() {
-                    deps.push(weight.id());
-                }
-                let bias_requires_grad = bias.is_some_and(|b| b.requires_grad());
-                if bias_requires_grad {
-                    deps.push(bias.unwrap().id());
-                }
-                let grad_fn = Arc::new(Conv2dBackward {
-                    input: input.detach(),
-                    weight: weight.detach(),
-                    input_id: input.id(),
-                    weight_id: weight.id(),
-                    bias_id: bias.map(|b| b.id()),
-                    input_requires_grad: input.requires_grad(),
-                    weight_requires_grad: weight.requires_grad(),
-                    bias_requires_grad,
-                    stride,
-                    padding,
-                    deps,
-                });
-                output.set_grad_fn(Some(grad_fn.clone()));
-                add_to_graph(&output, Some(grad_fn))?;
-            }
-
-            Ok(output)
-        }
-        _ => Err(MinitensorError::invalid_operation(
-            "conv2d is implemented only for Float32 CPU tensors",
-        )),
+    if !input.device().is_cpu() || !weight.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "conv2d is implemented only for CPU tensors",
+        ));
     }
+    if weight.dtype() != input.dtype() || bias.is_some_and(|b| b.dtype() != input.dtype()) {
+        return Err(MinitensorError::type_mismatch(
+            format!("{:?}", input.dtype()),
+            format!("{:?}", weight.dtype()),
+        ));
+    }
+
+    let output_data = match input.dtype() {
+        DataType::Float32 => conv2d_forward::<f32>(
+            input,
+            weight,
+            bias,
+            ConvGeometry {
+                batch_size,
+                in_channels,
+                input_height,
+                input_width,
+                out_channels,
+                kernel_h,
+                kernel_w,
+                output_height,
+                output_width,
+                stride,
+                padding,
+            },
+        )?,
+        DataType::Float64 => conv2d_forward::<f64>(
+            input,
+            weight,
+            bias,
+            ConvGeometry {
+                batch_size,
+                in_channels,
+                input_height,
+                input_width,
+                out_channels,
+                kernel_h,
+                kernel_w,
+                output_height,
+                output_width,
+                stride,
+                padding,
+            },
+        )?,
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "conv2d is implemented only for floating point tensors",
+            ));
+        }
+    };
+
+    let requires_grad =
+        input.requires_grad() || weight.requires_grad() || bias.is_some_and(|b| b.requires_grad());
+    let mut output = Tensor::new(
+        Arc::new(output_data),
+        output_shape,
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+
+    if requires_grad {
+        let mut deps: SmallVec<[_; 3]> = SmallVec::new();
+        if input.requires_grad() {
+            deps.push(input.id());
+        }
+        if weight.requires_grad() {
+            deps.push(weight.id());
+        }
+        let bias_requires_grad = bias.is_some_and(|b| b.requires_grad());
+        if bias_requires_grad {
+            deps.push(bias.unwrap().id());
+        }
+        let grad_fn = Arc::new(Conv2dBackward {
+            input: input.detach(),
+            weight: weight.detach(),
+            input_id: input.id(),
+            weight_id: weight.id(),
+            bias_id: bias.map(|b| b.id()),
+            input_requires_grad: input.requires_grad(),
+            weight_requires_grad: weight.requires_grad(),
+            bias_requires_grad,
+            stride,
+            padding,
+            deps,
+        });
+        output.set_grad_fn(Some(grad_fn.clone()));
+        add_to_graph(&output, Some(grad_fn))?;
+    }
+
+    Ok(output)
+}
+
+/// The shape parameters a convolution kernel needs, gathered so the generic
+/// body does not take a dozen positional arguments.
+pub(crate) struct ConvGeometry {
+    pub batch_size: usize,
+    pub in_channels: usize,
+    pub input_height: usize,
+    pub input_width: usize,
+    pub out_channels: usize,
+    pub kernel_h: usize,
+    pub kernel_w: usize,
+    pub output_height: usize,
+    pub output_width: usize,
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+}
+
+/// im2col + GEMM forward pass, for one element type.
+///
+/// Lower each output position's receptive field into a column of `cols`
+/// (`[K, N*out_h*out_w]`, `K = C_in*kH*kW`), then a single matrix multiply
+/// `weight[C_out, K] @ cols` produces `[C_out, N*out_h*out_w]`, which is
+/// scattered (with bias) into the `[N, C_out, out_h, out_w]` output. `weight`
+/// is already laid out as `[C_out, K]`, so it needs no repacking. This routes
+/// the arithmetic through the tuned GEMM instead of a naive per-output
+/// accumulation, and produces the same cross-correlation result.
+fn conv2d_forward<T: ConvScalar>(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    geom: ConvGeometry,
+) -> Result<TensorData> {
+    let ConvGeometry {
+        batch_size,
+        in_channels,
+        input_height,
+        input_width,
+        out_channels,
+        kernel_h,
+        kernel_w,
+        output_height,
+        output_width,
+        stride,
+        padding,
+    } = geom;
+
+    let input_data = T::slice(input.data())
+        .ok_or_else(|| MinitensorError::invalid_operation("Expected float input data"))?;
+    let weight_data = T::slice(weight.data())
+        .ok_or_else(|| MinitensorError::invalid_operation("Expected float weight data"))?;
+    let bias_data = match bias {
+        Some(bias) => Some(
+            T::slice(bias.data())
+                .ok_or_else(|| MinitensorError::invalid_operation("Expected float bias data"))?,
+        ),
+        None => None,
+    };
+
+    let ohw = output_height * output_width;
+    let k_dim = in_channels * kernel_h * kernel_w;
+    let n_cols = batch_size * ohw;
+    let kh_kw = kernel_h * kernel_w;
+
+    let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
+
+    if !output_vec.is_empty() {
+        // Build cols row by row (one row per kernel-input index `k`), so each
+        // row is written contiguously.
+        let mut cols = vec![T::default(); k_dim * n_cols];
+        cols.par_chunks_mut(n_cols)
+            .enumerate()
+            .for_each(|(k, row)| {
+                let ic = k / kh_kw;
+                let rem = k % kh_kw;
+                let ky = rem / kernel_w;
+                let kx = rem % kernel_w;
+                for (c, slot) in row.iter_mut().enumerate() {
+                    let n = c / ohw;
+                    let p = c % ohw;
+                    let oh = p / output_width;
+                    let ow = p % output_width;
+                    let ih = oh * stride.0 + ky;
+                    let iw = ow * stride.1 + kx;
+                    // Padded coordinate; the valid (unpadded) region is
+                    // [padding, dim + padding); everything else is zero pad.
+                    if ih >= padding.0
+                        && iw >= padding.1
+                        && ih < input_height + padding.0
+                        && iw < input_width + padding.1
+                    {
+                        let ih = ih - padding.0;
+                        let iw = iw - padding.1;
+                        let idx = ((n * in_channels + ic) * input_height + ih) * input_width + iw;
+                        *slot = input_data[idx];
+                    }
+                }
+            });
+
+        let mut gemm_out = vec![T::default(); out_channels * n_cols];
+        // SAFETY: `weight_data` is [C_out, k_dim], `cols` is [k_dim, n_cols],
+        // and `gemm_out` is [C_out, n_cols]; all contiguous row-major with
+        // matching dimensions.
+        unsafe {
+            T::gemm(
+                out_channels,
+                k_dim,
+                n_cols,
+                weight_data.as_ptr(),
+                cols.as_ptr(),
+                gemm_out.as_mut_ptr(),
+            );
+        }
+
+        // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a given
+        // (n, oc) the source and destination are contiguous `ohw` slabs.
+        output_vec
+            .par_chunks_mut(ohw)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let n = chunk_idx / out_channels;
+                let oc = chunk_idx % out_channels;
+                let base = oc * n_cols + n * ohw;
+                for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
+                    *o = v;
+                    if let Some(bd) = bias_data {
+                        *o += bd[oc];
+                    }
+                }
+            });
+    }
+
+    Ok(T::into_tensor_data(output_vec, input.device()))
 }
 
 #[cfg(test)]

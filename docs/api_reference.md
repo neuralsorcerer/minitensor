@@ -911,8 +911,8 @@ when you already hold the weights and do not want a module:
 | Function | Purpose |
 | --- | --- |
 | `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. |
-| `conv2d(input, weight, bias=None, stride=None, padding=None)` | 2-D convolution. |
-| `conv1d(input, weight, bias=None, stride=1, padding=0)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Float32 CPU tensors only, inherited from `conv2d`. |
+| `conv2d(input, weight, bias=None, stride=None, padding=None)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. |
+| `conv1d(input, weight, bias=None, stride=1, padding=0)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on. |
 | `max_pool1d(input, kernel_size, stride=None, padding=0)` | 1-D max pooling; `stride` defaults to `kernel_size`. |
 | `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling. |
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |

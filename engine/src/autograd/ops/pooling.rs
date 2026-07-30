@@ -12,6 +12,7 @@
 //! plane of the gradient and no two tasks touch the same element.
 
 use super::*;
+use crate::ops::conv::ConvScalar;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -295,8 +296,12 @@ pub struct Conv2dBackward {
     pub padding: (usize, usize),
     pub deps: SmallVec<[TensorId; 3]>,
 }
-impl GradientFunction for Conv2dBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+impl Conv2dBackward {
+    fn backward_typed<T: ConvScalar>(
+        &self,
+        grad_output: &Tensor,
+        gradients: &mut FxHashMap<TensorId, Tensor>,
+    ) -> Result<()> {
         let in_dims = self.input.shape().dims();
         let w_dims = self.weight.shape().dims();
         let (batch, in_channels, in_h, in_w) = (in_dims[0], in_dims[1], in_dims[2], in_dims[3]);
@@ -306,20 +311,18 @@ impl GradientFunction for Conv2dBackward {
         let stride = self.stride;
         let padding = self.padding;
 
-        let input =
-            self.input.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("conv2d backward expects f32 input")
-            })?;
-        let weight =
-            self.weight.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("conv2d backward expects f32 weight")
-            })?;
-        let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-            MinitensorError::internal_error("conv2d backward expects f32 grad_output")
+        let input = T::slice(self.input.data()).ok_or_else(|| {
+            MinitensorError::internal_error("conv2d backward: input dtype does not match gradient")
+        })?;
+        let weight = T::slice(self.weight.data()).ok_or_else(|| {
+            MinitensorError::internal_error("conv2d backward: weight dtype does not match gradient")
+        })?;
+        let go = T::slice(grad_output.data()).ok_or_else(|| {
+            MinitensorError::internal_error("conv2d backward: failed to read grad_output")
         })?;
 
         let device = self.input.device();
-        let mut gradients = FxHashMap::default();
+        let dtype = T::DTYPE;
 
         let ohw = out_h * out_w;
         let n_ohw = batch * ohw;
@@ -329,7 +332,7 @@ impl GradientFunction for Conv2dBackward {
         // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
         // the layout both weight- and input-gradient GEMMs contract against.
         let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
-            let mut gm = vec![0f32; out_channels * n_ohw];
+            let mut gm = vec![T::default(); out_channels * n_ohw];
             gm.par_chunks_mut(n_ohw).enumerate().for_each(|(oc, row)| {
                 for n in 0..batch {
                     let src = (n * out_channels + oc) * ohw;
@@ -347,19 +350,19 @@ impl GradientFunction for Conv2dBackward {
         // with a serial scatter-add within each batch, so there are no races.
         if self.input_requires_grad {
             let in_stride = in_channels * in_h * in_w;
-            let mut grad_input = vec![0f32; batch * in_stride];
+            let mut grad_input = vec![T::default(); batch * in_stride];
             if n_ohw > 0 {
-                let mut weight_t = vec![0f32; k_dim * out_channels];
+                let mut weight_t = vec![T::default(); k_dim * out_channels];
                 for oc in 0..out_channels {
                     for k in 0..k_dim {
                         weight_t[k * out_channels + oc] = weight[oc * k_dim + k];
                     }
                 }
-                let mut grad_cols = vec![0f32; k_dim * n_ohw];
+                let mut grad_cols = vec![T::default(); k_dim * n_ohw];
                 // SAFETY: weight_t is [K, C_out], go_mat is [C_out, N*OH*OW], and
                 // grad_cols is [K, N*OH*OW]; all contiguous row-major, dims match.
                 unsafe {
-                    crate::ops::linalg::gemm_f32(
+                    T::gemm(
                         k_dim,
                         out_channels,
                         n_ohw,
@@ -392,22 +395,22 @@ impl GradientFunction for Conv2dBackward {
                     });
             }
             let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_input, device)),
+                Arc::new(T::into_tensor_data(grad_input, device)),
                 self.input.shape().clone(),
-                DataType::Float32,
+                dtype,
                 device,
                 false,
             );
-            accumulate_grad(&mut gradients, self.input_id, grad)?;
+            accumulate_grad(gradients, self.input_id, grad)?;
         }
 
         // grad_weight = go_mat @ cols, where `cols` [N*OH*OW, K] is the im2col of
         // the input (the same lowering as the forward). One GEMM replaces the
         // naive per-element accumulation.
         if self.weight_requires_grad {
-            let mut grad_weight = vec![0f32; out_channels * k_dim];
+            let mut grad_weight = vec![T::default(); out_channels * k_dim];
             if n_ohw > 0 {
-                let mut cols = vec![0f32; n_ohw * k_dim];
+                let mut cols = vec![T::default(); n_ohw * k_dim];
                 cols.par_chunks_mut(k_dim)
                     .enumerate()
                     .for_each(|(r, prow)| {
@@ -431,7 +434,7 @@ impl GradientFunction for Conv2dBackward {
                 // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
                 // grad_weight is [C_out, K]; all contiguous row-major, dims match.
                 unsafe {
-                    crate::ops::linalg::gemm_f32(
+                    T::gemm(
                         out_channels,
                         n_ohw,
                         k_dim,
@@ -442,22 +445,22 @@ impl GradientFunction for Conv2dBackward {
                 }
             }
             let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_weight, device)),
+                Arc::new(T::into_tensor_data(grad_weight, device)),
                 self.weight.shape().clone(),
-                DataType::Float32,
+                dtype,
                 device,
                 false,
             );
-            accumulate_grad(&mut gradients, self.weight_id, grad)?;
+            accumulate_grad(gradients, self.weight_id, grad)?;
         }
 
         // grad_bias: parallel over output channels.
         if self.bias_requires_grad
             && let Some(bias_id) = self.bias_id
         {
-            let mut grad_bias = vec![0f32; out_channels];
+            let mut grad_bias = vec![T::default(); out_channels];
             grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
-                let mut sum = 0f32;
+                let mut sum = T::default();
                 for n in 0..batch {
                     let base = (n * out_channels + oc) * out_h * out_w;
                     for k in 0..out_h * out_w {
@@ -467,15 +470,31 @@ impl GradientFunction for Conv2dBackward {
                 *gb = sum;
             });
             let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_bias, device)),
+                Arc::new(T::into_tensor_data(grad_bias, device)),
                 Shape::new(vec![out_channels]),
-                DataType::Float32,
+                dtype,
                 device,
                 false,
             );
-            accumulate_grad(&mut gradients, bias_id, grad)?;
+            accumulate_grad(gradients, bias_id, grad)?;
         }
 
+        Ok(())
+    }
+}
+
+impl GradientFunction for Conv2dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        match grad_output.dtype() {
+            DataType::Float32 => self.backward_typed::<f32>(grad_output, &mut gradients)?,
+            DataType::Float64 => self.backward_typed::<f64>(grad_output, &mut gradients)?,
+            _ => {
+                return Err(MinitensorError::internal_error(
+                    "conv2d backward expects a floating point gradient",
+                ));
+            }
+        }
         Ok(gradients)
     }
 
