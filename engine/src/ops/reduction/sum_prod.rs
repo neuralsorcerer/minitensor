@@ -651,36 +651,3 @@ pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
     result_slice[0] = min_val;
     Ok(())
 }
-
-pub(crate) fn nanmax_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_f32_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-
-    let (max_val, found) = data
-        .par_iter()
-        .map(|&v| {
-            if v.is_nan() {
-                (f32::NEG_INFINITY, false)
-            } else {
-                (v, true)
-            }
-        })
-        .reduce(
-            || (f32::NEG_INFINITY, false),
-            |(a_val, a_found), (b_val, b_found)| match (a_found, b_found) {
-                (true, true) => (a_val.max(b_val), true),
-                (true, false) => (a_val, true),
-                (false, true) => (b_val, true),
-                (false, false) => (f32::NEG_INFINITY, false),
-            },
-        );
-
-    let result_slice = result_data
-        .as_f32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable f32 slice"))?;
-
-    result_slice[0] = if found { max_val } else { f32::NAN };
-    Ok(())
-}

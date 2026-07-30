@@ -1060,3 +1060,55 @@ def test_nan_wins_plain_extremum_but_not_the_nan_aware_form():
     assert got[0] == pytest.approx(3.0)
     assert np.isnan(got[1])  # an all-NaN slice has no non-NaN value to report
     np.testing.assert_array_equal(indices.numpy(), [2, 0])
+
+
+# The whole-tensor argmin/argmax and NaN-skipping extremum reducers are one
+# generic implementation per family rather than one per dtype.
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+@pytest.mark.parametrize("shape", [(11,), (4, 9), (2, 3, 5)])
+def test_global_arg_reductions_match_numpy(dtype, shape):
+    rng = np.random.default_rng(20240720)
+    raw = rng.standard_normal(shape) * 5
+    x = raw.astype(dtype) if dtype.startswith("float") else (raw * 4).astype(dtype)
+    t = mt.Tensor(x)
+    assert t.argmax().item() == int(np.argmax(x))
+    assert t.argmin().item() == int(np.argmin(x))
+
+
+def test_global_arg_reductions_on_bool_including_no_match():
+    data = np.array([False, False, True, False, True])
+    t = mt.Tensor(data).astype("bool")
+    assert t.argmax().item() == int(np.argmax(data))
+    assert t.argmin().item() == int(np.argmin(data))
+    # No element matches: fall back to index 0, as NumPy does.
+    assert mt.Tensor(np.ones(4, dtype=bool)).astype("bool").argmin().item() == 0
+    assert mt.Tensor(np.zeros(4, dtype=bool)).astype("bool").argmax().item() == 0
+
+
+def test_global_arg_reductions_when_every_element_is_the_extreme_value():
+    # These reducers used to fold against an identity seeded with the type's
+    # extreme value, which a real input can equal. There is no identity now;
+    # pin the cases that would have collided with it.
+    assert (
+        mt.Tensor(np.full(6, np.iinfo(np.int32).min, dtype=np.int32)).argmax().item()
+        == 0
+    )
+    assert (
+        mt.Tensor(np.full(6, np.iinfo(np.int64).max, dtype=np.int64)).argmin().item()
+        == 0
+    )
+    assert mt.Tensor(np.full(6, -np.inf, dtype=np.float32)).argmax().item() == 0
+    assert mt.Tensor(np.full(6, np.inf, dtype=np.float32)).argmin().item() == 0
+
+
+def test_global_nan_extremum_skips_nan_and_reports_nan_for_all_nan():
+    x = np.array([1.0, np.nan, 3.0], dtype=np.float32)
+    t = mt.Tensor(x)
+    assert t.nanmax().item() == pytest.approx(3.0)
+    assert t.nanmin().item() == pytest.approx(1.0)
+    # A NaN still wins the plain argmax, unlike the nan-aware reduction.
+    assert t.argmax().item() == 1
+
+    all_nan = mt.Tensor(np.full(4, np.nan, dtype=np.float64))
+    assert np.isnan(all_nan.nanmax().item())
+    assert np.isnan(all_nan.nanmin().item())
