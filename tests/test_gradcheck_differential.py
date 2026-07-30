@@ -21,6 +21,8 @@ stronger, library-agnostic checks:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -490,3 +492,171 @@ def test_conv2d_float64_gradcheck(which):
     np.testing.assert_allclose(
         analytic, numeric.reshape(src[which].shape), rtol=1e-5, atol=1e-6
     )
+
+
+# --------------------------------------------------------------------------- #
+# Forward values against NumPy
+# --------------------------------------------------------------------------- #
+
+_FWD_ANY = np.random.default_rng(101).standard_normal((4, 5))
+_FWD_POS = np.abs(np.random.default_rng(102).standard_normal((4, 5))) + 0.3
+_FWD_UNIT = np.random.default_rng(103).uniform(-0.9, 0.9, (4, 5))
+_FWD_GT1 = np.abs(np.random.default_rng(104).standard_normal((4, 5))) + 1.3
+# Square, and materialised: the tensor constructor requires a contiguous array.
+_FWD_SQUARE = np.ascontiguousarray(_FWD_ANY[:, :4])
+_FWD_3D = np.random.default_rng(105).standard_normal((2, 3, 4))
+_FWD_POS3D = np.abs(np.random.default_rng(106).standard_normal((2, 3, 4))) + 0.4
+
+
+def _erf(x):
+    return np.vectorize(math.erf)(x)
+
+
+_FORWARD_OPS = [
+    ("abs", lambda t: t.abs(), _FWD_ANY, np.abs),
+    ("acos", lambda t: t.acos(), _FWD_UNIT, np.arccos),
+    ("acosh", lambda t: t.acosh(), _FWD_GT1, np.arccosh),
+    ("asin", lambda t: t.asin(), _FWD_UNIT, np.arcsin),
+    ("asinh", lambda t: t.asinh(), _FWD_ANY, np.arcsinh),
+    ("atan", lambda t: t.atan(), _FWD_ANY, np.arctan),
+    ("atanh", lambda t: t.atanh(), _FWD_UNIT, np.arctanh),
+    ("ceil", lambda t: t.ceil(), _FWD_ANY, np.ceil),
+    ("cos", lambda t: t.cos(), _FWD_ANY, np.cos),
+    ("cosh", lambda t: t.cosh(), _FWD_ANY, np.cosh),
+    ("erf", lambda t: t.erf(), _FWD_ANY, _erf),
+    ("erfc", lambda t: t.erfc(), _FWD_ANY, lambda a: 1.0 - _erf(a)),
+    ("exp", lambda t: t.exp(), _FWD_ANY, np.exp),
+    ("expm1", lambda t: t.expm1(), _FWD_ANY, np.expm1),
+    ("floor", lambda t: t.floor(), _FWD_ANY, np.floor),
+    ("log", lambda t: t.log(), _FWD_POS, np.log),
+    ("log10", lambda t: t.log10(), _FWD_POS, np.log10),
+    ("log1p", lambda t: t.log1p(), _FWD_POS, np.log1p),
+    ("log2", lambda t: t.log2(), _FWD_POS, np.log2),
+    ("reciprocal", lambda t: t.reciprocal(), _FWD_POS, lambda a: 1.0 / a),
+    ("round", lambda t: t.round(), _FWD_ANY, np.round),
+    ("rsqrt", lambda t: t.rsqrt(), _FWD_POS, lambda a: 1.0 / np.sqrt(a)),
+    ("sign", lambda t: t.sign(), _FWD_ANY, np.sign),
+    ("sin", lambda t: t.sin(), _FWD_ANY, np.sin),
+    ("sinh", lambda t: t.sinh(), _FWD_ANY, np.sinh),
+    ("sqrt", lambda t: t.sqrt(), _FWD_POS, np.sqrt),
+    ("tan", lambda t: t.tan(), _FWD_UNIT, np.tan),
+    ("tanh", lambda t: t.tanh(), _FWD_ANY, np.tanh),
+    ("sigmoid", lambda t: t.sigmoid(), _FWD_ANY, lambda a: 1 / (1 + np.exp(-a))),
+    ("relu", lambda t: t.relu(), _FWD_ANY, lambda a: np.maximum(a, 0)),
+    ("softplus", lambda t: t.softplus(), _FWD_ANY, lambda a: np.log1p(np.exp(a))),
+    ("softsign", lambda t: t.softsign(), _FWD_ANY, lambda a: a / (1 + np.abs(a))),
+    ("silu", lambda t: t.silu(), _FWD_ANY, lambda a: a / (1 + np.exp(-a))),
+    ("elu", lambda t: t.elu(), _FWD_ANY, lambda a: np.where(a > 0, a, np.expm1(a))),
+    (
+        "selu",
+        lambda t: t.selu(),
+        _FWD_ANY,
+        lambda a: 1.0507009873554805
+        * np.where(a > 0, a, 1.6732632423543772 * np.expm1(a)),
+    ),
+    (
+        "gelu",
+        lambda t: t.gelu(),
+        _FWD_ANY,
+        lambda a: a * 0.5 * (1 + _erf(a / np.sqrt(2))),
+    ),
+    (
+        "hardshrink",
+        lambda t: t.hardshrink(lambd=0.5),
+        _FWD_ANY,
+        lambda a: np.where(np.abs(a) > 0.5, a, 0.0),
+    ),
+    ("clamp", lambda t: t.clamp(-0.5, 0.5), _FWD_ANY, lambda a: np.clip(a, -0.5, 0.5)),
+    ("sum", lambda t: t.sum(), _FWD_ANY, lambda a: np.array(a.sum())),
+    ("mean", lambda t: t.mean(), _FWD_ANY, lambda a: np.array(a.mean())),
+    ("prod", lambda t: t.prod(), _FWD_POS, lambda a: np.array(a.prod())),
+    ("max", lambda t: t.max(), _FWD_ANY, lambda a: np.array(a.max())),
+    ("min", lambda t: t.min(), _FWD_ANY, lambda a: np.array(a.min())),
+    # var/std default to the unbiased (sample) estimator, as PyTorch does.
+    ("var", lambda t: t.var(), _FWD_ANY, lambda a: np.array(a.var(ddof=1))),
+    ("std", lambda t: t.std(), _FWD_ANY, lambda a: np.array(a.std(ddof=1))),
+    ("sum_dim", lambda t: t.sum(dim=1), _FWD_3D, lambda a: a.sum(axis=1)),
+    ("mean_dim", lambda t: t.mean(dim=2), _FWD_3D, lambda a: a.mean(axis=2)),
+    ("prod_dim", lambda t: t.prod(dim=0), _FWD_POS3D, lambda a: a.prod(axis=0)),
+    ("var_dim", lambda t: t.var(dim=1), _FWD_3D, lambda a: a.var(axis=1, ddof=1)),
+    ("std_dim", lambda t: t.std(dim=1), _FWD_3D, lambda a: a.std(axis=1, ddof=1)),
+    ("cumsum", lambda t: t.cumsum(1), _FWD_3D, lambda a: a.cumsum(axis=1)),
+    ("cumprod", lambda t: t.cumprod(1), _FWD_POS3D, lambda a: a.cumprod(axis=1)),
+    (
+        "logsumexp",
+        lambda t: t.logsumexp(dim=1),
+        _FWD_3D,
+        lambda a: np.log(np.exp(a).sum(axis=1)),
+    ),
+    ("norm1", lambda t: t.norm(1.0), _FWD_ANY, lambda a: np.array(np.abs(a).sum())),
+    (
+        "norm2",
+        lambda t: t.norm(2.0),
+        _FWD_ANY,
+        lambda a: np.array(np.linalg.norm(a.ravel(), 2)),
+    ),
+    (
+        "norm_inf",
+        lambda t: t.norm(float("inf")),
+        _FWD_ANY,
+        lambda a: np.array(np.abs(a).max()),
+    ),
+    # median takes the lower middle for even counts, so index (n-1)//2 of the sort.
+    (
+        "median",
+        lambda t: t.median(),
+        _FWD_ANY,
+        lambda a: np.array(np.sort(a.ravel())[(a.size - 1) // 2]),
+    ),
+    (
+        "softmax",
+        lambda t: t.softmax(dim=1),
+        _FWD_3D,
+        lambda a: np.exp(a - a.max(1, keepdims=True))
+        / np.exp(a - a.max(1, keepdims=True)).sum(1, keepdims=True),
+    ),
+    ("argmax", lambda t: t.argmax(), _FWD_ANY, lambda a: np.array(np.argmax(a))),
+    ("argmin", lambda t: t.argmin(), _FWD_ANY, lambda a: np.array(np.argmin(a))),
+    ("sort", lambda t: t.sort()[0], _FWD_ANY, lambda a: np.sort(a, axis=-1)),
+    (
+        "argsort",
+        lambda t: t.argsort(),
+        _FWD_ANY,
+        lambda a: np.argsort(a, axis=-1, kind="stable"),
+    ),
+    ("flip", lambda t: t.flip([0]), _FWD_ANY, lambda a: np.flip(a, 0)),
+    ("roll", lambda t: t.roll(2, 1), _FWD_ANY, lambda a: np.roll(a, 2, 1)),
+    ("transpose", lambda t: t.transpose(0, 1), _FWD_ANY, lambda a: a.T),
+    (
+        "permute",
+        lambda t: t.permute((2, 0, 1)),
+        _FWD_3D,
+        lambda a: np.transpose(a, (2, 0, 1)),
+    ),
+    ("tril", lambda t: t.tril(0), _FWD_SQUARE, np.tril),
+    ("triu", lambda t: t.triu(1), _FWD_SQUARE, lambda a: np.triu(a, 1)),
+    (
+        "diagonal",
+        lambda t: t.diagonal(),
+        _FWD_SQUARE,
+        lambda a: np.diagonal(a).copy(),
+    ),
+    ("trace", lambda t: t.trace(), _FWD_SQUARE, lambda a: np.array(np.trace(a))),
+    ("repeat", lambda t: t.repeat((2, 3)), _FWD_ANY, lambda a: np.tile(a, (2, 3))),
+    (
+        "repeat_interleave",
+        lambda t: t.repeat_interleave(3, dim=1),
+        _FWD_ANY,
+        lambda a: np.repeat(a, 3, axis=1),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,fn,src,reference", _FORWARD_OPS, ids=[o[0] for o in _FORWARD_OPS]
+)
+def test_forward_values_match_numpy(name, fn, src, reference):
+    got = np.asarray(fn(mt.Tensor(src, dtype="float64")).numpy())
+    want = np.asarray(reference(src.astype(np.float64)))
+    assert got.shape == want.shape, f"{name}: {got.shape} != {want.shape}"
+    np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-11)
