@@ -224,7 +224,9 @@ pub(crate) fn quantiles_all(
 
             let positions = quantile_positions_for_len(buffer.len(), qs);
             buffer.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f32(&buffer, &positions, interpolation, values);
+            for (slot, position) in values.iter_mut().zip(positions.iter()) {
+                *slot = quantile_from_sorted_position(&buffer, position, interpolation);
+            }
         }
         DataType::Float64 => {
             let data = tensor
@@ -269,7 +271,9 @@ pub(crate) fn quantiles_all(
 
             let positions = quantile_positions_for_len(buffer.len(), qs);
             buffer.sort_by(|a, b| a.total_cmp(b));
-            quantiles_from_sorted_f64(&buffer, &positions, interpolation, values);
+            for (slot, position) in values.iter_mut().zip(positions.iter()) {
+                *slot = quantile_from_sorted_position(&buffer, position, interpolation);
+            }
         }
         _ => unreachable!("dtype validated"),
     }
@@ -348,7 +352,9 @@ pub(crate) fn nanquantiles_all(
             } else {
                 let positions = quantile_positions_for_len(sorted.len(), qs);
                 sorted.sort_by(|a, b| a.total_cmp(b));
-                quantiles_from_sorted_f32(&sorted, &positions, interpolation, values);
+                for (slot, position) in values.iter_mut().zip(positions.iter()) {
+                    *slot = quantile_from_sorted_position(&sorted, position, interpolation);
+                }
             }
         }
         DataType::Float64 => {
@@ -391,7 +397,9 @@ pub(crate) fn nanquantiles_all(
             } else {
                 let positions = quantile_positions_for_len(sorted.len(), qs);
                 sorted.sort_by(|a, b| a.total_cmp(b));
-                quantiles_from_sorted_f64(&sorted, &positions, interpolation, values);
+                for (slot, position) in values.iter_mut().zip(positions.iter()) {
+                    *slot = quantile_from_sorted_position(&sorted, position, interpolation);
+                }
             }
         }
         _ => unreachable!("dtype validated"),
@@ -414,219 +422,6 @@ fn quantiles_output_dims(tensor_ndim: usize, q_len: usize, keepdim: bool) -> Vec
     } else {
         vec![q_len]
     }
-}
-
-pub(crate) fn quantiles_along_dim(
-    tensor: &Tensor,
-    dim: usize,
-    qs: &[f64],
-    keepdim: bool,
-    interpolation: QuantileInterpolation,
-) -> Result<Tensor> {
-    let dims = tensor.shape().dims();
-    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
-
-    if dim_size == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "quantile() does not support empty slices".to_string(),
-        ));
-    }
-
-    let q_len = qs.len();
-
-    let mut out_dims = Vec::with_capacity(dims.len() + 2);
-    out_dims.push(q_len);
-    if !dims.is_empty() {
-        out_dims.extend_from_slice(&dims[..dim]);
-        if keepdim {
-            out_dims.push(1);
-        }
-        out_dims.extend_from_slice(&dims[dim + 1..]);
-    } else if keepdim {
-        out_dims.push(1);
-    }
-
-    let shape = Shape::new(out_dims);
-    let mut values_data =
-        TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
-
-    let outer = if dims.is_empty() || dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
-    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let outer_stride = dim_size * inner;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_quantiles_single_f32(input, values, outer, inner, outer_stride, q_len);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                if q_len == 1 {
-                    let q_value = qs[0];
-                    for o in 0..outer {
-                        for r in 0..inner {
-                            buffer.clear();
-                            let mut has_nan = false;
-                            for d in 0..dim_size {
-                                let idx = o * outer_stride + d * inner + r;
-                                let value = input[idx];
-                                if value.is_nan() {
-                                    has_nan = true;
-                                    break;
-                                }
-                                buffer.push(value);
-                            }
-
-                            let out_idx = o * inner + r;
-                            if has_nan {
-                                values[out_idx] = f32::NAN;
-                                continue;
-                            }
-
-                            values[out_idx] =
-                                quantile_from_unsorted(&mut buffer, q_value, interpolation);
-                        }
-                    }
-                } else {
-                    let positions = quantile_positions_for_len(dim_size, qs);
-                    for o in 0..outer {
-                        for r in 0..inner {
-                            buffer.clear();
-                            let mut has_nan = false;
-                            for d in 0..dim_size {
-                                let idx = o * outer_stride + d * inner + r;
-                                let value = input[idx];
-                                if value.is_nan() {
-                                    has_nan = true;
-                                    break;
-                                }
-                                buffer.push(value);
-                            }
-
-                            if has_nan {
-                                for qi in 0..q_len {
-                                    let out_idx = ((qi * outer) + o) * inner + r;
-                                    values[out_idx] = f32::NAN;
-                                }
-                                continue;
-                            }
-
-                            buffer.sort_by(|a, b| a.total_cmp(b));
-                            for (qi, position) in positions.iter().enumerate() {
-                                let out_idx = ((qi * outer) + o) * inner + r;
-                                values[out_idx] = quantile_from_sorted_position_f32(
-                                    &buffer,
-                                    position,
-                                    interpolation,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_quantiles_single_f64(input, values, outer, inner, outer_stride, q_len);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                if q_len == 1 {
-                    let q_value = qs[0];
-                    for o in 0..outer {
-                        for r in 0..inner {
-                            buffer.clear();
-                            let mut has_nan = false;
-                            for d in 0..dim_size {
-                                let idx = o * outer_stride + d * inner + r;
-                                let value = input[idx];
-                                if value.is_nan() {
-                                    has_nan = true;
-                                    break;
-                                }
-                                buffer.push(value);
-                            }
-
-                            let out_idx = o * inner + r;
-                            if has_nan {
-                                values[out_idx] = f64::NAN;
-                                continue;
-                            }
-
-                            values[out_idx] =
-                                quantile_from_unsorted(&mut buffer, q_value, interpolation);
-                        }
-                    }
-                } else {
-                    let positions = quantile_positions_for_len(dim_size, qs);
-                    for o in 0..outer {
-                        for r in 0..inner {
-                            buffer.clear();
-                            let mut has_nan = false;
-                            for d in 0..dim_size {
-                                let idx = o * outer_stride + d * inner + r;
-                                let value = input[idx];
-                                if value.is_nan() {
-                                    has_nan = true;
-                                    break;
-                                }
-                                buffer.push(value);
-                            }
-
-                            if has_nan {
-                                for qi in 0..q_len {
-                                    let out_idx = ((qi * outer) + o) * inner + r;
-                                    values[out_idx] = f64::NAN;
-                                }
-                                continue;
-                            }
-
-                            buffer.sort_by(|a, b| a.total_cmp(b));
-                            for (qi, position) in positions.iter().enumerate() {
-                                let out_idx = ((qi * outer) + o) * inner + r;
-                                values[out_idx] = quantile_from_sorted_position_f64(
-                                    &buffer,
-                                    position,
-                                    interpolation,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => unreachable!("dtype validated"),
-    }
-
-    Ok(Tensor::new(
-        Arc::new(values_data),
-        shape,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
 }
 
 /// Geometry of a dimension reduction that also copes with a 0-d tensor
@@ -794,3 +589,159 @@ macro_rules! quantile_along_dim_entry {
 
 quantile_along_dim_entry!(quantile_along_dim, false, "quantile");
 quantile_along_dim_entry!(nanquantile_along_dim, true, "nanquantile");
+
+/// Several quantiles along `dim`, in one pass over each column.
+///
+/// The output is laid out `[q_len, ..reduced dims..]`, so a given slot's `q_len`
+/// results are `slot_count` apart. The reduction therefore writes a slot-major
+/// scratch in parallel and transposes it into place, rather than having every
+/// task scatter into a strided output.
+///
+/// For a single `q` this quickselects, which is `O(n)`; for several it sorts
+/// once and reads each position out of the sorted column, which beats `q_len`
+/// separate selections as soon as `q_len` approaches `log n`. `nan_aware` drops
+/// NaNs instead of poisoning the column, so the sorted length varies per slot
+/// and the positions are recomputed when it changes.
+fn quantiles_along_dim_core<T: TotalCmp + Send + Sync>(
+    input: &[T],
+    values: &mut [T],
+    layout: &QuantileDimLayout,
+    nan_aware: bool,
+    qs: &[f64],
+    interpolation: QuantileInterpolation,
+) {
+    let QuantileDimLayout {
+        dim_size,
+        inner,
+        outer_stride,
+        ..
+    } = *layout;
+    let q_len = qs.len();
+    debug_assert!(q_len > 0 && values.len().is_multiple_of(q_len));
+    let slot_count = values.len() / q_len;
+    if slot_count == 0 {
+        return;
+    }
+
+    let mut slot_major: Vec<T> = vec![T::nan(); slot_count * q_len];
+    slot_major
+        .par_chunks_mut(PAR_CHUNK * q_len)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
+            // Positions depend only on the column length, which is constant
+            // unless NaNs are being dropped.
+            let mut cached: Option<(usize, Vec<QuantilePosition>)> = None;
+            for (local, out) in chunk.chunks_mut(q_len).enumerate() {
+                let slot = chunk_idx * PAR_CHUNK + local;
+                let o = slot / inner;
+                let r = slot % inner;
+                buffer.clear();
+
+                let mut poisoned = false;
+                let mut idx = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    let value = input[idx];
+                    if value.is_nan() {
+                        if !nan_aware {
+                            poisoned = true;
+                            break;
+                        }
+                    } else {
+                        buffer.push(value);
+                    }
+                    idx += inner;
+                }
+
+                if poisoned || buffer.is_empty() {
+                    out.fill(T::nan());
+                    continue;
+                }
+
+                if q_len == 1 {
+                    out[0] = quantile_from_unsorted(&mut buffer, qs[0], interpolation);
+                    continue;
+                }
+
+                buffer.sort_by(|a, b| a.total_order(b));
+                let positions = match cached {
+                    Some((len, ref positions)) if len == buffer.len() => positions,
+                    _ => {
+                        cached = Some((buffer.len(), quantile_positions_for_len(buffer.len(), qs)));
+                        &cached.as_ref().expect("positions just cached").1
+                    }
+                };
+                for (slot_out, position) in out.iter_mut().zip(positions.iter()) {
+                    *slot_out = quantile_from_sorted_position(&buffer, position, interpolation);
+                }
+            }
+        });
+
+    // Slot-major -> q-major. Each destination chunk is one q's full output, so
+    // the writes stay contiguous.
+    values
+        .par_chunks_mut(slot_count)
+        .enumerate()
+        .for_each(|(qi, out_q)| {
+            for (slot, out) in out_q.iter_mut().enumerate() {
+                *out = slot_major[slot * q_len + qi];
+            }
+        });
+}
+
+/// Entry points for several quantiles along a dimension, per NaN mode.
+macro_rules! quantiles_along_dim_entry {
+    ($name:ident, $nan_aware:literal, $op:literal) => {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            dim: usize,
+            qs: &[f64],
+            keepdim: bool,
+            interpolation: QuantileInterpolation,
+        ) -> Result<Tensor> {
+            let layout = quantile_dim_layout(tensor, dim, keepdim, $op)?;
+
+            // The quantile axis is prepended to the reduced shape.
+            let mut out_dims = Vec::with_capacity(layout.values_shape.ndim() + 1);
+            out_dims.push(qs.len());
+            out_dims.extend_from_slice(layout.values_shape.dims());
+            let shape = Shape::new(out_dims);
+
+            let mut values_data =
+                TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
+
+            match tensor.dtype() {
+                DataType::Float32 => {
+                    let input = tensor.data().as_f32_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get f32 slice")
+                    })?;
+                    let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f32 slice")
+                    })?;
+                    quantiles_along_dim_core(input, values, &layout, $nan_aware, qs, interpolation);
+                }
+                DataType::Float64 => {
+                    let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get f64 slice")
+                    })?;
+                    let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f64 slice")
+                    })?;
+                    quantiles_along_dim_core(input, values, &layout, $nan_aware, qs, interpolation);
+                }
+                _ => unreachable!("dtype validated"),
+            }
+
+            Ok(Tensor::new(
+                Arc::new(values_data),
+                shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            ))
+        }
+    };
+}
+
+quantiles_along_dim_entry!(quantiles_along_dim, false, "quantile");
+quantiles_along_dim_entry!(nanquantiles_along_dim, true, "nanquantile");

@@ -1170,3 +1170,49 @@ def test_quantile_nan_column_poisons_but_nanquantile_drops():
     assert skipped[0] == pytest.approx(3.0)
     assert skipped[1] == pytest.approx(2.5)
     assert np.isnan(skipped[2])  # nothing left to take a quantile of
+
+
+# The multi-quantile form writes `q_len` results per slot into a `[q_len, ...]`
+# output, so it builds a slot-major scratch and transposes; check the layout as
+# well as the values.
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("shape", [(1,), (7,), (4, 9), (2, 3, 5)])
+@pytest.mark.parametrize("qs", [[0.5], [0.0, 1.0], [0.1, 0.25, 0.5, 0.75, 0.9]])
+def test_multi_quantile_along_dim_matches_numpy(dtype, shape, qs):
+    rng = np.random.default_rng(20240723)
+    tol = 1e-5 if dtype == "float32" else 1e-10
+    x = rng.standard_normal(shape).astype(dtype)
+    t = mt.Tensor(x, dtype=dtype)
+
+    for axis in range(len(shape)):
+        for interp in ("linear", "lower", "higher", "midpoint", "nearest"):
+            got = t.quantile(qs, dim=axis, interpolation=interp).numpy()
+            want = np.quantile(x, qs, axis=axis, method=interp)
+            assert got.shape == want.shape
+            np.testing.assert_allclose(got, want, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("shape", [(6,), (4, 7), (2, 3, 5)])
+@pytest.mark.parametrize("qs", [[0.5], [0.0, 1.0], [0.1, 0.25, 0.5, 0.75, 0.9]])
+def test_multi_nanquantile_along_dim_matches_numpy(shape, qs):
+    import warnings
+
+    rng = np.random.default_rng(20240724)
+    x = rng.standard_normal(shape)
+    # Dropping NaNs makes each column a different length, so the quantile
+    # positions have to be recomputed per column rather than cached once.
+    x[rng.random(shape) < 0.3] = np.nan
+    t = mt.Tensor(x, dtype="float64")
+
+    for axis in range(len(shape)):
+        for interp in ("linear", "lower", "higher", "midpoint", "nearest"):
+            got = t.nanquantile(qs, dim=axis, interpolation=interp).numpy()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                want = np.nanquantile(x, qs, axis=axis, method=interp)
+            finite = np.isfinite(want)
+            assert got.shape == want.shape
+            np.testing.assert_allclose(
+                got[finite], want[finite], rtol=1e-10, atol=1e-10
+            )
+            assert np.all(np.isnan(got[~finite]))

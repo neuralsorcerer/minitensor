@@ -517,85 +517,9 @@ fn ensure_floating_point_dtype_for(dtype: DataType, operation: &str) -> Result<(
     }
 }
 
-pub(crate) fn fill_quantiles_single_f32(
-    input: &[f32],
-    values: &mut [f32],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-    q_len: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            for qi in 0..q_len {
-                let out_idx = ((qi * outer) + o) * inner + r;
-                values[out_idx] = if value.is_nan() { f32::NAN } else { value };
-            }
-        }
-    }
-}
-
-pub(crate) fn fill_quantiles_single_f64(
-    input: &[f64],
-    values: &mut [f64],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-    q_len: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            for qi in 0..q_len {
-                let out_idx = ((qi * outer) + o) * inner + r;
-                values[out_idx] = if value.is_nan() { f64::NAN } else { value };
-            }
-        }
-    }
-}
-
 // A single-element reduction slice trivially equals its only value; when that
 // value is NaN it flows straight through, matching NumPy/PyTorch, which return
 // NaN for all-NaN slices rather than erroring.
-
-pub(crate) fn fill_nanquantiles_single_f32(
-    input: &[f32],
-    values: &mut [f32],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-    q_len: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let value = input[o * outer_stride + r];
-            for qi in 0..q_len {
-                values[((qi * outer) + o) * inner + r] = value;
-            }
-        }
-    }
-}
-
-pub(crate) fn fill_nanquantiles_single_f64(
-    input: &[f64],
-    values: &mut [f64],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-    q_len: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let value = input[o * outer_stride + r];
-            for qi in 0..q_len {
-                values[((qi * outer) + o) * inner + r] = value;
-            }
-        }
-    }
-}
 
 pub(crate) fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
     if value.is_nan() {
@@ -665,28 +589,6 @@ pub(crate) fn quantile_position_for_len_q(len: usize, q: f64) -> QuantilePositio
     }
 }
 
-pub(crate) fn quantiles_from_sorted_f32(
-    values: &[f32],
-    positions: &[QuantilePosition],
-    interpolation: QuantileInterpolation,
-    output: &mut [f32],
-) {
-    for (slot, position) in output.iter_mut().zip(positions.iter()) {
-        *slot = quantile_from_sorted_position_f32(values, position, interpolation);
-    }
-}
-
-pub(crate) fn quantiles_from_sorted_f64(
-    values: &[f64],
-    positions: &[QuantilePosition],
-    interpolation: QuantileInterpolation,
-    output: &mut [f64],
-) {
-    for (slot, position) in output.iter_mut().zip(positions.iter()) {
-        *slot = quantile_from_sorted_position_f64(values, position, interpolation);
-    }
-}
-
 #[inline(always)]
 fn nearest_index_with_tie_even(lower_idx: usize, upper_idx: usize, weight: f64) -> usize {
     debug_assert!((0.0..=1.0).contains(&weight));
@@ -707,40 +609,6 @@ fn nearest_index_with_tie_even(lower_idx: usize, upper_idx: usize, weight: f64) 
         upper_idx
     } else {
         lower_idx + (lower_idx & 1)
-    }
-}
-
-pub(crate) fn quantile_from_sorted_position_f32(
-    values: &[f32],
-    position: &QuantilePosition,
-    interpolation: QuantileInterpolation,
-) -> f32 {
-    match interpolation {
-        QuantileInterpolation::Lower => values[position.lower_idx],
-        QuantileInterpolation::Higher => values[position.upper_idx],
-        QuantileInterpolation::Nearest => values[position.nearest_idx],
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
-            let lower = values[position.lower_idx] as f64;
-            let upper = values[position.upper_idx] as f64;
-            interpolation.interpolate(lower, upper, position.weight) as f32
-        }
-    }
-}
-
-pub(crate) fn quantile_from_sorted_position_f64(
-    values: &[f64],
-    position: &QuantilePosition,
-    interpolation: QuantileInterpolation,
-) -> f64 {
-    match interpolation {
-        QuantileInterpolation::Lower => values[position.lower_idx],
-        QuantileInterpolation::Higher => values[position.upper_idx],
-        QuantileInterpolation::Nearest => values[position.nearest_idx],
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
-            let lower = values[position.lower_idx];
-            let upper = values[position.upper_idx];
-            interpolation.interpolate(lower, upper, position.weight)
-        }
     }
 }
 
@@ -978,6 +846,24 @@ pub(crate) fn quantile_from_unsorted<T: TotalCmp>(
                 position.weight,
             );
             T::from(interpolated).unwrap_or_else(T::nan)
+        }
+    }
+}
+
+/// Read the `q`-th quantile out of an already-sorted slice.
+pub(crate) fn quantile_from_sorted_position<T: TotalCmp>(
+    values: &[T],
+    position: &QuantilePosition,
+    interpolation: QuantileInterpolation,
+) -> T {
+    match interpolation {
+        QuantileInterpolation::Lower => values[position.lower_idx],
+        QuantileInterpolation::Higher => values[position.upper_idx],
+        QuantileInterpolation::Nearest => values[position.nearest_idx],
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let lower = values[position.lower_idx].to_f64().unwrap_or(f64::NAN);
+            let upper = values[position.upper_idx].to_f64().unwrap_or(f64::NAN);
+            T::from(interpolation.interpolate(lower, upper, position.weight)).unwrap_or_else(T::nan)
         }
     }
 }
