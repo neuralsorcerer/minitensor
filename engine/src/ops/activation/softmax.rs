@@ -7,6 +7,7 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
+use crate::ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64};
 use crate::tensor::DataType;
 use crate::tensor::Shape;
 use crate::tensor::Strides;
@@ -146,28 +147,6 @@ pub(crate) fn sigmoid_f64(tensor: &Tensor) -> Result<TensorData> {
         DataType::Float64,
         tensor.device(),
     ))
-}
-
-#[inline]
-fn stable_sigmoid_f32(val: f32) -> f32 {
-    if val >= 0.0 {
-        let exp_neg = (-val).exp();
-        1.0 / (1.0 + exp_neg)
-    } else {
-        let exp_pos = val.exp();
-        exp_pos / (1.0 + exp_pos)
-    }
-}
-
-#[inline]
-fn stable_sigmoid_f64(val: f64) -> f64 {
-    if val >= 0.0 {
-        let exp_neg = (-val).exp();
-        1.0 / (1.0 + exp_neg)
-    } else {
-        let exp_pos = val.exp();
-        exp_pos / (1.0 + exp_pos)
-    }
 }
 
 pub(crate) fn relu_f32(
@@ -551,36 +530,6 @@ pub(crate) fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: us
         });
 
     Ok(())
-}
-
-fn broadcast_mask_index(
-    linear_idx: usize,
-    output_dims: &[usize],
-    output_strides: &[usize],
-    mask_dims: &[usize],
-    mask_strides: &[usize],
-) -> usize {
-    if mask_dims.is_empty() {
-        return 0;
-    }
-
-    let output_ndim = output_dims.len();
-    let mask_ndim = mask_dims.len();
-    let mut mask_index = 0usize;
-
-    for i in 0..mask_ndim {
-        let output_dim_idx = output_ndim - 1 - i;
-        let mask_dim_idx = mask_ndim - 1 - i;
-        let stride = output_strides[output_dim_idx];
-        let coord = linear_idx
-            .checked_div(stride)
-            .map_or(0, |quotient| quotient % output_dims[output_dim_idx]);
-        let mask_dim = mask_dims[mask_dim_idx];
-        let mask_coord = if mask_dim == 1 { 0 } else { coord };
-        mask_index += mask_coord * mask_strides[mask_dim_idx];
-    }
-
-    mask_index
 }
 
 pub(crate) fn masked_softmax_f32(

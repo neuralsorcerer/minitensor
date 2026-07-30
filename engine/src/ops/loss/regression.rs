@@ -13,6 +13,7 @@ use crate::{
         add_to_graph,
     },
     error::{MinitensorError, Result},
+    ops::util::create_scalar_tensor,
     ops::{
         activation::{abs as activation_abs, exp, log_softmax, log1p},
         arithmetic::{add, mul, sub},

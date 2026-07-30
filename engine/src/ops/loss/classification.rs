@@ -190,44 +190,6 @@ pub(crate) fn divide_by_scalar(tensor: &Tensor, scalar: f64) -> Result<Tensor> {
     ))
 }
 
-/// Create a scalar tensor with the given value
-pub(crate) fn create_scalar_tensor(
-    value: f64,
-    dtype: DataType,
-    device: crate::device::Device,
-) -> Result<Tensor> {
-    let scalar_shape = Shape::new(vec![1]);
-    let mut tensor_data = TensorData::zeros_on_device(1, dtype, device);
-
-    match dtype {
-        DataType::Float32 => {
-            let slice = tensor_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            slice[0] = value as f32;
-        }
-        DataType::Float64 => {
-            let slice = tensor_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            slice[0] = value;
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Scalar tensor creation only supported for floating point types",
-            ));
-        }
-    }
-
-    Ok(Tensor::new(
-        Arc::new(tensor_data),
-        scalar_shape,
-        dtype,
-        device,
-        false,
-    ))
-}
-
 /// Compute Huber loss element-wise
 /// Elementwise binary cross entropy from logits, in the form that stays finite
 /// at every logit magnitude:

@@ -7,7 +7,7 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::{PAR_CHUNK, binary_map, ternary_map},
+    ops::map::PAR_CHUNK,
     ops::reduction,
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
@@ -15,246 +15,6 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
-
-/// Map an output tap `(oh, ow, kh, kw)` to the input coordinate it reads, or
-/// `None` when it lands in the zero padding. The padding bound already forces
-/// `0 <= ih < in_h` (and likewise for `iw`), so no second range check is needed.
-#[inline(always)]
-fn conv_input_coord(
-    oh: usize,
-    ow: usize,
-    kh: usize,
-    kw: usize,
-    stride: (usize, usize),
-    padding: (usize, usize),
-    in_h: usize,
-    in_w: usize,
-) -> Option<(usize, usize)> {
-    let h_in = oh * stride.0 + kh;
-    let w_in = ow * stride.1 + kw;
-    if h_in < padding.0 || w_in < padding.1 || h_in >= in_h + padding.0 || w_in >= in_w + padding.1
-    {
-        None
-    } else {
-        Some((h_in - padding.0, w_in - padding.1))
-    }
-}
-
-/// Gradient function for 2D convolution (`ops::conv2d`).
-///
-/// Given `grad_output` of shape `[N, C_out, OH, OW]`, produces:
-/// * `grad_input[n, ic, ih, iw]  = Σ grad_output[n, oc, oh, ow] · weight[oc, ic, kh, kw]`
-/// * `grad_weight[oc, ic, kh, kw] = Σ grad_output[n, oc, oh, ow] · input[n, ic, ih, iw]`
-/// * `grad_bias[oc]               = Σ grad_output[n, oc, oh, ow]`
-///
-/// with the same padding/stride index mapping as the forward pass. Each gradient
-/// is only computed when its operand requires it, and each is parallelised over a
-/// race-free axis: `grad_input` over the batch (disjoint output slices),
-/// `grad_weight`/`grad_bias` over the output channel (disjoint kernel/bias
-/// slices). The padding/stride coordinate is hoisted out of the input-channel
-/// loop since it does not depend on it.
-pub struct Conv2dBackward {
-    pub input: Tensor,
-    pub weight: Tensor,
-    pub input_id: TensorId,
-    pub weight_id: TensorId,
-    pub bias_id: Option<TensorId>,
-    pub input_requires_grad: bool,
-    pub weight_requires_grad: bool,
-    pub bias_requires_grad: bool,
-    pub stride: (usize, usize),
-    pub padding: (usize, usize),
-    pub deps: SmallVec<[TensorId; 3]>,
-}
-
-impl GradientFunction for Conv2dBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let in_dims = self.input.shape().dims();
-        let w_dims = self.weight.shape().dims();
-        let (batch, in_channels, in_h, in_w) = (in_dims[0], in_dims[1], in_dims[2], in_dims[3]);
-        let (out_channels, kernel_h, kernel_w) = (w_dims[0], w_dims[2], w_dims[3]);
-        let go_dims = grad_output.shape().dims();
-        let (out_h, out_w) = (go_dims[2], go_dims[3]);
-        let stride = self.stride;
-        let padding = self.padding;
-
-        let input =
-            self.input.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("conv2d backward expects f32 input")
-            })?;
-        let weight =
-            self.weight.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("conv2d backward expects f32 weight")
-            })?;
-        let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-            MinitensorError::internal_error("conv2d backward expects f32 grad_output")
-        })?;
-
-        let device = self.input.device();
-        let mut gradients = FxHashMap::default();
-
-        let ohw = out_h * out_w;
-        let n_ohw = batch * ohw;
-        let k_dim = in_channels * kernel_h * kernel_w;
-        let kh_kw = kernel_h * kernel_w;
-
-        // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
-        // the layout both weight- and input-gradient GEMMs contract against.
-        let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
-            let mut gm = vec![0f32; out_channels * n_ohw];
-            gm.par_chunks_mut(n_ohw).enumerate().for_each(|(oc, row)| {
-                for n in 0..batch {
-                    let src = (n * out_channels + oc) * ohw;
-                    row[n * ohw..n * ohw + ohw].copy_from_slice(&go[src..src + ohw]);
-                }
-            });
-            gm
-        } else {
-            Vec::new()
-        };
-
-        // grad_input = col2im(weightᵀ @ go_mat). The GEMM yields grad_cols
-        // [K, N*OH*OW]; col2im scatters each column back to the input positions it
-        // was gathered from. Parallel over the batch (disjoint grad_input regions),
-        // with a serial scatter-add within each batch, so there are no races.
-        if self.input_requires_grad {
-            let in_stride = in_channels * in_h * in_w;
-            let mut grad_input = vec![0f32; batch * in_stride];
-            if n_ohw > 0 {
-                let mut weight_t = vec![0f32; k_dim * out_channels];
-                for oc in 0..out_channels {
-                    for k in 0..k_dim {
-                        weight_t[k * out_channels + oc] = weight[oc * k_dim + k];
-                    }
-                }
-                let mut grad_cols = vec![0f32; k_dim * n_ohw];
-                // SAFETY: weight_t is [K, C_out], go_mat is [C_out, N*OH*OW], and
-                // grad_cols is [K, N*OH*OW]; all contiguous row-major, dims match.
-                unsafe {
-                    crate::ops::linalg::gemm_f32(
-                        k_dim,
-                        out_channels,
-                        n_ohw,
-                        weight_t.as_ptr(),
-                        go_mat.as_ptr(),
-                        grad_cols.as_mut_ptr(),
-                    );
-                }
-                grad_input
-                    .par_chunks_mut(in_stride)
-                    .enumerate()
-                    .for_each(|(n, gi)| {
-                        for k in 0..k_dim {
-                            let ic = k / kh_kw;
-                            let rem = k % kh_kw;
-                            let ky = rem / kernel_w;
-                            let kx = rem % kernel_w;
-                            let row_base = k * n_ohw + n * ohw;
-                            let ic_base = ic * in_h * in_w;
-                            for p in 0..ohw {
-                                let oh = p / out_w;
-                                let ow = p % out_w;
-                                if let Some((ih, iw)) =
-                                    conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
-                                {
-                                    gi[ic_base + ih * in_w + iw] += grad_cols[row_base + p];
-                                }
-                            }
-                        }
-                    });
-            }
-            let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_input, device)),
-                self.input.shape().clone(),
-                DataType::Float32,
-                device,
-                false,
-            );
-            accumulate_grad(&mut gradients, self.input_id, grad)?;
-        }
-
-        // grad_weight = go_mat @ cols, where `cols` [N*OH*OW, K] is the im2col of
-        // the input (the same lowering as the forward). One GEMM replaces the
-        // naive per-element accumulation.
-        if self.weight_requires_grad {
-            let mut grad_weight = vec![0f32; out_channels * k_dim];
-            if n_ohw > 0 {
-                let mut cols = vec![0f32; n_ohw * k_dim];
-                cols.par_chunks_mut(k_dim)
-                    .enumerate()
-                    .for_each(|(r, prow)| {
-                        let n = r / ohw;
-                        let p = r % ohw;
-                        let oh = p / out_w;
-                        let ow = p % out_w;
-                        for (k, slot) in prow.iter_mut().enumerate() {
-                            let ic = k / kh_kw;
-                            let rem = k % kh_kw;
-                            let ky = rem / kernel_w;
-                            let kx = rem % kernel_w;
-                            if let Some((ih, iw)) =
-                                conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
-                            {
-                                *slot =
-                                    input[(n * in_channels + ic) * in_h * in_w + ih * in_w + iw];
-                            }
-                        }
-                    });
-                // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
-                // grad_weight is [C_out, K]; all contiguous row-major, dims match.
-                unsafe {
-                    crate::ops::linalg::gemm_f32(
-                        out_channels,
-                        n_ohw,
-                        k_dim,
-                        go_mat.as_ptr(),
-                        cols.as_ptr(),
-                        grad_weight.as_mut_ptr(),
-                    );
-                }
-            }
-            let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_weight, device)),
-                self.weight.shape().clone(),
-                DataType::Float32,
-                device,
-                false,
-            );
-            accumulate_grad(&mut gradients, self.weight_id, grad)?;
-        }
-
-        // grad_bias: parallel over output channels.
-        if self.bias_requires_grad
-            && let Some(bias_id) = self.bias_id
-        {
-            let mut grad_bias = vec![0f32; out_channels];
-            grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
-                let mut sum = 0f32;
-                for n in 0..batch {
-                    let base = (n * out_channels + oc) * out_h * out_w;
-                    for k in 0..out_h * out_w {
-                        sum += go[base + k];
-                    }
-                }
-                *gb = sum;
-            });
-            let grad = Tensor::new(
-                Arc::new(TensorData::from_vec_f32(grad_bias, device)),
-                Shape::new(vec![out_channels]),
-                DataType::Float32,
-                device,
-                false,
-            );
-            accumulate_grad(&mut gradients, bias_id, grad)?;
-        }
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        &self.deps
-    }
-}
 
 /// Write `grad_out[i]` where `mask[i]` is set and `0` elsewhere.
 ///
@@ -266,7 +26,11 @@ impl GradientFunction for Conv2dBackward {
 /// vectorises inside each chunk; replaces the raw-pointer parallel loops these
 /// kernels used to hand-roll (which laundered pointers through `usize` to
 /// cross the rayon closure boundary).
-fn mask_select_into<T: Copy + Default + Send + Sync>(out: &mut [T], grad_out: &[T], mask: &[bool]) {
+pub(super) fn mask_select_into<T: Copy + Default + Send + Sync>(
+    out: &mut [T],
+    grad_out: &[T],
+    mask: &[bool],
+) {
     zip_mask_into(
         out,
         grad_out,
@@ -277,7 +41,7 @@ fn mask_select_into<T: Copy + Default + Send + Sync>(out: &mut [T], grad_out: &[
 
 /// Generalisation of [`mask_select_into`] for masks that scale rather than
 /// replace the gradient (ReLU, leaky ReLU).
-fn zip_mask_into<T, F>(out: &mut [T], grad_out: &[T], mask: &[bool], op: F)
+pub(super) fn zip_mask_into<T, F>(out: &mut [T], grad_out: &[T], mask: &[bool], op: F)
 where
     T: Copy + Send + Sync,
     F: Fn(T, bool) -> T + Send + Sync,
@@ -296,685 +60,6 @@ where
             .zip(grad_out.par_chunks(PAR_CHUNK))
             .zip(mask.par_chunks(PAR_CHUNK))
             .for_each(|((o, g), m)| apply(o, g, m));
-    }
-}
-
-impl GradientFunction for PowBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(2);
-
-        match self.output.dtype() {
-            DataType::Float32 => {
-                let base_slice = self.base.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from base tensor")
-                })?;
-                let exp_slice = self.exponent.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from exponent tensor")
-                })?;
-                let out_slice = self.output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from output tensor")
-                })?;
-                let grad_out = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-
-                if self.base_requires_grad {
-                    // d/db (b^e) = e * b^(e-1)
-                    let values: Vec<f32> = match self.broadcast {
-                        PowBroadcast::None => ternary_map(
-                            exp_slice,
-                            base_slice,
-                            grad_out,
-                            |e: f32, b: f32, g: f32| e * b.powf(e - 1.0) * g,
-                        ),
-                        PowBroadcast::BaseScalar => {
-                            // The scalar base receives the sum over every output.
-                            let base_val = base_slice[0];
-                            let mut accum = 0.0_f32;
-                            for i in 0..grad_out.len() {
-                                accum +=
-                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
-                            }
-                            vec![accum]
-                        }
-                        PowBroadcast::ExponentScalar => {
-                            let exp_val = exp_slice[0];
-                            binary_map(base_slice, grad_out, move |b: f32, g: f32| {
-                                exp_val * b.powf(exp_val - 1.0) * g
-                            })
-                        }
-                    };
-                    let grad_data =
-                        TensorData::from_vec::<f32>(values, self.base.dtype(), self.base.device());
-
-                    let grad_tensor = Tensor::new(
-                        Arc::new(grad_data),
-                        self.base.shape().clone(),
-                        self.base.dtype(),
-                        self.base.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, self.input_ids[0], grad_tensor)?;
-                }
-
-                if self.exp_requires_grad {
-                    // d/de (b^e) = b^e * ln(b)
-                    let values: Vec<f32> = match self.broadcast {
-                        PowBroadcast::None => ternary_map(
-                            out_slice,
-                            base_slice,
-                            grad_out,
-                            |o: f32, b: f32, g: f32| o * b.ln() * g,
-                        ),
-                        PowBroadcast::BaseScalar => {
-                            let log_base = base_slice[0].ln();
-                            binary_map(out_slice, grad_out, move |o: f32, g: f32| o * log_base * g)
-                        }
-                        PowBroadcast::ExponentScalar => {
-                            // The scalar exponent receives the sum over every output.
-                            let mut accum = 0.0_f32;
-                            for i in 0..grad_out.len() {
-                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
-                            }
-                            vec![accum]
-                        }
-                    };
-                    let grad_data = TensorData::from_vec::<f32>(
-                        values,
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                    );
-
-                    let grad_tensor = Tensor::new(
-                        Arc::new(grad_data),
-                        self.exponent.shape().clone(),
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, self.input_ids[1], grad_tensor)?;
-                }
-            }
-            DataType::Float64 => {
-                let base_slice = self.base.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from base tensor")
-                })?;
-                let exp_slice = self.exponent.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from exponent tensor")
-                })?;
-                let out_slice = self.output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from output tensor")
-                })?;
-                let grad_out = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-
-                if self.base_requires_grad {
-                    // d/db (b^e) = e * b^(e-1)
-                    let values: Vec<f64> = match self.broadcast {
-                        PowBroadcast::None => ternary_map(
-                            exp_slice,
-                            base_slice,
-                            grad_out,
-                            |e: f64, b: f64, g: f64| e * b.powf(e - 1.0) * g,
-                        ),
-                        PowBroadcast::BaseScalar => {
-                            // The scalar base receives the sum over every output.
-                            let base_val = base_slice[0];
-                            let mut accum = 0.0_f64;
-                            for i in 0..grad_out.len() {
-                                accum +=
-                                    exp_slice[i] * base_val.powf(exp_slice[i] - 1.0) * grad_out[i];
-                            }
-                            vec![accum]
-                        }
-                        PowBroadcast::ExponentScalar => {
-                            let exp_val = exp_slice[0];
-                            binary_map(base_slice, grad_out, move |b: f64, g: f64| {
-                                exp_val * b.powf(exp_val - 1.0) * g
-                            })
-                        }
-                    };
-                    let grad_data =
-                        TensorData::from_vec::<f64>(values, self.base.dtype(), self.base.device());
-
-                    let grad_tensor = Tensor::new(
-                        Arc::new(grad_data),
-                        self.base.shape().clone(),
-                        self.base.dtype(),
-                        self.base.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, self.input_ids[0], grad_tensor)?;
-                }
-
-                if self.exp_requires_grad {
-                    // d/de (b^e) = b^e * ln(b)
-                    let values: Vec<f64> = match self.broadcast {
-                        PowBroadcast::None => ternary_map(
-                            out_slice,
-                            base_slice,
-                            grad_out,
-                            |o: f64, b: f64, g: f64| o * b.ln() * g,
-                        ),
-                        PowBroadcast::BaseScalar => {
-                            let log_base = base_slice[0].ln();
-                            binary_map(out_slice, grad_out, move |o: f64, g: f64| o * log_base * g)
-                        }
-                        PowBroadcast::ExponentScalar => {
-                            // The scalar exponent receives the sum over every output.
-                            let mut accum = 0.0_f64;
-                            for i in 0..grad_out.len() {
-                                accum += out_slice[i] * base_slice[i].ln() * grad_out[i];
-                            }
-                            vec![accum]
-                        }
-                    };
-                    let grad_data = TensorData::from_vec::<f64>(
-                        values,
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                    );
-
-                    let grad_tensor = Tensor::new(
-                        Arc::new(grad_data),
-                        self.exponent.shape().clone(),
-                        self.exponent.dtype(),
-                        self.exponent.device(),
-                        false,
-                    );
-                    accumulate_grad(&mut gradients, self.input_ids[1], grad_tensor)?;
-                }
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "Power backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        &self.input_ids
-    }
-}
-
-/// Gradient function for Hardshrink
-pub struct HardshrinkBackward {
-    pub input_id: TensorId,
-    pub mask: Vec<bool>,
-}
-
-impl GradientFunction for HardshrinkBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                mask_select_into(grad_slice, go, &self.mask);
-            }
-            DataType::Float64 => {
-                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                mask_select_into(grad_slice, go, &self.mask);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "hardshrink backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            grad_output.requires_grad(),
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for nan_to_num.
-pub struct NanToNumBackward {
-    pub input_id: TensorId,
-    pub finite_mask: Vec<bool>,
-}
-
-impl GradientFunction for NanToNumBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        if self.finite_mask.len() != grad_output.numel() {
-            return Err(MinitensorError::gradient_error(
-                "nan_to_num backward mask length does not match gradient size",
-            ));
-        }
-
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let grad = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let out = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                apply_finite_mask(grad, out, &self.finite_mask);
-            }
-            DataType::Float64 => {
-                let grad = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let out = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                apply_finite_mask(grad, out, &self.finite_mask);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "nan_to_num backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            false,
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-#[inline(always)]
-fn apply_finite_mask<T>(grad: &[T], output: &mut [T], finite_mask: &[bool])
-where
-    T: Copy + Default + Send + Sync,
-{
-    debug_assert_eq!(grad.len(), output.len());
-    debug_assert_eq!(grad.len(), finite_mask.len());
-
-    let len = grad.len();
-    if len < PAR_THRESHOLD {
-        for i in 0..len {
-            output[i] = if finite_mask[i] {
-                grad[i]
-            } else {
-                T::default()
-            };
-        }
-    } else {
-        grad.par_iter()
-            .zip(output.par_iter_mut())
-            .zip(finite_mask.par_iter())
-            .for_each(|((g, out), is_finite)| {
-                *out = if *is_finite { *g } else { T::default() };
-            });
-    }
-}
-
-/// Gradient function for ReLU
-pub struct ReluBackward {
-    pub input_id: TensorId,
-    pub mask: Vec<bool>,
-}
-
-impl GradientFunction for ReluBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                zip_mask_into(grad_slice, go, &self.mask, |g: f32, keep| {
-                    // Multiply rather than select: a NaN gradient must stay
-                    // NaN even where the mask is clear (NaN inputs are not
-                    // `> 0`, and PyTorch propagates NaN through relu).
-                    g * if keep { 1.0 } else { 0.0 }
-                });
-            }
-            DataType::Float64 => {
-                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                zip_mask_into(grad_slice, go, &self.mask, |g: f64, keep| {
-                    // Multiply rather than select: a NaN gradient must stay
-                    // NaN even where the mask is clear (NaN inputs are not
-                    // `> 0`, and PyTorch propagates NaN through relu).
-                    g * if keep { 1.0 } else { 0.0 }
-                });
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "ReLU backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            grad_output.requires_grad(),
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for LeakyReLU
-pub struct LeakyReluBackward {
-    pub input_id: TensorId,
-    pub negative_slope: f64,
-    pub mask: Vec<bool>,
-}
-
-impl GradientFunction for LeakyReluBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                let slope = self.negative_slope as f32;
-                zip_mask_into(
-                    grad_slice,
-                    go,
-                    &self.mask,
-                    |g: f32, keep| {
-                        if keep { g } else { g * slope }
-                    },
-                );
-            }
-            DataType::Float64 => {
-                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                let slope = self.negative_slope;
-                zip_mask_into(
-                    grad_slice,
-                    go,
-                    &self.mask,
-                    |g: f64, keep| {
-                        if keep { g } else { g * slope }
-                    },
-                );
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "LeakyReLU backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            grad_output.requires_grad(),
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for the element-wise absolute value.
-///
-/// `d/dx |x| = sign(x)` with the sub-gradient at `x == 0` taken as `0`.
-/// The stored input shares storage with the forward input (a detached
-/// clone), so no data is copied.
-pub struct AbsBackward {
-    pub input_id: TensorId,
-    pub input: Tensor,
-}
-
-impl GradientFunction for AbsBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        macro_rules! abs_grad {
-            ($slice:ident, $mut_slice:ident, $ty:ty) => {{
-                let x = self.input.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to read input for abs backward")
-                })?;
-                let go = grad_output.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to read grad_output for abs backward")
-                })?;
-                let gi = grad_data.$mut_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to write grad for abs backward")
-                })?;
-                let sign = |v: $ty| -> $ty {
-                    if v > 0.0 {
-                        1.0
-                    } else if v < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                };
-                if gi.len() < PAR_THRESHOLD {
-                    for i in 0..gi.len() {
-                        gi[i] = go[i] * sign(x[i]);
-                    }
-                } else {
-                    gi.par_iter_mut()
-                        .zip(go.par_iter())
-                        .zip(x.par_iter())
-                        .for_each(|((g, &o), &v)| *g = o * sign(v));
-                }
-            }};
-        }
-
-        match grad_output.dtype() {
-            DataType::Float32 => abs_grad!(as_f32_slice, as_f32_slice_mut, f32),
-            DataType::Float64 => abs_grad!(as_f64_slice, as_f64_slice_mut, f64),
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "abs backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            false,
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for `clamp`/`clip`.
-///
-/// The gradient is passed through where the input lies inside the (inclusive)
-/// clamp bounds and zeroed where it was saturated. Either
-/// bound may be absent (`clamp_min`/`clamp_max`).
-pub struct ClampBackward {
-    pub input_id: TensorId,
-    pub input: Tensor,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-}
-
-impl GradientFunction for ClampBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
-        macro_rules! clamp_grad {
-            ($slice:ident, $mut_slice:ident, $ty:ty) => {{
-                let x = self.input.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to read input for clamp backward")
-                })?;
-                let go = grad_output.data().$slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to read grad_output for clamp backward")
-                })?;
-                let gi = grad_data.$mut_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to write grad for clamp backward")
-                })?;
-                let min = self.min.map(|m| m as $ty);
-                let max = self.max.map(|m| m as $ty);
-                let passes = move |v: $ty| -> bool {
-                    min.map_or(true, |m| v >= m) && max.map_or(true, |m| v <= m)
-                };
-                if gi.len() < PAR_THRESHOLD {
-                    for i in 0..gi.len() {
-                        gi[i] = if passes(x[i]) { go[i] } else { 0.0 };
-                    }
-                } else {
-                    gi.par_iter_mut()
-                        .zip(go.par_iter())
-                        .zip(x.par_iter())
-                        .for_each(|((g, &o), &v)| *g = if passes(v) { o } else { 0.0 });
-                }
-            }};
-        }
-
-        match grad_output.dtype() {
-            DataType::Float32 => clamp_grad!(as_f32_slice, as_f32_slice_mut, f32),
-            DataType::Float64 => clamp_grad!(as_f64_slice, as_f64_slice_mut, f64),
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "clamp backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            grad_output.shape().clone(),
-            grad_output.dtype(),
-            grad_output.device(),
-            false,
-        );
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
     }
 }
 
@@ -1335,163 +420,6 @@ impl GradientFunction for IndexBackward {
     }
 }
 
-/// Gradient function for softmax
-pub struct SoftmaxBackward {
-    pub input_id: TensorId,
-    pub output: Tensor,
-    pub dim: usize,
-}
-
-impl GradientFunction for SoftmaxBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        // Allocate gradient buffer
-        let mut grad_data = TensorData::zeros_on_device(
-            self.output.numel(),
-            self.output.dtype(),
-            self.output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let y = self.output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from softmax output")
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                softmax_backward(go, y, grad_slice, self.output.shape().dims(), self.dim);
-            }
-            DataType::Float64 => {
-                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let y = self.output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from softmax output")
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                softmax_backward(go, y, grad_slice, self.output.shape().dims(), self.dim);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "Softmax backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
-            grad_output.requires_grad(),
-        );
-
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for log-softmax
-pub struct LogSoftmaxBackward {
-    pub input_id: TensorId,
-    pub output: Tensor,
-    pub dim: usize,
-}
-
-impl GradientFunction for LogSoftmaxBackward {
-    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        let mut gradients = FxHashMap::default();
-        gradients.reserve(1);
-
-        let mut grad_data = TensorData::zeros_on_device(
-            self.output.numel(),
-            self.output.dtype(),
-            self.output.device(),
-        );
-
-        match grad_output.dtype() {
-            DataType::Float32 => {
-                let go = grad_output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f32 slice from grad_output")
-                })?;
-                let log_y = self.output.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f32 slice from log_softmax output",
-                    )
-                })?;
-                let grad_slice = grad_data.as_f32_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f32 slice from grad_data",
-                    )
-                })?;
-                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
-            }
-            DataType::Float64 => {
-                let go = grad_output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to get f64 slice from grad_output")
-                })?;
-                let log_y = self.output.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get f64 slice from log_softmax output",
-                    )
-                })?;
-                let grad_slice = grad_data.as_f64_slice_mut().ok_or_else(|| {
-                    MinitensorError::internal_error(
-                        "Failed to get mutable f64 slice from grad_data",
-                    )
-                })?;
-                log_softmax_backward(go, log_y, grad_slice, self.output.shape().dims(), self.dim);
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(
-                    "LogSoftmax backward only supported for floating point tensors",
-                ));
-            }
-        }
-
-        let grad_input = Tensor::new(
-            Arc::new(grad_data),
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
-            grad_output.requires_grad(),
-        );
-
-        gradients.insert(self.input_id, grad_input);
-
-        Ok(gradients)
-    }
-
-    fn input_ids(&self) -> &[TensorId] {
-        std::slice::from_ref(&self.input_id)
-    }
-}
-
-/// Gradient function for masked log-softmax
-pub struct MaskedLogSoftmaxBackward {
-    pub input_id: TensorId,
-    pub output: Tensor,
-    pub mask: Tensor,
-    pub dim: usize,
-}
-
 /// Gradient function for `scatter_add`.
 ///
 /// `out = input.clone(); out[index] += src`, so the input passes its gradient
@@ -1591,5 +519,186 @@ impl GradientFunction for ScatterBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         &self.input_ids
+    }
+}
+
+pub(crate) fn repeat_interleave_backward_impl(
+    grad_output: &Tensor,
+    input_shape: &[usize],
+    repeats: &[usize],
+    dim: usize,
+) -> Result<Tensor> {
+    if dim >= input_shape.len() {
+        return Err(MinitensorError::index_error(
+            dim as isize,
+            0,
+            input_shape.len(),
+        ));
+    }
+
+    let dim_size = input_shape[dim];
+    if repeats.len() != dim_size {
+        return Err(MinitensorError::invalid_operation(
+            "repeat_interleave backward: repeats must match input dimension size".to_string(),
+        ));
+    }
+
+    let grad_shape_vec = input_shape.to_vec();
+    let grad_shape = Shape::new(grad_shape_vec.clone());
+    let numel = grad_shape.numel();
+    let dtype = grad_output.dtype();
+    let device = grad_output.device();
+    let total_repeats: usize = repeats.iter().sum();
+
+    let inner: usize = if dim + 1 >= input_shape.len() {
+        1
+    } else {
+        input_shape[dim + 1..].iter().product()
+    };
+    let outer: usize = if dim == 0 {
+        1
+    } else {
+        input_shape[..dim].iter().product()
+    };
+
+    if numel == 0 || total_repeats == 0 || inner == 0 || outer == 0 {
+        return Ok(Tensor::zeros(
+            Shape::new(grad_shape_vec),
+            dtype,
+            device,
+            false,
+        ));
+    }
+
+    let output_dims = grad_output.shape().dims();
+    if output_dims.len() != input_shape.len() || output_dims[dim] != total_repeats {
+        return Err(MinitensorError::shape_mismatch(
+            input_shape.to_vec(),
+            output_dims.to_vec(),
+        ));
+    }
+
+    macro_rules! repeat_interleave_backward_impl_inner {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = grad_output.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation(
+                    "repeat_interleave backward: gradient tensor must be contiguous".to_string(),
+                )
+            })?;
+            let mut dst = vec![<$ty>::default(); numel];
+            let chunk = total_repeats * inner;
+            dst.par_chunks_mut(dim_size * inner)
+                .enumerate()
+                .for_each(|(outer_idx, dst_chunk)| {
+                    let mut src_offset = outer_idx * chunk;
+                    for (i, &rep) in repeats.iter().enumerate() {
+                        if rep == 0 {
+                            continue;
+                        }
+                        let dst_start = i * inner;
+                        let dst_slice = &mut dst_chunk[dst_start..dst_start + inner];
+                        for _ in 0..rep {
+                            let src_slice = &src[src_offset..src_offset + inner];
+                            dst_slice.iter_mut().zip(src_slice.iter()).for_each(
+                                |(dst_val, &src_val)| {
+                                    *dst_val += src_val;
+                                },
+                            );
+                            src_offset += inner;
+                        }
+                    }
+                });
+            TensorData::$from_vec(dst, device)
+        }};
+    }
+
+    let data = match dtype {
+        DataType::Float32 => {
+            repeat_interleave_backward_impl_inner!(f32, as_f32_slice, from_vec_f32)
+        }
+        DataType::Float64 => {
+            repeat_interleave_backward_impl_inner!(f64, as_f64_slice, from_vec_f64)
+        }
+        DataType::Int32 => repeat_interleave_backward_impl_inner!(i32, as_i32_slice, from_vec_i32),
+        DataType::Int64 => repeat_interleave_backward_impl_inner!(i64, as_i64_slice, from_vec_i64),
+        DataType::Bool => {
+            return Ok(Tensor::zeros(grad_shape, dtype, device, false));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        grad_shape,
+        dtype,
+        device,
+        false,
+    ))
+}
+/// Gradient function for expand operation which reduces broadcasted gradients
+pub struct ExpandBackward {
+    pub input_shape: Vec<usize>,
+    pub input_id: TensorId,
+}
+impl GradientFunction for ExpandBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let shape = Shape::new(self.input_shape.clone());
+        let grad_input = reduce_gradient_for_broadcasting(grad_output, &shape)?;
+        gradients.insert(self.input_id, grad_input);
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient function for reshape operation
+pub struct ReshapeBackward {
+    pub input_shape: Vec<usize>,
+    pub input_id: TensorId,
+}
+impl GradientFunction for ReshapeBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        // Reshape gradient: reshape back to original shape
+        let original_shape = Shape::new(self.input_shape.clone());
+        let grad_input = crate::ops::shape_ops::reshape(grad_output, original_shape)?;
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+/// Gradient function for repeat_interleave operation
+pub struct RepeatInterleaveBackward {
+    pub input_shape: Vec<usize>,
+    pub repeats: Vec<usize>,
+    pub input_id: TensorId,
+    pub dim: usize,
+}
+impl GradientFunction for RepeatInterleaveBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let grad_input = repeat_interleave_backward_impl(
+            grad_output,
+            &self.input_shape,
+            &self.repeats,
+            self.dim,
+        )?;
+
+        let mut gradients = FxHashMap::default();
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
     }
 }

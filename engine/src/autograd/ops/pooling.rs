@@ -4,12 +4,12 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Backward passes for the 2-D poolers.
+//! Backward passes for the 2-D spatial operations: convolution and pooling.
 //!
-//! Both scatter into the input plane, and several output windows can overlap
-//! the same input element once `stride < kernel`, so the accumulation has to be
-//! per-plane rather than per-output: each task owns one `[H, W]` plane of the
-//! gradient and no two tasks touch the same element.
+//! All of them scatter into the input plane, and several output windows can
+//! overlap the same input element once `stride < kernel`, so the accumulation
+//! has to be per-plane rather than per-output: each task owns one `[H, W]`
+//! plane of the gradient and no two tasks touch the same element.
 
 use super::*;
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Route each output gradient back to the input element that won its window.
@@ -242,5 +243,243 @@ impl GradientFunction for AvgPool2dBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Map an output tap `(oh, ow, kh, kw)` to the input coordinate it reads, or
+/// `None` when it lands in the zero padding. The padding bound already forces
+/// `0 <= ih < in_h` (and likewise for `iw`), so no second range check is needed.
+#[inline(always)]
+fn conv_input_coord(
+    oh: usize,
+    ow: usize,
+    kh: usize,
+    kw: usize,
+    stride: (usize, usize),
+    padding: (usize, usize),
+    in_h: usize,
+    in_w: usize,
+) -> Option<(usize, usize)> {
+    let h_in = oh * stride.0 + kh;
+    let w_in = ow * stride.1 + kw;
+    if h_in < padding.0 || w_in < padding.1 || h_in >= in_h + padding.0 || w_in >= in_w + padding.1
+    {
+        None
+    } else {
+        Some((h_in - padding.0, w_in - padding.1))
+    }
+}
+/// Gradient function for 2D convolution (`ops::conv2d`).
+///
+/// Given `grad_output` of shape `[N, C_out, OH, OW]`, produces:
+/// * `grad_input[n, ic, ih, iw]  = Σ grad_output[n, oc, oh, ow] · weight[oc, ic, kh, kw]`
+/// * `grad_weight[oc, ic, kh, kw] = Σ grad_output[n, oc, oh, ow] · input[n, ic, ih, iw]`
+/// * `grad_bias[oc]               = Σ grad_output[n, oc, oh, ow]`
+///
+/// with the same padding/stride index mapping as the forward pass. Each gradient
+/// is only computed when its operand requires it, and each is parallelised over a
+/// race-free axis: `grad_input` over the batch (disjoint output slices),
+/// `grad_weight`/`grad_bias` over the output channel (disjoint kernel/bias
+/// slices). The padding/stride coordinate is hoisted out of the input-channel
+/// loop since it does not depend on it.
+pub struct Conv2dBackward {
+    pub input: Tensor,
+    pub weight: Tensor,
+    pub input_id: TensorId,
+    pub weight_id: TensorId,
+    pub bias_id: Option<TensorId>,
+    pub input_requires_grad: bool,
+    pub weight_requires_grad: bool,
+    pub bias_requires_grad: bool,
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+    pub deps: SmallVec<[TensorId; 3]>,
+}
+impl GradientFunction for Conv2dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let in_dims = self.input.shape().dims();
+        let w_dims = self.weight.shape().dims();
+        let (batch, in_channels, in_h, in_w) = (in_dims[0], in_dims[1], in_dims[2], in_dims[3]);
+        let (out_channels, kernel_h, kernel_w) = (w_dims[0], w_dims[2], w_dims[3]);
+        let go_dims = grad_output.shape().dims();
+        let (out_h, out_w) = (go_dims[2], go_dims[3]);
+        let stride = self.stride;
+        let padding = self.padding;
+
+        let input =
+            self.input.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("conv2d backward expects f32 input")
+            })?;
+        let weight =
+            self.weight.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("conv2d backward expects f32 weight")
+            })?;
+        let go = grad_output.data().as_f32_slice().ok_or_else(|| {
+            MinitensorError::internal_error("conv2d backward expects f32 grad_output")
+        })?;
+
+        let device = self.input.device();
+        let mut gradients = FxHashMap::default();
+
+        let ohw = out_h * out_w;
+        let n_ohw = batch * ohw;
+        let k_dim = in_channels * kernel_h * kernel_w;
+        let kh_kw = kernel_h * kernel_w;
+
+        // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
+        // the layout both weight- and input-gradient GEMMs contract against.
+        let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
+            let mut gm = vec![0f32; out_channels * n_ohw];
+            gm.par_chunks_mut(n_ohw).enumerate().for_each(|(oc, row)| {
+                for n in 0..batch {
+                    let src = (n * out_channels + oc) * ohw;
+                    row[n * ohw..n * ohw + ohw].copy_from_slice(&go[src..src + ohw]);
+                }
+            });
+            gm
+        } else {
+            Vec::new()
+        };
+
+        // grad_input = col2im(weightᵀ @ go_mat). The GEMM yields grad_cols
+        // [K, N*OH*OW]; col2im scatters each column back to the input positions it
+        // was gathered from. Parallel over the batch (disjoint grad_input regions),
+        // with a serial scatter-add within each batch, so there are no races.
+        if self.input_requires_grad {
+            let in_stride = in_channels * in_h * in_w;
+            let mut grad_input = vec![0f32; batch * in_stride];
+            if n_ohw > 0 {
+                let mut weight_t = vec![0f32; k_dim * out_channels];
+                for oc in 0..out_channels {
+                    for k in 0..k_dim {
+                        weight_t[k * out_channels + oc] = weight[oc * k_dim + k];
+                    }
+                }
+                let mut grad_cols = vec![0f32; k_dim * n_ohw];
+                // SAFETY: weight_t is [K, C_out], go_mat is [C_out, N*OH*OW], and
+                // grad_cols is [K, N*OH*OW]; all contiguous row-major, dims match.
+                unsafe {
+                    crate::ops::linalg::gemm_f32(
+                        k_dim,
+                        out_channels,
+                        n_ohw,
+                        weight_t.as_ptr(),
+                        go_mat.as_ptr(),
+                        grad_cols.as_mut_ptr(),
+                    );
+                }
+                grad_input
+                    .par_chunks_mut(in_stride)
+                    .enumerate()
+                    .for_each(|(n, gi)| {
+                        for k in 0..k_dim {
+                            let ic = k / kh_kw;
+                            let rem = k % kh_kw;
+                            let ky = rem / kernel_w;
+                            let kx = rem % kernel_w;
+                            let row_base = k * n_ohw + n * ohw;
+                            let ic_base = ic * in_h * in_w;
+                            for p in 0..ohw {
+                                let oh = p / out_w;
+                                let ow = p % out_w;
+                                if let Some((ih, iw)) =
+                                    conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
+                                {
+                                    gi[ic_base + ih * in_w + iw] += grad_cols[row_base + p];
+                                }
+                            }
+                        }
+                    });
+            }
+            let grad = Tensor::new(
+                Arc::new(TensorData::from_vec_f32(grad_input, device)),
+                self.input.shape().clone(),
+                DataType::Float32,
+                device,
+                false,
+            );
+            accumulate_grad(&mut gradients, self.input_id, grad)?;
+        }
+
+        // grad_weight = go_mat @ cols, where `cols` [N*OH*OW, K] is the im2col of
+        // the input (the same lowering as the forward). One GEMM replaces the
+        // naive per-element accumulation.
+        if self.weight_requires_grad {
+            let mut grad_weight = vec![0f32; out_channels * k_dim];
+            if n_ohw > 0 {
+                let mut cols = vec![0f32; n_ohw * k_dim];
+                cols.par_chunks_mut(k_dim)
+                    .enumerate()
+                    .for_each(|(r, prow)| {
+                        let n = r / ohw;
+                        let p = r % ohw;
+                        let oh = p / out_w;
+                        let ow = p % out_w;
+                        for (k, slot) in prow.iter_mut().enumerate() {
+                            let ic = k / kh_kw;
+                            let rem = k % kh_kw;
+                            let ky = rem / kernel_w;
+                            let kx = rem % kernel_w;
+                            if let Some((ih, iw)) =
+                                conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
+                            {
+                                *slot =
+                                    input[(n * in_channels + ic) * in_h * in_w + ih * in_w + iw];
+                            }
+                        }
+                    });
+                // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
+                // grad_weight is [C_out, K]; all contiguous row-major, dims match.
+                unsafe {
+                    crate::ops::linalg::gemm_f32(
+                        out_channels,
+                        n_ohw,
+                        k_dim,
+                        go_mat.as_ptr(),
+                        cols.as_ptr(),
+                        grad_weight.as_mut_ptr(),
+                    );
+                }
+            }
+            let grad = Tensor::new(
+                Arc::new(TensorData::from_vec_f32(grad_weight, device)),
+                self.weight.shape().clone(),
+                DataType::Float32,
+                device,
+                false,
+            );
+            accumulate_grad(&mut gradients, self.weight_id, grad)?;
+        }
+
+        // grad_bias: parallel over output channels.
+        if self.bias_requires_grad
+            && let Some(bias_id) = self.bias_id
+        {
+            let mut grad_bias = vec![0f32; out_channels];
+            grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
+                let mut sum = 0f32;
+                for n in 0..batch {
+                    let base = (n * out_channels + oc) * out_h * out_w;
+                    for k in 0..out_h * out_w {
+                        sum += go[base + k];
+                    }
+                }
+                *gb = sum;
+            });
+            let grad = Tensor::new(
+                Arc::new(TensorData::from_vec_f32(grad_bias, device)),
+                Shape::new(vec![out_channels]),
+                DataType::Float32,
+                device,
+                false,
+            );
+            accumulate_grad(&mut gradients, bias_id, grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.deps
     }
 }
