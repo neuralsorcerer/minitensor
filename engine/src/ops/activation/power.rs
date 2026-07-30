@@ -72,7 +72,12 @@ pub fn sign(tensor: &Tensor) -> Result<Tensor> {
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
-        tensor.requires_grad(),
+        // A step function: its derivative is zero wherever it exists, so no
+        // gradient is worth recording. The output is a constant rather than a
+        // tensor that claims `requires_grad` and then behaves as a leaf --
+        // which is what propagating the input's flag without attaching a
+        // gradient function produced. Matches `norm(p = 0)`.
+        false,
     ))
 }
 
@@ -265,7 +270,12 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
-        tensor.requires_grad(),
+        // A step function: its derivative is zero wherever it exists, so no
+        // gradient is worth recording. The output is a constant rather than a
+        // tensor that claims `requires_grad` and then behaves as a leaf --
+        // which is what propagating the input's flag without attaching a
+        // gradient function produced. Matches `norm(p = 0)`.
+        false,
     );
 
     Ok(output)
@@ -288,7 +298,12 @@ pub fn floor(tensor: &Tensor) -> Result<Tensor> {
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
-        tensor.requires_grad(),
+        // A step function: its derivative is zero wherever it exists, so no
+        // gradient is worth recording. The output is a constant rather than a
+        // tensor that claims `requires_grad` and then behaves as a leaf --
+        // which is what propagating the input's flag without attaching a
+        // gradient function produced. Matches `norm(p = 0)`.
+        false,
     );
 
     Ok(output)
@@ -311,7 +326,12 @@ pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
-        tensor.requires_grad(),
+        // A step function: its derivative is zero wherever it exists, so no
+        // gradient is worth recording. The output is a constant rather than a
+        // tensor that claims `requires_grad` and then behaves as a leaf --
+        // which is what propagating the input's flag without attaching a
+        // gradient function produced. Matches `norm(p = 0)`.
+        false,
     );
 
     Ok(output)
