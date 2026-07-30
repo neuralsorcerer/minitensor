@@ -327,6 +327,37 @@ pub(crate) fn leaky_relu_f64(
     ))
 }
 
+/// Geometry shared by the softmax-family forward kernels: the size of the
+/// reduced dimension, the number of trailing elements per slice (`after`), and
+/// the size of one contiguous block spanning the reduced dimension.
+///
+/// `None` means the reduced dimension is empty and there is nothing to write.
+fn softmax_geometry(dims: &[usize], dim: usize) -> Option<(usize, usize, usize)> {
+    let dim_size = dims[dim];
+    if dim_size == 0 {
+        return None;
+    }
+    let after: usize = if dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+    Some((dim_size, after, dim_size * after))
+}
+
+/// The output/mask stride pair needed to map output positions onto a broadcast
+/// mask, or `None` when the shapes already agree and the index is direct.
+fn mask_strides_for(tensor_shape: &Shape, mask_shape: &Shape) -> Option<(Strides, Strides)> {
+    if mask_shape.dims() == tensor_shape.dims() {
+        None
+    } else {
+        Some((
+            Strides::from_shape(tensor_shape),
+            Strides::from_shape(mask_shape),
+        ))
+    }
+}
+
 /// Column-wise softmax of a `[dim_size, after]` row-major block (`after > 1`).
 ///
 /// The softmax dimension is the outer (row) index. Processing the block one
@@ -335,13 +366,14 @@ pub(crate) fn leaky_relu_f64(
 /// `after` on every element. Numerically identical to the strided version: the
 /// per-column max is order-independent and the per-column sum accumulates rows
 /// in the same order.
-fn softmax_block_columnwise_f32(
-    in_block: &[f32],
-    out_block: &mut [f32],
+fn softmax_block_columnwise<T: Float>(
+    in_block: &[T],
+    out_block: &mut [T],
     dim_size: usize,
     after: usize,
 ) {
-    let mut col_max = vec![f32::NEG_INFINITY; after];
+    let neg_inf = T::neg_infinity();
+    let mut col_max = vec![neg_inf; after];
     for k in 0..dim_size {
         let row = &in_block[k * after..k * after + after];
         for (m, &v) in col_max.iter_mut().zip(row) {
@@ -350,99 +382,45 @@ fn softmax_block_columnwise_f32(
             }
         }
     }
-    let mut col_sum = vec![0.0f32; after];
+    let mut col_sum = vec![T::zero(); after];
     for k in 0..dim_size {
         let in_row = &in_block[k * after..k * after + after];
         let out_row = &mut out_block[k * after..k * after + after];
         for a in 0..after {
             let m = col_max[a];
             // A column whose max is -inf is all -inf (or empty); emit 0, matching
-            // the strided path's negative-infinity short-circuit.
-            let e = if m == f32::NEG_INFINITY {
-                0.0
+            // the contiguous path's negative-infinity short-circuit.
+            let e = if m == neg_inf {
+                T::zero()
             } else {
                 (in_row[a] - m).exp()
             };
             out_row[a] = e;
-            col_sum[a] += e;
+            col_sum[a] = col_sum[a] + e;
         }
     }
     for k in 0..dim_size {
         let out_row = &mut out_block[k * after..k * after + after];
         for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
-            if s > 0.0 {
-                *o /= s;
+            if s > T::zero() {
+                *o = *o / s;
             }
         }
     }
 }
 
-/// f64 counterpart of [`softmax_block_columnwise_f32`].
-fn softmax_block_columnwise_f64(
-    in_block: &[f64],
-    out_block: &mut [f64],
-    dim_size: usize,
-    after: usize,
-) {
-    let mut col_max = vec![f64::NEG_INFINITY; after];
-    for k in 0..dim_size {
-        let row = &in_block[k * after..k * after + after];
-        for (m, &v) in col_max.iter_mut().zip(row) {
-            if v > *m {
-                *m = v;
-            }
-        }
-    }
-    let mut col_sum = vec![0.0f64; after];
-    for k in 0..dim_size {
-        let in_row = &in_block[k * after..k * after + after];
-        let out_row = &mut out_block[k * after..k * after + after];
-        for a in 0..after {
-            let m = col_max[a];
-            let e = if m == f64::NEG_INFINITY {
-                0.0
-            } else {
-                (in_row[a] - m).exp()
-            };
-            out_row[a] = e;
-            col_sum[a] += e;
-        }
-    }
-    for k in 0..dim_size {
-        let out_row = &mut out_block[k * after..k * after + after];
-        for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
-            if s > 0.0 {
-                *o /= s;
-            }
-        }
-    }
-}
-
-pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    let dims = tensor.shape().dims();
-    let dim_size = dims[dim];
-
-    if dim_size == 0 {
+/// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
+fn softmax_core<T: Float + Send + Sync>(
+    input_data: &[T],
+    output_slice: &mut [T],
+    dims: &[usize],
+    dim: usize,
+) -> Result<()> {
+    let Some((dim_size, after, group)) = softmax_geometry(dims, dim) else {
         return Ok(());
-    }
-
-    // Compute the number of groups before and after the softmax dimension. This
-    // allows us to iterate over all slices along `dim` for tensors of arbitrary
-    // rank using row-major indexing.
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
+    let neg_inf = T::neg_infinity();
+
     input_data
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
@@ -450,127 +428,72 @@ pub(crate) fn softmax_f32(tensor: &Tensor, output_data: &mut TensorData, dim: us
             if after == 1 {
                 // Softmax over the last (contiguous) dimension: each block is a
                 // single slice laid out contiguously.
-                let mut max_val = f32::NEG_INFINITY;
+                let mut max_val = neg_inf;
                 for &v in in_block.iter() {
-                    max_val = max_val.max(v);
+                    if v > max_val {
+                        max_val = v;
+                    }
                 }
-                if max_val == f32::NEG_INFINITY {
-                    out_block.fill(0.0);
+                if max_val == neg_inf {
+                    out_block.fill(T::zero());
                     return;
                 }
-                let mut sum = 0.0f32;
+                let mut sum = T::zero();
                 for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
                     let e = (v - max_val).exp();
                     *o = e;
-                    sum += e;
+                    sum = sum + e;
                 }
                 for o in out_block.iter_mut() {
-                    *o /= sum;
+                    *o = *o / sum;
                 }
             } else {
                 // Softmax over a non-last dimension: the block is a
                 // `[dim_size, after]` row-major matrix and the reduction runs
-                // down the rows. Using `after`-sized column accumulators keeps
-                // every pass contiguous (cache-friendly) instead of striding by
-                // `after` per element.
-                softmax_block_columnwise_f32(in_block, out_block, dim_size, after);
+                // down the rows. Column accumulators keep every pass contiguous
+                // instead of striding by `after` per element.
+                softmax_block_columnwise(in_block, out_block, dim_size, after);
             }
         });
 
     Ok(())
 }
 
-pub(crate) fn softmax_f64(tensor: &Tensor, output_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    let dims = tensor.shape().dims();
-    let dim_size = dims[dim];
-
-    if dim_size == 0 {
-        return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .for_each(|(in_block, out_block)| {
-            if after == 1 {
-                let mut max_val = f64::NEG_INFINITY;
-                for &v in in_block.iter() {
-                    max_val = max_val.max(v);
-                }
-                if max_val == f64::NEG_INFINITY {
-                    out_block.fill(0.0);
-                    return;
-                }
-                let mut sum = 0.0f64;
-                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                    let e = (v - max_val).exp();
-                    *o = e;
-                    sum += e;
-                }
-                for o in out_block.iter_mut() {
-                    *o /= sum;
-                }
-            } else {
-                softmax_block_columnwise_f64(in_block, out_block, dim_size, after);
-            }
-        });
-
-    Ok(())
-}
-
-pub(crate) fn masked_softmax_f32(
-    tensor: &Tensor,
-    mask: &Tensor,
-    output_data: &mut TensorData,
+/// `softmax` restricted to the unmasked positions.
+///
+/// Masked entries take no part in the max or the sum and come out as 0. A slice
+/// with no unmasked entry -- or whose unmasked entries are all `-inf` -- is all
+/// zeros rather than NaN.
+fn masked_softmax_core<T: Float + Send + Sync>(
+    input_data: &[T],
+    output_slice: &mut [T],
+    mask_data: &[bool],
+    tensor_shape: &Shape,
+    mask_shape: &Shape,
     dim: usize,
 ) -> Result<()> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
-    let mask_data = mask.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from mask tensor")
-    })?;
-    let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f32 slice from output data")
-    })?;
-
-    let dims = tensor.shape().dims();
-    let mask_dims = mask.shape().dims();
-    let dim_size = dims[dim];
-    if dim_size == 0 {
+    let dims = tensor_shape.dims();
+    let mask_dims = mask_shape.dims();
+    let Some((dim_size, after, group)) = softmax_geometry(dims, dim) else {
         return Ok(());
-    }
+    };
+    let neg_inf = T::neg_infinity();
 
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let group = dim_size * after;
-    let same_shape = mask_dims == dims;
-    let output_strides = if same_shape {
-        None
-    } else {
-        Some(Strides::from_shape(tensor.shape()))
-    };
-    let mask_strides = if same_shape {
-        None
-    } else {
-        Some(Strides::from_shape(mask.shape()))
+    // Resolving a mask position through one closure is what lets the passes
+    // below read the same whether or not the mask is broadcast; spelling the
+    // lookup out inline needed six copies of it.
+    let strides = mask_strides_for(tensor_shape, mask_shape);
+    let is_masked = |linear_idx: usize| match &strides {
+        Some((out_strides, m_strides)) => {
+            mask_data[broadcast_mask_index(
+                linear_idx,
+                dims,
+                out_strides.as_slice(),
+                mask_dims,
+                m_strides.as_slice(),
+            )]
+        }
+        None => mask_data[linear_idx],
     };
 
     input_data
@@ -579,72 +502,40 @@ pub(crate) fn masked_softmax_f32(
         .enumerate()
         .for_each(|(block_idx, (in_block, out_block))| {
             let block_offset = block_idx * group;
-            for a in 0..after {
-                let base = a;
-                let mut max_val = f32::NEG_INFINITY;
+            for base in 0..after {
+                let mut max_val = neg_inf;
                 let mut has_unmasked = false;
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask_data[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.as_ref().unwrap().as_slice(),
-                            mask_dims,
-                            mask_strides.as_ref().unwrap().as_slice(),
-                        );
-                        mask_data[mask_index]
-                    };
-                    if !masked {
+                    if !is_masked(block_offset + idx) {
                         has_unmasked = true;
-                        max_val = max_val.max(in_block[idx]);
+                        let v = in_block[idx];
+                        if v > max_val {
+                            max_val = v;
+                        }
                     }
                 }
-                if !has_unmasked {
+                if !has_unmasked || max_val == neg_inf {
                     for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
+                        out_block[base + k * after] = T::zero();
                     }
                     continue;
                 }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
-                    }
-                    continue;
-                }
-                let mut sum = 0.0f32;
+                let mut sum = T::zero();
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask_data[linear_idx]
+                    if is_masked(block_offset + idx) {
+                        out_block[idx] = T::zero();
                     } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.as_ref().unwrap().as_slice(),
-                            mask_dims,
-                            mask_strides.as_ref().unwrap().as_slice(),
-                        );
-                        mask_data[mask_index]
-                    };
-                    if masked {
-                        out_block[idx] = 0.0;
-                    } else {
-                        let val = (in_block[idx] - max_val).exp();
-                        out_block[idx] = val;
-                        sum += val;
+                        let e = (in_block[idx] - max_val).exp();
+                        out_block[idx] = e;
+                        sum = sum + e;
                     }
                 }
-                if sum != 0.0 {
+                if sum != T::zero() {
                     for k in 0..dim_size {
                         let idx = base + k * after;
-                        out_block[idx] /= sum;
+                        out_block[idx] = out_block[idx] / sum;
                     }
                 }
             }
@@ -653,145 +544,80 @@ pub(crate) fn masked_softmax_f32(
     Ok(())
 }
 
-pub(crate) fn masked_softmax_f64(
-    tensor: &Tensor,
-    mask: &Tensor,
-    output_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-    let mask_data = mask.data().as_bool_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get bool slice from mask tensor")
-    })?;
-    let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get mutable f64 slice from output data")
-    })?;
-
-    let dims = tensor.shape().dims();
-    let mask_dims = mask.shape().dims();
-    let dim_size = dims[dim];
-    if dim_size == 0 {
-        return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
+macro_rules! softmax_entry {
+    ($name:ident, $core:ident, $as_input:ident, $as_output:ident) => {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            output_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
+            let input_data = tensor.data().$as_input().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get input slice from tensor")
+            })?;
+            let output_slice = output_data.$as_output().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable output slice from data")
+            })?;
+            $core(input_data, output_slice, tensor.shape().dims(), dim)
+        }
     };
-    let group = dim_size * after;
-    let same_shape = mask_dims == dims;
-    let output_strides = if same_shape {
-        None
-    } else {
-        Some(Strides::from_shape(tensor.shape()))
-    };
-    let mask_strides = if same_shape {
-        None
-    } else {
-        Some(Strides::from_shape(mask.shape()))
-    };
-
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .enumerate()
-        .for_each(|(block_idx, (in_block, out_block))| {
-            let block_offset = block_idx * group;
-            for a in 0..after {
-                let base = a;
-                let mut max_val = f64::NEG_INFINITY;
-                let mut has_unmasked = false;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask_data[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.as_ref().unwrap().as_slice(),
-                            mask_dims,
-                            mask_strides.as_ref().unwrap().as_slice(),
-                        );
-                        mask_data[mask_index]
-                    };
-                    if !masked {
-                        has_unmasked = true;
-                        max_val = max_val.max(in_block[idx]);
-                    }
-                }
-                if !has_unmasked {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
-                    }
-                    continue;
-                }
-                if max_val.is_infinite() && max_val.is_sign_negative() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = 0.0;
-                    }
-                    continue;
-                }
-                let mut sum = 0.0f64;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let masked = if same_shape {
-                        mask_data[linear_idx]
-                    } else {
-                        let mask_index = broadcast_mask_index(
-                            linear_idx,
-                            dims,
-                            output_strides.as_ref().unwrap().as_slice(),
-                            mask_dims,
-                            mask_strides.as_ref().unwrap().as_slice(),
-                        );
-                        mask_data[mask_index]
-                    };
-                    if masked {
-                        out_block[idx] = 0.0;
-                    } else {
-                        let val = (in_block[idx] - max_val).exp();
-                        out_block[idx] = val;
-                        sum += val;
-                    }
-                }
-                if sum != 0.0 {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] /= sum;
-                    }
-                }
-            }
-        });
-
-    Ok(())
 }
 
+macro_rules! masked_softmax_entry {
+    ($name:ident, $core:ident, $as_input:ident, $as_output:ident) => {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            mask: &Tensor,
+            output_data: &mut TensorData,
+            dim: usize,
+        ) -> Result<()> {
+            let input_data = tensor.data().$as_input().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get input slice from tensor")
+            })?;
+            let mask_data = mask.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from mask tensor")
+            })?;
+            let output_slice = output_data.$as_output().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable output slice from data")
+            })?;
+            $core(
+                input_data,
+                output_slice,
+                mask_data,
+                tensor.shape(),
+                mask.shape(),
+                dim,
+            )
+        }
+    };
+}
+
+softmax_entry!(softmax_f32, softmax_core, as_f32_slice, as_f32_slice_mut);
+softmax_entry!(softmax_f64, softmax_core, as_f64_slice, as_f64_slice_mut);
+masked_softmax_entry!(
+    masked_softmax_f32,
+    masked_softmax_core,
+    as_f32_slice,
+    as_f32_slice_mut
+);
+masked_softmax_entry!(
+    masked_softmax_f64,
+    masked_softmax_core,
+    as_f64_slice,
+    as_f64_slice_mut
+);
+
+/// `log_softmax` along `dim`, via the shifted log-sum-exp so the exponentials
+/// cannot overflow.
 fn log_softmax_core<T: Float + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
     dims: &[usize],
     dim: usize,
-    neg_inf: T,
 ) -> Result<()> {
-    let dim_size = dims[dim];
-    if dim_size == 0 {
+    let Some((dim_size, after, group)) = softmax_geometry(dims, dim) else {
         return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
+    let neg_inf = T::neg_infinity();
     input_data
         .par_chunks(group)
         .zip(output_slice.par_chunks_mut(group))
@@ -864,6 +690,11 @@ fn log_softmax_core<T: Float + Send + Sync>(
     Ok(())
 }
 
+/// `log_softmax` restricted to the unmasked positions.
+///
+/// Masked entries take no part in the max or the log-sum and come out as
+/// `-inf`, as does every entry of a slice with no unmasked value (or whose
+/// unmasked values are all `-inf`).
 fn masked_log_softmax_core<T: Float + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
@@ -871,79 +702,31 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
     tensor_shape: &Shape,
     mask_shape: &Shape,
     dim: usize,
-    neg_inf: T,
 ) -> Result<()> {
     let dims = tensor_shape.dims();
     let mask_dims = mask_shape.dims();
-    let dim_size = dims[dim];
-    if dim_size == 0 {
+    let Some((dim_size, after, group)) = softmax_geometry(dims, dim) else {
         return Ok(());
-    }
-
-    let after: usize = if dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
     };
-    let group = dim_size * after;
-    let same_shape = mask_dims == dims;
+    let neg_inf = T::neg_infinity();
 
-    if same_shape {
-        input_data
-            .par_chunks(group)
-            .zip(output_slice.par_chunks_mut(group))
-            .enumerate()
-            .for_each(|(block_idx, (in_block, out_block))| {
-                let block_offset = block_idx * group;
-                for a in 0..after {
-                    let base = a;
-                    let mut max_val = neg_inf;
-                    let mut has_unmasked = false;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        if !mask_data[linear_idx] {
-                            has_unmasked = true;
-                            let val = in_block[idx];
-                            if val > max_val {
-                                max_val = val;
-                            }
-                        }
-                    }
-                    if !has_unmasked || (max_val.is_infinite() && max_val.is_sign_negative()) {
-                        for k in 0..dim_size {
-                            let idx = base + k * after;
-                            out_block[idx] = neg_inf;
-                        }
-                        continue;
-                    }
-                    let mut sum = T::zero();
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        if !mask_data[linear_idx] {
-                            sum = sum + (in_block[idx] - max_val).exp();
-                        }
-                    }
-                    let logsum = sum.ln() + max_val;
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        let linear_idx = block_offset + idx;
-                        if mask_data[linear_idx] {
-                            out_block[idx] = neg_inf;
-                        } else {
-                            out_block[idx] = in_block[idx] - logsum;
-                        }
-                    }
-                }
-            });
-        return Ok(());
-    }
-
-    let output_strides = Strides::from_shape(tensor_shape);
-    let mask_strides = Strides::from_shape(mask_shape);
-    let output_stride_slice = output_strides.as_slice();
-    let mask_stride_slice = mask_strides.as_slice();
+    // One closure for the mask lookup, so the three passes below read the same
+    // whether or not the mask is broadcast. Writing the branch at the top level
+    // instead meant two copies of the whole kernel, each with three inlined
+    // copies of this lookup.
+    let strides = mask_strides_for(tensor_shape, mask_shape);
+    let is_masked = |linear_idx: usize| match &strides {
+        Some((out_strides, m_strides)) => {
+            mask_data[broadcast_mask_index(
+                linear_idx,
+                dims,
+                out_strides.as_slice(),
+                mask_dims,
+                m_strides.as_slice(),
+            )]
+        }
+        None => mask_data[linear_idx],
+    };
 
     input_data
         .par_chunks(group)
@@ -951,66 +734,40 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
         .enumerate()
         .for_each(|(block_idx, (in_block, out_block))| {
             let block_offset = block_idx * group;
-            for a in 0..after {
-                let base = a;
+            for base in 0..after {
                 let mut max_val = neg_inf;
                 let mut has_unmasked = false;
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let mask_index = broadcast_mask_index(
-                        linear_idx,
-                        dims,
-                        output_stride_slice,
-                        mask_dims,
-                        mask_stride_slice,
-                    );
-                    if !mask_data[mask_index] {
+                    if !is_masked(block_offset + idx) {
                         has_unmasked = true;
-                        let val = in_block[idx];
-                        if val > max_val {
-                            max_val = val;
+                        let v = in_block[idx];
+                        if v > max_val {
+                            max_val = v;
                         }
                     }
                 }
-                if !has_unmasked || (max_val.is_infinite() && max_val.is_sign_negative()) {
+                if !has_unmasked || max_val == neg_inf {
                     for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = neg_inf;
+                        out_block[base + k * after] = neg_inf;
                     }
                     continue;
                 }
                 let mut sum = T::zero();
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let mask_index = broadcast_mask_index(
-                        linear_idx,
-                        dims,
-                        output_stride_slice,
-                        mask_dims,
-                        mask_stride_slice,
-                    );
-                    if !mask_data[mask_index] {
+                    if !is_masked(block_offset + idx) {
                         sum = sum + (in_block[idx] - max_val).exp();
                     }
                 }
                 let logsum = sum.ln() + max_val;
                 for k in 0..dim_size {
                     let idx = base + k * after;
-                    let linear_idx = block_offset + idx;
-                    let mask_index = broadcast_mask_index(
-                        linear_idx,
-                        dims,
-                        output_stride_slice,
-                        mask_dims,
-                        mask_stride_slice,
-                    );
-                    if mask_data[mask_index] {
-                        out_block[idx] = neg_inf;
+                    out_block[idx] = if is_masked(block_offset + idx) {
+                        neg_inf
                     } else {
-                        out_block[idx] = in_block[idx] - logsum;
-                    }
+                        in_block[idx] - logsum
+                    };
                 }
             }
         });
@@ -1018,125 +775,27 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
     Ok(())
 }
 
-macro_rules! masked_log_softmax_impl {
-    (
-        $tensor:expr,
-        $mask:expr,
-        $output_data:expr,
-        $dim:expr,
-        $input_ty:ty,
-        $as_input:ident,
-        $as_output:ident,
-        $neg_inf:expr
-    ) => {{
-        let input_data = $tensor.data().$as_input().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get input slice from tensor")
-        })?;
-        let mask_data = $mask.data().as_bool_slice().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get bool slice from mask tensor")
-        })?;
-        let output_slice = $output_data.$as_output().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get mutable output slice from data")
-        })?;
-
-        masked_log_softmax_core(
-            input_data,
-            output_slice,
-            mask_data,
-            $tensor.shape(),
-            $mask.shape(),
-            $dim,
-            $neg_inf,
-        )
-    }};
-}
-
-macro_rules! log_softmax_impl {
-    (
-        $tensor:expr,
-        $output_data:expr,
-        $dim:expr,
-        $input_ty:ty,
-        $as_input:ident,
-        $as_output:ident,
-        $neg_inf:expr
-    ) => {{
-        let input_data = $tensor.data().$as_input().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get input slice from tensor")
-        })?;
-        let output_slice = $output_data.$as_output().ok_or_else(|| {
-            MinitensorError::internal_error("Failed to get mutable output slice from data")
-        })?;
-
-        let dims = $tensor.shape().dims();
-        log_softmax_core(input_data, output_slice, dims, $dim, $neg_inf)
-    }};
-}
-
-pub(crate) fn masked_log_softmax_f32(
-    tensor: &Tensor,
-    mask: &Tensor,
-    output_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    masked_log_softmax_impl!(
-        tensor,
-        mask,
-        output_data,
-        dim,
-        f32,
-        as_f32_slice,
-        as_f32_slice_mut,
-        f32::NEG_INFINITY
-    )
-}
-
-pub(crate) fn masked_log_softmax_f64(
-    tensor: &Tensor,
-    mask: &Tensor,
-    output_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    masked_log_softmax_impl!(
-        tensor,
-        mask,
-        output_data,
-        dim,
-        f64,
-        as_f64_slice,
-        as_f64_slice_mut,
-        f64::NEG_INFINITY
-    )
-}
-
-pub(crate) fn log_softmax_f32(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    log_softmax_impl!(
-        tensor,
-        output_data,
-        dim,
-        f32,
-        as_f32_slice,
-        as_f32_slice_mut,
-        f32::NEG_INFINITY
-    )
-}
-
-pub(crate) fn log_softmax_f64(
-    tensor: &Tensor,
-    output_data: &mut TensorData,
-    dim: usize,
-) -> Result<()> {
-    log_softmax_impl!(
-        tensor,
-        output_data,
-        dim,
-        f64,
-        as_f64_slice,
-        as_f64_slice_mut,
-        f64::NEG_INFINITY
-    )
-}
+softmax_entry!(
+    log_softmax_f32,
+    log_softmax_core,
+    as_f32_slice,
+    as_f32_slice_mut
+);
+softmax_entry!(
+    log_softmax_f64,
+    log_softmax_core,
+    as_f64_slice,
+    as_f64_slice_mut
+);
+masked_softmax_entry!(
+    masked_log_softmax_f32,
+    masked_log_softmax_core,
+    as_f32_slice,
+    as_f32_slice_mut
+);
+masked_softmax_entry!(
+    masked_log_softmax_f64,
+    masked_log_softmax_core,
+    as_f64_slice,
+    as_f64_slice_mut
+);

@@ -461,6 +461,82 @@ def test_masked_softmax_all_neg_inf_unmasked_is_zero():
     assert np.allclose(result.numpy(), np.array([0.0, 0.0], dtype=np.float32))
 
 
+def _reference_masked_softmax(x, mask, axis, log=False):
+    """NumPy reference: masked entries drop out of both the max and the sum."""
+    masked_x = np.where(mask, -np.inf, x.astype(np.float64))
+    peak = np.max(masked_x, axis=axis, keepdims=True)
+    empty = ~np.isfinite(peak)  # the whole slice is masked, or is all -inf
+    shift = np.where(empty, 0.0, peak)
+    exps = np.where(mask, 0.0, np.exp(masked_x - shift))
+    total = exps.sum(axis=axis, keepdims=True)
+    if log:
+        out = np.where(
+            mask, -np.inf, masked_x - (np.log(np.where(total == 0, 1, total)) + shift)
+        )
+        return np.where(empty, -np.inf, out)
+    out = np.where(total > 0, exps / np.where(total == 0, 1, total), 0.0)
+    return np.where(empty, 0.0, out)
+
+
+# The softmax family is one generic kernel per variant rather than one per
+# dtype, and the masked variants resolve a possibly-broadcast mask through a
+# single closure. Sweep both dtypes, every axis of a rank-1/2/3 tensor, and
+# masks that do and do not need broadcasting.
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "shape,mask_shape",
+    [
+        ((6,), (6,)),
+        ((4, 6), (4, 6)),
+        ((4, 6), (1, 6)),
+        ((3, 4, 5), (3, 4, 5)),
+        ((3, 4, 5), (1, 1, 5)),
+        ((3, 4, 5), (1, 4, 5)),
+    ],
+)
+def test_masked_softmax_family_matches_reference(dtype, shape, mask_shape):
+    rng = np.random.default_rng(20240717)
+    np_dtype = np.float32 if dtype == "float32" else np.float64
+    x_np = (rng.standard_normal(shape) * 3).astype(np_dtype)
+    mask_np = rng.random(mask_shape) < 0.4
+    broadcast_mask = np.broadcast_to(mask_np, shape)
+
+    x = mt.Tensor(x_np)
+    mask = mt.Tensor(np.ascontiguousarray(mask_np)).astype("bool")
+
+    for axis in range(len(shape)):
+        got = F.masked_softmax(x, mask, dim=axis).numpy()
+        want = _reference_masked_softmax(x_np, broadcast_mask, axis)
+        assert np.allclose(
+            got, want, rtol=1e-5, atol=1e-6
+        ), f"masked_softmax axis={axis}"
+
+        got_log = F.masked_log_softmax(x, mask, dim=axis).numpy()
+        want_log = _reference_masked_softmax(x_np, broadcast_mask, axis, log=True)
+        finite = np.isfinite(want_log)
+        assert np.allclose(
+            got_log[finite], want_log[finite], rtol=1e-5, atol=1e-5
+        ), f"masked_log_softmax axis={axis}"
+        assert np.all(np.isneginf(got_log[~finite])), f"masked_log_softmax axis={axis}"
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("shape", [(6,), (4, 7), (3, 4, 5)])
+def test_softmax_family_matches_reference(dtype, shape):
+    rng = np.random.default_rng(20240718)
+    np_dtype = np.float32 if dtype == "float32" else np.float64
+    x_np = (rng.standard_normal(shape) * 3).astype(np_dtype)
+    x = mt.Tensor(x_np)
+
+    for axis in range(len(shape)):
+        shifted = x_np.astype(np.float64) - np.max(x_np, axis=axis, keepdims=True)
+        want = np.exp(shifted) / np.exp(shifted).sum(axis=axis, keepdims=True)
+        assert np.allclose(F.softmax(x, dim=axis).numpy(), want, rtol=1e-5, atol=1e-6)
+        assert np.allclose(
+            F.log_softmax(x, dim=axis).numpy(), np.log(want), rtol=1e-5, atol=1e-5
+        )
+
+
 def _layer_norm_reference(x, normalized_shape, weight=None, bias=None, eps=1e-5):
     normalized_shape = tuple(normalized_shape)
     dims = len(normalized_shape)
