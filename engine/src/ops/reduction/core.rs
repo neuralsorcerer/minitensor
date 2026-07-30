@@ -517,38 +517,6 @@ fn ensure_floating_point_dtype_for(dtype: DataType, operation: &str) -> Result<(
     }
 }
 
-pub(crate) fn fill_quantile_single_f32(
-    input: &[f32],
-    values: &mut [f32],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            values[o * inner + r] = if value.is_nan() { f32::NAN } else { value };
-        }
-    }
-}
-
-pub(crate) fn fill_quantile_single_f64(
-    input: &[f64],
-    values: &mut [f64],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            let idx = o * outer_stride + r;
-            let value = input[idx];
-            values[o * inner + r] = if value.is_nan() { f64::NAN } else { value };
-        }
-    }
-}
-
 pub(crate) fn fill_quantiles_single_f32(
     input: &[f32],
     values: &mut [f32],
@@ -592,33 +560,6 @@ pub(crate) fn fill_quantiles_single_f64(
 // A single-element reduction slice trivially equals its only value; when that
 // value is NaN it flows straight through, matching NumPy/PyTorch, which return
 // NaN for all-NaN slices rather than erroring.
-pub(crate) fn fill_nanquantile_single_f32(
-    input: &[f32],
-    values: &mut [f32],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            values[o * inner + r] = input[o * outer_stride + r];
-        }
-    }
-}
-
-pub(crate) fn fill_nanquantile_single_f64(
-    input: &[f64],
-    values: &mut [f64],
-    outer: usize,
-    inner: usize,
-    outer_stride: usize,
-) {
-    for o in 0..outer {
-        for r in 0..inner {
-            values[o * inner + r] = input[o * outer_stride + r];
-        }
-    }
-}
 
 pub(crate) fn fill_nanquantiles_single_f32(
     input: &[f32],
@@ -842,7 +783,7 @@ fn quantile_all(
                 }
                 values.push(value);
             }
-            let quant = quantile_from_unsorted_f32(&mut values, q, interpolation);
+            let quant = quantile_from_unsorted(&mut values, q, interpolation);
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
             })?[0] = quant;
@@ -873,7 +814,7 @@ fn quantile_all(
                 }
                 values.push(value);
             }
-            let quant = quantile_from_unsorted_f64(&mut values, q, interpolation);
+            let quant = quantile_from_unsorted(&mut values, q, interpolation);
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
             })?[0] = quant;
@@ -921,7 +862,7 @@ fn nanquantile_all(
             let quant = if values.is_empty() {
                 f32::NAN
             } else {
-                quantile_from_unsorted_f32(&mut values, q, interpolation)
+                quantile_from_unsorted(&mut values, q, interpolation)
             };
             result_data.as_f32_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f32 slice")
@@ -936,7 +877,7 @@ fn nanquantile_all(
             let quant = if values.is_empty() {
                 f64::NAN
             } else {
-                quantile_from_unsorted_f64(&mut values, q, interpolation)
+                quantile_from_unsorted(&mut values, q, interpolation)
             };
             result_data.as_f64_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable f64 slice")
@@ -958,6 +899,87 @@ fn nanquantile_all(
         tensor.device(),
         tensor.requires_grad(),
     ))
+}
+
+/// The total ordering on floats, which `num_traits::Float` does not expose.
+///
+/// Quantile selection orders by `total_cmp` rather than `partial_cmp` so that
+/// NaN has a defined position instead of making the comparator inconsistent —
+/// `select_nth_unstable_by` with an inconsistent comparator may panic or return
+/// an arbitrary element. Callers filter NaN out beforehand; this keeps the
+/// selection well-defined regardless.
+pub(crate) trait TotalCmp: num_traits::Float + Copy {
+    fn total_order(&self, other: &Self) -> Ordering;
+}
+
+impl TotalCmp for f32 {
+    #[inline]
+    fn total_order(&self, other: &Self) -> Ordering {
+        self.total_cmp(other)
+    }
+}
+
+impl TotalCmp for f64 {
+    #[inline]
+    fn total_order(&self, other: &Self) -> Ordering {
+        self.total_cmp(other)
+    }
+}
+
+/// The element of rank `idx`, found by quickselect. Reorders `values`.
+fn select_rank<T: TotalCmp>(values: &mut [T], idx: usize) -> T {
+    let (_, pivot, _) = values.select_nth_unstable_by(idx, |a, b| a.total_order(b));
+    *pivot
+}
+
+/// The elements of ranks `lower_idx` and `upper_idx`.
+///
+/// Selecting the upper rank first partitions everything below it, so the second
+/// selection only has to search that prefix.
+fn select_rank_pair<T: TotalCmp>(values: &mut [T], lower_idx: usize, upper_idx: usize) -> (T, T) {
+    if lower_idx == upper_idx {
+        let value = select_rank(values, lower_idx);
+        return (value, value);
+    }
+
+    let upper = select_rank(values, upper_idx);
+    let lower = select_rank(&mut values[..upper_idx], lower_idx);
+    (lower, upper)
+}
+
+/// The `q`-th quantile of an unsorted slice, via quickselect rather than a full
+/// sort: only the one or two order statistics that bracket the requested
+/// position are needed, which is `O(n)` instead of `O(n log n)`.
+///
+/// Reorders `values`.
+pub(crate) fn quantile_from_unsorted<T: TotalCmp>(
+    values: &mut [T],
+    q: f64,
+    interpolation: QuantileInterpolation,
+) -> T {
+    if values.len() == 1 {
+        return values[0];
+    }
+
+    let position = quantile_position_for_len_q(values.len(), q);
+    if position.lower_idx == position.upper_idx {
+        return select_rank(values, position.lower_idx);
+    }
+
+    match interpolation {
+        QuantileInterpolation::Lower => select_rank(values, position.lower_idx),
+        QuantileInterpolation::Higher => select_rank(values, position.upper_idx),
+        QuantileInterpolation::Nearest => select_rank(values, position.nearest_idx),
+        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
+            let (lower, upper) = select_rank_pair(values, position.lower_idx, position.upper_idx);
+            let interpolated = interpolation.interpolate(
+                lower.to_f64().unwrap_or(f64::NAN),
+                upper.to_f64().unwrap_or(f64::NAN),
+                position.weight,
+            );
+            T::from(interpolated).unwrap_or_else(T::nan)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -7,273 +7,11 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
+    ops::map::PAR_CHUNK,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
-
-pub(crate) fn quantile_along_dim(
-    tensor: &Tensor,
-    dim: usize,
-    keepdim: bool,
-    q: f64,
-    interpolation: QuantileInterpolation,
-) -> Result<Tensor> {
-    let dims = tensor.shape().dims();
-    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
-
-    if dim_size == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "quantile() does not support reductions over empty dimensions".to_string(),
-        ));
-    }
-
-    let mut out_dims = if dims.is_empty() {
-        vec![1]
-    } else {
-        dims.to_vec()
-    };
-
-    if keepdim {
-        if !out_dims.is_empty() {
-            out_dims[dim] = 1;
-        }
-    } else if !out_dims.is_empty() {
-        out_dims.remove(dim);
-    }
-
-    let values_shape = Shape::new(out_dims);
-    let num_out = values_shape.numel();
-    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
-
-    let outer = if dims.is_empty() || dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
-    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let outer_stride = dim_size * inner;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_quantile_single_f32(input, values, outer, inner, outer_stride);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                for o in 0..outer {
-                    for r in 0..inner {
-                        buffer.clear();
-                        let mut has_nan = false;
-                        for d in 0..dim_size {
-                            let idx = o * outer_stride + d * inner + r;
-                            let value = input[idx];
-                            if value.is_nan() {
-                                has_nan = true;
-                                break;
-                            }
-                            buffer.push(value);
-                        }
-
-                        if has_nan {
-                            values[o * inner + r] = f32::NAN;
-                            continue;
-                        }
-
-                        values[o * inner + r] =
-                            quantile_from_unsorted_f32(&mut buffer, q, interpolation);
-                    }
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_quantile_single_f64(input, values, outer, inner, outer_stride);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                for o in 0..outer {
-                    for r in 0..inner {
-                        buffer.clear();
-                        let mut has_nan = false;
-                        for d in 0..dim_size {
-                            let idx = o * outer_stride + d * inner + r;
-                            let value = input[idx];
-                            if value.is_nan() {
-                                has_nan = true;
-                                break;
-                            }
-                            buffer.push(value);
-                        }
-
-                        if has_nan {
-                            values[o * inner + r] = f64::NAN;
-                            continue;
-                        }
-
-                        values[o * inner + r] =
-                            quantile_from_unsorted_f64(&mut buffer, q, interpolation);
-                    }
-                }
-            }
-        }
-        _ => unreachable!("dtype validated"),
-    }
-
-    Ok(Tensor::new(
-        Arc::new(values_data),
-        values_shape,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
-pub(crate) fn nanquantile_along_dim(
-    tensor: &Tensor,
-    dim: usize,
-    keepdim: bool,
-    q: f64,
-    interpolation: QuantileInterpolation,
-) -> Result<Tensor> {
-    let dims = tensor.shape().dims();
-    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
-
-    if dim_size == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "nanquantile() does not support reductions over empty dimensions".to_string(),
-        ));
-    }
-
-    let mut out_dims = if dims.is_empty() {
-        vec![1]
-    } else {
-        dims.to_vec()
-    };
-
-    if keepdim {
-        if !out_dims.is_empty() {
-            out_dims[dim] = 1;
-        }
-    } else if !out_dims.is_empty() {
-        out_dims.remove(dim);
-    }
-
-    let values_shape = Shape::new(out_dims);
-    let num_out = values_shape.numel();
-    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
-
-    let outer = if dims.is_empty() || dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
-    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let outer_stride = dim_size * inner;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_nanquantile_single_f32(input, values, outer, inner, outer_stride);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                for o in 0..outer {
-                    for r in 0..inner {
-                        buffer.clear();
-                        for d in 0..dim_size {
-                            let idx = o * outer_stride + d * inner + r;
-                            let val = input[idx];
-                            if !val.is_nan() {
-                                buffer.push(val);
-                            }
-                        }
-
-                        // All-NaN slice -> NaN (NumPy/PyTorch semantics).
-                        let quant = if buffer.is_empty() {
-                            f32::NAN
-                        } else {
-                            quantile_from_unsorted_f32(&mut buffer, q, interpolation)
-                        };
-                        values[o * inner + r] = quant;
-                    }
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-
-            if dim_size == 1 {
-                fill_nanquantile_single_f64(input, values, outer, inner, outer_stride);
-            } else {
-                let mut buffer = Vec::with_capacity(dim_size);
-                for o in 0..outer {
-                    for r in 0..inner {
-                        buffer.clear();
-                        for d in 0..dim_size {
-                            let idx = o * outer_stride + d * inner + r;
-                            let val = input[idx];
-                            if !val.is_nan() {
-                                buffer.push(val);
-                            }
-                        }
-
-                        // All-NaN slice -> NaN (NumPy/PyTorch semantics).
-                        let quant = if buffer.is_empty() {
-                            f64::NAN
-                        } else {
-                            quantile_from_unsorted_f64(&mut buffer, q, interpolation)
-                        };
-                        values[o * inner + r] = quant;
-                    }
-                }
-            }
-        }
-        _ => unreachable!("dtype validated"),
-    }
-
-    Ok(Tensor::new(
-        Arc::new(values_data),
-        values_shape,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
 
 pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
     let output_dims = if keepdim && tensor.ndim() > 0 {
@@ -298,7 +36,7 @@ pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
             values[0] = if buffer.is_empty() {
                 f32::NAN
             } else {
-                quantile_from_unsorted_f32(&mut buffer, 0.5, QuantileInterpolation::Linear)
+                quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
             };
         }
         DataType::Float64 => {
@@ -313,7 +51,7 @@ pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
             values[0] = if buffer.is_empty() {
                 f64::NAN
             } else {
-                quantile_from_unsorted_f64(&mut buffer, 0.5, QuantileInterpolation::Linear)
+                quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
             };
         }
         _ => unreachable!("dtype validated"),
@@ -385,7 +123,7 @@ pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) ->
                     values[out_idx] = if buffer.is_empty() {
                         f32::NAN
                     } else {
-                        quantile_from_unsorted_f32(&mut buffer, 0.5, QuantileInterpolation::Linear)
+                        quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
                     };
                 }
             }
@@ -412,7 +150,7 @@ pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) ->
                     values[out_idx] = if buffer.is_empty() {
                         f64::NAN
                     } else {
-                        quantile_from_unsorted_f64(&mut buffer, 0.5, QuantileInterpolation::Linear)
+                        quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
                     };
                 }
             }
@@ -474,7 +212,7 @@ pub(crate) fn quantiles_all(
             };
 
             if q_len == 1 {
-                values[0] = quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation);
+                values[0] = quantile_from_unsorted(&mut buffer, qs[0], interpolation);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -519,7 +257,7 @@ pub(crate) fn quantiles_all(
             };
 
             if q_len == 1 {
-                values[0] = quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation);
+                values[0] = quantile_from_unsorted(&mut buffer, qs[0], interpolation);
                 return Ok(Tensor::new(
                     Arc::new(values_data),
                     shape,
@@ -594,7 +332,7 @@ pub(crate) fn nanquantiles_all(
                 values[0] = if buffer.is_empty() {
                     f32::NAN
                 } else {
-                    quantile_from_unsorted_f32(&mut buffer, qs[0], interpolation)
+                    quantile_from_unsorted(&mut buffer, qs[0], interpolation)
                 };
                 return Ok(Tensor::new(
                     Arc::new(values_data),
@@ -637,7 +375,7 @@ pub(crate) fn nanquantiles_all(
                 values[0] = if buffer.is_empty() {
                     f64::NAN
                 } else {
-                    quantile_from_unsorted_f64(&mut buffer, qs[0], interpolation)
+                    quantile_from_unsorted(&mut buffer, qs[0], interpolation)
                 };
                 return Ok(Tensor::new(
                     Arc::new(values_data),
@@ -761,7 +499,7 @@ pub(crate) fn quantiles_along_dim(
                             }
 
                             values[out_idx] =
-                                quantile_from_unsorted_f32(&mut buffer, q_value, interpolation);
+                                quantile_from_unsorted(&mut buffer, q_value, interpolation);
                         }
                     }
                 } else {
@@ -838,7 +576,7 @@ pub(crate) fn quantiles_along_dim(
                             }
 
                             values[out_idx] =
-                                quantile_from_unsorted_f64(&mut buffer, q_value, interpolation);
+                                quantile_from_unsorted(&mut buffer, q_value, interpolation);
                         }
                     }
                 } else {
@@ -890,3 +628,169 @@ pub(crate) fn quantiles_along_dim(
         tensor.requires_grad(),
     ))
 }
+
+/// Geometry of a dimension reduction that also copes with a 0-d tensor
+/// (treated as a single length-1 column).
+pub(crate) struct QuantileDimLayout {
+    pub(crate) values_shape: Shape,
+    pub(crate) dim_size: usize,
+    pub(crate) inner: usize,
+    pub(crate) outer_stride: usize,
+}
+
+pub(crate) fn quantile_dim_layout(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+    op: &str,
+) -> Result<QuantileDimLayout> {
+    let dims = tensor.shape().dims();
+    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
+
+    if dim_size == 0 {
+        return Err(MinitensorError::invalid_argument(format!(
+            "{op}() does not support reductions over empty dimensions"
+        )));
+    }
+
+    let mut out_dims = if dims.is_empty() {
+        vec![1]
+    } else {
+        dims.to_vec()
+    };
+    if !out_dims.is_empty() {
+        if keepdim {
+            out_dims[dim] = 1;
+        } else {
+            out_dims.remove(dim);
+        }
+    }
+
+    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
+        1
+    } else {
+        dims[dim + 1..].iter().product()
+    };
+
+    Ok(QuantileDimLayout {
+        values_shape: Shape::new(out_dims),
+        dim_size,
+        inner,
+        outer_stride: dim_size * inner,
+    })
+}
+
+/// One quantile along `dim`.
+///
+/// Output slots are independent, so they parallelize; each rayon task allocates
+/// one gather buffer and reuses it across the slots it is given. (The four
+/// dtype-and-NaN-mode copies this replaces each walked every slot on a single
+/// thread.)
+///
+/// `nan_aware` decides what a NaN in a column means: with it off, one NaN makes
+/// the whole quantile NaN (`torch.quantile`); with it on, NaNs are dropped and
+/// only an all-NaN column yields NaN (`numpy.nanquantile`).
+fn quantile_along_dim_core<T: TotalCmp + Send + Sync>(
+    input: &[T],
+    values: &mut [T],
+    layout: &QuantileDimLayout,
+    nan_aware: bool,
+    q: f64,
+    interpolation: QuantileInterpolation,
+) {
+    let QuantileDimLayout {
+        dim_size,
+        inner,
+        outer_stride,
+        ..
+    } = *layout;
+
+    // A slot's column is `dim_size` elements strided by `inner`; grouping slots
+    // into chunks amortizes the buffer allocation over `PAR_CHUNK` of them.
+    values
+        .par_chunks_mut(PAR_CHUNK)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
+            for (local, slot) in chunk.iter_mut().enumerate() {
+                let out_idx = chunk_idx * PAR_CHUNK + local;
+                let o = out_idx / inner;
+                let r = out_idx % inner;
+                buffer.clear();
+
+                let mut saw_nan = false;
+                let mut idx = o * outer_stride + r;
+                for _ in 0..dim_size {
+                    let value = input[idx];
+                    if value.is_nan() {
+                        if !nan_aware {
+                            saw_nan = true;
+                            break;
+                        }
+                    } else {
+                        buffer.push(value);
+                    }
+                    idx += inner;
+                }
+
+                *slot = if saw_nan || buffer.is_empty() {
+                    T::nan()
+                } else {
+                    quantile_from_unsorted(&mut buffer, q, interpolation)
+                };
+            }
+        });
+}
+
+/// Entry points for one quantile along a dimension, per dtype and NaN mode.
+macro_rules! quantile_along_dim_entry {
+    ($name:ident, $nan_aware:literal, $op:literal) => {
+        pub(crate) fn $name(
+            tensor: &Tensor,
+            dim: usize,
+            keepdim: bool,
+            q: f64,
+            interpolation: QuantileInterpolation,
+        ) -> Result<Tensor> {
+            let layout = quantile_dim_layout(tensor, dim, keepdim, $op)?;
+            let mut values_data = TensorData::zeros_on_device(
+                layout.values_shape.numel(),
+                tensor.dtype(),
+                tensor.device(),
+            );
+
+            match tensor.dtype() {
+                DataType::Float32 => {
+                    let input = tensor.data().as_f32_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get f32 slice")
+                    })?;
+                    let values = values_data.as_f32_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f32 slice")
+                    })?;
+                    quantile_along_dim_core(input, values, &layout, $nan_aware, q, interpolation);
+                }
+                DataType::Float64 => {
+                    let input = tensor.data().as_f64_slice().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get f64 slice")
+                    })?;
+                    let values = values_data.as_f64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable f64 slice")
+                    })?;
+                    quantile_along_dim_core(input, values, &layout, $nan_aware, q, interpolation);
+                }
+                _ => unreachable!("dtype validated"),
+            }
+
+            Ok(Tensor::new(
+                Arc::new(values_data),
+                layout.values_shape,
+                tensor.dtype(),
+                tensor.device(),
+                tensor.requires_grad(),
+            ))
+        }
+    };
+}
+
+quantile_along_dim_entry!(quantile_along_dim, false, "quantile");
+quantile_along_dim_entry!(nanquantile_along_dim, true, "nanquantile");

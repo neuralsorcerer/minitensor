@@ -1112,3 +1112,61 @@ def test_global_nan_extremum_skips_nan_and_reports_nan_for_all_nan():
     all_nan = mt.Tensor(np.full(4, np.nan, dtype=np.float64))
     assert np.isnan(all_nan.nanmax().item())
     assert np.isnan(all_nan.nanmin().item())
+
+
+# quantile/nanquantile along a dimension share one generic kernel across dtypes
+# and NaN modes, so sweep both dtypes, every axis, and all five interpolations.
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("shape", [(1,), (7,), (4, 9), (2, 3, 5), (3, 1, 4)])
+def test_quantile_along_dim_matches_numpy(dtype, shape):
+    rng = np.random.default_rng(20240721)
+    tol = 1e-5 if dtype == "float32" else 1e-10
+    x = rng.standard_normal(shape).astype(dtype)
+    t = mt.Tensor(x, dtype=dtype)
+
+    for axis in range(len(shape)):
+        for q in (0.0, 0.25, 0.5, 0.73, 1.0):
+            for interp in ("linear", "lower", "higher", "midpoint", "nearest"):
+                got = t.quantile(q, dim=axis, interpolation=interp).numpy()
+                want = np.quantile(x, q, axis=axis, method=interp)
+                np.testing.assert_allclose(got, want, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("shape", [(6,), (4, 7), (2, 3, 5)])
+def test_nanquantile_along_dim_matches_numpy_on_nan_laden_data(shape):
+    rng = np.random.default_rng(20240722)
+    x = rng.standard_normal(shape)
+    x[rng.random(shape) < 0.3] = np.nan
+    t = mt.Tensor(x, dtype="float64")
+
+    for axis in range(len(shape)):
+        for interp in ("linear", "lower", "higher", "midpoint", "nearest"):
+            got = t.nanquantile(0.4, dim=axis, interpolation=interp).numpy()
+            with np.errstate(all="ignore"):
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    want = np.nanquantile(x, 0.4, axis=axis, method=interp)
+            finite = np.isfinite(want)
+            np.testing.assert_allclose(
+                got[finite], want[finite], rtol=1e-10, atol=1e-10
+            )
+            assert np.all(np.isnan(got[~finite]))
+
+
+def test_quantile_nan_column_poisons_but_nanquantile_drops():
+    x = np.array(
+        [[1.0, np.nan, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0], [np.nan] * 4], dtype=np.float64
+    )
+    t = mt.Tensor(x, dtype="float64")
+
+    plain = t.quantile(0.5, dim=1).numpy()
+    assert np.isnan(plain[0])  # one NaN makes the whole column NaN
+    assert plain[1] == pytest.approx(2.5)
+    assert np.isnan(plain[2])
+
+    skipped = t.nanquantile(0.5, dim=1).numpy()
+    assert skipped[0] == pytest.approx(3.0)
+    assert skipped[1] == pytest.approx(2.5)
+    assert np.isnan(skipped[2])  # nothing left to take a quantile of

@@ -95,7 +95,7 @@ pub(crate) fn nanquantiles_along_dim(
                             values[out_idx] = if buffer.is_empty() {
                                 f32::NAN
                             } else {
-                                quantile_from_unsorted_f32(&mut buffer, q_value, interpolation)
+                                quantile_from_unsorted(&mut buffer, q_value, interpolation)
                             };
                         }
                     }
@@ -173,7 +173,7 @@ pub(crate) fn nanquantiles_along_dim(
                             values[out_idx] = if buffer.is_empty() {
                                 f64::NAN
                             } else {
-                                quantile_from_unsorted_f64(&mut buffer, q_value, interpolation)
+                                quantile_from_unsorted(&mut buffer, q_value, interpolation)
                             };
                         }
                     }
@@ -229,118 +229,6 @@ pub(crate) fn nanquantiles_along_dim(
         tensor.device(),
         tensor.requires_grad(),
     ))
-}
-
-pub(crate) fn quantile_from_unsorted_f32(
-    values: &mut [f32],
-    q: f64,
-    interpolation: QuantileInterpolation,
-) -> f32 {
-    if values.len() == 1 {
-        return values[0];
-    }
-
-    let position = quantile_position_for_len_q(values.len(), q);
-    let lower_idx = position.lower_idx;
-    let upper_idx = position.upper_idx;
-    let weight = position.weight;
-
-    if lower_idx == upper_idx {
-        return select_quantile_at_f32(values, lower_idx);
-    }
-
-    let value = match interpolation {
-        QuantileInterpolation::Lower => select_quantile_at_f32(values, lower_idx) as f64,
-        QuantileInterpolation::Higher => select_quantile_at_f32(values, upper_idx) as f64,
-        QuantileInterpolation::Nearest => {
-            let idx = position.nearest_idx;
-            select_quantile_at_f32(values, idx) as f64
-        }
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
-            let (lower, upper) = select_quantile_bounds_f32(values, lower_idx, upper_idx);
-            interpolation.interpolate(lower as f64, upper as f64, weight)
-        }
-    };
-
-    value as f32
-}
-
-pub(crate) fn quantile_from_unsorted_f64(
-    values: &mut [f64],
-    q: f64,
-    interpolation: QuantileInterpolation,
-) -> f64 {
-    if values.len() == 1 {
-        return values[0];
-    }
-
-    let position = quantile_position_for_len_q(values.len(), q);
-    let lower_idx = position.lower_idx;
-    let upper_idx = position.upper_idx;
-    let weight = position.weight;
-
-    if lower_idx == upper_idx {
-        return select_quantile_at_f64(values, lower_idx);
-    }
-
-    match interpolation {
-        QuantileInterpolation::Lower => select_quantile_at_f64(values, lower_idx),
-        QuantileInterpolation::Higher => select_quantile_at_f64(values, upper_idx),
-        QuantileInterpolation::Nearest => {
-            let idx = position.nearest_idx;
-            select_quantile_at_f64(values, idx)
-        }
-        QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
-            let (lower, upper) = select_quantile_bounds_f64(values, lower_idx, upper_idx);
-            interpolation.interpolate(lower, upper, weight)
-        }
-    }
-}
-
-fn select_quantile_at_f32(values: &mut [f32], idx: usize) -> f32 {
-    let (_, pivot, _) = values.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
-    *pivot
-}
-
-fn select_quantile_bounds_f32(
-    values: &mut [f32],
-    lower_idx: usize,
-    upper_idx: usize,
-) -> (f32, f32) {
-    if lower_idx == upper_idx {
-        let value = select_quantile_at_f32(values, lower_idx);
-        return (value, value);
-    }
-
-    let (_, upper_pivot, _) = values.select_nth_unstable_by(upper_idx, |a, b| a.total_cmp(b));
-    let upper = *upper_pivot;
-    let (_, lower_pivot, _) =
-        values[..upper_idx].select_nth_unstable_by(lower_idx, |a, b| a.total_cmp(b));
-    let lower = *lower_pivot;
-    (lower, upper)
-}
-
-fn select_quantile_at_f64(values: &mut [f64], idx: usize) -> f64 {
-    let (_, pivot, _) = values.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
-    *pivot
-}
-
-fn select_quantile_bounds_f64(
-    values: &mut [f64],
-    lower_idx: usize,
-    upper_idx: usize,
-) -> (f64, f64) {
-    if lower_idx == upper_idx {
-        let value = select_quantile_at_f64(values, lower_idx);
-        return (value, value);
-    }
-
-    let (_, upper_pivot, _) = values.select_nth_unstable_by(upper_idx, |a, b| a.total_cmp(b));
-    let upper = *upper_pivot;
-    let (_, lower_pivot, _) =
-        values[..upper_idx].select_nth_unstable_by(lower_idx, |a, b| a.total_cmp(b));
-    let lower = *lower_pivot;
-    (lower, upper)
 }
 
 pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
