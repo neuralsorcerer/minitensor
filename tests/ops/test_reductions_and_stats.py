@@ -1216,3 +1216,53 @@ def test_multi_nanquantile_along_dim_matches_numpy(shape, qs):
                 got[finite], want[finite], rtol=1e-10, atol=1e-10
             )
             assert np.all(np.isnan(got[~finite]))
+
+
+@pytest.mark.parametrize("shape", [(8,), (5, 6), (2, 3, 4)])
+def test_nanmedian_equals_median_when_there_are_no_nans(shape):
+    # torch's contract: nanmedian is identical to median on NaN-free input.
+    # nanmedian used to interpolate (numpy's definition) while median selected
+    # the lower middle, so the two disagreed on every even-length reduction.
+    rng = np.random.default_rng(20240725)
+    x = rng.standard_normal(shape)
+    t = mt.Tensor(x, dtype="float64")
+
+    assert t.median().item() == t.nanmedian().item()
+    for axis in range(len(shape)):
+        np.testing.assert_array_equal(
+            t.median(dim=axis)[0].numpy(), t.nanmedian(dim=axis).numpy()
+        )
+
+
+def test_median_and_nanmedian_take_the_lower_middle_for_even_counts():
+    x = np.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype=np.float64)
+    t = mt.Tensor(x, dtype="float64")
+    # 2.0/6.0, not the interpolated 2.5/6.5 that numpy.median would give.
+    np.testing.assert_array_equal(t.median(dim=1)[0].numpy(), [2.0, 6.0])
+    np.testing.assert_array_equal(t.nanmedian(dim=1).numpy(), [2.0, 6.0])
+    assert t.median().item() == 4.0
+    assert t.nanmedian().item() == 4.0
+
+
+def test_nanmedian_gradient_reaches_the_selected_element():
+    # The gradient routes to input elements EQUAL to the result, split among
+    # ties. An interpolated median equals no input element, so the tie count is
+    # zero and the gradient came back NaN for every even-length input.
+    x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+
+    t = mt.Tensor(x, dtype="float64", requires_grad=True)
+    t.nanmedian().backward()
+    np.testing.assert_array_equal(t.grad.numpy(), [0.0, 1.0, 0.0, 0.0])
+
+    # ...and matches what median does on the same input.
+    m = mt.Tensor(x, dtype="float64", requires_grad=True)
+    m.median().backward()
+    np.testing.assert_array_equal(m.grad.numpy(), t.grad.numpy())
+
+
+def test_nanmedian_skips_nans_and_still_picks_a_real_element():
+    y = np.array([[1.0, np.nan, 3.0, 4.0], [np.nan] * 4], dtype=np.float64)
+    t = mt.Tensor(y, dtype="float64")
+    got = t.nanmedian(dim=1).numpy()
+    assert got[0] == 3.0  # lower middle of the surviving [1, 3, 4]
+    assert np.isnan(got[1])  # nothing survives

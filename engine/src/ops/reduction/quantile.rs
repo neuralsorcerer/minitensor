@@ -13,160 +13,6 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
-    let output_dims = if keepdim && tensor.ndim() > 0 {
-        vec![1; tensor.ndim()]
-    } else {
-        Vec::new()
-    };
-    let shape = Shape::new(output_dims);
-    let mut values_data =
-        TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let data = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            let mut buffer: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            values[0] = if buffer.is_empty() {
-                f32::NAN
-            } else {
-                quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
-            };
-        }
-        DataType::Float64 => {
-            let data = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            let mut buffer: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            values[0] = if buffer.is_empty() {
-                f64::NAN
-            } else {
-                quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
-            };
-        }
-        _ => unreachable!("dtype validated"),
-    }
-
-    Ok(Tensor::new(
-        Arc::new(values_data),
-        shape,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
-pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    let dims = tensor.shape().dims();
-    let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
-
-    let mut out_dims = if dims.is_empty() {
-        vec![1]
-    } else {
-        dims.to_vec()
-    };
-
-    if keepdim {
-        if !out_dims.is_empty() {
-            out_dims[dim] = 1;
-        }
-    } else if !out_dims.is_empty() {
-        out_dims.remove(dim);
-    }
-
-    let values_shape = Shape::new(out_dims);
-    let num_out = values_shape.numel();
-    let mut values_data = TensorData::zeros_on_device(num_out, tensor.dtype(), tensor.device());
-
-    let outer = if dims.is_empty() || dim == 0 {
-        1
-    } else {
-        dims[..dim].iter().product()
-    };
-    let inner = if dims.is_empty() || dim + 1 >= dims.len() {
-        1
-    } else {
-        dims[dim + 1..].iter().product()
-    };
-    let outer_stride = dim_size * inner;
-
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    for d in 0..dim_size {
-                        let value = input[o * outer_stride + d * inner + r];
-                        if !value.is_nan() {
-                            buffer.push(value);
-                        }
-                    }
-                    let out_idx = o * inner + r;
-                    values[out_idx] = if buffer.is_empty() {
-                        f32::NAN
-                    } else {
-                        quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
-                    };
-                }
-            }
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            let mut buffer = Vec::with_capacity(dim_size);
-            for o in 0..outer {
-                for r in 0..inner {
-                    buffer.clear();
-                    for d in 0..dim_size {
-                        let value = input[o * outer_stride + d * inner + r];
-                        if !value.is_nan() {
-                            buffer.push(value);
-                        }
-                    }
-                    let out_idx = o * inner + r;
-                    values[out_idx] = if buffer.is_empty() {
-                        f64::NAN
-                    } else {
-                        quantile_from_unsorted(&mut buffer, 0.5, QuantileInterpolation::Linear)
-                    };
-                }
-            }
-        }
-        _ => unreachable!("dtype validated"),
-    }
-
-    Ok(Tensor::new(
-        Arc::new(values_data),
-        values_shape,
-        tensor.dtype(),
-        tensor.device(),
-        tensor.requires_grad(),
-    ))
-}
-
 pub(crate) fn quantiles_all(
     tensor: &Tensor,
     qs: &[f64],
@@ -745,3 +591,97 @@ macro_rules! quantiles_along_dim_entry {
 
 quantiles_along_dim_entry!(quantiles_along_dim, false, "quantile");
 quantiles_along_dim_entry!(nanquantiles_along_dim, true, "nanquantile");
+
+/// A median is the *lower* of the two middle order statistics for an even
+/// count, matching `torch.median`/`torch.nanmedian` rather than NumPy's
+/// interpolated definition. Selecting rank `(len - 1) / 2` is exactly
+/// [`QuantileInterpolation::Lower`] at `q = 0.5`, so the median reductions are
+/// the quantile reductions with that interpolation pinned.
+///
+/// This matters beyond the value itself: [`crate::autograd::MedianBackward`]
+/// routes the gradient to the input elements *equal* to the result, splitting
+/// it among ties. An interpolated median equals no input element, so the tie
+/// count is zero and the gradient comes back NaN. Reaching for `Linear` here
+/// silently produced exactly that for every even-length input.
+const MEDIAN_INTERPOLATION: QuantileInterpolation = QuantileInterpolation::Lower;
+
+/// Median of the whole tensor, ignoring NaN. An all-NaN tensor yields NaN.
+pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+    let output_dims = if keepdim && tensor.ndim() > 0 {
+        vec![1; tensor.ndim()]
+    } else {
+        Vec::new()
+    };
+    let shape = Shape::new(output_dims);
+    let mut values_data =
+        TensorData::zeros_on_device(shape.numel(), tensor.dtype(), tensor.device());
+
+    macro_rules! median_all_arm {
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal) => {{
+            let data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+            let values = values_data.$mut_accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get mutable ",
+                    $tyname,
+                    " slice"
+                ))
+            })?;
+            let mut buffer: Vec<$ty> = data.iter().copied().filter(|v| !v.is_nan()).collect();
+            values[0] = if buffer.is_empty() {
+                <$ty>::NAN
+            } else {
+                quantile_from_unsorted(&mut buffer, 0.5, MEDIAN_INTERPOLATION)
+            };
+        }};
+    }
+
+    match tensor.dtype() {
+        DataType::Float32 => median_all_arm!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
+        DataType::Float64 => median_all_arm!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
+        _ => unreachable!("dtype validated"),
+    }
+
+    Ok(Tensor::new(
+        Arc::new(values_data),
+        shape,
+        tensor.dtype(),
+        tensor.device(),
+        tensor.requires_grad(),
+    ))
+}
+
+/// Median along `dim`, ignoring NaN.
+///
+/// A column with no non-NaN value yields NaN, and unlike `nanquantile` an
+/// empty reduced dimension is a NaN result rather than an error -- the median
+/// of nothing is as undefined as the median of all-NaN, and `numpy.nanmedian`
+/// answers both the same way.
+pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+    let dims = tensor.shape().dims();
+    if !dims.is_empty() && dims[dim] == 0 {
+        let mut out_dims = dims.to_vec();
+        if keepdim {
+            out_dims[dim] = 1;
+        } else {
+            out_dims.remove(dim);
+        }
+        let shape = Shape::new(out_dims);
+        let numel = shape.numel();
+        let data = match tensor.dtype() {
+            DataType::Float32 => TensorData::from_vec_f32(vec![f32::NAN; numel], tensor.device()),
+            DataType::Float64 => TensorData::from_vec_f64(vec![f64::NAN; numel], tensor.device()),
+            _ => unreachable!("dtype validated"),
+        };
+        return Ok(Tensor::new(
+            Arc::new(data),
+            shape,
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        ));
+    }
+
+    nanquantile_along_dim(tensor, dim, keepdim, 0.5, MEDIAN_INTERPOLATION)
+}
