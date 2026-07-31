@@ -87,6 +87,14 @@ macro_rules! typed_slice_accessors {
             } else {
                 self.as_ptr() as *const $ty
             };
+            debug_assert!(
+                ptr.is_aligned(),
+                concat!(
+                    "tensor storage is not aligned for ",
+                    stringify!($ty),
+                    "; see TensorData::from_vec on what the buffer allocation relies on"
+                )
+            );
             Some(unsafe { std::slice::from_raw_parts(ptr, self.layout.numel) })
         }
 
@@ -100,6 +108,7 @@ macro_rules! typed_slice_accessors {
             } else {
                 self.as_mut_ptr() as *mut $ty
             };
+            debug_assert!(ptr.is_aligned(), "tensor storage is misaligned");
             Some(unsafe { std::slice::from_raw_parts_mut(ptr, self.layout.numel) })
         }
 
@@ -385,7 +394,31 @@ impl TensorData {
         }
     }
 
-    /// Create tensor data from a vector of typed values
+    /// Create tensor data from a vector of typed values.
+    ///
+    /// # Allocation invariant
+    ///
+    /// The CPU path below reinterprets the `Vec<T>` as a `Vec<u8>` rather than
+    /// copying. That keeps the buffer aligned for `T` — which the typed
+    /// accessors require, since building a `&[f64]` from a misaligned pointer
+    /// is undefined behavior — but it means the block is *freed* through a
+    /// `Vec<u8>`, whose layout records alignment 1 rather than the
+    /// `align_of::<T>()` it was allocated with.
+    ///
+    /// `GlobalAlloc::dealloc` is specified to take the same layout as the
+    /// matching `alloc`, so this relies on the installed allocator ignoring the
+    /// alignment on free. Every mainstream one does — Rust's `System` allocator
+    /// forwards to `free`/`HeapFree`, neither of which takes a layout — but a
+    /// downstream crate installing a layout-sensitive `#[global_allocator]`
+    /// would be within its rights to object. Removing the reliance means
+    /// teaching [`TensorBuffer::Owned`] to carry its allocation's alignment and
+    /// freeing manually, rather than storing a `Vec<u8>`.
+    ///
+    /// The zeroed constructors have the mirror-image property: their buffer
+    /// really is a `Vec<u8>`, so the layouts match exactly, and the alignment
+    /// the accessors need comes from the allocator returning
+    /// suitably-aligned blocks for every size. The `debug_assert!` in each
+    /// accessor is what would catch either assumption breaking.
     #[inline(always)]
     pub fn from_vec<T: Copy + 'static>(data: Vec<T>, dtype: DataType, device: Device) -> Self {
         let numel = data.len();
@@ -887,6 +920,44 @@ mod tests {
     #[should_panic(expected = "dtype/type mismatch in TensorData::from_vec")]
     fn test_from_vec_dtype_type_mismatch_panics() {
         let _ = TensorData::from_vec(vec![2_u8, 0_u8], DataType::Bool, Device::cpu());
+    }
+
+    #[test]
+    fn test_storage_is_aligned_for_every_dtype_and_size() {
+        // The typed accessors build slices straight out of the buffer, so the
+        // pointer must be aligned for the element type. Both construction paths
+        // are covered: the zeroed one (a real `Vec<u8>`, aligned only by the
+        // allocator's practice) and `from_vec` (aligned by construction).
+        //
+        // Sizes are chosen to straddle allocator size classes; an odd byte
+        // count is what would expose a 1-aligned block.
+        for numel in [1usize, 3, 7, 15, 17, 33, 65, 129, 1000, 4097] {
+            macro_rules! check {
+                ($ty:ty, $variant:ident, $accessor:ident, $from:ident) => {{
+                    let zeroed = TensorData::zeros(numel, DataType::$variant);
+                    let slice = zeroed.$accessor().expect("dtype matches");
+                    assert_eq!(
+                        slice.as_ptr().align_offset(std::mem::align_of::<$ty>()),
+                        0,
+                        concat!("zeros() storage misaligned for ", stringify!($ty))
+                    );
+
+                    let typed = TensorData::$from(vec![<$ty>::default(); numel], Device::cpu());
+                    let slice = typed.$accessor().expect("dtype matches");
+                    assert_eq!(
+                        slice.as_ptr().align_offset(std::mem::align_of::<$ty>()),
+                        0,
+                        concat!("from_vec() storage misaligned for ", stringify!($ty))
+                    );
+                }};
+            }
+
+            check!(f32, Float32, as_f32_slice, from_vec_f32);
+            check!(f64, Float64, as_f64_slice, from_vec_f64);
+            check!(i32, Int32, as_i32_slice, from_vec_i32);
+            check!(i64, Int64, as_i64_slice, from_vec_i64);
+            check!(bool, Bool, as_bool_slice, from_vec_bool);
+        }
     }
 
     #[test]
