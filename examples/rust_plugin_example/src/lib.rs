@@ -5,11 +5,45 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::{
-    CustomOp, CustomOpBuilder, CustomOpRegistry, MinitensorError, Plugin, PluginInfo, Result,
-    VersionInfo,
+    CustomOp, CustomOpBuilder, CustomOpRegistry, DataType, MinitensorError, Plugin, PluginInfo,
+    Result, Tensor, TensorData, VersionInfo,
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// A broadcastable one-element tensor holding `value`, matching `like`'s dtype
+/// and device. Plugins get the same public surface as any other crate, so this
+/// is built from `TensorData` rather than an internal helper.
+fn scalar_like(like: &Tensor, value: f64) -> Result<Tensor> {
+    let data = match like.dtype() {
+        DataType::Float32 => TensorData::from_vec_f32(vec![value as f32], like.device()),
+        DataType::Float64 => TensorData::from_vec_f64(vec![value], like.device()),
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "rust_gelu is only defined for floating point tensors, got {other:?}"
+            )));
+        }
+    };
+    Ok(Tensor::new(
+        Arc::new(data),
+        engine::tensor::Shape::new(vec![1]),
+        like.dtype(),
+        like.device(),
+        false,
+    ))
+}
+
+/// Read a one-element float tensor as an `f64`, whichever float dtype it is.
+fn read_scalar(tensor: &Tensor, label: &str) -> Result<f64> {
+    let value = match tensor.dtype() {
+        DataType::Float32 => tensor.data().as_f32_slice().map(|s| s[0] as f64),
+        DataType::Float64 => tensor.data().as_f64_slice().map(|s| s[0]),
+        _ => None,
+    };
+    value.ok_or_else(|| {
+        MinitensorError::invalid_argument(format!("{label} must be a float32 or float64 scalar"))
+    })
+}
 
 /// Example plugin implementation
 pub struct RustExamplePlugin {
@@ -70,9 +104,13 @@ fn create_abs_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_abs", 1)
         .forward(|inputs| inputs[0].abs())
         .backward(|ctx| {
+            // d/dx |x| = sign(x). Passing `grad_output` through unchanged --
+            // which is what an identity backward does -- gets the sign wrong
+            // for every negative input, so the model learns to move those the
+            // wrong way.
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = ctx.input_ids.first() {
-                gradients.insert(id, ctx.grad_output.clone());
+            if let (Some(&id), Some(x)) = (ctx.input_ids.first(), ctx.input(0)) {
+                gradients.insert(id, engine::ops::mul(ctx.grad_output, &x.sign()?)?);
             }
             Ok(gradients)
         })
@@ -95,22 +133,33 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_clamp", 3)
         .forward(|inputs| {
             let x = inputs[0];
-            let min_slice = inputs[1]
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::invalid_argument("Min must be f32 scalar"))?;
-            let max_slice = inputs[2]
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::invalid_argument("Max must be f32 scalar"))?;
-            let min_val = min_slice[0] as f64;
-            let max_val = max_slice[0] as f64;
+            // Read the bounds at whatever float precision they arrive in;
+            // hardcoding `as_f32_slice` here rejected a float64 model outright.
+            let min_val = read_scalar(inputs[1], "Min")?;
+            let max_val = read_scalar(inputs[2], "Max")?;
             x.clamp(Some(min_val), Some(max_val))
         })
         .backward(|ctx| {
+            // Clamping is flat outside [min, max], so the gradient there is
+            // zero -- an identity backward would keep pushing a saturated input
+            // further past the bound it is already pinned to.
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = ctx.input_ids.first() {
-                gradients.insert(id, ctx.grad_output.clone());
+            if let (Some(&id), Some(x), Some(lo), Some(hi)) = (
+                ctx.input_ids.first(),
+                ctx.input(0),
+                ctx.input(1),
+                ctx.input(2),
+            ) {
+                // `mul` on two bool tensors is logical AND (see the bool arm
+                // of the binary kernels), which is the mask we want here.
+                let inside = engine::ops::mul(&x.ge(lo)?, &x.le(hi)?)?;
+                let zeros = Tensor::zeros(
+                    x.shape().clone(),
+                    ctx.grad_output.dtype(),
+                    ctx.grad_output.device(),
+                    false,
+                );
+                gradients.insert(id, engine::ops::where_op(&inside, ctx.grad_output, &zeros)?);
             }
             Ok(gradients)
         })
@@ -136,11 +185,33 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
 
 fn create_gelu_operation() -> Arc<dyn CustomOp> {
     CustomOpBuilder::new("rust_gelu", 1)
-        .forward(|inputs| Ok(inputs[0].clone()))
+        .forward(|inputs| engine::ops::gelu(inputs[0], false))
         .backward(|ctx| {
+            // d/dx x*Phi(x) = Phi(x) + x*phi(x). Recovering Phi from the output
+            // would need f(x)/x, undefined at zero, so both terms are built from
+            // erf and exp directly.
             let mut gradients = FxHashMap::default();
-            if let Some(&id) = ctx.input_ids.first() {
-                gradients.insert(id, ctx.grad_output.clone());
+            if let (Some(&id), Some(x)) = (ctx.input_ids.first(), ctx.input(0)) {
+                let half = scalar_like(x, 0.5)?;
+                let inv_sqrt2 = scalar_like(x, std::f64::consts::FRAC_1_SQRT_2)?;
+                let ones = Tensor::ones(x.shape().clone(), x.dtype(), x.device(), false);
+
+                let cdf = engine::ops::mul(
+                    &half,
+                    &engine::ops::add(
+                        &ones,
+                        &engine::ops::erf(&engine::ops::mul(x, &inv_sqrt2)?)?,
+                    )?,
+                )?;
+                let pdf = engine::ops::mul(
+                    &engine::ops::exp(&engine::ops::mul(
+                        &engine::ops::mul(x, x)?,
+                        &scalar_like(x, -0.5)?,
+                    )?)?,
+                    &scalar_like(x, 1.0 / (2.0 * std::f64::consts::PI).sqrt())?,
+                )?;
+                let local = engine::ops::add(&cdf, &engine::ops::mul(x, &pdf)?)?;
+                gradients.insert(id, engine::ops::mul(ctx.grad_output, &local)?);
             }
             Ok(gradients)
         })

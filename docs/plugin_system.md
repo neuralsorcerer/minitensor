@@ -128,7 +128,9 @@ parameter name is missing, `get_parameter(name)` raises `KeyError`.
 The `plugins.load_plugin(path)` function is available in the Python module, but
 it only loads shared libraries when the extension was compiled with the
 `dynamic-loading` Cargo feature. Without that feature it raises
-`NotImplementedError`.
+`NotImplementedError`; with it, a missing or incompatible library raises
+`RuntimeError` from `dlopen`. Both are worth distinguishing — the first means
+"rebuild the extension", the second means "check the plugin".
 
 ```python
 import minitensor.plugins as plugins
@@ -137,6 +139,8 @@ try:
     plugins.load_plugin("./my_plugin.so")
 except NotImplementedError:
     print("This MiniTensor build does not enable dynamic plugin loading")
+except RuntimeError as exc:
+    print(f"Plugin could not be loaded: {exc}")
 ```
 
 Other global helpers delegate to the Rust engine's native plugin registry:
