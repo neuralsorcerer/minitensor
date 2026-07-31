@@ -1490,14 +1490,9 @@ print(debugger.health_check(mt.ones(2, 3)))
 ```
 
 ```text
-[2, 3] Float32 6
+[2, 3] float32 6
 False True
 ['✅ No issues detected']
-```
-
-```{note}
-`TensorInfo.dtype` reports the engine's capitalized name (`Float32`), whereas
-the `Tensor.dtype` property returns the lower-case Python name (`float32`).
 ```
 
 ## 12) Custom operations

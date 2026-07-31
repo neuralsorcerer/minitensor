@@ -46,7 +46,7 @@ impl TensorInfo {
     pub fn from_tensor(tensor: &Tensor) -> Self {
         Self {
             shape: tensor.shape().clone(),
-            dtype: format!("{:?}", tensor.dtype()),
+            dtype: tensor.dtype().name().to_string(),
             device: tensor.device(),
             numel: tensor.numel(),
             requires_grad: tensor.requires_grad(),
@@ -505,7 +505,9 @@ mod tests {
         let info = TensorInfo::from_tensor(&tensor);
 
         assert_eq!(info.shape.dims(), &[2, 2]);
-        assert_eq!(info.dtype, "Float32");
+        // Reported as the canonical dtype name, matching `Tensor.dtype`
+        // in Python; it used to be the derived `Debug` spelling "Float32".
+        assert_eq!(info.dtype, "float32");
         assert_eq!(info.device, Device::cpu());
         assert_eq!(info.numel, 4);
         assert!(!info.requires_grad);
@@ -513,7 +515,7 @@ mod tests {
         assert_eq!(info.stride, vec![2, 1]);
 
         let summary = info.summary();
-        assert!(summary.contains("Tensor(shape=[2, 2], dtype=Float32"));
+        assert!(summary.contains("Tensor(shape=[2, 2], dtype=float32"));
         assert!(summary.contains("requires_grad=false"));
         // Device renders via `Display`, not the derived `Debug`.
         assert!(summary.contains("device=cpu"), "{summary}");
@@ -558,14 +560,14 @@ mod tests {
             id: "x".into(),
             operation: "input".into(),
             shape: vec![2, 2],
-            dtype: "Float32".into(),
+            dtype: "float32".into(),
             requires_grad: true,
         });
         visualizer.add_node(GraphNode {
             id: "y".into(),
             operation: "relu".into(),
             shape: vec![2, 2],
-            dtype: "Float32".into(),
+            dtype: "float32".into(),
             requires_grad: false,
         });
         visualizer.add_edge(GraphEdge {

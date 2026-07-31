@@ -599,7 +599,7 @@ impl PyModule {
         dict.set_item("total_bytes", usage.total_bytes)?;
         let dtype_dict = PyDict::new(py);
         for (dtype, bytes) in usage.bytes_by_dtype {
-            dtype_dict.set_item(format!("{:?}", dtype), bytes)?;
+            dtype_dict.set_item(crate::dtype::dtype_to_python_string(dtype), bytes)?;
         }
         dict.set_item("bytes_by_dtype", dtype_dict)?;
         Ok(dict.into())
@@ -625,7 +625,14 @@ impl PyModule {
         }
     }
 
-    /// Estimate forward memory usage for Sequential models
+    /// Rough forward-pass memory sketch for Sequential models.
+    ///
+    /// `parameter_memory` is exact. The activation numbers are not: layers
+    /// cannot report an output shape, so this charges every layer an
+    /// activation the size of the input. A model that widens is under-counted
+    /// and one that narrows is over-counted. Element width follows the model's
+    /// own dtype. Returns a dict of byte counts; use it for order-of-magnitude
+    /// budgeting, not to decide whether a model fits.
     fn forward_memory_estimate(
         &self,
         input_shape: Vec<usize>,

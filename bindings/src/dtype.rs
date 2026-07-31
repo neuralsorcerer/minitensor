@@ -34,14 +34,13 @@ fn dtype_from_str(name: &str) -> Option<DataType> {
     }
 }
 
+/// The canonical Python spelling of a dtype.
+///
+/// `DataType::name` is the single definition of these strings; the bindings
+/// used to carry a second copy of the table, which is one more place for
+/// `float32` and `Float32` to drift apart.
 fn dtype_to_str(dtype: DataType) -> &'static str {
-    match dtype {
-        DataType::Float32 => "float32",
-        DataType::Float64 => "float64",
-        DataType::Int32 => "int32",
-        DataType::Int64 => "int64",
-        DataType::Bool => "bool",
-    }
+    dtype.name()
 }
 
 pub fn parse_dtype(name: &str) -> PyResult<DataType> {

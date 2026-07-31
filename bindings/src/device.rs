@@ -97,7 +97,7 @@ impl PyDevice {
     /// Get device type as string
     #[getter]
     fn device_type(&self) -> String {
-        format!("{:?}", self.inner.device_type())
+        self.inner.device_type().to_string()
     }
 
     /// Get device ID
@@ -151,27 +151,31 @@ impl PyDevice {
 mod tests {
     use super::*;
 
+    // `device_type` reports the same lower-case spelling the rest of the API
+    // uses -- `str(device)`, `Device(...)` parsing, and `Tensor.dtype`. It used
+    // to be Rust's `Debug` output ("Cpu", "OpenCL"), which matched nothing else
+    // and could not be fed back to `Device(...)` without knowing to case-fold.
     #[test]
     fn constructors_and_properties_cover_cpu_and_gpu_paths() {
         let cpu = PyDevice::cpu();
-        assert_eq!(cpu.device_type(), "Cpu");
+        assert_eq!(cpu.device_type(), "cpu");
         assert_eq!(cpu.device_id(), None);
         assert!(cpu.is_cpu());
         assert!(!cpu.is_gpu());
         assert_eq!(cpu.__str__(), cpu.__repr__());
 
         let cuda = PyDevice::cuda(Some(1));
-        assert_eq!(cuda.device_type(), "Cuda");
+        assert_eq!(cuda.device_type(), "cuda");
         assert_eq!(cuda.device_id(), Some(1));
         assert!(!cuda.is_cpu());
         assert!(cuda.is_gpu());
 
         let metal = PyDevice::metal();
-        assert_eq!(metal.device_type(), "Metal");
+        assert_eq!(metal.device_type(), "metal");
         assert!(metal.is_gpu());
 
         let opencl = PyDevice::opencl(Some(2));
-        assert_eq!(opencl.device_type(), "OpenCL");
+        assert_eq!(opencl.device_type(), "opencl");
         assert_eq!(opencl.device_id(), Some(2));
         assert!(opencl.is_gpu());
     }
@@ -182,11 +186,11 @@ mod tests {
         assert!(cpu.is_cpu());
 
         let cuda = PyDevice::new("cuda:3").expect("cuda should parse");
-        assert_eq!(cuda.device_type(), "Cuda");
+        assert_eq!(cuda.device_type(), "cuda");
         assert_eq!(cuda.device_id(), Some(3));
 
         let opencl = PyDevice::new("opencl:4").expect("opencl should parse");
-        assert_eq!(opencl.device_type(), "OpenCL");
+        assert_eq!(opencl.device_type(), "opencl");
         assert_eq!(opencl.device_id(), Some(4));
 
         let err = match PyDevice::new("definitely-not-a-device") {
@@ -204,7 +208,7 @@ mod tests {
     #[test]
     fn device_roundtrip_helpers_cover_conversion_paths() {
         let from_device = PyDevice::from_device(Device::cuda(Some(7)));
-        assert_eq!(from_device.device_type(), "Cuda");
+        assert_eq!(from_device.device_type(), "cuda");
         assert_eq!(from_device.device().device_id(), Some(7));
 
         let cpu = PyDevice::from_device(Device::cpu());

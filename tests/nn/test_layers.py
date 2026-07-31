@@ -77,7 +77,9 @@ def test_dense_layer_forward_and_stats():
     assert stats["total_parameters"] == 3 * 2 + 2
     mem = layer.memory_usage()
     assert mem["total_bytes"] == (3 * 2 + 2) * 4
-    assert mem["bytes_by_dtype"]["Float32"] == (3 * 2 + 2) * 4
+    # Keyed by the dtype name the rest of the API uses, so the key can be
+    # handed straight back to `dtype=`.
+    assert mem["bytes_by_dtype"]["float32"] == (3 * 2 + 2) * 4
     summary = layer.summary()
     assert "Total Parameters" in summary
 

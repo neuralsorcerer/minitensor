@@ -31,7 +31,7 @@ impl PyTensorInfo {
     /// Get tensor device
     #[getter]
     pub(crate) fn device(&self) -> String {
-        format!("{:?}", self.inner.device)
+        self.inner.device.to_string()
     }
 
     /// Get number of elements

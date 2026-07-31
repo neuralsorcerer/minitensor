@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{Layer, Sequential};
+use crate::tensor::DataType;
 use std::collections::HashMap;
 
 /// Utility functions for layer and model inspection
@@ -58,7 +59,7 @@ impl LayerUtils {
 
         for param in params {
             let dtype = param.dtype();
-            let param_bytes = param.numel() * dtype.size_in_bytes();
+            let param_bytes = param.numel() * dtype.size_bytes();
             total_bytes += param_bytes;
             *bytes_by_dtype.entry(dtype).or_insert(0) += param_bytes;
         }
@@ -186,26 +187,44 @@ impl SequentialUtils {
         summary
     }
 
-    /// Calculate the theoretical memory usage for forward pass
+    /// Rough upper-bound sketch of the memory a forward pass touches.
+    ///
+    /// `parameter_memory` is exact. The activation figures are not: [`Layer`]
+    /// has no way to report an output shape, so this cannot trace widths
+    /// through the model and instead assumes **every layer produces an
+    /// activation the same size as the input**. A model that widens (a
+    /// classifier's hidden layers) is under-counted; one that narrows is
+    /// over-counted. Use it for order-of-magnitude budgeting, not for deciding
+    /// whether a model fits.
+    ///
+    /// The element width comes from the model's own parameters rather than
+    /// being assumed to be 4 bytes, so an f64 model is not reported at half
+    /// its size. An empty model has no parameters to read a dtype from and
+    /// falls back to `Float32`.
+    ///
+    /// [`Layer`]: crate::nn::Layer
     pub fn estimate_forward_memory(
         model: &Sequential,
         input_shape: &[usize],
         batch_size: usize,
     ) -> ForwardMemoryEstimate {
-        // This is a simplified estimation
-        // In practice, this would need to trace through each layer to get accurate intermediate tensor sizes
-
         let input_elements = input_shape.iter().product::<usize>() * batch_size;
         let parameter_memory = LayerUtils::memory_usage(model).total_bytes;
 
-        // Rough estimate: assume each layer doubles the memory requirement for activations
-        let estimated_activation_memory = input_elements * 4 * model.len(); // Assuming f32
+        let element_bytes = model
+            .parameters()
+            .first()
+            .map_or(DataType::Float32, |param| param.dtype())
+            .size_bytes();
+
+        let input_memory = input_elements * element_bytes;
+        let estimated_activation_memory = input_memory * model.len();
 
         ForwardMemoryEstimate {
             parameter_memory,
             estimated_activation_memory,
             estimated_total_memory: parameter_memory + estimated_activation_memory,
-            input_memory: input_elements * 4, // Assuming f32
+            input_memory,
         }
     }
 }
@@ -243,25 +262,6 @@ pub struct ForwardMemoryEstimate {
     pub estimated_activation_memory: usize,
     pub estimated_total_memory: usize,
     pub input_memory: usize,
-}
-
-/// Extension trait to add utility methods to DataType
-pub trait DataTypeExt {
-    /// Get the size in bytes for this data type
-    fn size_in_bytes(&self) -> usize;
-}
-
-impl DataTypeExt for crate::tensor::DataType {
-    fn size_in_bytes(&self) -> usize {
-        use crate::tensor::DataType;
-        match self {
-            DataType::Float32 => 4,
-            DataType::Float64 => 8,
-            DataType::Int32 => 4,
-            DataType::Int64 => 8,
-            DataType::Bool => 1,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -369,17 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn test_datatype_size_in_bytes() {
-        use crate::tensor::DataType;
-
-        assert_eq!(DataType::Float32.size_in_bytes(), 4);
-        assert_eq!(DataType::Float64.size_in_bytes(), 8);
-        assert_eq!(DataType::Int32.size_in_bytes(), 4);
-        assert_eq!(DataType::Int64.size_in_bytes(), 8);
-        assert_eq!(DataType::Bool.size_in_bytes(), 1);
-    }
-
-    #[test]
     fn test_forward_memory_estimation() {
         let model = SequentialBuilder::new()
             .add(Box::new(
@@ -389,9 +378,54 @@ mod tests {
 
         let estimate = SequentialUtils::estimate_forward_memory(&model, &[10], 32);
 
-        assert!(estimate.parameter_memory > 0);
-        assert!(estimate.estimated_activation_memory > 0);
-        assert!(estimate.estimated_total_memory > estimate.parameter_memory);
-        assert_eq!(estimate.input_memory, 10 * 32 * 4); // 10 features * 32 batch * 4 bytes
+        // 10 * 5 weights + 5 biases, f32.
+        assert_eq!(estimate.parameter_memory, (10 * 5 + 5) * 4);
+        assert_eq!(estimate.input_memory, 10 * 32 * 4);
+        // One layer, and the estimate charges each layer an input-sized
+        // activation -- see the doc comment for why that is a sketch.
+        assert_eq!(estimate.estimated_activation_memory, 10 * 32 * 4);
+        assert_eq!(
+            estimate.estimated_total_memory,
+            estimate.parameter_memory + estimate.estimated_activation_memory
+        );
+    }
+
+    #[test]
+    fn forward_memory_estimate_follows_the_model_dtype() {
+        let build = |dtype| {
+            SequentialBuilder::new()
+                .add(Box::new(
+                    DenseLayer::new(10, 5, true, Device::cpu(), dtype).unwrap(),
+                ))
+                .build()
+        };
+
+        let f32_estimate =
+            SequentialUtils::estimate_forward_memory(&build(DataType::Float32), &[10], 32);
+        let f64_estimate =
+            SequentialUtils::estimate_forward_memory(&build(DataType::Float64), &[10], 32);
+
+        // The activation figures are a sketch, but the element width is not
+        // guesswork: an f64 model must not be reported at f32 sizes.
+        assert_eq!(f64_estimate.input_memory, 2 * f32_estimate.input_memory);
+        assert_eq!(
+            f64_estimate.parameter_memory,
+            2 * f32_estimate.parameter_memory
+        );
+        assert_eq!(
+            f64_estimate.estimated_activation_memory,
+            2 * f32_estimate.estimated_activation_memory
+        );
+    }
+
+    #[test]
+    fn forward_memory_estimate_handles_a_model_with_no_parameters() {
+        let model = SequentialBuilder::new().build();
+        let estimate = SequentialUtils::estimate_forward_memory(&model, &[10], 32);
+
+        assert_eq!(estimate.parameter_memory, 0);
+        assert_eq!(estimate.input_memory, 10 * 32 * 4);
+        assert_eq!(estimate.estimated_activation_memory, 0);
+        assert_eq!(estimate.estimated_total_memory, 0);
     }
 }
