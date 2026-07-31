@@ -16,7 +16,7 @@ pub mod pool;
 
 #[cfg(feature = "cuda")]
 pub use allocator::CudaAllocator;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
 pub use allocator::MetalAllocator;
 #[cfg(feature = "opencl")]
 pub use allocator::OpenCLAllocator;

@@ -46,10 +46,10 @@ jobs:
           pytest -v tests/
 
   # `engine/src/backends/metal` is ~1000 lines that no CI job has ever
-  # compiled. The `metal` crate pulls in Apple frameworks, so the feature
-  # cannot even be type-checked off macOS -- `cargo check --features metal` on
-  # Linux fails inside `core-graphics-types` before reaching our code. This is
-  # the only runner that can look at it.
+  # compiled. The `metal` crate links Apple frameworks, so it is declared only
+  # for Apple targets and every `metal` cfg is paired with `target_vendor =
+  # "apple"`: off macOS the feature resolves to nothing and the backend is not
+  # built at all. This is the only runner that can look at it.
   #
   # Advisory until it has been seen green: nobody knows whether that code still
   # compiles against the pinned `metal` release, and a first run that fails

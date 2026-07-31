@@ -45,7 +45,7 @@ impl MemoryPool {
             crate::device::DeviceType::Cuda => {
                 Box::new(super::CudaAllocator::new(device.device_id()))
             }
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_vendor = "apple"))]
             crate::device::DeviceType::Metal => {
                 Box::new(super::MetalAllocator::new(device.device_id()))
             }

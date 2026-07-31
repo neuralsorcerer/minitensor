@@ -82,7 +82,7 @@ impl GpuDevice {
         }
 
         // Detect Metal devices
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_vendor = "apple"))]
         {
             devices.extend(Self::_detect_metal_devices());
         }
@@ -132,7 +132,7 @@ impl GpuDevice {
         Vec::new()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_vendor = "apple"))]
     fn _detect_metal_devices() -> Vec<Self> {
         let mut devices = Vec::new();
 
@@ -171,7 +171,7 @@ impl GpuDevice {
         devices
     }
 
-    #[cfg(not(feature = "metal"))]
+    #[cfg(not(all(feature = "metal", target_vendor = "apple")))]
     fn _detect_metal_devices() -> Vec<Self> {
         Vec::new()
     }

@@ -38,7 +38,7 @@ pub struct CudaAllocator {
 }
 
 /// Metal memory allocator
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
 pub struct MetalAllocator {
     device: Device,
 }
@@ -129,7 +129,7 @@ impl Allocator for CudaAllocator {
     }
 }
 
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
 impl MetalAllocator {
     /// Create a new Metal allocator.
     ///
@@ -144,7 +144,7 @@ impl MetalAllocator {
     }
 }
 
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
 impl Allocator for MetalAllocator {
     fn allocate(&mut self, _size: usize) -> Result<*mut u8> {
         Err(crate::error::MinitensorError::backend_error(

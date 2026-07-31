@@ -9,7 +9,11 @@ pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
-#[cfg(feature = "metal")]
+// The `metal` crate is only declared for Apple targets (see engine/Cargo.toml),
+// so every site guarded by the `metal` feature must also check the target --
+// otherwise `--features gpu`, which turns the feature on unconditionally, would
+// compile this module with no `metal` crate to compile it against.
+#[cfg(all(feature = "metal", target_vendor = "apple"))]
 pub mod metal;
 
 #[cfg(feature = "opencl")]
@@ -52,7 +56,7 @@ pub fn get_backend(device: Device) -> Result<Box<dyn Backend>> {
         crate::device::DeviceType::Cpu => Ok(Box::new(cpu::CpuBackend::initialize()?)),
         #[cfg(feature = "cuda")]
         crate::device::DeviceType::Cuda => Ok(Box::new(cuda::CudaBackend::initialize()?)),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_vendor = "apple"))]
         crate::device::DeviceType::Metal => Ok(Box::new(metal::MetalBackend::initialize()?)),
         #[cfg(feature = "opencl")]
         crate::device::DeviceType::OpenCL => Ok(Box::new(opencl::OpenCLBackend::initialize()?)),

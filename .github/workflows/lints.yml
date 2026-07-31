@@ -26,11 +26,11 @@ jobs:
   # backends and the minimal build rot unnoticed: `--features cuda` had already
   # accumulated failures nobody would see without enabling it.
   #
-  # Two features are missing here on purpose. `blas` needs a system OpenBLAS.
-  # `metal` links an Apple-only framework, so it can only be built on a macOS
-  # runner and has never been compiled by CI — adding it belongs in
-  # test_macos.yml, but it should be enabled by someone who can confirm the
-  # backend still builds against the current `metal` crate first.
+  # `blas` is missing here on purpose: it needs a system OpenBLAS. `metal` is
+  # covered on the macOS runner instead (test_macos.yml) because that is the
+  # only place the backend actually compiles; the `gpu` entry below is what
+  # keeps it from breaking everyone else, since `gpu` turns the `metal` feature
+  # on unconditionally and must still build where there is no Metal.
   features:
     name: clippy (${{ matrix.label }})
     runs-on: ubuntu-latest
@@ -44,6 +44,8 @@ jobs:
             args: --features cuda
           - label: opencl
             args: --features opencl
+          - label: gpu
+            args: --features gpu
           - label: dynamic-loading
             args: --features dynamic-loading
     steps:
