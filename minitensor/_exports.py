@@ -131,6 +131,38 @@ _FUNCTIONAL_FORWARDERS = (
     "masked_fill",
 )
 
+# Public members of `functional` that deliberately stay namespaced. These are
+# the layer-shaped ops -- they take weights, running statistics, or a training
+# flag, so `mt.functional.conv2d(x, w, b)` reads better at a call site than a
+# bare `mt.conv2d`, and the top-level namespace stays about tensor math.
+#
+# Listing them is what makes `_bind_functional_forwarders` able to check both
+# directions. Forwarding alone only catches a name that disappeared from
+# `functional`; a name *added* to `functional` and forgotten here would simply
+# never show up as `mt.<name>`, with nothing to notice.
+_FUNCTIONAL_ONLY = (
+    "avg_pool1d",
+    "avg_pool2d",
+    "batch_norm",
+    "binary_cross_entropy",
+    "binary_cross_entropy_with_logits",
+    "conv1d",
+    "conv2d",
+    "cross_entropy",
+    "dense_layer",
+    "dropout",
+    "dropout2d",
+    "log_cosh_loss",
+    "max_pool1d",
+    "max_pool2d",
+    "mse_loss",
+    "smooth_l1_loss",
+    # Exported at the top level by the core module itself, so forwarding them
+    # here would be a second binding of the same object.
+    "bmm",
+    "dot",
+)
+
 
 def _public_namespace() -> MutableMapping[str, object]:
     return _sys.modules["minitensor"].__dict__
@@ -165,6 +197,25 @@ def _bind_functional_forwarders(
     missing = [name for name in names if not hasattr(functional, name)]
     if missing:
         raise RuntimeError("Missing functional forwarders: " + ", ".join(missing))
+
+    # Every public name in `functional` must be accounted for: forwarded to the
+    # top level, or listed as deliberately namespaced. Without this, adding an
+    # op to `functional` and forgetting this file leaves it reachable only as
+    # `mt.functional.<name>`, and nothing says so.
+    unaccounted = sorted(
+        name
+        for name in dir(functional)
+        if not name.startswith("_")
+        and name not in set(names)
+        and name not in set(_FUNCTIONAL_ONLY)
+    )
+    if unaccounted:
+        raise RuntimeError(
+            "functional exports not listed in _exports.py: "
+            + ", ".join(unaccounted)
+            + " -- add each to _FUNCTIONAL_FORWARDERS to expose it as mt.<name>, "
+            "or to _FUNCTIONAL_ONLY to keep it namespaced"
+        )
 
     for name in names:
         namespace[name] = getattr(functional, name)

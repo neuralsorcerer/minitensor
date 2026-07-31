@@ -332,6 +332,39 @@ def test_functional_forwarder_binding_rejects_duplicates_and_missing_names():
         mt._bind_functional_forwarders(("missing",))
 
 
+def test_every_functional_export_is_either_forwarded_or_listed_as_namespaced():
+    # Forwarding is a hand-maintained list. Checking only that each forwarded
+    # name exists catches a removal from `functional`, but an op *added* to
+    # `functional` and forgotten in _exports.py would just never appear as
+    # `mt.<name>` -- silently, since nothing looks in that direction.
+    from minitensor._exports import _FUNCTIONAL_FORWARDERS, _FUNCTIONAL_ONLY
+
+    accounted = set(_FUNCTIONAL_FORWARDERS) | set(_FUNCTIONAL_ONLY)
+    exported = {name for name in dir(mt.functional) if not name.startswith("_")}
+    assert not exported - accounted
+    # And the lists describe reality, rather than having drifted the other way.
+    assert not accounted - exported
+    assert not set(_FUNCTIONAL_FORWARDERS) & set(_FUNCTIONAL_ONLY)
+
+
+def test_functional_forwarder_binding_rejects_an_unlisted_export():
+    import types
+
+    from minitensor._exports import (
+        _FUNCTIONAL_ONLY,
+        _bind_functional_forwarders,
+    )
+
+    noop = lambda *args, **kwargs: None  # noqa: E731
+    names = ("relu", "sigmoid")
+    stub = types.SimpleNamespace(**{name: noop for name in names + _FUNCTIONAL_ONLY})
+    _bind_functional_forwarders(names, {"functional": stub})  # baseline passes
+
+    stub.brand_new_op = noop
+    with pytest.raises(RuntimeError, match="brand_new_op"):
+        _bind_functional_forwarders(names, {"functional": stub})
+
+
 @pytest.mark.parametrize(
     "name",
     [
