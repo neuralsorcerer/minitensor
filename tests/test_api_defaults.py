@@ -122,3 +122,37 @@ def test_module_load_state_dict_default_device(tmp_path):
     other.load_state_dict(sd)  # no device argument
     x = mt.from_numpy(np.random.RandomState(0).randn(2, 4).astype(np.float32))
     np.testing.assert_allclose(model(x).numpy(), other(x).numpy(), rtol=1e-6)
+
+
+# The two constructor families disagree on dtype, which is easy to trip over and
+# was previously undocumented. Pin the rule so it cannot drift silently.
+@pytest.mark.parametrize(
+    "numpy_dtype", ["float64", "float32", "int64", "int32", "bool"]
+)
+def test_tensor_constructors_default_to_float32_regardless_of_source_dtype(numpy_dtype):
+    array = np.ones(3, dtype=numpy_dtype)
+    assert mt.Tensor(array).dtype == "float32"
+    assert mt.tensor(array).dtype == "float32"
+    # ...but an explicit dtype is always honoured.
+    assert mt.Tensor(array, dtype="float64").dtype == "float64"
+
+
+@pytest.mark.parametrize(
+    "numpy_dtype", ["float64", "float32", "int64", "int32", "bool"]
+)
+def test_from_numpy_and_as_tensor_keep_the_source_dtype(numpy_dtype):
+    array = np.ones(3, dtype=numpy_dtype)
+    assert mt.from_numpy(array).dtype == numpy_dtype
+    assert mt.as_tensor(array).dtype == numpy_dtype
+
+
+def test_float64_survives_from_numpy_but_not_tensor():
+    # The practical consequence: full precision only reaches the engine through
+    # the preserving constructors. `float()` forces the comparison to happen in
+    # double -- comparing a float32 scalar against a Python float directly would
+    # round the literal down to float32 first and call them equal.
+    value = 0.1234567890123456789
+    array = np.array([value], dtype=np.float64)
+    assert float(mt.from_numpy(array).numpy()[0]) == value
+    assert float(mt.Tensor(array).numpy()[0]) != value  # rounded to float32
+    assert float(mt.Tensor(array, dtype="float64").numpy()[0]) == value

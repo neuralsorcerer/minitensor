@@ -261,6 +261,22 @@ Every creation helper is available as either `mt.<name>(...)` or
   the source array after construction are not visible through the tensor
 - `as_tensor(obj, dtype=None, requires_grad=None, copy=False)`
 
+#### Which constructor keeps the source dtype
+
+The two families differ, and the difference is easy to trip over:
+
+| Constructor | dtype when `dtype=` is omitted |
+| --- | --- |
+| `Tensor(obj)`, `tensor(obj)` | always `float32` |
+| `from_numpy(array)`, `as_tensor(obj)` | taken from the source |
+
+So `Tensor(np.arange(3))` is `float32` while `from_numpy(np.arange(3))` is
+`int64`, and a float64 array loses precision through `Tensor` but not through
+`from_numpy`. `Tensor` matches `torch.Tensor`, which likewise ignores the
+source dtype and uses the default; note that `tensor` does **not** match
+`torch.tensor`, which infers. Pass `dtype=` explicitly, or use `from_numpy` /
+`as_tensor`, whenever the source dtype is the one you want.
+
 ```python
 import numpy as np
 
