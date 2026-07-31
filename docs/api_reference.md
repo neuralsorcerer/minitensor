@@ -1543,9 +1543,13 @@ The request fails where the device was named rather than producing a tensor
 that reports `device=cuda:0` and then fails in every operation applied to it.
 
 `DeviceType` still models CUDA, Metal, and OpenCL, and the `cuda` / `metal` /
-`opencl` Cargo features compile allocator and device-detection scaffolding
-(`engine::backends`, `engine::hardware::GpuDevice::detect_all`) — but no
-kernels, so enabling them does not change what `is_available()` returns.
+`opencl` Cargo features compile `engine::backends` — device contexts,
+allocators, and a small standalone kernel set (add, mul, matmul, relu,
+sigmoid) per backend. Nothing in `engine::ops` dispatches to any of it, and
+`engine::backends::get_backend` has no callers outside its own tests, so
+enabling a backend feature does not change what `is_available()` returns or
+what any tensor operation does. Treat those modules as groundwork for GPU
+execution, not as a GPU execution path.
 
 Feature flags for the `engine` crate:
 

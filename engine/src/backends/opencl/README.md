@@ -1,6 +1,14 @@
 # OpenCL Backend
 
-The OpenCL backend provides cross-platform GPU acceleration for tensor operations using the OpenCL framework. This backend enables minitensor to run on a wide variety of GPU hardware from different vendors including NVIDIA, AMD, Intel, and others.
+> **Status: not wired into tensor execution.** Everything below describes this
+> module in isolation. No operation in `engine::ops` dispatches to it, and
+> `Device::is_available` reports `false` for `opencl`, so tensors cannot be
+> placed on an OpenCL device and none of these kernels run as part of a
+> tensor computation. Building with `--features opencl` compiles this code;
+> it does not accelerate anything yet. Use it as the starting point for
+> wiring GPU execution, not as a description of current behaviour.
+
+The OpenCL backend targets cross-platform GPU acceleration for tensor operations using the OpenCL framework, on GPU hardware from NVIDIA, AMD, Intel, and others.
 
 ## Features
 

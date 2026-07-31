@@ -4,6 +4,19 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+//! Device backends: contexts, allocators, and per-device kernels.
+//!
+//! Nothing in [`crate::ops`] dispatches here, and [`get_backend`] has no
+//! callers outside this module's tests. Tensor execution is CPU-only and goes
+//! straight through [`crate::tensor::TensorData`]'s host slices;
+//! [`crate::device::Device::is_available`] is the authority on where a tensor
+//! may be placed, and it answers `true` for CPU alone.
+//!
+//! This module is therefore groundwork rather than a live execution path. The
+//! GPU submodules each carry the same small kernel set (add, mul, matmul,
+//! relu, sigmoid) and are compiled only with their feature enabled, so nothing
+//! here affects a default build.
+
 pub mod cpu;
 
 #[cfg(feature = "cuda")]
