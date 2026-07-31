@@ -146,36 +146,32 @@ pub struct SerializedTensor {
 impl SerializedTensor {
     /// Serialize a tensor
     pub fn from_tensor(tensor: &Tensor) -> Result<Self> {
+        /// Little-endian bytes for one numeric dtype. Sized up front rather
+        /// than grown from a `flat_map`, whose per-element size hint makes the
+        /// collect reallocate its way to the final length.
+        macro_rules! numeric_bytes {
+            ($accessor:ident, $label:literal) => {{
+                let slice = tensor.data().$accessor().ok_or_else(|| {
+                    MinitensorError::serialization_error(concat!("Failed to get ", $label, " data"))
+                })?;
+                let mut bytes = Vec::with_capacity(std::mem::size_of_val(slice));
+                for value in slice {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes
+            }};
+        }
+
         let data = match tensor.dtype() {
-            DataType::Float32 => {
-                let slice = tensor.data().as_f32_slice().ok_or_else(|| {
-                    MinitensorError::serialization_error("Failed to get f32 data")
-                })?;
-                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
-            }
-            DataType::Float64 => {
-                let slice = tensor.data().as_f64_slice().ok_or_else(|| {
-                    MinitensorError::serialization_error("Failed to get f64 data")
-                })?;
-                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
-            }
-            DataType::Int32 => {
-                let slice = tensor.data().as_i32_slice().ok_or_else(|| {
-                    MinitensorError::serialization_error("Failed to get i32 data")
-                })?;
-                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
-            }
-            DataType::Int64 => {
-                let slice = tensor.data().as_i64_slice().ok_or_else(|| {
-                    MinitensorError::serialization_error("Failed to get i64 data")
-                })?;
-                slice.iter().flat_map(|&x| x.to_le_bytes()).collect()
-            }
+            DataType::Float32 => numeric_bytes!(as_f32_slice, "f32"),
+            DataType::Float64 => numeric_bytes!(as_f64_slice, "f64"),
+            DataType::Int32 => numeric_bytes!(as_i32_slice, "i32"),
+            DataType::Int64 => numeric_bytes!(as_i64_slice, "i64"),
             DataType::Bool => {
                 let slice = tensor.data().as_bool_slice().ok_or_else(|| {
                     MinitensorError::serialization_error("Failed to get bool data")
                 })?;
-                slice.iter().map(|&x| if x { 1u8 } else { 0u8 }).collect()
+                slice.iter().map(|&x| u8::from(x)).collect()
             }
         };
 
@@ -193,72 +189,38 @@ impl SerializedTensor {
         let device = target_device.unwrap_or(self.device);
         let numel = self.shape.numel();
 
-        // Create tensor data based on dtype
+        /// One numeric dtype's worth of little-endian decoding.
+        ///
+        /// `checked_mul` guards the untrusted `numel` (it comes from the
+        /// deserialized shape): a product that overflows `usize` is treated as
+        /// a length mismatch rather than wrapping to a small value that could
+        /// spuriously pass the check.
+        macro_rules! numeric_values {
+            ($ty:ty, $ctor:ident, $label:literal) => {{
+                const WIDTH: usize = std::mem::size_of::<$ty>();
+                if numel.checked_mul(WIDTH) != Some(self.data.len()) {
+                    return Err(MinitensorError::serialization_error(concat!(
+                        "Invalid ",
+                        $label,
+                        " data length"
+                    )));
+                }
+                let mut values = Vec::with_capacity(numel);
+                for chunk in self.data.chunks_exact(WIDTH) {
+                    let bytes: [u8; WIDTH] = chunk.try_into().map_err(|_| {
+                        MinitensorError::serialization_error(concat!("Invalid ", $label, " bytes"))
+                    })?;
+                    values.push(<$ty>::from_le_bytes(bytes));
+                }
+                crate::tensor::TensorData::$ctor(values, device)
+            }};
+        }
+
         let tensor_data = match self.dtype {
-            DataType::Float32 => {
-                // `checked_mul` guards the untrusted `numel` (from the
-                // deserialized shape): a product that overflows `usize` is
-                // treated as a length mismatch rather than wrapping to a small
-                // value that could spuriously pass the check.
-                if numel.checked_mul(4) != Some(self.data.len()) {
-                    return Err(MinitensorError::serialization_error(
-                        "Invalid f32 data length",
-                    ));
-                }
-                let mut values = Vec::with_capacity(numel);
-                for chunk in self.data.chunks_exact(4) {
-                    let bytes: [u8; 4] = chunk
-                        .try_into()
-                        .map_err(|_| MinitensorError::serialization_error("Invalid f32 bytes"))?;
-                    values.push(f32::from_le_bytes(bytes));
-                }
-                crate::tensor::TensorData::from_vec_f32(values, device)
-            }
-            DataType::Float64 => {
-                if numel.checked_mul(8) != Some(self.data.len()) {
-                    return Err(MinitensorError::serialization_error(
-                        "Invalid f64 data length",
-                    ));
-                }
-                let mut values = Vec::with_capacity(numel);
-                for chunk in self.data.chunks_exact(8) {
-                    let bytes: [u8; 8] = chunk
-                        .try_into()
-                        .map_err(|_| MinitensorError::serialization_error("Invalid f64 bytes"))?;
-                    values.push(f64::from_le_bytes(bytes));
-                }
-                crate::tensor::TensorData::from_vec_f64(values, device)
-            }
-            DataType::Int32 => {
-                if numel.checked_mul(4) != Some(self.data.len()) {
-                    return Err(MinitensorError::serialization_error(
-                        "Invalid i32 data length",
-                    ));
-                }
-                let mut values = Vec::with_capacity(numel);
-                for chunk in self.data.chunks_exact(4) {
-                    let bytes: [u8; 4] = chunk
-                        .try_into()
-                        .map_err(|_| MinitensorError::serialization_error("Invalid i32 bytes"))?;
-                    values.push(i32::from_le_bytes(bytes));
-                }
-                crate::tensor::TensorData::from_vec_i32(values, device)
-            }
-            DataType::Int64 => {
-                if numel.checked_mul(8) != Some(self.data.len()) {
-                    return Err(MinitensorError::serialization_error(
-                        "Invalid i64 data length",
-                    ));
-                }
-                let mut values = Vec::with_capacity(numel);
-                for chunk in self.data.chunks_exact(8) {
-                    let bytes: [u8; 8] = chunk
-                        .try_into()
-                        .map_err(|_| MinitensorError::serialization_error("Invalid i64 bytes"))?;
-                    values.push(i64::from_le_bytes(bytes));
-                }
-                crate::tensor::TensorData::from_vec_i64(values, device)
-            }
+            DataType::Float32 => numeric_values!(f32, from_vec_f32, "f32"),
+            DataType::Float64 => numeric_values!(f64, from_vec_f64, "f64"),
+            DataType::Int32 => numeric_values!(i32, from_vec_i32, "i32"),
+            DataType::Int64 => numeric_values!(i64, from_vec_i64, "i64"),
             DataType::Bool => {
                 if self.data.len() != numel {
                     return Err(MinitensorError::serialization_error(
@@ -665,6 +627,111 @@ mod tests {
         assert_eq!(SerializationFormat::Json.extension(), "json");
         assert_eq!(SerializationFormat::Binary.extension(), "bin");
         assert_eq!(SerializationFormat::MessagePack.extension(), "msgpack");
+    }
+
+    #[test]
+    fn serialized_tensor_roundtrips_every_dtype() {
+        use crate::tensor::TensorData;
+        use std::sync::Arc;
+
+        // Only float32 reaches this through model save/load, so the other four
+        // decoders are covered here instead of by proxy.
+        let shape = Shape::new(vec![2, 3]);
+        let cases: Vec<(DataType, TensorData)> = vec![
+            (
+                DataType::Float32,
+                TensorData::from_vec_f32(
+                    vec![-1.5, 0.0, 2.25, f32::MIN, f32::MAX, -0.0],
+                    Device::cpu(),
+                ),
+            ),
+            (
+                DataType::Float64,
+                TensorData::from_vec_f64(
+                    vec![-1.5, 0.0, 2.25, f64::MIN, f64::MAX, -0.0],
+                    Device::cpu(),
+                ),
+            ),
+            (
+                DataType::Int32,
+                TensorData::from_vec_i32(vec![-7, 0, 7, i32::MIN, i32::MAX, 1], Device::cpu()),
+            ),
+            (
+                DataType::Int64,
+                TensorData::from_vec_i64(vec![-7, 0, 7, i64::MIN, i64::MAX, 1], Device::cpu()),
+            ),
+            (
+                DataType::Bool,
+                TensorData::from_vec_bool(
+                    vec![true, false, true, true, false, false],
+                    Device::cpu(),
+                ),
+            ),
+        ];
+
+        for (dtype, data) in cases {
+            let tensor = Tensor::new(Arc::new(data), shape.clone(), dtype, Device::cpu(), true);
+            let restored = SerializedTensor::from_tensor(&tensor)
+                .and_then(|s| s.to_tensor(None))
+                .unwrap_or_else(|err| panic!("{dtype:?} failed to round-trip: {err}"));
+
+            assert_eq!(restored.shape().dims(), shape.dims(), "{dtype:?}");
+            assert_eq!(restored.dtype(), dtype, "{dtype:?}");
+            assert!(restored.requires_grad(), "{dtype:?}");
+
+            // Bit-exact, so signed zero and the dtype extremes survive.
+            match dtype {
+                DataType::Float32 => {
+                    let (a, b) = (
+                        tensor.data().as_f32_slice().unwrap(),
+                        restored.data().as_f32_slice().unwrap(),
+                    );
+                    assert!(a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()));
+                }
+                DataType::Float64 => {
+                    let (a, b) = (
+                        tensor.data().as_f64_slice().unwrap(),
+                        restored.data().as_f64_slice().unwrap(),
+                    );
+                    assert!(a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()));
+                }
+                DataType::Int32 => assert_eq!(
+                    tensor.data().as_i32_slice().unwrap(),
+                    restored.data().as_i32_slice().unwrap()
+                ),
+                DataType::Int64 => assert_eq!(
+                    tensor.data().as_i64_slice().unwrap(),
+                    restored.data().as_i64_slice().unwrap()
+                ),
+                DataType::Bool => assert_eq!(
+                    tensor.data().as_bool_slice().unwrap(),
+                    restored.data().as_bool_slice().unwrap()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn to_tensor_rejects_a_truncated_payload_for_every_dtype() {
+        for (dtype, width) in [
+            (DataType::Float32, 4),
+            (DataType::Float64, 8),
+            (DataType::Int32, 4),
+            (DataType::Int64, 8),
+            (DataType::Bool, 1),
+        ] {
+            let short = SerializedTensor {
+                shape: Shape::new(vec![4]),
+                dtype,
+                device: Device::cpu(),
+                data: vec![0u8; 4 * width - 1],
+                requires_grad: false,
+            };
+            assert!(
+                short.to_tensor(None).is_err(),
+                "{dtype:?} accepted a payload one byte short"
+            );
+        }
     }
 
     #[test]
