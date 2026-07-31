@@ -97,6 +97,85 @@ def test_truncated_normal_matches_bounds_and_moments():
     assert abs(values.var(ddof=0) - expected_var) < 0.15
 
 
+def _truncated_normal_cdf(
+    x: np.ndarray, mean: float, std: float, lower: float, upper: float
+) -> np.ndarray:
+    """Analytic CDF of the truncated normal, evaluated in the stable direction.
+
+    ``Phi`` saturates at 1 above the mean and at 0 below it, so a single
+    formula cannot cover both tails: for an interval above the mean the
+    reference has to be written with survival probabilities, or it degrades in
+    exactly the regime the test is checking (and, for something like [10, 12],
+    divides by zero).
+    """
+    z = lambda v: (v - mean) / std  # noqa: E731
+    phi = lambda v: 0.5 * math.erfc(-v / math.sqrt(2.0))  # noqa: E731  accurate for v << 0
+    q = lambda v: 0.5 * math.erfc(v / math.sqrt(2.0))  # noqa: E731  accurate for v >> 0
+
+    if z(lower) + z(upper) > 0:
+        denom = q(z(lower)) - q(z(upper))
+        return np.array([(q(z(lower)) - q(z(v))) / denom for v in x])
+    denom = phi(z(upper)) - phi(z(lower))
+    return np.array([(phi(z(v)) - phi(z(lower))) / denom for v in x])
+
+
+# Intervals far from the mean used to be sampled by inverting a CDF that had
+# saturated: [8, 9] returned ~8% of its draws below 8 and never reached 9, and
+# [10, 12] failed outright as "zero probability mass". The lower tail was fine,
+# which is the asymmetry that gives the bug away.
+@pytest.mark.parametrize(
+    "lower,upper,mean,std",
+    [
+        (-1.0, 1.0, 0.0, 1.0),
+        (2.0, 4.0, 0.0, 1.0),
+        (8.0, 9.0, 0.0, 1.0),
+        (-9.0, -8.0, 0.0, 1.0),
+        (10.0, 12.0, 0.0, 1.0),
+        (-12.0, -10.0, 0.0, 1.0),
+        (20.0, 22.0, 0.0, 1.0),
+        (-22.0, -20.0, 0.0, 1.0),
+        (1.0, 2.0, 0.5, 2.0),
+        (0.0, 0.05, 0.0, 1.0),
+    ],
+)
+def test_truncated_normal_holds_its_bounds_and_distribution_in_the_tails(
+    lower, upper, mean, std
+):
+    n = 20000
+    mt.manual_seed(7)
+    values = np.sort(
+        mt.truncated_normal(
+            (n,), mean=mean, std=std, lower=lower, upper=upper, dtype="float64"
+        ).numpy()
+    )
+
+    assert np.all(values >= lower)
+    assert np.all(values <= upper)
+    # Not collapsed onto a bound: a too-eager guard against inverse_cdf(0)
+    # keeps every value in range while destroying the distribution.
+    assert len(np.unique(values)) > n * 0.99
+
+    expected = _truncated_normal_cdf(values, mean, std, lower, upper)
+    empirical = np.arange(1, n + 1) / n
+    ks = float(np.max(np.abs(expected - empirical)))
+    assert ks < 1.63 / math.sqrt(n), f"KS={ks} for [{lower}, {upper}]"
+
+
+def test_truncated_normal_mirrored_intervals_agree():
+    # The upper tail is sampled by reflecting the interval below the mean, so
+    # the two halves must be each other's mirror image, not merely both valid.
+    mt.manual_seed(11)
+    above = mt.truncated_normal(
+        (20000,), mean=0.0, std=1.0, lower=8.0, upper=9.0, dtype="float64"
+    ).numpy()
+    mt.manual_seed(11)
+    below = mt.truncated_normal(
+        (20000,), mean=0.0, std=1.0, lower=-9.0, upper=-8.0, dtype="float64"
+    ).numpy()
+
+    np.testing.assert_allclose(np.sort(above), np.sort(-below), rtol=0, atol=1e-9)
+
+
 def test_truncated_normal_like_honours_overrides_and_bounds():
     base = Tensor.zeros((128, 64), dtype="float32", requires_grad=True)
     result = Tensor.truncated_normal_like(

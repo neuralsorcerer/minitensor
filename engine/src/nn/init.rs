@@ -274,8 +274,27 @@ pub fn truncated_normal_init(
             "truncated_normal could not construct distribution: {err}",
         ))
     })?;
-    let lower_cdf = normal.cdf(lower);
-    let upper_cdf = normal.cdf(upper);
+
+    // Inverse-CDF sampling needs `Phi(lower)` and `Phi(upper)` to be far enough
+    // apart to tell sample points inside the interval apart. Above the mean the
+    // CDF saturates at 1: for [8, 9] on a standard normal both endpoints round
+    // to within a few ULPs of 1.0, so `inverse_cdf` was fed noise and returned
+    // values below the requested lower bound (~8% of draws), and [10, 12] was
+    // rejected outright as "zero probability mass".
+    //
+    // The normal is symmetric about its mean, so an interval lying above the
+    // mean is sampled from its mirror image below the mean -- where the CDF has
+    // full relative precision -- and each draw is reflected back. Same
+    // distribution, computed where the arithmetic works.
+    let reflected = lower + upper > 2.0 * mean;
+    let (sample_lower, sample_upper) = if reflected {
+        (2.0 * mean - upper, 2.0 * mean - lower)
+    } else {
+        (lower, upper)
+    };
+
+    let lower_cdf = normal.cdf(sample_lower);
+    let upper_cdf = normal.cdf(sample_upper);
 
     if upper_cdf <= lower_cdf {
         return Err(MinitensorError::invalid_argument(
@@ -283,38 +302,44 @@ pub fn truncated_normal_init(
         ));
     }
 
+    let uniform = Uniform::new(lower_cdf, upper_cdf).map_err(|err| {
+        MinitensorError::invalid_argument(format!(
+            "truncated_normal could not construct sampler: {err}",
+        ))
+    })?;
+
+    // One draw, in f64 throughout. The final clamp makes the requested bounds
+    // exact: reflection and `inverse_cdf` are both accurate to a few ULPs, but
+    // "a few ULPs outside the interval the caller asked for" is still outside.
+    let draw = |rng: &mut _| {
+        // Keep the draw strictly inside (0, 1); `inverse_cdf` is infinite at
+        // the endpoints. The floor has to be the smallest positive double, not
+        // machine epsilon: in the far tail (`[-40, -38]`) every legitimate
+        // draw is orders of magnitude below `f64::EPSILON`, and flooring there
+        // would collapse the whole tensor onto one bound.
+        let sample_cdf = uniform.sample(rng);
+        let sample_cdf = if sample_cdf <= 0.0 {
+            f64::MIN_POSITIVE
+        } else if sample_cdf >= 1.0 {
+            1.0 - f64::EPSILON
+        } else {
+            sample_cdf
+        };
+        let value = normal.inverse_cdf(sample_cdf);
+        let value = if reflected { 2.0 * mean - value } else { value };
+        value.clamp(lower, upper)
+    };
+
     let numel = shape.numel();
     let data = match dtype {
         DataType::Float32 => {
             let mut vec = Vec::with_capacity(numel);
-            random::with_rng(|rng| {
-                let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
-                vec.extend((0..numel).map(|_| {
-                    let mut sample_cdf = uniform.sample(rng);
-                    if sample_cdf <= 0.0 {
-                        sample_cdf = f64::EPSILON;
-                    } else if sample_cdf >= 1.0 {
-                        sample_cdf = 1.0 - f64::EPSILON;
-                    }
-                    normal.inverse_cdf(sample_cdf) as f32
-                }));
-            });
+            random::with_rng(|rng| vec.extend((0..numel).map(|_| draw(rng) as f32)));
             TensorData::from_vec_f32(vec, device)
         }
         DataType::Float64 => {
             let mut vec = Vec::with_capacity(numel);
-            random::with_rng(|rng| {
-                let uniform = Uniform::new(lower_cdf, upper_cdf).unwrap();
-                vec.extend((0..numel).map(|_| {
-                    let mut sample_cdf = uniform.sample(rng);
-                    if sample_cdf <= 0.0 {
-                        sample_cdf = f64::EPSILON;
-                    } else if sample_cdf >= 1.0 {
-                        sample_cdf = 1.0 - f64::EPSILON;
-                    }
-                    normal.inverse_cdf(sample_cdf)
-                }));
-            });
+            random::with_rng(|rng| vec.extend((0..numel).map(|_| draw(rng))));
             TensorData::from_vec_f64(vec, device)
         }
         _ => {
@@ -452,6 +477,51 @@ pub fn init_bias(shape: Shape, dtype: DataType, device: Device) -> Result<Tensor
 mod tests {
     use super::*;
     use crate::tensor::Shape;
+
+    #[test]
+    fn truncated_normal_keeps_its_bounds_in_both_tails() {
+        // Sampling by inverting the CDF breaks above the mean, where `Phi`
+        // saturates at 1: [8, 9] used to put ~8% of its draws below 8 and
+        // never reach 9, and [10, 12] was rejected as spanning zero
+        // probability mass. The mirrored intervals always worked, which is
+        // what identifies the cause.
+        for (lower, upper) in [
+            (-1.0, 1.0),
+            (8.0, 9.0),
+            (-9.0, -8.0),
+            (10.0, 12.0),
+            (-12.0, -10.0),
+            (20.0, 22.0),
+            (-22.0, -20.0),
+        ] {
+            let tensor = truncated_normal_init(
+                Shape::new(vec![4096]),
+                0.0,
+                1.0,
+                lower,
+                upper,
+                DataType::Float64,
+                Device::cpu(),
+                false,
+            )
+            .unwrap_or_else(|err| panic!("[{lower}, {upper}] failed: {err}"));
+
+            let values = tensor.data().as_f64_slice().unwrap();
+            let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                min >= lower && max <= upper,
+                "[{lower}, {upper}] produced [{min}, {max}]"
+            );
+            // Guarding the inverse CDF too aggressively keeps every value in
+            // range while collapsing the tensor onto one bound, so check the
+            // interval is actually covered rather than merely respected.
+            assert!(
+                max - min > (upper - lower) * 0.1,
+                "[{lower}, {upper}] collapsed to [{min}, {max}]"
+            );
+        }
+    }
 
     #[test]
     fn test_init_methods() {
