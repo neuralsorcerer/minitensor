@@ -174,13 +174,14 @@ pub(crate) fn parse_dtype_like(value: &Bound<PyAny>) -> PyResult<DataType> {
 
 pub(crate) fn parse_device_like(value: &Bound<PyAny>) -> PyResult<Device> {
     if let Ok(device) = value.extract::<PyDevice>() {
-        return Ok(device.device());
+        return crate::device::ensure_available(device.device());
     }
 
     if let Ok(spec) = value.extract::<String>() {
-        return Device::from_str(&spec).map_err(|err| {
+        let device = Device::from_str(&spec).map_err(|err| {
             PyValueError::new_err(format!("Unsupported device specification '{spec}': {err}"))
-        });
+        })?;
+        return crate::device::ensure_available(device);
     }
 
     Err(PyTypeError::new_err(

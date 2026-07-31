@@ -35,9 +35,7 @@ impl PyTensor {
             }
         }
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, false)?;
@@ -72,9 +70,7 @@ impl PyTensor {
             }
         }
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_random_tensor(shape, dtype, device, requires_grad, true)?;
@@ -105,9 +101,7 @@ impl PyTensor {
             },
         };
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_truncated_normal_tensor(
@@ -139,9 +133,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => reference_tensor.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = Tensor::empty(shape, dtype, device, requires_grad);
@@ -163,9 +155,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => reference_tensor.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = Tensor::zeros(shape, dtype, device, requires_grad);
@@ -187,9 +177,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => reference_tensor.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = Tensor::ones(shape, dtype, device, requires_grad);
@@ -213,9 +201,7 @@ impl PyTensor {
             None => reference_tensor.dtype(),
         };
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = reference.shape_vec();
         let tensor = create_full_tensor(shape, fill_value, dtype, device, requires_grad)?;
@@ -235,9 +221,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| self.inner.device());
+        let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::empty(Shape::new(dims), dtype, device, requires_grad);
         Ok(Self::from_tensor(tensor))
@@ -256,9 +240,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| self.inner.device());
+        let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::zeros(Shape::new(dims), dtype, device, requires_grad);
         Ok(Self::from_tensor(tensor))
@@ -277,9 +259,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| self.inner.device());
+        let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::ones(Shape::new(dims), dtype, device, requires_grad);
         Ok(Self::from_tensor(tensor))
@@ -299,9 +279,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| self.inner.device());
+        let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Ok(Self::from_tensor(tensor))
@@ -319,9 +297,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| self.inner.device());
+        let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
 
         if let Ok(py_tensor) = data.extract::<PyRef<PyTensor>>() {
@@ -384,9 +360,7 @@ impl PyTensor {
             }
         }
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_randint_tensor(shape, dtype, device, requires_grad, low, high)?;
@@ -427,7 +401,7 @@ impl PyTensor {
             }
         }
 
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -457,7 +431,7 @@ impl PyTensor {
             }
         }
 
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let tensor = create_randperm_tensor(n, dtype, device, requires_grad)?;
@@ -475,7 +449,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let m = m.unwrap_or(n);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let tensor = create_eye_tensor(n, m, dtype, device, requires_grad)?;
@@ -492,7 +466,7 @@ impl PyTensor {
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let dims = parse_shape_like(shape, "shape")?;
@@ -517,9 +491,7 @@ impl PyTensor {
                 Some(name) => dtype::parse_dtype(name)?,
                 None => source.dtype(),
             };
-            let target_device = device
-                .map(|d| d.device())
-                .unwrap_or_else(|| source.device());
+            let target_device = resolve_device_or(device, source.device())?;
             let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
             let tensor = adapt_tensor_for_as_tensor(
                 source,
@@ -539,9 +511,7 @@ impl PyTensor {
                 Some(name) => dtype::parse_dtype(name)?,
                 None => source.dtype(),
             };
-            let target_device = device
-                .map(|d| d.device())
-                .unwrap_or_else(|| source.device());
+            let target_device = resolve_device_or(device, source.device())?;
             let target_requires_grad = requires_grad.unwrap_or(source.requires_grad());
             let tensor = adapt_tensor_for_as_tensor(
                 source,
@@ -558,7 +528,7 @@ impl PyTensor {
             None => infer_python_value_dtype(data).unwrap_or_else(dtype::default_dtype),
         };
 
-        let target_device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let target_device = resolve_device(device)?;
         let target_requires_grad = requires_grad.unwrap_or(false);
 
         let tensor =

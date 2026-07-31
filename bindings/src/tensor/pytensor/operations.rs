@@ -73,7 +73,7 @@ impl PyTensor {
                         "to() received multiple device specifications",
                     ));
                 }
-                device_spec = Some(py_device.device());
+                device_spec = Some(crate::device::ensure_available(py_device.device())?);
             } else if let Ok(string_value) = arg0.extract::<String>() {
                 match dtype::parse_dtype(&string_value) {
                     Ok(dtype) => {
@@ -97,7 +97,7 @@ impl PyTensor {
                                 "to() received multiple device specifications",
                             ));
                         }
-                        device_spec = Some(device);
+                        device_spec = Some(crate::device::ensure_available(device)?);
                     }
                 }
             } else {

@@ -80,6 +80,21 @@ impl Device {
         matches!(self.device_type, DeviceType::Cpu)
     }
 
+    /// Whether tensors can actually be placed on this device.
+    ///
+    /// Only CPU placement is supported today: every kernel in [`crate::ops`]
+    /// reads host memory, so a tensor labelled with a GPU device cannot take
+    /// part in any operation. The `cuda` / `metal` / `opencl` features compile
+    /// allocation and device-query scaffolding rather than kernels, so
+    /// enabling them does not change this answer.
+    ///
+    /// Placement APIs consult this instead of accepting any device and failing
+    /// later: a tensor that reports `device=cuda:0` but breaks in every
+    /// operation applied to it is worse than a refusal at creation time.
+    pub fn is_available(&self) -> bool {
+        self.is_cpu()
+    }
+
     /// Check if this is a GPU device
     pub fn is_gpu(&self) -> bool {
         matches!(
@@ -180,6 +195,23 @@ impl fmt::Display for DeviceType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_cpu_is_available_for_tensor_placement() {
+        assert!(Device::cpu().is_available());
+        for device in [
+            Device::cuda(None),
+            Device::cuda(Some(3)),
+            Device::metal(),
+            Device::opencl(None),
+            Device::opencl(Some(1)),
+        ] {
+            assert!(
+                !device.is_available(),
+                "{device} reported itself as available, but no kernel can read its memory"
+            );
+        }
+    }
 
     #[test]
     fn test_device_creation() {

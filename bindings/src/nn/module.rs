@@ -12,12 +12,11 @@
 mod layers;
 pub use self::layers::*;
 
-use crate::device::PyDevice;
+use crate::device::{PyDevice, resolve_device};
 use crate::dtype;
 use crate::error::_convert_error;
 use crate::serialization::PyStateDict;
 use crate::tensor::PyTensor;
-use engine::Device;
 use engine::nn::{
     BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, DenseLayer, FocalLoss, HuberLoss, Layer,
     LogCoshLoss, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
@@ -816,7 +815,9 @@ impl PyModule {
     /// Load a provided StateDict into this module
     #[pyo3(signature = (state, device=None))]
     fn load_state_dict(&mut self, state: &PyStateDict, device: Option<&PyDevice>) -> PyResult<()> {
-        let dev = device.map(|d| d.device());
+        let dev = device
+            .map(|d| crate::device::ensure_available(d.device()))
+            .transpose()?;
         let sd_ref = crate::serialization::PyStateDict::inner_ref(state);
         self.inner
             .as_module_mut()
@@ -1026,7 +1027,7 @@ impl PyDenseLayer {
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
         let bias = bias.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let dense_layer = DenseLayer::new(in_features, out_features, bias, device, dtype)

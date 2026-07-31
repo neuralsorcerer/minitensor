@@ -2220,18 +2220,25 @@ impl Tensor {
         pow(self, exponent)
     }
 
-    /// Move tensor to device
+    /// Move tensor to device.
+    ///
+    /// Only a no-op move is currently possible, since CPU is the only device
+    /// tensors can live on (see [`Device::is_available`]). Anything else is
+    /// refused: overwriting the device field without copying the buffer -- the
+    /// previous behaviour -- left `self.device` disagreeing with the device
+    /// recorded in the storage layout, so the tensor read as a GPU tensor to
+    /// some call sites and a CPU tensor to others, and every operation on it
+    /// failed with an internal error.
     #[inline(always)]
     pub fn to(&self, device: Device) -> Result<Self> {
         if self.device == device {
             return Ok(self.clone());
         }
 
-        // For now, just clone the tensor with the new device
-        // In a full implementation, we'd copy data between devices
-        let mut new_tensor = self.clone();
-        new_tensor.device = device;
-        Ok(new_tensor)
+        Err(MinitensorError::not_implemented(format!(
+            "moving a tensor from {} to {} is not supported; only CPU tensors can be created and operated on",
+            self.device, device
+        )))
     }
 
     /// Convert tensor to a different data type
@@ -2768,6 +2775,29 @@ mod tests {
         assert!(!tensor.requires_grad());
         assert_eq!(tensor.ndim(), 2);
         assert_eq!(tensor.numel(), 6);
+    }
+
+    #[test]
+    fn to_refuses_moves_it_cannot_perform() {
+        let shape = Shape::new(vec![2, 3]);
+        let data = Arc::new(TensorData::zeros(shape.numel(), DataType::Float32));
+        let tensor = Tensor::new(data, shape, DataType::Float32, Device::cpu(), false);
+
+        // A no-op move is the only supported one.
+        let same = tensor.to(Device::cpu()).unwrap();
+        assert_eq!(same.device(), Device::cpu());
+
+        // Relabelling instead of copying would leave `device()` disagreeing
+        // with the device recorded in the storage layout, and every accessor
+        // reads the latter.
+        for target in [Device::cuda(Some(0)), Device::metal(), Device::opencl(None)] {
+            let err = tensor.to(target).unwrap_err();
+            assert!(
+                err.to_string().contains(&target.to_string()),
+                "error should name the requested device: {err}"
+            );
+            assert_eq!(tensor.device(), Device::cpu(), "source must be untouched");
+        }
     }
 
     #[test]

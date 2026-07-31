@@ -18,7 +18,7 @@ impl PyTensor {
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let (start, end) = match end {
@@ -45,7 +45,7 @@ impl PyTensor {
         }
 
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let tensor = create_linspace_tensor(start, end, steps, dtype, device, requires_grad)?;
@@ -68,7 +68,7 @@ impl PyTensor {
         }
 
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
         let base = base.unwrap_or(10.0);
 

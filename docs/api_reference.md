@@ -1511,9 +1511,55 @@ MiniTensor supports custom ops in both Rust and Python. Refer to
 
 ## 13) Notes on devices & backends
 
-The core engine supports CPU execution and can be compiled with CUDA, Metal, or
-OpenCL backends where applicable. Device selection flows through the `Device`
-API and tensor creation functions.
+**Execution is CPU-only.** Every kernel in the engine reads host memory, so CPU
+is the only device a tensor can live on. `Device.is_available()` reports this,
+and every placement argument enforces it:
+
+```python
+import minitensor as mt
+
+print(mt.Device("cpu").is_available())
+print(mt.Device("cuda").is_available())
+
+try:
+    mt.zeros((2, 2), device=mt.Device("cuda"))
+except RuntimeError as err:
+    print(err)
+
+try:
+    mt.ones((2, 2)).to("metal")
+except RuntimeError as err:
+    print(err)
+```
+
+```text
+True
+False
+device 'cuda:0' is not available: minitensor executes on the CPU only, so tensors cannot be placed on cuda. Use device='cpu' (the default).
+device 'metal' is not available: minitensor executes on the CPU only, so tensors cannot be placed on metal. Use device='cpu' (the default).
+```
+
+The request fails where the device was named rather than producing a tensor
+that reports `device=cuda:0` and then fails in every operation applied to it.
+
+`DeviceType` still models CUDA, Metal, and OpenCL, and the `cuda` / `metal` /
+`opencl` Cargo features compile allocator and device-detection scaffolding
+(`engine::backends`, `engine::hardware::GpuDevice::detect_all`) — but no
+kernels, so enabling them does not change what `is_available()` returns.
+
+Feature flags for the `engine` crate:
+
+| Feature | Default | Notes |
+| --- | --- | --- |
+| `cpu` | yes | CPU execution. |
+| `hardware` | yes | `engine::hardware` profiling/detection. Droppable. |
+| `debug` | yes | `engine::debug` inspector/profiler. Droppable. |
+| `cuda` | no | CUDA allocation scaffolding via `cudarc`. |
+| `metal` | no | Metal scaffolding. **Apple targets only** — the dependency is declared under `cfg(target_vendor = "apple")`, so on other platforms the feature resolves to nothing rather than failing the build. |
+| `opencl` | no | OpenCL scaffolding via `opencl3`. |
+| `gpu` | no | `cuda` + `metal` + `opencl`; builds on every platform, contributing whichever of the three that platform can have. |
+| `blas` | no | Routes GEMM through a system OpenBLAS. |
+| `dynamic-loading` | no | Runtime plugin loading (`docs/plugin_system.md`). |
 
 ## 14) Documentation maintenance
 

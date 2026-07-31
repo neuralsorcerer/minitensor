@@ -5,7 +5,42 @@
 // LICENSE file in the root directory of this source tree.
 
 use engine::Device;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+
+/// Reject a device that tensors cannot actually live on.
+///
+/// Every placement argument funnels through here so an unusable device fails
+/// where the user named it. Without this the tensor is built, reports the
+/// device it was asked for, and then fails inside the first operation applied
+/// to it -- with an internal error telling the user to file a bug.
+pub(crate) fn ensure_available(device: Device) -> PyResult<Device> {
+    if device.is_available() {
+        return Ok(device);
+    }
+    Err(PyRuntimeError::new_err(format!(
+        "device '{device}' is not available: minitensor executes on the CPU only, \
+         so tensors cannot be placed on {}. Use device='cpu' (the default).",
+        device.device_type()
+    )))
+}
+
+/// Resolve an optional `device=` argument, defaulting to `fallback`.
+///
+/// `fallback` is the device of whatever the result is modelled on (`*_like`
+/// constructors) and is not re-checked: it came from a tensor that already
+/// exists, so it passed this test when that tensor was built.
+pub(crate) fn resolve_device_or(device: Option<&PyDevice>, fallback: Device) -> PyResult<Device> {
+    match device {
+        Some(device) => ensure_available(device.device()),
+        None => Ok(fallback),
+    }
+}
+
+/// Resolve an optional `device=` argument, defaulting to CPU.
+pub(crate) fn resolve_device(device: Option<&PyDevice>) -> PyResult<Device> {
+    resolve_device_or(device, Device::cpu())
+}
 
 /// Python wrapper for Device
 #[pyclass(name = "Device", from_py_object)]
@@ -79,6 +114,15 @@ impl PyDevice {
     /// Check if this is a GPU device
     fn is_gpu(&self) -> bool {
         self.inner.is_gpu()
+    }
+
+    /// Check whether tensors can be placed on this device.
+    ///
+    /// True for CPU only: minitensor's kernels all run on the host, so tensor
+    /// creation refuses any other device rather than returning a tensor that
+    /// no operation accepts.
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
     }
 
     /// String representation

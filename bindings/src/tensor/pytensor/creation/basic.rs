@@ -18,7 +18,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -36,7 +36,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -54,7 +54,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -74,7 +74,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -91,7 +91,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -109,7 +109,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -132,7 +132,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         let shape = Shape::new(dims);
@@ -168,9 +168,7 @@ impl PyTensor {
             None => reference_tensor.dtype(),
         };
 
-        let device = device
-            .map(|d| d.device())
-            .unwrap_or_else(|| reference_tensor.device());
+        let device = resolve_device_or(device, reference_tensor.device())?;
         let requires_grad = requires_grad.unwrap_or(reference_tensor.requires_grad());
         let shape = Shape::new(reference.shape_vec());
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
@@ -201,7 +199,7 @@ macro_rules! fan_init_constructors {
                 ) -> PyResult<Self> {
                     let dims = parse_shape_tuple(shape, "shape")?;
                     let dtype = dtype::resolve_dtype_arg(dtype)?;
-                    let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+                    let device = resolve_device(device)?;
                     let tensor = create_fan_init_tensor(
                         Shape::new(dims),
                         dtype,
@@ -227,9 +225,7 @@ macro_rules! fan_init_constructors {
                         Some(name) => dtype::parse_dtype(name)?,
                         None => reference_tensor.dtype(),
                     };
-                    let device = device
-                        .map(|d| d.device())
-                        .unwrap_or_else(|| reference_tensor.device());
+                    let device = resolve_device_or(device, reference_tensor.device())?;
                     let requires_grad =
                         requires_grad.unwrap_or(reference_tensor.requires_grad());
                     let tensor = create_fan_init_tensor(

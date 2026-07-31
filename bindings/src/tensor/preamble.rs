@@ -48,7 +48,7 @@ pub(crate) use self::py_args::*;
 pub(crate) use self::py_convert::*;
 pub(crate) use self::py_numpy_interop::*;
 
-use crate::device::PyDevice;
+use crate::device::{PyDevice, resolve_device, resolve_device_or};
 use crate::dtype;
 use crate::error::_convert_error;
 use crate::numpy_compat::cross_impl;

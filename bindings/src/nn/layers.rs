@@ -221,7 +221,7 @@ impl PyConv1d {
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
         let layer = Conv1d::new(
             in_channels,
@@ -517,7 +517,7 @@ impl PyConv2d {
             None => (0, 0),
         };
         let bias = bias.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let conv2d = Conv2d::new(
@@ -595,7 +595,7 @@ impl PyBatchNorm1d {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm1d::new(num_features, Some(eps), Some(momentum), device, dtype)
@@ -638,7 +638,7 @@ impl PyBatchNorm2d {
         let eps = eps.unwrap_or(1e-5);
         let momentum = momentum.unwrap_or(0.1);
         let _affine = affine.unwrap_or(true);
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let batch_norm = BatchNorm2d::new(num_features, Some(eps), Some(momentum), device, dtype)
@@ -677,7 +677,7 @@ impl PyEmbedding {
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let embedding = Embedding::new(num_embeddings, embedding_dim, padding_idx, device, dtype)
@@ -756,7 +756,7 @@ impl PyLayerNorm {
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
         let shape = parse_normalized_shape_arg(normalized_shape)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let layer = LayerNorm::new(
@@ -815,7 +815,7 @@ impl PyRMSNorm {
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
         let shape = parse_normalized_shape_arg(normalized_shape)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let layer = RMSNorm::new(
@@ -882,7 +882,7 @@ macro_rules! recurrent_class {
                 device: Option<&PyDevice>,
                 dtype: Option<&str>,
             ) -> PyResult<PyClassInitializer<Self>> {
-                let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+                let device = resolve_device(device)?;
                 let dtype = dtype::resolve_dtype_arg(dtype)?;
                 let layer = Recurrent::$ctor(
                     input_size,
@@ -1042,7 +1042,7 @@ impl PyMultiheadAttention {
         device: Option<&PyDevice>,
         dtype: Option<&str>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
 
         let mha = MultiheadAttention::new(

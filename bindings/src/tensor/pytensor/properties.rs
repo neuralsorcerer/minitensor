@@ -22,7 +22,7 @@ impl PyTensor {
         requires_grad: Option<bool>,
     ) -> PyResult<Self> {
         let dtype = dtype::resolve_dtype_arg(dtype)?;
-        let device = device.map(|d| d.device()).unwrap_or_else(Device::cpu);
+        let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
         if let Some(value) = data {
