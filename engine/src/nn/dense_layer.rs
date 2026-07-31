@@ -114,9 +114,11 @@ impl DenseLayer {
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
     }
+}
 
+impl Layer for DenseLayer {
     /// Get named parameters for this layer
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &self.weight);
         if let Some(ref bias) = self.bias {
@@ -124,9 +126,8 @@ impl DenseLayer {
         }
         params
     }
-
     /// Get named mutable parameters for this layer
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
         params.insert("weight".to_string(), &mut self.weight);
         if let Some(ref mut bias) = self.bias {
@@ -134,9 +135,7 @@ impl DenseLayer {
         }
         params
     }
-}
 
-impl Layer for DenseLayer {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions
         if input.ndim() < 2 {

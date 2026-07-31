@@ -44,30 +44,40 @@ pub trait Layer: Send + Sync {
     fn num_parameters(&self) -> usize {
         self.parameters().iter().map(|p| p.numel()).sum()
     }
+
+    /// Names for this layer's parameters, as they appear in a state dict.
+    ///
+    /// The default is empty, in which case [`Module::state_dict`] falls back to
+    /// positional `param_{i}` keys. Overriding it is what makes a checkpoint
+    /// readable and what lets a state dict be loaded into a layer whose
+    /// parameter *order* differs.
+    ///
+    /// These hooks live on `Layer` rather than on `Module` because `Module` is
+    /// supplied by a blanket `impl<T: Layer> Module for T`: an implementor
+    /// cannot override a method on it without colliding with that impl, so
+    /// naming would be unreachable from where layers are actually written.
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        HashMap::new()
+    }
+
+    /// Mutable counterpart of [`Self::named_parameters`], used when loading.
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        HashMap::new()
+    }
+
+    /// Names for this layer's persistent buffers. See [`Self::named_parameters`].
+    fn named_buffers(&self) -> HashMap<String, &Tensor> {
+        HashMap::new()
+    }
+
+    /// Mutable counterpart of [`Self::named_buffers`], used when loading.
+    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        HashMap::new()
+    }
 }
 
 /// Base module trait that extends Layer with additional functionality
 pub trait Module: Layer {
-    /// Get named parameters of the module
-    fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        HashMap::new() // Default empty implementation
-    }
-
-    /// Get named mutable parameters of the module
-    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        HashMap::new() // Default empty implementation
-    }
-
-    /// Get named buffers (non-trainable parameters) of the module
-    fn named_buffers(&self) -> HashMap<String, &Tensor> {
-        HashMap::new() // Default empty implementation
-    }
-
-    /// Get named mutable buffers of the module
-    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        HashMap::new() // Default empty implementation
-    }
-
     /// Apply a function to all parameters.
     ///
     /// `Self: Sized` keeps this generic method out of the vtable so `Module`

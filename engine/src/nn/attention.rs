@@ -222,9 +222,11 @@ impl MultiheadAttention {
         let merged = self.merge_heads(&attended, batch, q_seq)?;
         self.project(&merged, &self.out_proj, self.out_bias.as_ref())
     }
+}
 
+impl Layer for MultiheadAttention {
     /// Named parameters for serialization.
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();
         params.insert("q_proj".to_string(), &self.q_proj);
         params.insert("k_proj".to_string(), &self.k_proj);
@@ -242,9 +244,8 @@ impl MultiheadAttention {
         }
         params
     }
-
     /// Named mutable parameters for state-dict loading.
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut params = HashMap::new();
         params.insert("q_proj".to_string(), &mut self.q_proj);
         params.insert("k_proj".to_string(), &mut self.k_proj);
@@ -262,9 +263,7 @@ impl MultiheadAttention {
         }
         params
     }
-}
 
-impl Layer for MultiheadAttention {
     /// Self-attention: queries, keys and values are all projections of `input`.
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         self.forward_qkv(input, input, input, None, self.is_causal)

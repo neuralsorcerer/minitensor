@@ -72,6 +72,84 @@ impl Default for Sequential {
 }
 
 impl Layer for Sequential {
+    /// Prefix each child's names with its index, recursing so a nested layer's
+    /// own naming survives: `1.weight`, not `layer_1.param_0`. A child that
+    /// does not name its parameters keeps positional keys under its prefix, so
+    /// the path still identifies which layer a tensor belongs to.
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut named = HashMap::new();
+        for (i, layer) in self.layers.iter().enumerate() {
+            let child = layer.named_parameters();
+            if child.is_empty() {
+                for (j, param) in layer.parameters().into_iter().enumerate() {
+                    named.insert(format!("{i}.param_{j}"), param);
+                }
+            } else {
+                for (name, param) in child {
+                    named.insert(format!("{i}.{name}"), param);
+                }
+            }
+        }
+        named
+    }
+
+    /// Mutable counterpart of [`Self::named_parameters`]; must produce the same
+    /// keys or a saved model would not load back into itself.
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut named = HashMap::new();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            // The immutable probe has to finish before the mutable borrow
+            // starts, so ask whether the child names anything first.
+            let has_names = !layer.named_parameters().is_empty();
+            if !has_names {
+                for (j, param) in layer.parameters_mut().into_iter().enumerate() {
+                    named.insert(format!("{i}.param_{j}"), param);
+                }
+            } else {
+                for (name, param) in layer.named_parameters_mut() {
+                    named.insert(format!("{i}.{name}"), param);
+                }
+            }
+        }
+        named
+    }
+
+    /// Buffers follow the same prefixing as parameters.
+    fn named_buffers(&self) -> HashMap<String, &Tensor> {
+        let mut named = HashMap::new();
+        for (i, layer) in self.layers.iter().enumerate() {
+            let child = layer.named_buffers();
+            if child.is_empty() {
+                for (j, buffer) in layer.buffers().into_iter().enumerate() {
+                    named.insert(format!("{i}.buffer_{j}"), buffer);
+                }
+            } else {
+                for (name, buffer) in child {
+                    named.insert(format!("{i}.{name}"), buffer);
+                }
+            }
+        }
+        named
+    }
+
+    /// Mutable counterpart of [`Self::named_buffers`].
+    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut named = HashMap::new();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let has_names = !layer.named_buffers().is_empty();
+            if has_names {
+                for (name, buffer) in layer.named_buffers_mut() {
+                    named.insert(format!("{i}.{name}"), buffer);
+                }
+            } else {
+                for (j, buffer) in layer.buffers_mut().into_iter().enumerate() {
+                    named.insert(format!("{i}.buffer_{j}"), buffer);
+                }
+            }
+        }
+        named
+    }
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         let mut output = input.clone();
 
@@ -135,47 +213,7 @@ impl Layer for Sequential {
     }
 }
 
-impl Sequential {
-    /// Get named parameters of the sequential model
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut collected: Vec<Vec<&Tensor>> = Vec::with_capacity(self.layers.len());
-        let mut total = 0usize;
-        for layer in &self.layers {
-            let params = layer.parameters();
-            total += params.len();
-            collected.push(params);
-        }
-
-        let mut named_params = HashMap::with_capacity(total);
-        for (i, layer_params) in collected.iter().enumerate() {
-            for (j, param) in layer_params.iter().enumerate() {
-                let name = format!("layer_{}.param_{}", i, j);
-                named_params.insert(name, *param);
-            }
-        }
-        named_params
-    }
-
-    /// Get named mutable parameters of the sequential model
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut collected: Vec<Vec<&mut Tensor>> = Vec::with_capacity(self.layers.len());
-        let mut total = 0usize;
-        for layer in &mut self.layers {
-            let params = layer.parameters_mut();
-            total += params.len();
-            collected.push(params);
-        }
-
-        let mut named_params = HashMap::with_capacity(total);
-        for (i, layer_params) in collected.into_iter().enumerate() {
-            for (j, param) in layer_params.into_iter().enumerate() {
-                let name = format!("layer_{}.param_{}", i, j);
-                named_params.insert(name, param);
-            }
-        }
-        named_params
-    }
-}
+impl Sequential {}
 
 /// Builder pattern for creating sequential models
 pub struct SequentialBuilder {
@@ -313,12 +351,39 @@ mod tests {
         seq.add_layer(Box::new(MockLayer::new(10, 8)));
         seq.add_layer(Box::new(MockLayer::new(8, 5)));
 
+        // MockLayer does not name its parameters, so the child keys stay
+        // positional -- but the index prefix still says which layer they came
+        // from, which is the part a flat `param_{i}` scheme loses.
         let named_params = seq.named_parameters();
         assert_eq!(named_params.len(), 2);
-        assert!(named_params.contains_key("layer_0.param_0"));
-        assert!(named_params.contains_key("layer_1.param_0"));
+        assert!(named_params.contains_key("0.param_0"));
+        assert!(named_params.contains_key("1.param_0"));
 
         let named_params_mut = seq.named_parameters_mut();
         assert_eq!(named_params_mut.len(), 2);
+        assert!(named_params_mut.contains_key("0.param_0"));
+        assert!(named_params_mut.contains_key("1.param_0"));
+    }
+
+    #[test]
+    fn test_named_parameters_recurse_into_children_that_name_their_own() {
+        use crate::nn::DenseLayer;
+        use crate::tensor::DataType;
+
+        let mut seq = Sequential::new();
+        seq.add_layer(Box::new(
+            DenseLayer::new(4, 3, true, Device::cpu(), DataType::Float32).unwrap(),
+        ));
+        seq.add_layer(Box::new(
+            DenseLayer::new(3, 2, false, Device::cpu(), DataType::Float32).unwrap(),
+        ));
+
+        let mut keys: Vec<String> = seq.named_parameters().into_keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["0.bias", "0.weight", "1.weight"]);
+
+        let mut mut_keys: Vec<String> = seq.named_parameters_mut().into_keys().collect();
+        mut_keys.sort();
+        assert_eq!(mut_keys, keys, "loading must use the same keys as saving");
     }
 }

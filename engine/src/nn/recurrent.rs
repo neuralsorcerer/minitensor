@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::{Layer, init::InitMethod};
+use std::collections::HashMap;
+
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
@@ -198,6 +200,21 @@ impl Recurrent {
     /// Whether each layer also runs a second pass over the reversed sequence.
     pub fn bidirectional(&self) -> bool {
         self.bidirectional
+    }
+
+    /// `l{k}` or `l{k}_reverse` for the flat layer index `index`.
+    fn suffix_for(index: usize, directions: usize) -> String {
+        let layer = index / directions;
+        if directions == 2 && index % 2 == 1 {
+            format!("l{layer}_reverse")
+        } else {
+            format!("l{layer}")
+        }
+    }
+
+    /// [`Self::suffix_for`] using this stack's direction count.
+    fn parameter_suffix(&self, index: usize) -> String {
+        Self::suffix_for(index, if self.bidirectional { 2 } else { 1 })
     }
 
     /// 2 when bidirectional, 1 otherwise.
@@ -485,6 +502,48 @@ impl Recurrent {
 }
 
 impl Layer for Recurrent {
+    /// PyTorch's names: `weight_ih_l{k}`, `weight_hh_l{k}`, `bias_ih_l{k}`,
+    /// `bias_hh_l{k}`, with `_reverse` appended for the backward direction.
+    ///
+    /// The flat layer order is layer0-forward, layer0-reverse, layer1-forward,
+    /// ... so the index and direction fall straight out of it. Naming these
+    /// matters more here than elsewhere: a stacked bidirectional LSTM has up to
+    /// `4 * num_layers * directions` parameters, several of which share a
+    /// shape, so a positional checkpoint is impossible to check by eye.
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut named = HashMap::with_capacity(self.layers.len() * 4);
+        for (index, layer) in self.layers.iter().enumerate() {
+            let suffix = self.parameter_suffix(index);
+            named.insert(format!("weight_ih_{suffix}"), &layer.w_ih);
+            named.insert(format!("weight_hh_{suffix}"), &layer.w_hh);
+            if let Some(b) = &layer.b_ih {
+                named.insert(format!("bias_ih_{suffix}"), b);
+            }
+            if let Some(b) = &layer.b_hh {
+                named.insert(format!("bias_hh_{suffix}"), b);
+            }
+        }
+        named
+    }
+
+    /// Mutable counterpart of [`Self::named_parameters`].
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let directions = if self.bidirectional { 2 } else { 1 };
+        let mut named = HashMap::with_capacity(self.layers.len() * 4);
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            let suffix = Self::suffix_for(index, directions);
+            named.insert(format!("weight_ih_{suffix}"), &mut layer.w_ih);
+            named.insert(format!("weight_hh_{suffix}"), &mut layer.w_hh);
+            if let Some(b) = &mut layer.b_ih {
+                named.insert(format!("bias_ih_{suffix}"), b);
+            }
+            if let Some(b) = &mut layer.b_hh {
+                named.insert(format!("bias_hh_{suffix}"), b);
+            }
+        }
+        named
+    }
+
     /// Run the stack from zero state and return only the output sequence. Use
     /// [`Recurrent::forward_with_state`] when the final states are needed.
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {

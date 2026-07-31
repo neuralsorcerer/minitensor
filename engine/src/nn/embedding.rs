@@ -109,20 +109,6 @@ impl Embedding {
         &self.weight
     }
 
-    /// Named parameters for serialization.
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::with_capacity(1);
-        params.insert("weight".to_string(), &self.weight);
-        params
-    }
-
-    /// Named mutable parameters for state-dict loading.
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::with_capacity(1);
-        params.insert("weight".to_string(), &mut self.weight);
-        params
-    }
-
     /// Read the input index tensor into host indices, validating the range.
     fn host_indices(&self, input: &Tensor) -> Result<Vec<usize>> {
         let input = input.contiguous()?;
@@ -167,6 +153,19 @@ impl Embedding {
 }
 
 impl Layer for Embedding {
+    /// Named parameters for serialization.
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
+        let mut params = HashMap::with_capacity(1);
+        params.insert("weight".to_string(), &self.weight);
+        params
+    }
+    /// Named mutable parameters for state-dict loading.
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut params = HashMap::with_capacity(1);
+        params.insert("weight".to_string(), &mut self.weight);
+        params
+    }
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         let indices = self.host_indices(input)?;
 

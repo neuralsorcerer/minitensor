@@ -126,33 +126,43 @@ impl BatchNorm1d {
     pub fn eval(&mut self) {
         self.training = false;
     }
+}
 
+impl Layer for BatchNorm1d {
     /// Get named parameters for this layer
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::with_capacity(2);
         params.insert("weight".to_string(), &self.weight);
         params.insert("bias".to_string(), &self.bias);
         params
     }
-
     /// Get named mutable parameters for this layer
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut params = HashMap::with_capacity(2);
         params.insert("weight".to_string(), &mut self.weight);
         params.insert("bias".to_string(), &mut self.bias);
         params
     }
-
     /// Get named buffers (non-trainable parameters) for this layer
-    pub fn named_buffers(&self) -> HashMap<String, &Tensor> {
+    fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &self.running_mean);
         buffers.insert("running_var".to_string(), &self.running_var);
         buffers
     }
-}
 
-impl Layer for BatchNorm1d {
+    /// Get named mutable buffers for this layer.
+    ///
+    /// Must mirror [`Self::named_buffers`]: saving under names and loading by
+    /// position would put `running_var` wherever the buffer order happened to
+    /// place it.
+    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+        let mut buffers = HashMap::with_capacity(2);
+        buffers.insert("running_mean".to_string(), &mut self.running_mean);
+        buffers.insert("running_var".to_string(), &mut self.running_var);
+        buffers
+    }
+
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions - expect 2D [N, C] or 3D [N, C, L]
         if input.ndim() < 2 || input.ndim() > 3 {
@@ -288,25 +298,24 @@ impl BatchNorm2d {
     pub fn eval(&mut self) {
         self.training = false;
     }
+}
 
+impl Layer for BatchNorm2d {
     /// Get named buffers (non-trainable parameters) for this layer
-    pub fn named_buffers(&self) -> HashMap<String, &Tensor> {
+    fn named_buffers(&self) -> HashMap<String, &Tensor> {
         let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &self.running_mean);
         buffers.insert("running_var".to_string(), &self.running_var);
         buffers
     }
-
     /// Get named mutable buffers for this layer
-    pub fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_buffers_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut buffers = HashMap::with_capacity(2);
         buffers.insert("running_mean".to_string(), &mut self.running_mean);
         buffers.insert("running_var".to_string(), &mut self.running_var);
         buffers
     }
-}
 
-impl Layer for BatchNorm2d {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions - expect 4D [N, C, H, W]
         if input.ndim() != 4 {
@@ -454,9 +463,11 @@ impl LayerNorm {
     pub fn elementwise_affine(&self) -> bool {
         self.weight.is_some()
     }
+}
 
+impl Layer for LayerNorm {
     /// Named parameters for serialization.
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();
         if let Some(ref w) = self.weight {
             params.insert("weight".to_string(), w);
@@ -466,9 +477,8 @@ impl LayerNorm {
         }
         params
     }
-
     /// Named mutable parameters for state-dict loading.
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut params = HashMap::new();
         if let Some(ref mut w) = self.weight {
             params.insert("weight".to_string(), w);
@@ -478,9 +488,7 @@ impl LayerNorm {
         }
         params
     }
-}
 
-impl Layer for LayerNorm {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         check_normalized_suffix(input, &self.normalized_shape, "LayerNorm")?;
         crate::ops::normalization::layer_norm(
@@ -581,27 +589,26 @@ impl RMSNorm {
     pub fn elementwise_affine(&self) -> bool {
         self.weight.is_some()
     }
+}
 
+impl Layer for RMSNorm {
     /// Named parameters for serialization.
-    pub fn named_parameters(&self) -> HashMap<String, &Tensor> {
+    fn named_parameters(&self) -> HashMap<String, &Tensor> {
         let mut params = HashMap::new();
         if let Some(ref w) = self.weight {
             params.insert("weight".to_string(), w);
         }
         params
     }
-
     /// Named mutable parameters for state-dict loading.
-    pub fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
+    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
         let mut params = HashMap::new();
         if let Some(ref mut w) = self.weight {
             params.insert("weight".to_string(), w);
         }
         params
     }
-}
 
-impl Layer for RMSNorm {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         check_normalized_suffix(input, &self.normalized_shape, "RMSNorm")?;
         crate::ops::normalization::rms_norm(
@@ -644,8 +651,12 @@ mod tests {
             2,
             "running_mean and running_var must serialize"
         );
-        assert!(sd.buffers.contains_key("buffer_0"));
-        assert!(sd.buffers.contains_key("buffer_1"));
+        // Named, not positional: a checkpoint that says `buffer_0` cannot be
+        // checked by eye, and cannot survive a change in buffer order.
+        assert!(sd.buffers.contains_key("running_mean"));
+        assert!(sd.buffers.contains_key("running_var"));
+        assert!(sd.parameters.contains_key("weight"));
+        assert!(sd.parameters.contains_key("bias"));
     }
 
     #[test]

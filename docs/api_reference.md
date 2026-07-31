@@ -1331,8 +1331,20 @@ ddof=2 rejected: True
 Any module can write its own weights with `module.save(path, format=...)` and
 read a saved file back with `Module.load_state_from(path, format=...)`, which
 returns a `StateDict` that `load_state_dict` applies. Passing `format=None`
-picks the format from the file extension. Layers without named parameters fall
-back to indexed names (`param_0`, `param_1`, ...).
+picks the format from the file extension.
+
+Parameters and buffers are keyed by name: `weight` / `bias` for the dense,
+convolution and normalization layers, `running_mean` / `running_var` for
+BatchNorm's buffers, `q_proj` / `k_proj` / `v_proj` / `out_proj` (and their
+biases) for attention, and PyTorch's `weight_ih_l{k}` / `weight_hh_l{k}` /
+`bias_ih_l{k}` / `bias_hh_l{k}` for the recurrent layers, with `_reverse`
+appended for the backward direction of a bidirectional stack. `Sequential`
+prefixes each child with its index (`0.weight`, `2.bias`), recursing so a
+nested layer keeps its own names.
+
+A custom `Layer` that does not override `named_parameters` falls back to
+positional keys (`param_0`, `param_1`, ...), which still load correctly but
+cannot be inspected or reordered.
 
 ```python
 import os
@@ -1360,7 +1372,7 @@ print(model(probe).tolist() == before)
 ```
 
 ```text
-['param_0', 'param_1'] []
+['bias', 'weight'] []
 True
 ```
 
