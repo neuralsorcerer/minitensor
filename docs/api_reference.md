@@ -1551,14 +1551,23 @@ Feature flags for the `engine` crate:
 | Feature | Default | Notes |
 | --- | --- | --- |
 | `cpu` | yes | CPU execution. |
-| `hardware` | yes | `engine::hardware` profiling/detection. Droppable. |
-| `debug` | yes | `engine::debug` inspector/profiler. Droppable. |
+| `hardware` | yes | `engine::hardware` profiling/detection. |
+| `debug` | yes | `engine::debug` inspector/profiler. |
 | `cuda` | no | CUDA allocation scaffolding via `cudarc`. |
 | `metal` | no | Metal scaffolding. **Apple targets only** — the dependency is declared under `cfg(target_vendor = "apple")`, so on other platforms the feature resolves to nothing rather than failing the build. |
 | `opencl` | no | OpenCL scaffolding via `opencl3`. |
 | `gpu` | no | `cuda` + `metal` + `opencl`; builds on every platform, contributing whichever of the three that platform can have. |
 | `blas` | no | Routes GEMM through a system OpenBLAS. |
 | `dynamic-loading` | no | Runtime plugin loading (`docs/plugin_system.md`). |
+
+Neither `hardware` nor `debug` is used by any tensor or autograd execution
+path, so a Rust consumer embedding the engine can drop both:
+`--no-default-features --features cpu` builds a 30.4 MB rlib against 46.0 MB
+for the default set (measured, release profile). The dependency graph is
+unchanged at 132 crates either way — both features are pure Rust code, not
+extra dependencies, so the saving is compiled volume rather than build inputs.
+The Python extension always needs them: `mt._core.debug` and the hardware
+introspection API are part of the published surface.
 
 ## 14) Documentation maintenance
 
