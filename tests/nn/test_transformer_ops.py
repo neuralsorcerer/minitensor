@@ -291,3 +291,75 @@ def test_glu_gradients_match_finite_differences():
     xt = _t(x, requires_grad=True)
     (F.glu(xt) * _t(g)).sum().backward()
     np.testing.assert_allclose(xt.grad.numpy(), _finite_diff(_glu_np, x, g), atol=1e-6)
+
+
+def test_boolean_mask_polarity_is_opposite_between_the_two_families():
+    """Pin the convention on both sides, because they disagree.
+
+    `scaled_dot_product_attention` keeps `True` positions; `masked_softmax`,
+    `masked_log_softmax` and `masked_fill` exclude them. Both follow PyTorch,
+    which is inconsistent here, and only the attention side was documented.
+    Getting it backwards raises nothing -- it attends to exactly the positions
+    the caller meant to hide -- so the contrast is asserted directly.
+    """
+    scores = mt.from_numpy(np.array([[1.0, 2.0, 3.0]], dtype=np.float32))
+    first_only = np.array([[True, False, False]])
+
+    # masked_softmax: True excludes, so position 0 drops out and the remaining
+    # two renormalize between themselves.
+    excluded = mt.masked_softmax(scores, mt.from_numpy(first_only), -1).numpy()
+    reference = np.exp([2.0, 3.0]) / np.exp([2.0, 3.0]).sum()
+    assert excluded[0, 0] == 0.0
+    np.testing.assert_allclose(excluded[0, 1:], reference, rtol=1e-6)
+
+    # masked_fill agrees with it: True is the position that gets replaced.
+    filled = mt.masked_fill(
+        mt.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32)),
+        mt.from_numpy(first_only[0]),
+        -9.0,
+    ).numpy()
+    np.testing.assert_array_equal(filled, [-9.0, 2.0, 3.0])
+
+    # Attention is the other way round: True is the position that survives.
+    rng = np.random.default_rng(0)
+    q, k, v = (rng.standard_normal((1, 1, 4)).astype(np.float32) for _ in range(3))
+    value = rng.standard_normal((1, 3, 4)).astype(np.float32)
+    key = rng.standard_normal((1, 3, 4)).astype(np.float32)
+    out = mt.scaled_dot_product_attention(
+        mt.from_numpy(q),
+        mt.from_numpy(key),
+        mt.from_numpy(value),
+        attn_mask=mt.from_numpy(first_only),
+    ).numpy()
+    # Only key 0 is allowed, so the output is exactly value row 0.
+    np.testing.assert_allclose(out[0, 0], value[0, 0], rtol=1e-6)
+
+
+def test_a_row_with_nothing_to_attend_to_is_zero_not_nan():
+    """`0/0` has no answer; record which one this library returns.
+
+    PyTorch yields NaN for a fully-masked attention row. Zeros propagate
+    quietly instead, so the difference matters to anyone porting code that
+    relied on NaN to surface a bad mask.
+    """
+    rng = np.random.default_rng(1)
+    q, k, v = (rng.standard_normal((1, 3, 4)).astype(np.float32) for _ in range(3))
+    mask = np.ones((3, 3), dtype=bool)
+    mask[1, :] = False  # query 1 may attend to nothing
+
+    out = mt.scaled_dot_product_attention(
+        mt.from_numpy(q), mt.from_numpy(k), mt.from_numpy(v),
+        attn_mask=mt.from_numpy(mask),
+    ).numpy()
+
+    np.testing.assert_array_equal(out[0, 1], np.zeros(4))
+    assert np.all(np.isfinite(out[0, 0])) and np.all(np.isfinite(out[0, 2]))
+
+    # The softmax helpers agree: zeros for the probability form, -inf for the
+    # log form (log 0), rather than NaN.
+    scores = mt.from_numpy(np.array([[1.0, 2.0, 3.0]], dtype=np.float32))
+    all_excluded = mt.from_numpy(np.array([[True, True, True]]))
+    np.testing.assert_array_equal(
+        mt.masked_softmax(scores, all_excluded, -1).numpy(), np.zeros((1, 3))
+    )
+    assert np.all(np.isneginf(mt.masked_log_softmax(scores, all_excluded, -1).numpy()))

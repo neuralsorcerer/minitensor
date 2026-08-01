@@ -941,6 +941,41 @@ and disables `False` ones. `is_causal=True` restricts query `i` to keys `j <= i`
 aligned to the bottom right when `L != S`; combining it with an explicit
 `attn_mask` is rejected. `scale` overrides the default `1/sqrt(E)`.
 
+#### Which way round is a boolean mask?
+
+The two mask-taking families use **opposite** polarity. Both follow PyTorch,
+which is itself inconsistent here, so the convention is worth stating rather
+than guessing:
+
+| Function | `True` means |
+| --- | --- |
+| `scaled_dot_product_attention(attn_mask=...)` | **keep** this position |
+| `masked_softmax`, `masked_log_softmax`, `masked_fill` | **exclude** this position |
+
+Passing the wrong polarity does not raise — it silently attends to exactly the
+positions you meant to hide, so this is worth checking rather than assuming.
+
+A row that ends up with nothing to attend to has no defined softmax (`0/0`).
+`masked_softmax` and `scaled_dot_product_attention` return zeros for such a row,
+and `masked_log_softmax` returns `-inf`. Note that PyTorch returns `NaN` for a
+fully-masked attention row; zeros propagate quietly, so a fully-masked row is
+still a bug worth catching upstream.
+
+```python
+import minitensor as mt
+import numpy as np
+
+scores = mt.from_numpy(np.array([[1.0, 2.0, 3.0]], dtype=np.float32))
+keep_first_only = mt.from_numpy(np.array([[False, True, True]]))
+
+# True excludes, so this keeps position 0 alone and it takes all the weight.
+print(mt.masked_softmax(scores, keep_first_only, -1).numpy())
+```
+
+```text
+[[1. 0. 0.]]
+```
+
 `rope(x, base=10000.0, offset=0)` -- rotary position embedding. Rotates pairs of
 features of an `(..., seq, head_dim)` input by position-dependent angles,
 injecting *relative* position information with no learned parameters;
