@@ -51,7 +51,7 @@ fn checked_repeat_numel(dims: &[usize]) -> Result<usize> {
 }
 
 fn attach_repeat_backward(mut output: Tensor, input: &Tensor, repeats: &[usize]) -> Result<Tensor> {
-    if input.requires_grad() && input.dtype().is_float() {
+    if input.requires_grad() && input.dtype().is_float() && crate::autograd::is_grad_enabled() {
         output.refresh_autograd_metadata();
         let mut output = output.requires_grad_(true);
         let grad_fn = Arc::new(RepeatBackward {
@@ -82,14 +82,22 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
     // describes real storage. The copy is made outside of autograd because the
     // ReshapeBackward node attached below already routes gradients straight to
     // the original tensor.
+    // Under `no_grad`, the output must not claim to be tracked. Neither path
+    // below gates on grad mode by itself: `view` clones the input (flag and
+    // all), and `requires_grad_` deliberately ignores grad mode so that marking
+    // a leaf trainable inside `no_grad` still works. Propagating the flag
+    // through it therefore produced a tensor with `requires_grad = true` and a
+    // `grad_fn`, but no graph node -- `add_to_graph` gates correctly -- so the
+    // result looked tracked and back-propagated to nothing.
+    let track = tensor.requires_grad() && crate::autograd::is_grad_enabled();
     let mut reshaped = if tensor.is_contiguous() {
-        tensor.view(new_shape.clone())?
+        tensor.view(new_shape.clone())?.requires_grad_(track)
     } else {
         tensor
             .detach()
             .contiguous()?
             .view(new_shape.clone())?
-            .requires_grad_(tensor.requires_grad())
+            .requires_grad_(track)
     };
     reshaped.refresh_autograd_metadata();
 
@@ -958,7 +966,8 @@ pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result
     // Compute the roll on a detached view so the internal slice/concatenate steps
     // (which flatten to a storage-sharing view in the `dims == None` case) never
     // build gradient edges; a single RollBackward inverts the whole operation.
-    let track_grad = tensor.requires_grad() && tensor.dtype().is_float();
+    let track_grad =
+        tensor.requires_grad() && tensor.dtype().is_float() && crate::autograd::is_grad_enabled();
     let base = if track_grad {
         tensor.detach()
     } else {

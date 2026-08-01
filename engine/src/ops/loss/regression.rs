@@ -144,7 +144,9 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     // Set up gradient function if needed. The forward is computed on detached
     // data (the exact gradient is provided by MAELossBackward from the stored
     // sign), so gate on the inputs and enable grad on the loss explicitly.
-    if predictions.requires_grad() || targets.requires_grad() {
+    if (predictions.requires_grad() || targets.requires_grad())
+        && crate::autograd::is_grad_enabled()
+    {
         let grad_fn = Arc::new(MAELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -223,7 +225,7 @@ pub fn cross_entropy_loss(
     };
 
     // Set up gradient function if needed
-    if predictions.requires_grad() {
+    if predictions.requires_grad() && crate::autograd::is_grad_enabled() {
         let grad_fn = Arc::new(CrossEntropyLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets_one_hot.shape().dims().to_vec(),
@@ -476,7 +478,7 @@ pub fn binary_cross_entropy_with_logits_loss(
     // The forward runs on detached data (the exact gradient comes from
     // BCEWithLogitsLossBackward), so gate on the inputs and turn grad back on
     // explicitly rather than letting it propagate.
-    if logits.requires_grad() || targets.requires_grad() {
+    if (logits.requires_grad() || targets.requires_grad()) && crate::autograd::is_grad_enabled() {
         let grad_fn = Arc::new(BCEWithLogitsLossBackward {
             input_ids: [logits.id(), targets.id()],
             input_requires_grad: [logits.requires_grad(), targets.requires_grad()],
@@ -739,7 +741,9 @@ pub fn huber_loss(
     // Set up gradient function if needed. The forward is computed on detached
     // data (the exact gradient is provided by HuberLossBackward from the stored
     // diff), so gate on the inputs and enable grad on the loss explicitly.
-    if predictions.requires_grad() || targets.requires_grad() {
+    if (predictions.requires_grad() || targets.requires_grad())
+        && crate::autograd::is_grad_enabled()
+    {
         let grad_fn = Arc::new(HuberLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),

@@ -221,7 +221,7 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
 
     // p = 0 counts non-zeros: it is a step function, so its derivative is zero
     // wherever it exists and there is no gradient worth recording.
-    if tensor.requires_grad() && p != 0.0 {
+    if tensor.requires_grad() && p != 0.0 && crate::autograd::is_grad_enabled() {
         let grad_fn = Arc::new(NormBackward {
             input_id: tensor.id(),
             input,
