@@ -21,6 +21,33 @@ The benchmark script attempts to import optional comparison frameworks such as
 PyTorch and TensorFlow. Missing optional frameworks are skipped rather than
 failing the MiniTensor benchmark.
 
+## Choosing a GEMM backend
+
+Matrix multiplication runs through `matrixmultiply` by default -- pure Rust, no
+system library. The `blas` feature routes it to an installed OpenBLAS instead.
+Which is faster depends on the machine and the size, so measure rather than
+assume:
+
+```bash
+cargo run --release --example gemm_benchmark
+cargo run --release --features blas --example gemm_benchmark
+```
+
+On the machine these docs were last measured on (x86-64, OpenBLAS 0.3 from
+`libopenblas-dev`), square float32 matmul came out:
+
+| size | matrixmultiply | OpenBLAS | speedup |
+| --- | --- | --- | --- |
+| 128 | 49 GFLOP/s | 55 GFLOP/s | 1.1x |
+| 256 | 101 GFLOP/s | 156 GFLOP/s | 1.5x |
+| 512 | 150 GFLOP/s | 226 GFLOP/s | 1.5x |
+| 1024 | 189 GFLOP/s | 287 GFLOP/s | 1.5x |
+
+The gap widens with size and is small enough at 128 that the extra build
+dependency may not be worth it for workloads dominated by small matrices. These
+are single-run figures from one machine; treat them as a reason to run the
+benchmark, not as a result to quote.
+
 ## Recommended benchmark setup
 
 For stable measurements:
