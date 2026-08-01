@@ -1181,9 +1181,9 @@ Shape([5, 2, 8]) Shape([2, 2, 4]) 8
 ### Built-in optimizers
 
 - `SGD(params, lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False)`
-- `Adam`
+- `Adam(params, lr=1e-3, betas=None, beta1=None, beta2=None, epsilon=1e-8, weight_decay=0.0, amsgrad=False)`
 - `AdamW`
-- `RMSprop`
+- `RMSprop(params, lr, alpha=0.99, epsilon=1e-8, weight_decay=0.0, momentum=0.0, centered=False)`
 - `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004)`
 - `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, epsilon=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
@@ -1223,6 +1223,50 @@ magnitude, and it stores one momentum buffer per parameter instead of Adam's
 two. Because the step size is uniform, a Lion learning rate is typically 3-10x
 smaller than the AdamW one, with a correspondingly larger `weight_decay`. Its
 beta defaults are `(0.9, 0.99)` -- not Adam's `(0.9, 0.999)`.
+
+`Adam`'s `amsgrad=True` keeps the running *maximum* of the second moment
+instead of its current value, so the denominator never shrinks and the step
+size is monotonically non-increasing per coordinate. It is the fix for Adam's
+non-convergence on problems where a rare large gradient would otherwise be
+forgotten by the moving average.
+
+### Learning-rate schedulers
+
+A scheduler wraps an optimizer, owns the step counter, and writes each step's
+rate back to `optimizer.lr`. Constructing one applies the schedule's step-0
+value immediately, as PyTorch does, so `LinearWarmupLR` starts at zero.
+
+- `ConstantLR(optimizer)` -- holds the rate.
+- `StepLR(optimizer, step_size, gamma=0.1)` -- `base_lr * gamma ** (t // step_size)`.
+- `ExponentialLR(optimizer, gamma)` -- `base_lr * gamma ** t`.
+- `CosineAnnealingLR(optimizer, t_max, eta_min=0.0)` -- half cosine from `base_lr` down to `eta_min` over `t_max` steps, then held.
+- `LinearWarmupLR(optimizer, warmup_steps)` -- linear ramp from 0 to `base_lr`, then held.
+- `PolynomialDecayLR(optimizer, decay_steps, end_lr=0.0, power=1.0)` -- `(base_lr - end_lr) * (1 - t/decay_steps) ** power + end_lr`, then held at `end_lr`.
+- `MultiStepLR(optimizer, milestones, gamma=0.1)` -- multiplies by `gamma` once per milestone passed.
+
+Every schedule is relative to the learning rate the optimizer had when the
+scheduler was constructed (`scheduler.base_lr`); assigning to `optimizer.lr`
+afterwards does not move the schedule. `get_lr(step)` evaluates the schedule at
+any step without applying it, and `get_last_lr()` returns what was last written.
+
+```python
+import minitensor as mt
+from minitensor import optim
+
+parameter = mt.zeros((2,), requires_grad=True)
+optimizer = optim.SGD([parameter], 1.0)
+scheduler = optim.StepLR(optimizer, step_size=2, gamma=0.5)
+
+rates = [optimizer.lr]
+for _ in range(4):
+    scheduler.step()
+    rates.append(optimizer.lr)
+print(rates)
+```
+
+```text
+[1.0, 1.0, 0.5, 0.5, 0.25]
+```
 
 ### Base optimizer API
 

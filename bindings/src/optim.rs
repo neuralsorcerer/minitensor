@@ -16,6 +16,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
 
 /// Base class for optimizers
+/// Python spells its booleans `True`/`False`; Rust's `Display` gives
+/// `true`/`false`, which is not valid Python in a `__repr__`.
+fn py_bool(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
+}
+
 #[pyclass(name = "Optimizer", subclass)]
 pub struct PyOptimizer {
     inner: OptimizerType,
@@ -106,7 +112,7 @@ impl PyOptimizer {
 
     /// Get learning rate
     #[getter]
-    fn lr(&self) -> f64 {
+    pub(crate) fn lr(&self) -> f64 {
         match &self.inner {
             OptimizerType::Sgd(optimizer) => optimizer.learning_rate(),
             OptimizerType::Adam(optimizer) => optimizer.learning_rate(),
@@ -120,7 +126,7 @@ impl PyOptimizer {
 
     /// Set learning rate
     #[setter]
-    fn set_lr(&mut self, lr: f64) {
+    pub(crate) fn set_lr(&mut self, lr: f64) {
         match &mut self.inner {
             OptimizerType::Sgd(optimizer) => optimizer.set_learning_rate(lr),
             OptimizerType::Adam(optimizer) => optimizer.set_learning_rate(lr),
@@ -136,22 +142,25 @@ impl PyOptimizer {
     fn __repr__(&self) -> String {
         match &self.inner {
             OptimizerType::Sgd(optimizer) => format!(
-                "SGD(lr={}, momentum={}, dampening={})",
+                "SGD(lr={:?}, momentum={:?}, dampening={:?}, weight_decay={:?}, nesterov={})",
                 optimizer.learning_rate(),
                 optimizer.momentum(),
-                optimizer.dampening()
+                optimizer.dampening(),
+                optimizer.weight_decay(),
+                py_bool(optimizer.is_nesterov())
             ),
             OptimizerType::Adam(optimizer) => format!(
-                "Adam(lr={}, betas=({}, {}), eps={}, weight_decay={}, decoupled_weight_decay={})",
+                "Adam(lr={:?}, betas=({:?}, {:?}), eps={:?}, weight_decay={:?}, amsgrad={}, decoupled_weight_decay={})",
                 optimizer.learning_rate(),
                 optimizer.beta1(),
                 optimizer.beta2(),
                 optimizer.epsilon(),
                 optimizer.weight_decay(),
-                optimizer.is_decoupled_weight_decay()
+                py_bool(optimizer.is_amsgrad()),
+                py_bool(optimizer.is_decoupled_weight_decay())
             ),
             OptimizerType::AdamW(optimizer) => format!(
-                "AdamW(lr={}, betas=({}, {}), eps={}, weight_decay={})",
+                "AdamW(lr={:?}, betas=({}, {}), eps={:?}, weight_decay={:?})",
                 optimizer.learning_rate(),
                 optimizer.beta1(),
                 optimizer.beta2(),
@@ -159,7 +168,7 @@ impl PyOptimizer {
                 optimizer.weight_decay()
             ),
             OptimizerType::NAdam(optimizer) => format!(
-                "NAdam(lr={}, betas=({}, {}), eps={}, momentum_decay={})",
+                "NAdam(lr={:?}, betas=({}, {}), eps={:?}, momentum_decay={:?})",
                 optimizer.learning_rate(),
                 optimizer.beta1(),
                 optimizer.beta2(),
@@ -167,19 +176,22 @@ impl PyOptimizer {
                 optimizer.momentum_decay()
             ),
             OptimizerType::Adagrad(optimizer) => format!(
-                "Adagrad(lr={}, lr_decay={}, eps={})",
+                "Adagrad(lr={:?}, lr_decay={:?}, eps={:?})",
                 optimizer.learning_rate(),
                 optimizer.lr_decay(),
                 optimizer.epsilon()
             ),
             OptimizerType::RMSprop(optimizer) => format!(
-                "RMSprop(lr={}, alpha={}, eps={})",
+                "RMSprop(lr={:?}, alpha={:?}, eps={:?}, weight_decay={:?}, momentum={:?}, centered={})",
                 optimizer.learning_rate(),
                 optimizer.alpha(),
-                optimizer.epsilon()
+                optimizer.epsilon(),
+                optimizer.weight_decay(),
+                optimizer.momentum(),
+                py_bool(optimizer.is_centered())
             ),
             OptimizerType::Lion(optimizer) => format!(
-                "Lion(lr={}, betas=({}, {}), weight_decay={})",
+                "Lion(lr={:?}, betas=({}, {}), weight_decay={:?})",
                 optimizer.learning_rate(),
                 optimizer.beta1(),
                 optimizer.beta2(),
@@ -460,7 +472,8 @@ impl PyAdam {
             beta1=None,
             beta2=None,
             epsilon=1e-8,
-            weight_decay=0.0
+            weight_decay=0.0,
+            amsgrad=false
         )
     )]
     #[allow(clippy::too_many_arguments)]
@@ -473,6 +486,7 @@ impl PyAdam {
         beta2: Option<f64>,
         epsilon: f64,
         weight_decay: f64,
+        amsgrad: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
@@ -489,13 +503,17 @@ impl PyAdam {
         let params = collect_parameters(parameters)?;
         let (beta1, beta2) = resolve_betas(betas, beta1, beta2)?;
 
+        // The engine has carried `with_amsgrad` (and a tested `v_hat` update)
+        // since the start; nothing bound it, so the max-second-moment variant
+        // was unreachable from Python.
         let adam = Adam::new(
             lr,
             Some(beta1),
             Some(beta2),
             Some(epsilon),
             Some(weight_decay),
-        );
+        )
+        .with_amsgrad(amsgrad);
 
         Ok(PyClassInitializer::from(PyOptimizer::from_adam(adam, params)).add_subclass(Self))
     }
@@ -539,6 +557,17 @@ impl PyAdam {
         let optimizer = slf.as_ref();
         if let OptimizerType::Adam(adam) = &optimizer.inner {
             Ok(adam.weight_decay())
+        } else {
+            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        }
+    }
+
+    /// Whether the AMSGrad variant is in use
+    #[getter]
+    fn amsgrad(slf: PyRef<Self>) -> PyResult<bool> {
+        let optimizer = slf.as_ref();
+        if let OptimizerType::Adam(adam) = &optimizer.inner {
+            Ok(adam.is_amsgrad())
         } else {
             Err(PyRuntimeError::new_err("Invalid optimizer type"))
         }
@@ -1050,6 +1079,8 @@ pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> P
     optim_module.add_class::<PyAdagrad>()?;
     optim_module.add_class::<PyNAdam>()?;
     optim_module.add_class::<PyLion>()?;
+
+    crate::lr_scheduler::register(&optim_module)?;
 
     parent_module.add_submodule(&optim_module)?;
     Ok(())

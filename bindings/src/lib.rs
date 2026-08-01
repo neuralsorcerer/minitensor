@@ -14,6 +14,7 @@ mod device;
 mod dtype;
 mod error;
 mod functional;
+mod lr_scheduler;
 mod nn;
 mod numpy_compat;
 mod optim;
