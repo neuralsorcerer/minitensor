@@ -911,3 +911,60 @@ def test_numpy_layouts_round_trip_for_every_supported_dtype(dtype):
         result = mt.as_tensor(source).numpy()
         assert result.dtype == source.dtype
         np.testing.assert_array_equal(result, source)
+
+
+# NumPy dtypes the engine does not carry, paired with the dtype they widen to.
+# Every one of these widens exactly: no value can change in the cast.
+_WIDENED_DTYPES = [
+    ("float16", "float32"),
+    ("int8", "int32"),
+    ("int16", "int32"),
+    ("uint8", "int32"),
+    ("uint16", "int32"),
+    ("uint32", "int64"),
+]
+
+
+@pytest.mark.parametrize("source_dtype,expected", _WIDENED_DTYPES)
+def test_unsupported_numpy_dtypes_widen_without_changing_values(source_dtype, expected):
+    if np.issubdtype(np.dtype(source_dtype), np.integer):
+        info = np.iinfo(source_dtype)
+        values = [info.min, 0, 1, info.max]
+    else:
+        values = [-65504.0, 0.0, 1.0, 65504.0]  # float16 range extremes
+    source = np.array(values, dtype=source_dtype)
+
+    tensor = mt.from_numpy(source)
+    assert tensor.dtype == expected
+
+    # Exactness is the whole justification for widening rather than refusing.
+    np.testing.assert_array_equal(
+        tensor.numpy().astype(np.float64), source.astype(np.float64)
+    )
+
+
+@pytest.mark.parametrize("source_dtype,expected", _WIDENED_DTYPES)
+def test_as_tensor_and_from_numpy_agree_on_widened_dtypes(source_dtype, expected):
+    # These go through different code (dtype inference vs direct conversion);
+    # disagreeing would make `as_tensor` silently produce a different dtype.
+    source = np.ones(4, dtype=source_dtype)
+    assert mt.as_tensor(source).dtype == expected
+    assert mt.from_numpy(source).dtype == expected
+
+
+@pytest.mark.parametrize("source_dtype", ["uint64", "longdouble"])
+def test_dtypes_that_cannot_widen_exactly_are_rejected_with_guidance(source_dtype):
+    # uint64 above int64's max, and longdouble's wider mantissa, cannot survive
+    # a cast. Rounding a user's data silently is worse than making them choose.
+    source = np.ones(2, dtype=source_dtype)
+    with pytest.raises(TypeError, match="Unsupported NumPy dtype"):
+        mt.from_numpy(source)
+    with pytest.raises(TypeError, match="astype"):
+        mt.from_numpy(source)
+
+
+def test_widening_composes_with_layout_normalisation():
+    source = np.arange(12, dtype=np.uint8).reshape(3, 4).T
+    result = mt.as_tensor(source)
+    assert result.dtype == "int32"
+    np.testing.assert_array_equal(result.numpy(), source.astype(np.int32))

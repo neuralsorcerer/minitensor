@@ -1597,6 +1597,27 @@ MiniTensor supports custom ops in both Rust and Python. Refer to
 - Python registration and execution (`execute_custom_op_py`, etc.).
 - Example custom ops (Swish, GELU, power).
 
+### NumPy dtypes and memory layout
+
+The engine carries five dtypes. NumPy arrays of other dtypes are accepted when
+the cast is *exact* -- every value round-trips, so the conversion cannot change
+a number:
+
+| NumPy dtype | becomes |
+| --- | --- |
+| `float16` | `float32` |
+| `int8`, `int16`, `uint8`, `uint16` | `int32` |
+| `uint32` | `int64` |
+
+`uint64` and `longdouble` are refused rather than rounded: values above
+`int64`'s maximum, and mantissas wider than `float64`'s, cannot survive the
+cast. Choose the cast yourself (`arr.astype('int64')`) so the handling of
+values that do not fit is yours.
+
+Memory layout is normalised on the way in, so transposes, Fortran-ordered
+arrays, strided slices, negative strides and broadcast views all convert
+correctly. An already C-contiguous array is not copied.
+
 ## 13) Notes on devices & backends
 
 **Execution is CPU-only.** Every kernel in the engine reads host memory, so CPU

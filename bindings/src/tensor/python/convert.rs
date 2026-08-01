@@ -358,11 +358,23 @@ pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType>
     if let Ok(numpy_module) = PyModule::import(value.py(), "numpy")
         && let Ok(ndarray_type) = numpy_module.getattr("ndarray")
         && let Ok(true) = value.is_instance(&ndarray_type)
-        && let Ok(dtype_obj) = value.getattr("dtype")
-        && let Ok(dtype_str) = dtype_obj.str()
-        && let Ok(dtype) = dtype::parse_dtype(&dtype_str.to_str().ok()?.to_ascii_lowercase())
     {
-        return Some(dtype);
+        if let Ok(dtype_obj) = value.getattr("dtype")
+            && let Ok(dtype_str) = dtype_obj.str()
+            && let Ok(dtype) = dtype::parse_dtype(&dtype_str.to_str().ok()?.to_ascii_lowercase())
+        {
+            return Some(dtype);
+        }
+        // A dtype the engine does not carry directly still has an answer when
+        // it widens exactly (uint8 -> int32, and so on). Without this the
+        // inference falls through to the default float dtype, and `as_tensor`
+        // would disagree with `from_numpy` about the same array.
+        if let Ok((kind, itemsize)) = numpy_dtype_parts(value)
+            && let Some(widened) = widened_numpy_dtype(&kind, itemsize)
+            && let Ok(dtype) = dtype::parse_dtype(widened)
+        {
+            return Some(dtype);
+        }
     }
 
     if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
@@ -984,6 +996,48 @@ fn sequence_via_numpy(
     tensor.astype(dtype).ok()
 }
 
+/// The supported dtype a NumPy dtype widens to, if any.
+///
+/// The engine carries five dtypes; NumPy has many more. Rather than refuse the
+/// rest, cast the ones that widen *exactly* -- every value round-trips, so the
+/// conversion cannot change a number. `float16` fits in `float32`'s 24-bit
+/// mantissa; `int8`/`int16`/`uint8`/`uint16` fit in `int32`; `uint32` fits in
+/// `int64`.
+///
+/// `uint64` and `longdouble` are deliberately absent: values above
+/// `i64::MAX`, and mantissas wider than `float64`'s, cannot survive the cast,
+/// and silently rounding a user's data is worse than telling them to choose
+/// the cast themselves.
+fn widened_numpy_dtype(kind: &str, itemsize: usize) -> Option<&'static str> {
+    match (kind, itemsize) {
+        ("f", 2) => Some("float32"),
+        ("i", 1) | ("i", 2) => Some("int32"),
+        ("u", 1) | ("u", 2) => Some("int32"),
+        ("u", 4) => Some("int64"),
+        _ => None,
+    }
+}
+
+/// Read a NumPy array's dtype as `(kind, itemsize)`, e.g. `("u", 1)` for uint8.
+fn numpy_dtype_parts(array: &Bound<PyAny>) -> PyResult<(String, usize)> {
+    let dtype = array.getattr(intern!(array.py(), "dtype"))?;
+    let kind: String = dtype.getattr(intern!(array.py(), "kind"))?.extract()?;
+    let itemsize: usize = dtype.getattr(intern!(array.py(), "itemsize"))?.extract()?;
+    Ok((kind, itemsize))
+}
+
+/// Cast a NumPy array to a dtype the engine supports, when that is exact.
+///
+/// Leaves supported dtypes untouched, and leaves the lossy ones alone too so
+/// the caller reports them rather than rounding them.
+fn widen_numpy_dtype<'py>(array: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let (kind, itemsize) = numpy_dtype_parts(array)?;
+    match widened_numpy_dtype(&kind, itemsize) {
+        Some(target) => array.call_method1(intern!(array.py(), "astype"), (target,)),
+        None => Ok(array.clone()),
+    }
+}
+
 /// Force C-contiguous element order before any buffer is read.
 ///
 /// `PyReadonlyArray::as_slice` accepts a Fortran-contiguous array -- there are
@@ -1007,7 +1061,7 @@ pub(crate) fn convert_numpy_to_tensor(
     array: &Bound<PyAny>,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    let array = &as_c_contiguous(array)?;
+    let array = &as_c_contiguous(&widen_numpy_dtype(array)?)?;
     if let Ok(array_f32) = array.cast::<PyArrayDyn<f32>>() {
         let readonly = array_f32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
@@ -1089,8 +1143,15 @@ pub(crate) fn convert_numpy_to_tensor(
             requires_grad,
         ))
     } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "Unsupported NumPy array type",
-        ))
+        let described = numpy_dtype_parts(array)
+            .map(|(kind, size)| format!("{kind}{}", size * 8))
+            .unwrap_or_else(|_| "unknown".to_string());
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Unsupported NumPy dtype '{described}'. Supported dtypes are \
+             float32, float64, int32, int64 and bool; float16, int8, int16, \
+             uint8, uint16 and uint32 are widened automatically. Cast \
+             explicitly (for example `.astype('int64')`) to choose how values \
+             that do not fit should be handled."
+        )))
     }
 }
