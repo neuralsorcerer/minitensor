@@ -21,9 +21,14 @@ use rayon::prelude::*;
 /// lives in the per-element loops below, where the work actually is.
 pub struct GradientUtils;
 
-/// Element count above which the gradient element loops go parallel; below it
-/// rayon's split overhead dominates the arithmetic.
-const GRAD_PAR_THRESHOLD: usize = 1 << 12;
+/// Element count above which the gradient element loops go parallel.
+///
+/// These loops -- a sum of squares, a scale, a clamp -- are as cheap per
+/// element as a `relu`, so they use the same threshold as the cheap unary
+/// kernels rather than a second, lower copy of the number. See
+/// [`crate::ops::map::PAR_THRESHOLD`] for the measurements: below it, waking
+/// rayon's parked workers costs more than the whole loop.
+use crate::ops::map::PAR_THRESHOLD as GRAD_PAR_THRESHOLD;
 
 /// Sum of squares of a float slice, parallel above the threshold.
 fn sum_squares<T: Copy + Send + Sync + Into<f64>>(values: &[T]) -> f64 {
