@@ -1767,6 +1767,53 @@ True
 Note `zero_grad()` is not a substitute: it clears the gradients of the
 parameters it was given, not the interior entries.
 
+### The graph is thread-local, and a missing graph is silent
+
+Each thread records into its own autograd graph, so concurrent threads do not
+interfere: one thread's `clear_autograd_graph()` cannot disturb a graph another
+thread is still building, and independent training loops in separate threads
+produce correct, independent gradients. `is_grad_enabled()` and the
+graph-consumed flag are thread-local for the same reason.
+
+The consequence is that **a graph has to be backpropagated on the thread that
+built it**. Building a loss in a worker thread and calling `backward()` on it
+from the main thread does not raise — it quietly does nothing, leaving `.grad`
+as `None`:
+
+```python
+import threading
+
+import minitensor as mt
+
+state = {}
+
+
+def build():
+    w = mt.ones(3, requires_grad=True)
+    state["w"] = w
+    state["loss"] = mt.sum(w * 5.0)
+
+
+worker = threading.Thread(target=build)
+worker.start()
+worker.join()
+
+state["loss"].backward()          # different thread: no error, no gradient
+print(state["w"].grad is None)
+print(state["loss"].requires_grad)
+```
+
+```text
+True
+True
+```
+
+Note the tensor still reports `requires_grad=True`, so nothing about it
+signals the problem. The same silence applies within a single thread after
+`clear_autograd_graph()` — `backward()` on a released graph is a no-op rather
+than an error. If gradients come back `None` when you expect values, check
+which thread built the graph and whether it was cleared in between.
+
 ## 13) Notes on devices & backends
 
 **Execution is CPU-only.** Every kernel in the engine reads host memory, so CPU
