@@ -164,14 +164,28 @@ impl HuberLoss {
 #[derive(Debug, Clone)]
 pub struct SmoothL1Loss {
     reduction: String,
+    beta: f64,
 }
 
 impl SmoothL1Loss {
-    /// Create a new Smooth L1 loss with the specified reduction
+    /// Create a new Smooth L1 loss with the specified reduction and `beta = 1`.
     pub fn new(reduction: impl Into<String>) -> Self {
         Self {
             reduction: reduction.into(),
+            beta: 1.0,
         }
+    }
+
+    /// Set the threshold below which the loss is quadratic. `beta` must be
+    /// positive and finite; [`Self::forward`] surfaces the error if it is not.
+    pub fn with_beta(mut self, beta: f64) -> Self {
+        self.beta = beta;
+        self
+    }
+
+    /// The threshold below which the loss is quadratic.
+    pub fn beta(&self) -> f64 {
+        self.beta
     }
 
     /// Create Smooth L1 loss with mean reduction (default)
@@ -191,7 +205,7 @@ impl SmoothL1Loss {
 
     /// Compute the Smooth L1 loss between predictions and targets
     pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        smooth_l1_loss(predictions, targets, &self.reduction)
+        smooth_l1_loss(predictions, targets, self.beta, &self.reduction)
     }
 
     /// Get the reduction mode

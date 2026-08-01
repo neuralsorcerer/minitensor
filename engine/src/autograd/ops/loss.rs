@@ -483,6 +483,21 @@ pub struct KLDivLossBackward {
     pub predictions: Tensor,
     pub targets: Tensor,
 }
+impl KLDivLossBackward {
+    /// The divisor the forward pass applied, so the gradient is scaled by the
+    /// same amount. Reading it off `reduction` rather than assuming `numel` is
+    /// what keeps `mean` and `batchmean` from silently disagreeing with the
+    /// forward, as they did when this hard-coded `numel` for `mean` while the
+    /// forward divided by the batch size.
+    fn reduction_divisor(&self) -> Option<f64> {
+        match self.reduction.as_str() {
+            "mean" => Some((self.predictions.numel().max(1)) as f64),
+            "batchmean" => Some(crate::ops::loss::kl_div_batch_size(&self.predictions)),
+            _ => None,
+        }
+    }
+}
+
 impl GradientFunction for KLDivLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
@@ -492,8 +507,7 @@ impl GradientFunction for KLDivLossBackward {
         if self.input_requires_grad[0] {
             let mut pred_grad = arithmetic::div(&self.targets, &self.predictions)?;
             pred_grad = arithmetic::neg(&pred_grad)?;
-            if self.reduction == "mean" {
-                let n = self.predictions.numel() as f64;
+            if let Some(n) = self.reduction_divisor() {
                 let scale = create_scalar_tensor(1.0 / n, pred_grad.dtype(), pred_grad.device())?;
                 pred_grad = arithmetic::mul(&pred_grad, &scale)?;
             }
@@ -513,8 +527,7 @@ impl GradientFunction for KLDivLossBackward {
                 false,
             );
             let mut target_grad = arithmetic::add(&diff, &one)?;
-            if self.reduction == "mean" {
-                let n = self.predictions.numel() as f64;
+            if let Some(n) = self.reduction_divisor() {
                 let scale =
                     create_scalar_tensor(1.0 / n, target_grad.dtype(), target_grad.device())?;
                 target_grad = arithmetic::mul(&target_grad, &scale)?;

@@ -766,13 +766,18 @@ mod tests {
 
     #[test]
     fn test_kl_div_loss_mean_and_backward() {
+        // This test used to assert an undivided forward against a gradient
+        // divided by 2, which is exactly the forward/backward disagreement
+        // `mean` had: the forward divided by the batch dimension (1, for a 1-D
+        // tensor) while the backward divided by the element count.
         let predictions = create_test_tensor_f32(vec![0.4, 0.6], vec![2], true);
         let targets = create_test_tensor_f32(vec![0.5, 0.5], vec![2], false);
 
+        let elementwise = 0.5 * (0.5f32.ln() - 0.4f32.ln()) + 0.5 * (0.5f32.ln() - 0.6f32.ln());
+
         let loss = kl_div_loss(&predictions, &targets, "mean").unwrap();
         let loss_val = loss.data().as_f32_slice().unwrap()[0];
-        let expected = 0.5 * ((0.5f32.ln() - 0.4f32.ln()) + (0.5f32.ln() - 0.6f32.ln()));
-        assert!((loss_val - expected).abs() < 1e-6);
+        assert!((loss_val - elementwise / 2.0).abs() < 1e-6, "{loss_val}");
 
         let grads = crate::autograd::backward_collect(&loss, None).unwrap();
         let grad = grads.get(&predictions.id()).unwrap();
@@ -780,6 +785,36 @@ mod tests {
         let expected_grad = [-(0.5 / 0.4) / 2.0, -(0.5 / 0.6) / 2.0];
         assert!((grad_slice[0] - expected_grad[0]).abs() < 1e-6);
         assert!((grad_slice[1] - expected_grad[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn kl_div_batchmean_divides_by_the_leading_dimension() {
+        let predictions = create_test_tensor_f32(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
+        let targets = create_test_tensor_f32(vec![0.5, 0.5, 0.5, 0.5], vec![2, 2], false);
+
+        let sum = kl_div_loss(&predictions, &targets, "sum").unwrap();
+        let sum_val = sum.data().as_f32_slice().unwrap()[0];
+
+        let batchmean = kl_div_loss(&predictions, &targets, "batchmean").unwrap();
+        assert!((batchmean.data().as_f32_slice().unwrap()[0] - sum_val / 2.0).abs() < 1e-6);
+
+        let mean = kl_div_loss(&predictions, &targets, "mean").unwrap();
+        assert!((mean.data().as_f32_slice().unwrap()[0] - sum_val / 4.0).abs() < 1e-6);
+
+        // The gradient must follow whichever divisor the forward used. Each
+        // reduction gets its own input: gradients accumulate per tensor id, so
+        // reusing one would sum the three backward passes.
+        for (reduction, divisor) in [("mean", 4.0f32), ("batchmean", 2.0), ("sum", 1.0)] {
+            let inputs = create_test_tensor_f32(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
+            let loss = kl_div_loss(&inputs, &targets, reduction).unwrap();
+            let grads = crate::autograd::backward_collect(&loss, None).unwrap();
+            let grad = grads.get(&inputs.id()).unwrap();
+            let first = grad.data().as_f32_slice().unwrap()[0];
+            assert!(
+                (first - -(0.5 / 0.4) / divisor).abs() < 1e-6,
+                "{reduction}: {first}"
+            );
+        }
     }
 
     #[test]
@@ -826,13 +861,50 @@ mod tests {
         let predictions = create_test_tensor_f32(vec![0.5, 2.0], vec![2], false);
         let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
 
-        let smooth = smooth_l1_loss(&predictions, &targets, "none").unwrap();
+        let smooth = smooth_l1_loss(&predictions, &targets, 1.0, "none").unwrap();
         let huber = huber_loss(&predictions, &targets, 1.0, "none").unwrap();
 
         let smooth_data = smooth.data().as_f32_slice().unwrap();
         let huber_data = huber.data().as_f32_slice().unwrap();
         assert!((smooth_data[0] - huber_data[0]).abs() < 1e-6);
         assert!((smooth_data[1] - huber_data[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_l1_is_huber_scaled_by_beta_away_from_one() {
+        // The two agree only at 1.0, so implementing smooth-l1 as a bare
+        // `huber_loss(.., beta, ..)` is right for the default and wrong
+        // everywhere else: huber(x, d) == d * smooth_l1(x, beta = d).
+        let predictions = create_test_tensor_f32(vec![0.25, 1.0, 4.0], vec![3], false);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0, 0.0], vec![3], false);
+
+        for beta in [0.5f32, 1.0, 2.0, 5.0] {
+            let smooth = smooth_l1_loss(&predictions, &targets, beta as f64, "none").unwrap();
+            let huber = huber_loss(&predictions, &targets, beta as f64, "none").unwrap();
+            let smooth_data = smooth.data().as_f32_slice().unwrap();
+            let huber_data = huber.data().as_f32_slice().unwrap();
+
+            for (i, x) in [0.25f32, 1.0, 4.0].into_iter().enumerate() {
+                let expected = if x < beta {
+                    0.5 * x * x / beta
+                } else {
+                    x - 0.5 * beta
+                };
+                assert!(
+                    (smooth_data[i] - expected).abs() < 1e-6,
+                    "beta={beta} x={x}: {} != {expected}",
+                    smooth_data[i]
+                );
+                assert!(
+                    (huber_data[i] - beta * smooth_data[i]).abs() < 1e-5,
+                    "beta={beta}"
+                );
+            }
+        }
+
+        assert!(smooth_l1_loss(&predictions, &targets, 0.0, "none").is_err());
+        assert!(smooth_l1_loss(&predictions, &targets, -1.0, "none").is_err());
+        assert!(smooth_l1_loss(&predictions, &targets, f64::NAN, "none").is_err());
     }
 
     #[test]

@@ -940,8 +940,12 @@ when you already hold the weights and do not want a module:
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |
 | `dropout2d(input, p)` | Channel-wise dropout. |
 | `mse_loss(predictions, targets, reduction="mean")` | Mean squared error. |
-| `smooth_l1_loss(predictions, targets, ...)` | Smooth L1 / Huber-style loss. |
+| `l1_loss(predictions, targets, reduction="mean")` | Mean absolute error. |
+| `smooth_l1_loss(predictions, targets, reduction="mean", beta=1.0)` | Smooth L1: quadratic below `beta`, linear above. `beta` must be positive and finite. |
+| `huber_loss(predictions, targets, reduction="mean", delta=1.0)` | Huber loss. Related to the above by `huber(x, d) == d * smooth_l1(x, beta=d)`, so the two agree only at `1.0`. |
 | `log_cosh_loss(predictions, targets, ...)` | Log-cosh loss. |
+| `kl_div(predictions, targets, reduction="mean")` | KL divergence over probabilities (not log-probabilities). `reduction="mean"` is the element-wise mean, as for every other loss here; `"batchmean"` divides by the leading dimension, which is the divisor that makes the result a true KL divergence per sample. |
+| `focal_loss(input, target, alpha=0.25, gamma=2.0, reduction="mean")` | Multi-class focal loss over logits, with one-hot or index targets. `alpha` must lie strictly in `(0, 1)`. |
 | `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy over probabilities. |
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |

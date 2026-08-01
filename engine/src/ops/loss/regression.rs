@@ -16,7 +16,7 @@ use crate::{
     ops::util::create_scalar_tensor,
     ops::{
         activation::{abs as activation_abs, exp, log_softmax, log1p},
-        arithmetic::{add, mul, sub},
+        arithmetic::{add, div as divide, mul, sub},
         reduction::{mean, sum},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -500,6 +500,15 @@ pub fn binary_cross_entropy_with_logits_loss(
 ///
 /// Computes KL divergence between target and prediction distributions:
 /// KL(target || prediction) = Σ target * (log_tensor(target) - log_tensor(prediction))
+/// Divisor for the `batchmean` reduction: the leading dimension, or 1 for a
+/// single distribution stored as a 1-D tensor.
+pub(crate) fn kl_div_batch_size(predictions: &Tensor) -> f64 {
+    match predictions.shape().dims() {
+        [batch, _rest @ ..] if !_rest.is_empty() => (*batch).max(1) as f64,
+        _ => 1.0,
+    }
+}
+
 pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
@@ -510,24 +519,28 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
     let diff = sub(&log_targets, &log_predictions)?;
     let kld = mul(targets, &diff)?;
 
-    // Apply reduction
+    // Apply reduction.
+    //
+    // `mean` is the element-wise mean, as it is for every other loss here and
+    // as it is in PyTorch. It used to divide by the batch dimension instead --
+    // PyTorch's `batchmean` -- while [`KLDivLossBackward`] divided by the
+    // element count, so forward and backward disagreed by a factor of
+    // `numel / batch` (4x for a 3x4 input) whenever there was more than one
+    // column. `batchmean` is now spelled out, and scales its gradient to match.
     let loss = match reduction {
         "mean" => {
             let sum = sum_all_elements(&kld)?;
-            // Compute mean over the batch dimension if present.
-            // For 1D tensors (single distribution), the batch size is 1
-            let batch = if predictions.shape().dims().len() > 1 {
-                predictions.shape().dims()[0] as f64
-            } else {
-                1.0
-            };
-            divide_by_scalar(&sum, batch)?
+            divide_by_scalar(&sum, predictions.numel().max(1) as f64)?
+        }
+        "batchmean" => {
+            let sum = sum_all_elements(&kld)?;
+            divide_by_scalar(&sum, kl_div_batch_size(predictions))?
         }
         "sum" => sum_all_elements(&kld)?,
         "none" => kld,
         _ => {
             return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                "Invalid reduction mode: {}. Must be 'mean', 'batchmean', 'sum', or 'none'",
                 reduction
             )));
         }
@@ -687,9 +700,11 @@ pub fn huber_loss(
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    if delta <= 0.0 {
+    // `delta <= 0.0` alone is false for NaN, which then propagated through
+    // every comparison and returned an all-NaN loss instead of an error.
+    if !delta.is_finite() || delta <= 0.0 {
         return Err(MinitensorError::invalid_operation(
-            "Delta must be positive for Huber loss",
+            "Delta must be positive and finite for Huber loss",
         ));
     }
 
@@ -747,17 +762,39 @@ pub fn huber_loss(
     }
 }
 
-/// Smooth L1 loss (Huber loss with delta=1.0)
+/// Smooth L1 loss.
 ///
-/// Computes Smooth L1 loss between predictions and targets:
-/// SmoothL1(x) = 0.5 * x² if |x| < 1, otherwise |x| - 0.5
+/// `SmoothL1(x) = 0.5 * x² / beta` for `|x| < beta`, else `|x| - 0.5 * beta`.
+///
+/// Related to [`huber_loss`] by `huber(x, delta) == delta * smooth_l1(x, beta =
+/// delta)`; the two coincide only at `1.0`, which is why this could previously
+/// be a bare call to `huber_loss(.., 1.0, ..)`. The scaling goes through a
+/// differentiable division so the gradient picks up the `1 / beta` factor
+/// rather than being huber's.
 ///
 /// # Arguments
 /// * `predictions` - Model predictions tensor
 /// * `targets` - Ground truth targets tensor
+/// * `beta` - Threshold below which the loss is quadratic (must be positive)
 /// * `reduction` - How to reduce the loss ("mean", "sum", or "none")
-pub fn smooth_l1_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Result<Tensor> {
-    huber_loss(predictions, targets, 1.0, reduction)
+pub fn smooth_l1_loss(
+    predictions: &Tensor,
+    targets: &Tensor,
+    beta: f64,
+    reduction: &str,
+) -> Result<Tensor> {
+    if !beta.is_finite() || beta <= 0.0 {
+        return Err(MinitensorError::invalid_argument(
+            "smooth_l1_loss requires a positive, finite beta",
+        ));
+    }
+
+    let loss = huber_loss(predictions, targets, beta, reduction)?;
+    if beta == 1.0 {
+        return Ok(loss);
+    }
+    let scale = create_scalar_tensor(beta, loss.dtype(), loss.device())?;
+    divide(&loss, &scale)
 }
 
 /// Log-cosh loss for robust regression

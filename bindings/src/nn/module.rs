@@ -35,6 +35,10 @@ use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
 use engine::ops::linalg::matmul as matmul_op;
 use engine::ops::loss::cross_entropy as cross_entropy_op;
+use engine::ops::loss::{
+    focal_loss as focal_loss_op, huber_loss as huber_loss_op, kl_div_loss as kl_div_loss_op,
+    mae_loss as mae_loss_op, smooth_l1_loss as smooth_l1_loss_op,
+};
 use engine::ops::pooling::{
     avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, max_pool1d as max_pool1d_op,
     max_pool2d as max_pool2d_op,
@@ -387,9 +391,50 @@ fn mse_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// `beta` was previously fixed at 1.0 -- `SmoothL1Loss` had no field for it.
+/// The default is unchanged.
 #[pyfunction(name = "smooth_l1_loss")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction=None, beta=1.0))]
 fn smooth_l1_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+    beta: f64,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    // The op validates beta; huber and smooth-l1 differ by a factor of beta and
+    // coincide only at 1.0, so this must not just forward to `huber_loss_op`.
+    let result = smooth_l1_loss_op(prediction.tensor(), target_tensor.tensor(), beta, reduction)
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "huber_loss")]
+#[pyo3(signature = (input, target, reduction=None, delta=1.0))]
+fn huber_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+    delta: f64,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let result = huber_loss_op(
+        prediction.tensor(),
+        target_tensor.tensor(),
+        delta,
+        reduction,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "l1_loss")]
+#[pyo3(signature = (input, target, reduction=None))]
+fn l1_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
     reduction: Option<&str>,
@@ -397,10 +442,46 @@ fn smooth_l1_loss_functional(
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
     let reduction = reduction.unwrap_or("mean");
-    let loss = SmoothL1Loss::new(reduction);
-    let result = loss
-        .forward(prediction.tensor(), target_tensor.tensor())
+    let result = mae_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
         .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "kl_div")]
+#[pyo3(signature = (input, target, reduction=None))]
+fn kl_div_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let result = kl_div_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+#[pyfunction(name = "focal_loss")]
+#[pyo3(signature = (input, target, alpha=0.25, gamma=2.0, reduction=None))]
+fn focal_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    alpha: f64,
+    gamma: f64,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let prediction = borrow_tensor(input)?;
+    let target_tensor = borrow_tensor(target)?;
+    let reduction = reduction.unwrap_or("mean");
+    let result = focal_loss_op(
+        prediction.tensor(),
+        target_tensor.tensor(),
+        alpha,
+        gamma,
+        reduction,
+    )
+    .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 

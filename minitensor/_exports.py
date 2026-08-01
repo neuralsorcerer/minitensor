@@ -176,6 +176,10 @@ _FUNCTIONAL_ONLY = (
     "max_pool2d",
     "mse_loss",
     "smooth_l1_loss",
+    "huber_loss",
+    "l1_loss",
+    "kl_div",
+    "focal_loss",
     # Exported at the top level by the core module itself, so forwarding them
     # here would be a second binding of the same object.
     "bmm",
