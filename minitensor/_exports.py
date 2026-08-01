@@ -180,6 +180,12 @@ _FUNCTIONAL_ONLY = (
     "l1_loss",
     "kl_div",
     "focal_loss",
+    # Gradient utilities. PyTorch spells these `torch.nn.utils.clip_grad_norm_`,
+    # so they stay under `mt.nn` rather than becoming `mt.clip_grad_norm_`.
+    "clip_grad_norm_",
+    "clip_grad_value_",
+    "grad_norm",
+    "count_parameters_with_gradients",
     # Exported at the top level by the core module itself, so forwarding them
     # here would be a second binding of the same object.
     "bmm",

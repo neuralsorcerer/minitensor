@@ -1230,6 +1230,43 @@ size is monotonically non-increasing per coordinate. It is the fix for Adam's
 non-convergence on problems where a rare large gradient would otherwise be
 forgotten by the moving average.
 
+### Gradient clipping
+
+In `minitensor.nn`, where PyTorch puts them (`torch.nn.utils.clip_grad_norm_`):
+
+- `clip_grad_norm_(parameters, max_norm)` -- scales every gradient in place so
+  their combined L2 norm is at most `max_norm`, and returns the norm *before*
+  clipping so a training loop can log it. The coefficient is
+  `max_norm / (total_norm + 1e-6)`, matching PyTorch.
+- `clip_grad_value_(parameters, clip_value)` -- clamps to
+  `[-clip_value, clip_value]`. Pass `min_value=`/`max_value=` instead for an
+  asymmetric range.
+- `grad_norm(parameters)` -- the same norm, without modifying anything.
+- `count_parameters_with_gradients(parameters)` -- how many currently hold one.
+
+Parameters without a gradient are skipped rather than rejected, so passing
+`model.parameters()` before the first `backward()` is a no-op. Only float
+gradients participate.
+
+```python
+import minitensor as mt
+from minitensor import nn, optim
+
+parameter = mt.zeros((1,), requires_grad=True)
+optimizer = optim.SGD([parameter], 1.0)
+
+optimizer.zero_grad(True)
+(parameter * mt.full((1,), 1000.0)).sum().backward()
+print(round(nn.clip_grad_norm_([parameter], 2.0), 4))
+optimizer.step()
+print(round(abs(float(parameter.numpy()[0])), 4))
+```
+
+```text
+1000.0
+2.0
+```
+
 ### Learning-rate schedulers
 
 A scheduler wraps an optimizer, owns the step counter, and writes each step's
