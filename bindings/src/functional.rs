@@ -464,12 +464,59 @@ macro_rules! binary_forwarders {
     };
 }
 unary_forwarders!(
-    abs, acos, acosh, asin, asinh, atan, atanh, ceil, cos, cosh, erf, erfc, exp, expm1, floor, log,
-    log10, log1p, log2, ravel, reciprocal, relu, rsqrt, selu, sigmoid, sign, silu, sin, sinh,
-    softsign, sqrt, tan, tanh,
+    abs,
+    acos,
+    acosh,
+    asin,
+    asinh,
+    atan,
+    atanh,
+    bitwise_not,
+    ceil,
+    cos,
+    cosh,
+    erf,
+    erfc,
+    exp,
+    expm1,
+    floor,
+    log,
+    log10,
+    log1p,
+    log2,
+    ravel,
+    reciprocal,
+    relu,
+    rsqrt,
+    selu,
+    sigmoid,
+    sign,
+    silu,
+    sin,
+    sinh,
+    softsign,
+    sqrt,
+    tan,
+    tanh,
 );
 
-binary_forwarders!(bmm, pow, dot, logaddexp, maximum, minimum,);
+binary_forwarders!(
+    bmm,
+    dot,
+    eq,
+    floor_divide,
+    ge,
+    gt,
+    le,
+    logaddexp,
+    lt,
+    matmul,
+    maximum,
+    minimum,
+    ne,
+    pow,
+    remainder,
+);
 
 #[pyfunction]
 pub fn clamp_min(input: &Bound<PyAny>, min: f64) -> PyResult<PyTensor> {
@@ -1353,6 +1400,16 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(exp, parent)?)?;
     parent.add_function(wrap_pyfunction!(log, parent)?)?;
     parent.add_function(wrap_pyfunction!(pow, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_not, parent)?)?;
+    parent.add_function(wrap_pyfunction!(matmul, parent)?)?;
+    parent.add_function(wrap_pyfunction!(eq, parent)?)?;
+    parent.add_function(wrap_pyfunction!(ne, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lt, parent)?)?;
+    parent.add_function(wrap_pyfunction!(le, parent)?)?;
+    parent.add_function(wrap_pyfunction!(gt, parent)?)?;
+    parent.add_function(wrap_pyfunction!(ge, parent)?)?;
+    parent.add_function(wrap_pyfunction!(floor_divide, parent)?)?;
+    parent.add_function(wrap_pyfunction!(remainder, parent)?)?;
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(maximum, parent)?)?;
     parent.add_function(wrap_pyfunction!(minimum, parent)?)?;

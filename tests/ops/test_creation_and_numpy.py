@@ -362,6 +362,55 @@ def test_pow_has_a_free_function_form_for_scalar_and_tensor_exponents():
     )
 
 
+def test_matmul_has_a_free_function_form():
+    # `a @ b` and `a.matmul(b)` worked; `mt.matmul(a, b)` did not exist, for the
+    # single most used operation in the library.
+    a = np.arange(6, dtype=np.float64).reshape(2, 3)
+    b = np.arange(12, dtype=np.float64).reshape(3, 4)
+    ta, tb = mt.as_tensor(a), mt.as_tensor(b)
+
+    np.testing.assert_allclose(mt.matmul(ta, tb).numpy(), a @ b, rtol=1e-14)
+    np.testing.assert_allclose(mt.matmul(ta, tb).numpy(), (ta @ tb).numpy())
+
+    grad_source = mt.as_tensor(a).requires_grad_(True)
+    mt.sum(mt.matmul(grad_source, tb)).backward()
+    np.testing.assert_allclose(grad_source.grad.numpy(), np.ones((2, 4)) @ b.T)
+
+
+@pytest.mark.parametrize(
+    "name,reference",
+    [
+        ("eq", np.equal),
+        ("ne", np.not_equal),
+        ("lt", np.less),
+        ("le", np.less_equal),
+        ("gt", np.greater),
+        ("ge", np.greater_equal),
+        ("floor_divide", np.floor_divide),
+        ("remainder", np.remainder),
+    ],
+)
+def test_binary_comparison_and_integer_division_have_free_function_forms(
+    name, reference
+):
+    x = np.array([1.0, 2.0, 3.0, -5.0])
+    y = np.array([2.0, 2.0, 2.0, 3.0])
+    tx, ty = mt.as_tensor(x), mt.as_tensor(y)
+
+    got = getattr(mt, name)(tx, ty).numpy()
+    np.testing.assert_allclose(got.astype(np.float64), reference(x, y).astype(np.float64))
+    np.testing.assert_array_equal(got, getattr(tx, name)(ty).numpy())
+
+
+def test_bitwise_not_has_a_free_function_form():
+    values = np.array([True, False, True])
+    tensor = mt.as_tensor(values)
+    np.testing.assert_array_equal(mt.bitwise_not(tensor).numpy(), ~values)
+    np.testing.assert_array_equal(
+        mt.bitwise_not(tensor).numpy(), tensor.bitwise_not().numpy()
+    )
+
+
 def test_free_function_forms_stay_differentiable():
     x = mt.as_tensor(np.array([1.5, 2.5, 4.0])).requires_grad_(True)
     mt.sum(mt.log(mt.sqrt(mt.exp(x)))).backward()

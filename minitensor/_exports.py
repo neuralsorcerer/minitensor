@@ -80,6 +80,18 @@ _FUNCTIONAL_FORWARDERS = (
     "exp",
     "log",
     "pow",
+    # Likewise reachable only as methods or dunders: `a @ b` and
+    # `a.matmul(b)` worked, `mt.matmul(a, b)` did not.
+    "matmul",
+    "eq",
+    "ne",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "floor_divide",
+    "remainder",
+    "bitwise_not",
     "reshape",
     "view",
     "triu",
