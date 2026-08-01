@@ -773,3 +773,93 @@ def test_meshgrid_rejects_invalid_arguments():
         mt.meshgrid([1, 2], copy=1)
     with pytest.raises(ValueError, match="1-D"):
         mt.meshgrid(mt.Tensor.ones((2, 2)))
+
+
+# --------------------------------------------------------------------------- #
+# Conversion paths
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "data,expected_dtype",
+    [
+        ([1, 2, 3], "int64"),
+        ([1.0, 2.0], "float32"),
+        ([True, False], "bool"),
+        ([1, 2.0], "float32"),
+        ([True, 1], "int64"),
+        ([[1, 2], [3, 4]], "int64"),
+        ([], "float32"),
+        ([[], []], "float32"),
+        ((1, 2, 3), "int64"),
+        ([(1, 2), (3, 4)], "int64"),
+        ([2**63 - 1], "int64"),
+    ],
+)
+def test_python_sequence_dtype_inference(data, expected_dtype):
+    # Sequence conversion goes through numpy for speed. The dtype rules are
+    # this library's, not numpy's: a list of Python floats infers float32 (the
+    # configured default), where numpy would say float64.
+    assert mt.as_tensor(data).dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    "data,exc,message",
+    [
+        ([[1, 2], [3]], ValueError, "Inconsistent nested sequence lengths"),
+        ([1, "a"], TypeError, "Unsupported scalar type in nested sequence"),
+        ([1, None], TypeError, "Unsupported scalar type in nested sequence"),
+    ],
+)
+def test_sequences_numpy_cannot_type_keep_their_original_errors(data, exc, message):
+    # These fall through the numpy fast path to the element-wise walk, so the
+    # diagnostics stay the ones the slow path produces.
+    with pytest.raises(exc, match=message):
+        mt.as_tensor(data)
+
+
+def test_sequence_conversion_values_survive_the_numpy_round_trip():
+    values = [float("nan"), float("inf"), -float("inf"), 1e308, 0.0, -0.0]
+    result = mt.as_tensor(values).numpy()
+
+    # 1e308 overflows float32 to inf. That is the behaviour under test, so the
+    # reference cast is allowed to overflow rather than warn about it.
+    with np.errstate(over="ignore"):
+        expected = np.asarray(values, dtype=np.float64).astype(np.float32)
+
+    np.testing.assert_array_equal(np.isnan(result), np.isnan(expected))
+    finite = ~np.isnan(expected)
+    np.testing.assert_array_equal(result[finite], expected[finite])
+    # Signed zero survives, and the overflow lands on +inf not a finite max.
+    assert np.signbit(result[5]) and not np.signbit(result[4])
+    assert np.isposinf(result[3])
+
+
+@pytest.mark.parametrize("shape", [(100,), (10, 10), (4, 5, 6), (2, 3, 4, 5), (0,), (3, 0, 2)])
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+def test_numpy_export_matches_the_source_array(shape, dtype):
+    count = int(np.prod(shape)) if shape else 1
+    source = np.arange(count).reshape(shape)
+    source = (source % 2 == 0) if dtype == "bool" else source.astype(dtype)
+    source = np.ascontiguousarray(source)
+
+    result = mt.as_tensor(source).numpy()
+    assert result.shape == source.shape
+    assert result.dtype == source.dtype
+    np.testing.assert_array_equal(result, source)
+
+
+def test_numpy_export_is_correct_for_results_of_shape_ops():
+    # `.numpy()` takes a memcpy fast path when the tensor is contiguous and
+    # falls back to a strided walk otherwise; both must agree with numpy.
+    base = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    tensor = mt.as_tensor(base)
+
+    np.testing.assert_array_equal(
+        mt.transpose(tensor, 0, 2).numpy(), base.transpose(2, 1, 0)
+    )
+    np.testing.assert_array_equal(
+        mt.permute(tensor, [1, 2, 0]).numpy(), base.transpose(1, 2, 0)
+    )
+    np.testing.assert_array_equal(tensor[1:].numpy(), base[1:])
+    np.testing.assert_array_equal(mt.flip(tensor, [1]).numpy(), np.flip(base, 1))

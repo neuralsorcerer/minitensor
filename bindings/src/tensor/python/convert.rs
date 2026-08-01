@@ -41,6 +41,17 @@ pub(crate) fn convert_python_data_to_tensor(
 
     // Handle Python lists and tuples by flattening values into scalar variants
     if let Ok(list) = data.cast::<PyList>() {
+        // NumPy is already a hard dependency of this extension, and it turns a
+        // nested Python sequence into a contiguous typed buffer in C. Walking
+        // the object graph here instead costs ~880ns per element against
+        // `np.asarray`'s ~16ns -- 55x on a 20k list. Anything NumPy cannot
+        // represent as a dtype this crate supports (ragged nesting, object
+        // arrays, strings) returns `None` and falls through to the traversal
+        // below, so its behaviour and error messages are unchanged.
+        if let Some(tensor) = sequence_via_numpy(data, dtype, device, requires_grad) {
+            return Ok(tensor);
+        }
+
         let (shape, flat_data) = flatten_python_data(list)?;
         let (base_tensor, base_dtype) =
             tensor_from_flat_scalars(shape, flat_data, device, requires_grad)?;
@@ -354,15 +365,43 @@ pub(crate) fn infer_python_value_dtype(value: &Bound<PyAny>) -> Option<DataType>
         return Some(dtype);
     }
 
-    if let Ok(list) = value.cast::<PyList>() {
-        return infer_sequence_dtype(list.iter());
-    }
-
-    if let Ok(tuple) = value.cast::<PyTuple>() {
-        return infer_sequence_dtype(tuple.iter());
+    if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
+        // Same reasoning as `sequence_via_numpy`: NumPy determines the common
+        // type of a nested sequence in C. Walking it here calls back into this
+        // function once per element, and `as_tensor` then walks it a second
+        // time to read the values -- so the naive path traversed a 20k list
+        // twice at ~450ns an element.
+        if let Some(dtype) = sequence_dtype_via_numpy(value) {
+            return Some(dtype);
+        }
+        if let Ok(list) = value.cast::<PyList>() {
+            return infer_sequence_dtype(list.iter());
+        }
+        if let Ok(tuple) = value.cast::<PyTuple>() {
+            return infer_sequence_dtype(tuple.iter());
+        }
     }
 
     None
+}
+
+/// The dtype a Python sequence infers to, via `numpy.asarray`.
+///
+/// Returns `None` for anything NumPy cannot type (ragged, object, strings) so
+/// the caller falls back to the element-wise walk. The mapping is this
+/// library's, not NumPy's: any float width becomes the configured default
+/// float dtype, so `[1.0, 2.0]` infers `float32` here where NumPy would say
+/// `float64`.
+fn sequence_dtype_via_numpy(value: &Bound<PyAny>) -> Option<DataType> {
+    let numpy = PyModule::import(value.py(), "numpy").ok()?;
+    let array = numpy.call_method1("asarray", (value,)).ok()?;
+    let kind = array.getattr("dtype").ok()?.getattr("kind").ok()?;
+    match kind.extract::<String>().ok()?.as_str() {
+        "b" => Some(DataType::Bool),
+        "i" | "u" => Some(DataType::Int64),
+        "f" => Some(dtype::default_dtype()),
+        _ => None,
+    }
 }
 
 fn infer_sequence_dtype<'py, I>(iter: I) -> Option<DataType>
@@ -908,6 +947,41 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
         result.push(full_slice(dim));
     }
     Ok(result)
+}
+
+/// Build a tensor from a Python sequence by way of `numpy.asarray`.
+///
+/// Returns `None` whenever NumPy cannot produce a buffer this crate supports,
+/// so the caller can fall back to the element-by-element traversal and keep its
+/// exact errors. The requested `dtype` still governs the result: a list of
+/// Python floats becomes the library's default float dtype, not NumPy's
+/// float64, because the caller resolved that before calling.
+fn sequence_via_numpy(
+    data: &Bound<PyAny>,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> Option<Tensor> {
+    if !device.is_cpu() {
+        return None;
+    }
+    let numpy = PyModule::import(data.py(), "numpy").ok()?;
+    // Ragged input raises here in NumPy 2; that is a fall-through, not an
+    // error, so the message the slow path produces is the one users see.
+    let array = numpy.call_method1("asarray", (data,)).ok()?;
+    // `convert_numpy_to_tensor` reaches into the array's buffer, which panics
+    // rather than erroring if the capsule is unavailable -- the same guard the
+    // ndarray branch above uses.
+    let tensor = panic::catch_unwind(AssertUnwindSafe(|| {
+        convert_numpy_to_tensor(&array, requires_grad)
+    }))
+    .ok()?
+    .ok()?;
+
+    if tensor.dtype() == dtype {
+        return Some(tensor);
+    }
+    tensor.astype(dtype).ok()
 }
 
 pub(crate) fn convert_numpy_to_tensor(

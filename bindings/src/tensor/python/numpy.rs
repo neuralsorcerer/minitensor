@@ -25,22 +25,32 @@ pub(crate) fn convert_tensor_to_numpy(
             let data = $slice.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to get tensor data")
             })?;
-            let mut out = Vec::<$ty>::with_capacity(numel);
-            let mut indices = vec![0usize; shape.len()];
-            for _ in 0..numel {
-                let mut offset = 0usize;
-                for (idx, stride) in indices.iter().zip(strides) {
-                    offset += idx * stride;
-                }
-                out.push(data[offset]);
-                for axis in (0..indices.len()).rev() {
-                    indices[axis] += 1;
-                    if indices[axis] < shape[axis] {
-                        break;
+            // Contiguous is the overwhelmingly common case -- `transpose` and
+            // `expand` materialise rather than returning strided views -- and
+            // there the walk below reduces to a copy in order. Doing it by
+            // index anyway cost a multiply-add per axis per element: 232us for
+            // a 100k float32 tensor against 9us for the memcpy.
+            let out = if tensor.is_contiguous() && data.len() == numel {
+                data.to_vec()
+            } else {
+                let mut out = Vec::<$ty>::with_capacity(numel);
+                let mut indices = vec![0usize; shape.len()];
+                for _ in 0..numel {
+                    let mut offset = 0usize;
+                    for (idx, stride) in indices.iter().zip(strides) {
+                        offset += idx * stride;
                     }
-                    indices[axis] = 0;
+                    out.push(data[offset]);
+                    for axis in (0..indices.len()).rev() {
+                        indices[axis] += 1;
+                        if indices[axis] < shape[axis] {
+                            break;
+                        }
+                        indices[axis] = 0;
+                    }
                 }
-            }
+                out
+            };
             let array = PyArray::from_vec(py, out).reshape(shape)?;
             Ok(array.into_any().unbind())
         }};

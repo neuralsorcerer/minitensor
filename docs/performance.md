@@ -21,6 +21,35 @@ The benchmark script attempts to import optional comparison frameworks such as
 PyTorch and TensorFlow. Missing optional frameworks are skipped rather than
 failing the MiniTensor benchmark.
 
+## Conversion to and from NumPy
+
+NumPy is already a hard dependency of the extension, and the conversion paths
+lean on it rather than reimplementing what it does in C:
+
+- Building a tensor from a Python list or tuple goes through `numpy.asarray`,
+  both to infer the dtype and to read the values. Walking the object graph in
+  Rust instead cost about 880ns per element against NumPy's ~16ns. Anything
+  NumPy cannot type -- ragged nesting, object arrays, strings -- falls back to
+  the element-wise walk so its error messages are unchanged.
+- `.numpy()` copies the buffer directly when the tensor is contiguous, which it
+  almost always is, instead of walking a multi-dimensional index.
+
+Measured on 20k-element sequences and a 100k-element float32 tensor:
+
+| path | before | after |
+| --- | --- | --- |
+| `as_tensor(flat list)` | 17.6 ms | 0.86 ms |
+| `as_tensor(nested list)` | 17.4 ms | 0.92 ms |
+| `Tensor(list)` | 17.6 ms | 0.42 ms |
+| `.numpy()` | 232 us | 9.5 us |
+
+`.numpy()` is now within noise of a plain `ndarray.copy()` (9.4us), which is
+the floor for a copy of that size.
+
+Note the dtype rules for sequences remain this library's, not NumPy's: a list
+of Python floats infers `float32`, the configured default, where NumPy infers
+`float64`.
+
 ## Where the time goes
 
 Measured against NumPy on a 4-core x86-64 container, float32, release build.
