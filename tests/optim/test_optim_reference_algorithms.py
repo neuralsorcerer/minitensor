@@ -59,8 +59,11 @@ def _ref_sgd(lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False):
     return out
 
 
-def _ref_adam(lr, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, decoupled=False):
+def _ref_adam(
+    lr, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, decoupled=False, amsgrad=False
+):
     p, m, v, out = INIT.copy(), np.zeros(4), np.zeros(4), []
+    v_max = np.zeros(4)
     for t, g in enumerate(GRADS, start=1):
         if decoupled:
             p = p - lr * weight_decay * p
@@ -68,13 +71,20 @@ def _ref_adam(lr, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0, decoupled=False)
             g = g + weight_decay * p
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
-        p = p - lr * (m / (1 - b1**t)) / (np.sqrt(v / (1 - b2**t)) + eps)
+        # amsgrad keeps the running maximum of the second moment, so the
+        # denominator never shrinks and the effective step never grows.
+        if amsgrad:
+            v_max = np.maximum(v_max, v)
+            second = v_max
+        else:
+            second = v
+        p = p - lr * (m / (1 - b1**t)) / (np.sqrt(second / (1 - b2**t)) + eps)
         out.append(p.copy())
     return out
 
 
-def _ref_adagrad(lr, eps=1e-10, weight_decay=0.0, lr_decay=0.0):
-    p, state, out = INIT.copy(), np.zeros(4), []
+def _ref_adagrad(lr, eps=1e-10, weight_decay=0.0, lr_decay=0.0, initial_accumulator=0.0):
+    p, state, out = INIT.copy(), np.full(4, initial_accumulator), []
     for t, g in enumerate(GRADS, start=1):
         g = g + weight_decay * p
         state = state + g * g
@@ -200,6 +210,35 @@ CASES = [
         lambda ps: mt.optim.Lion(ps, lr=0.02, weight_decay=0.05),
         lambda: _ref_lion(0.02, weight_decay=0.05),
     ),
+    # Reachable from Python, but nothing checked them against the algorithm
+    # box until the coverage guard below started asking.
+    (
+        "Adam+amsgrad",
+        lambda ps: mt.optim.Adam(ps, lr=0.05, amsgrad=True),
+        lambda: _ref_adam(0.05, amsgrad=True),
+    ),
+    (
+        "Adam+amsgrad+weight_decay",
+        lambda ps: mt.optim.Adam(ps, lr=0.05, amsgrad=True, weight_decay=0.02),
+        lambda: _ref_adam(0.05, amsgrad=True, weight_decay=0.02),
+    ),
+    (
+        "Adagrad+lr_decay",
+        lambda ps: mt.optim.Adagrad(ps, lr=0.1, lr_decay=0.05),
+        lambda: _ref_adagrad(0.1, lr_decay=0.05),
+    ),
+    (
+        "Adagrad+initial_accumulator_value",
+        lambda ps: mt.optim.Adagrad(ps, lr=0.1, initial_accumulator_value=0.3),
+        lambda: _ref_adagrad(0.1, initial_accumulator=0.3),
+    ),
+    (
+        "SGD+dampening+weight_decay",
+        lambda ps: mt.optim.SGD(
+            ps, lr=0.1, momentum=0.9, dampening=0.3, weight_decay=0.05
+        ),
+        lambda: _ref_sgd(0.1, momentum=0.9, dampening=0.3, weight_decay=0.05),
+    ),
 ]
 
 
@@ -229,3 +268,55 @@ def test_sgd_exposes_dampening_and_rejects_it_with_nesterov():
             dampening=0.25,
             nesterov=True,
         )
+
+
+# Hyperparameters the reference comparison above deliberately does not vary.
+# Each entry needs a reason: the point is to force a decision, not to give the
+# guard a place to hide things.
+_UNVARIED = {
+    # Sweeping the learning rate proves nothing the fixed value does not.
+    "lr",
+    # Numerical floors. Changing them perturbs every step by ~eps, which the
+    # reference reproduces trivially and which no user tunes for behaviour.
+    "epsilon",
+    # Spelling variants of beta1/beta2, checked for equivalence in the
+    # per-optimizer files rather than re-derived through the algorithm box.
+    "betas",
+    "beta1",
+    "beta2",
+    "alpha",
+    "momentum_decay",
+}
+
+
+def test_every_optimizer_hyperparameter_is_exercised_against_the_reference():
+    """Fail when a constructor argument has no case in `CASES`.
+
+    `amsgrad`, `lr_decay` and `initial_accumulator_value` were all reachable
+    from Python and all absent from the list -- `_ref_adagrad` even took an
+    `lr_decay` argument that no case ever passed. A hand-maintained matrix
+    drifts the moment an optimizer grows an option, and the failure is silent:
+    the suite stays green because the untested path is simply never entered.
+
+    The signatures are introspectable, so the required coverage is derived from
+    them rather than restated here.
+    """
+    import inspect
+
+    configured = " ".join(
+        inspect.getsource(make) for _, make, _ in CASES
+    )
+
+    missing = []
+    for name in ("SGD", "Adam", "AdamW", "Adagrad", "RMSprop", "NAdam", "Lion"):
+        optimizer = getattr(mt.optim, name)
+        for param in inspect.signature(optimizer).parameters:
+            if param in ("self", "parameters") or param in _UNVARIED:
+                continue
+            if f"{param}=" not in configured:
+                missing.append(f"{name}.{param}")
+
+    assert not missing, (
+        "optimizer hyperparameters never compared against the reference "
+        "algorithm: " + ", ".join(sorted(set(missing)))
+    )
