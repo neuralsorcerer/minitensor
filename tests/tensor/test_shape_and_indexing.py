@@ -433,9 +433,49 @@ def test_slice_out_of_range_empty():
 
 
 def test_reverse_slice_error():
+    # Negative steps are rejected, matching PyTorch rather than NumPy. Use
+    # `flip` for a reversed view.
     t = mt.arange(10)
     with pytest.raises(IndexError):
         _ = t[::-1]
+
+
+def test_inverted_slice_range_is_empty_not_an_error():
+    # `x[2:1]` selects nothing in both NumPy and PyTorch. This used to raise
+    # IndexError reporting `1 is out of bounds` for a dimension of size 3 --
+    # an in-bounds value, described as out of bounds, for a slice that was
+    # merely empty.
+    base = np.arange(12, dtype=np.float32).reshape(3, 4)
+    tensor = mt.as_tensor(base)
+
+    for start, stop in [(2, 1), (3, 1), (1, 0), (2, 0), (-1, -2), (-1, 0)]:
+        expected = base[start:stop]
+        actual = tensor[start:stop].numpy()
+        assert actual.shape == expected.shape, (start, stop)
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_slice_ranges_match_numpy_exhaustively():
+    base = np.arange(12, dtype=np.float32).reshape(3, 4)
+    tensor = mt.as_tensor(base)
+
+    for start in range(-4, 5):
+        for stop in range(-4, 5):
+            expected = base[start:stop]
+            actual = tensor[start:stop].numpy()
+            assert actual.shape == expected.shape, f"[{start}:{stop}]"
+            np.testing.assert_array_equal(actual, expected, err_msg=f"[{start}:{stop}]")
+
+
+def test_assignment_through_an_inverted_slice_is_a_no_op():
+    base = np.arange(12, dtype=np.float32).reshape(3, 4)
+    for start, stop in [(2, 1), (3, 1), (1, 0)]:
+        expected = base.copy()
+        expected[start:stop] = 99.0  # numpy: writes nothing
+
+        tensor = mt.as_tensor(base.copy())
+        tensor[start:stop] = 99.0
+        np.testing.assert_array_equal(tensor.numpy(), expected)
 
 
 def test_slice_assignment_with_step():

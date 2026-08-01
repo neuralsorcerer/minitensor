@@ -1415,9 +1415,13 @@ impl Tensor {
                     offset += pos * strides[i];
                 }
                 TensorIndex::Slice { start, end, step } => {
-                    if start > end || end > dim_size {
+                    if end > dim_size {
                         return Err(MinitensorError::index_error(end as isize, 0, dim_size));
                     }
+                    // An inverted range selects nothing -- `x[2:1]` is empty in
+                    // both NumPy and PyTorch, not an error. This used to reject
+                    // it, reporting a perfectly in-bounds `end` as an
+                    // out-of-bounds index.
                     let size = if end <= start {
                         0
                     } else {
@@ -1667,9 +1671,13 @@ impl Tensor {
                     offset += pos * strides[i];
                 }
                 TensorIndex::Slice { start, end, step } => {
-                    if start > end || end > dim_size {
+                    if end > dim_size {
                         return Err(MinitensorError::index_error(end as isize, 0, dim_size));
                     }
+                    // An inverted range selects nothing -- `x[2:1]` is empty in
+                    // both NumPy and PyTorch, not an error. This used to reject
+                    // it, reporting a perfectly in-bounds `end` as an
+                    // out-of-bounds index.
                     let size = if end <= start {
                         0
                     } else {

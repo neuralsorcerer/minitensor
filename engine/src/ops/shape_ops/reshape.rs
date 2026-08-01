@@ -802,12 +802,17 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
 
     let dim_size = tensor.shape().dims()[dim];
 
-    if start > dim_size || end > dim_size || start > end {
+    if start > dim_size || end > dim_size {
         return Err(MinitensorError::invalid_operation(format!(
             "Invalid slice range: start={}, end={}, dim_size={}",
             start, end, dim_size
         )));
     }
+
+    // An inverted range selects nothing, matching NumPy and PyTorch. Clamping
+    // here rather than erroring also keeps the `end - start` below from
+    // underflowing `usize`.
+    let end = end.max(start);
 
     if step == 0 {
         return Err(MinitensorError::invalid_operation(
@@ -1205,5 +1210,30 @@ mod reshape_tests {
         let reshaped = reshape_with_inference(&tensor, vec![3, -1]).expect("reshape should work");
 
         assert_eq!(reshaped.shape().dims(), &[3, 4]);
+    }
+
+    #[test]
+    fn slice_treats_an_inverted_range_as_empty() {
+        // `end < start` selects nothing, as in NumPy and PyTorch. It cannot
+        // simply fall through to the size computation either: `end - start` is
+        // `usize` arithmetic, so an unclamped inverted range would underflow
+        // rather than produce a small result.
+        let tensor = Tensor::zeros(
+            Shape::new(vec![4, 3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        for (start, end) in [(3usize, 1usize), (2, 0), (4, 0), (1, 1)] {
+            let sliced = slice(&tensor, 0, start, end, 1)
+                .unwrap_or_else(|err| panic!("slice({start}, {end}) failed: {err}"));
+            assert_eq!(sliced.shape().dims(), &[0, 3], "slice({start}, {end})");
+            assert_eq!(sliced.numel(), 0);
+        }
+
+        // Bounds that exceed the dimension are still rejected.
+        assert!(slice(&tensor, 0, 0, 5, 1).is_err());
+        assert!(slice(&tensor, 0, 5, 5, 1).is_err());
     }
 }
