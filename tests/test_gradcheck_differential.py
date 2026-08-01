@@ -22,6 +22,8 @@ stronger, library-agnostic checks:
 from __future__ import annotations
 
 import math
+import pathlib
+import re
 
 import numpy as np
 import pytest
@@ -361,7 +363,28 @@ _GRADCHECK_OPS = [
     ("tril", lambda t: t.reshape((3, 3)).tril(0), _ANY),
     ("diagonal", lambda t: t.reshape((3, 3)).diagonal(), _ANY),
     ("matmul", lambda t: t.reshape((3, 3)).matmul(t.reshape((3, 3))), _ANY),
+    # Found missing by the completeness check below. `leaky_relu` is the one
+    # that mattered: its gradient boundary at exactly zero was changed without
+    # any finite-difference check on it. The rest are shape and identity ops
+    # whose backward is a pass-through -- cheap to cover, and silent if broken.
+    ("clip", lambda t: t.clip(-0.5, 0.5), _ANY),
+    ("clone", lambda t: t.clone(), _ANY),
+    ("contiguous", lambda t: t.contiguous(), _ANY),
+    ("cpu", lambda t: t.cpu(), _ANY),
+    ("flatten", lambda t: t.reshape((3, 3)).flatten(), _ANY),
+    ("leaky_relu", lambda t: t.leaky_relu(), _ANY),
+    ("leaky_relu_slope", lambda t: t.leaky_relu(0.1), _ANY),
+    ("ravel", lambda t: t.reshape((3, 3)).ravel(), _ANY),
+    ("squeeze", lambda t: t.reshape((1, 9, 1)).squeeze(), _ANY),
+    ("to", lambda t: t.to("float64"), _ANY),
+    ("norm_default", lambda t: t.norm(), _ANY),
 ]
+
+# Ops a no-arg probe reaches but this list deliberately does not gradcheck.
+_GRADCHECK_EXEMPT = {
+    # Covered with explicit arguments by their own tests above.
+    "backward",
+}
 
 
 def _analytic_grad_f64(fn, src):
@@ -660,3 +683,51 @@ def test_forward_values_match_numpy(name, fn, src, reference):
     want = np.asarray(reference(src.astype(np.float64)))
     assert got.shape == want.shape, f"{name}: {got.shape} != {want.shape}"
     np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-11)
+
+
+def test_the_gradcheck_list_covers_every_differentiable_no_arg_op():
+    """Keep `_GRADCHECK_OPS` honest as the API grows.
+
+    The list is hand-maintained, so a new differentiable op is covered only if
+    someone remembers to add it -- and a test named "every differentiable op"
+    that quietly covers all but nine is worse than one that admits its scope.
+    This probes the live API instead: any tensor method callable with no
+    arguments whose result carries a gradient has to appear in the list.
+
+    That is a lower bar than "every differentiable op" -- ops needing arguments
+    are out of reach of a no-arg probe -- but it is checkable, and it is what
+    caught `leaky_relu` sitting outside the list while its gradient boundary
+    was being changed.
+    """
+    # Derive coverage from the calls the lambdas actually make, rather than from
+    # the parametrize ids: the ids are suffixed to stay unique ("norm1", "pow2",
+    # "leaky_relu_slope"), so matching on them needs a prefix rule that quietly
+    # accepts the wrong things -- "nan_to_num" would vouch for a method named
+    # "nan". The source is unambiguous about which methods are exercised.
+    block = pathlib.Path(__file__).read_text()
+    block = block[block.index("_GRADCHECK_OPS = ["): block.index("_GRADCHECK_EXEMPT")]
+    listed = set(re.findall(r"\.([a-z_0-9]+)\(", block))
+
+    sample = np.abs(np.random.default_rng(3).standard_normal(9)) + 0.4
+    missing = []
+    for name in sorted(n for n in dir(mt.Tensor) if not n.startswith("_")):
+        if name in _GRADCHECK_EXEMPT or name in listed:
+            continue
+        try:
+            probe = mt.Tensor(sample.copy(), dtype="float64", requires_grad=True)
+            attr = getattr(probe, name)
+            if not callable(attr):
+                continue
+            result = attr()
+        except Exception:
+            continue  # needs arguments, or is not applicable to this input
+        outputs = result if isinstance(result, tuple) else (result,)
+        if any(getattr(o, "requires_grad", False) for o in outputs):
+            missing.append(name)
+    mt.clear_autograd_graph()
+
+    assert not missing, (
+        "differentiable ops with no finite-difference check: "
+        + ", ".join(missing)
+        + " -- add them to _GRADCHECK_OPS, or to _GRADCHECK_EXEMPT with a reason"
+    )
