@@ -968,3 +968,39 @@ def test_widening_composes_with_layout_normalisation():
     result = mt.as_tensor(source)
     assert result.dtype == "int32"
     np.testing.assert_array_equal(result.numpy(), source.astype(np.int32))
+
+
+@pytest.mark.parametrize(
+    "label,make",
+    [
+        ("c_contiguous", lambda a: a),
+        ("transposed", lambda a: a.T),
+        ("fortran_order", np.asfortranarray),
+        ("reversed", lambda a: a[::-1]),
+    ],
+)
+def test_every_numpy_entry_point_respects_layout(label, make):
+    # `convert_numpy_to_tensor` is the choke point for all of these. They are
+    # separate code paths that happen to share it, so a new path that bypassed
+    # it would reintroduce the silent transpose without touching the import
+    # tests above.
+    square = np.arange(16, dtype=np.float32).reshape(4, 4)
+    source = make(square)
+    tensor = mt.as_tensor(np.ascontiguousarray(square))
+
+    np.testing.assert_array_equal(np.asarray(mt.as_tensor(source)), source, err_msg=label)
+    np.testing.assert_array_equal((tensor + source).numpy(), square + source, err_msg=label)
+    np.testing.assert_array_equal(np.add(tensor, source).numpy(), square + source, err_msg=label)
+    np.testing.assert_array_equal(
+        mt.maximum(tensor, mt.as_tensor(source)).numpy(),
+        np.maximum(square, source),
+        err_msg=label,
+    )
+    np.testing.assert_array_equal(
+        mt.numpy_compat.ones_like(source).numpy(), np.ones_like(source), err_msg=label
+    )
+
+    mask = source > 6.0
+    np.testing.assert_array_equal(
+        tensor[mt.as_tensor(mask)].numpy(), square[mask], err_msg=label
+    )
