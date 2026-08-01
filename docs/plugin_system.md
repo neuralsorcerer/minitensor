@@ -258,3 +258,20 @@ minitensor-engine = { path = "../engine" }
 - `list_plugins()`
 - `get_plugin_info(name)`
 - `is_plugin_loaded(name)`
+
+## Verifying the plugin path
+
+Plugin loading needs both halves built, and the test suite skips itself if
+either is missing:
+
+```bash
+cargo build --release --manifest-path examples/rust_plugin_example/Cargo.toml
+maturin develop --release --features dynamic-loading
+pytest tests/test_plugin_loading.py
+```
+
+Without those two commands `tests/test_plugin_loading.py` reports eleven
+skipped tests, not eleven passing ones. CI runs this as its own job
+(`dynamic plugin loading` in test_ubuntu.yml) and treats a skip as a failure,
+because a green run that exercised nothing is what let this path go unverified
+in the first place.

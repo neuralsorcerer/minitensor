@@ -58,3 +58,49 @@ jobs:
           source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
           maturin build --out /tmp/wheel-guard
           ls /tmp/wheel-guard/*.whl
+
+  # The plugin path is the library's extension story, and until this job
+  # existed nothing ran it: `tests/test_plugin_loading.py` skips itself unless
+  # the extension was built with `dynamic-loading` *and* the example plugin is
+  # compiled, neither of which any workflow did. Eleven tests reported green by
+  # never executing -- the same shape that let the `blas` feature stop
+  # compiling unnoticed.
+  plugin:
+    name: dynamic plugin loading
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: plugin
+
+      - name: Build the example plugin
+        run: cargo build --release --manifest-path examples/rust_plugin_example/Cargo.toml
+
+      - name: Install with dynamic-loading
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -U "pip>=22.1.2"
+          python -m pip install "maturin[patchelf]"
+          maturin develop --release --features dynamic-loading
+          python -m pip install ".[dev]"
+
+      # Skipping is the failure mode this job exists to prevent, so a run that
+      # skips has to be red rather than green.
+      - name: Run plugin tests, failing if any skip
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          output=$(pytest tests/test_plugin_loading.py -q -rs 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qi "skipped"; then
+            echo "::error::plugin tests skipped -- the plugin path was not exercised"
+            exit 1
+          fi
