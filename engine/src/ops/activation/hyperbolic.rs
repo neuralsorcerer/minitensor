@@ -290,7 +290,7 @@ macro_rules! float_unary_kernel {
                 ))
             })?;
             Ok(TensorData::from_vec::<$ty>(
-                unary_map(input_data, $f),
+                unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, $f),
                 DataType::$dtype,
                 tensor.device(),
             ))
@@ -319,7 +319,7 @@ macro_rules! float_unary_kernel_param {
                 ))
             })?;
             Ok(TensorData::from_vec::<$ty>(
-                unary_map(input_data, $f),
+                unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, $f),
                 DataType::$dtype,
                 tensor.device(),
             ))
@@ -464,14 +464,14 @@ pub(crate) fn gelu_f32(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     // The `approximate` branch is selected once, outside the element loop.
     let out = if approximate {
         let coeff = (2.0f32 / std::f32::consts::PI).sqrt();
-        unary_map(input_data, |x: f32| {
+        unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f32| {
             let x3 = x * x * x;
             let inner = coeff * (x + 0.044715f32 * x3);
             0.5f32 * x * (1.0f32 + inner.tanh())
         })
     } else {
         let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
-        unary_map(input_data, |x: f32| {
+        unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f32| {
             0.5f32 * x * (1.0f32 + erff(x * inv_sqrt_2))
         })
     };
@@ -490,14 +490,14 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     // The `approximate` branch is selected once, outside the element loop.
     let out = if approximate {
         let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
-        unary_map(input_data, |x: f64| {
+        unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
             let x3 = x * x * x;
             let inner = coeff * (x + 0.044715f64 * x3);
             0.5f64 * x * (1.0f64 + inner.tanh())
         })
     } else {
         let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
-        unary_map(input_data, |x: f64| {
+        unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
             0.5f64 * x * (1.0f64 + erf(x * inv_sqrt_2))
         })
     };

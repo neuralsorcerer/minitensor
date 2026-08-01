@@ -94,7 +94,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                 PowBroadcast::None => crate::ops::map::binary_map(b, e, |x: $ty, y: $ty| x.powf(y)),
                 PowBroadcast::BaseScalar => {
                     let base_val = b[0];
-                    unary_map(e, move |y: $ty| base_val.powf(y))
+                    unary_map_threshold(e, EXPENSIVE_PAR_THRESHOLD, move |y: $ty| base_val.powf(y))
                 }
                 PowBroadcast::ExponentScalar => {
                     let exp_val = e[0];
@@ -111,7 +111,9 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                     } else if exp_val == 3.0 {
                         unary_map(b, |x: $ty| x * x * x)
                     } else {
-                        unary_map(b, move |x: $ty| x.powf(exp_val))
+                        unary_map_threshold(b, EXPENSIVE_PAR_THRESHOLD, move |x: $ty| {
+                            x.powf(exp_val)
+                        })
                     }
                 }
             };

@@ -18,9 +18,12 @@ use crate::{
 };
 use std::sync::Arc;
 
-// The map primitive lives in `ops::map`; re-exported here so every
-// file in the activation cluster picks it up through `use super::*`.
-pub(crate) use crate::ops::map::unary_map;
+// The map primitives live in `ops::map`; re-exported here so every file in the
+// activation cluster picks them up through `use super::*`. Transcendentals use
+// `unary_map_threshold` with `EXPENSIVE_PAR_THRESHOLD` rather than the default
+// `unary_map`: their per-element cost repays the fixed parallel-region entry
+// cost far sooner than a `relu`'s does.
+pub(crate) use crate::ops::map::{EXPENSIVE_PAR_THRESHOLD, unary_map, unary_map_threshold};
 
 /// Exponential function with gradient support
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {

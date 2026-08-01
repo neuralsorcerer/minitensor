@@ -102,7 +102,7 @@ pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, f32::tanh);
+    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, f32::tanh);
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
@@ -115,7 +115,7 @@ pub(crate) fn tanh_f64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, f64::tanh);
+    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, f64::tanh);
     Ok(TensorData::from_vec::<f64>(
         out,
         DataType::Float64,
@@ -128,7 +128,7 @@ pub(crate) fn sigmoid_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, stable_sigmoid_f32);
+    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, stable_sigmoid_f32);
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
@@ -141,7 +141,7 @@ pub(crate) fn sigmoid_f64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f64 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, stable_sigmoid_f64);
+    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, stable_sigmoid_f64);
     Ok(TensorData::from_vec::<f64>(
         out,
         DataType::Float64,

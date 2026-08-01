@@ -21,6 +21,33 @@ The benchmark script attempts to import optional comparison frameworks such as
 PyTorch and TensorFlow. Missing optional frameworks are skipped rather than
 failing the MiniTensor benchmark.
 
+## Where the time goes
+
+Measured against NumPy on a 4-core x86-64 container, float32, release build.
+Ratios below 1 mean MiniTensor is faster.
+
+| op | 4K | 64K | 1M |
+| --- | --- | --- | --- |
+| `add` / `mul` | 0.9x | 0.8x | 0.9x |
+| `relu` | 0.24x | 0.21x | 0.14x |
+| `abs`, `sqrt` | 0.8x | ~1.0x | 0.4-0.5x |
+| `sum` | 0.35x | 0.78x | 0.25x |
+| `exp` | 2.9x | 1.4x | 1.3x |
+| `tanh` | 19x | 13x | 12x |
+
+The transcendentals are the outlier, and the reason is known: MiniTensor calls
+the scalar libm routine per element, while NumPy ships hand-written SIMD
+kernels for them. On this machine float32 `tanh` costs about 27ns per element
+per core against `relu`'s 0.05ns, so the gap is the vectorisation, not the
+threading -- these kernels *are* parallelised. Closing it means writing SIMD
+transcendentals with their own accuracy budget, which has not been done.
+
+`sort` deserves a note because it is easy to mis-measure: `mt.sort` always
+returns values *and* indices, so the comparable NumPy operation is
+`argsort` plus a gather, not `np.sort`. Against that it is roughly at parity
+(1.1x at 1M). Against `np.sort` alone it looks 25x slower, but that is
+comparing different work.
+
 ## Choosing a GEMM backend
 
 Matrix multiplication runs through `matrixmultiply` by default -- pure Rust, no

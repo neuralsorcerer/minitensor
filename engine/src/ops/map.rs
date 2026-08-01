@@ -23,14 +23,63 @@ use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::mem::MaybeUninit;
 
-/// Element count above which unary kernels switch to parallel execution.
+/// Element count above which *cheap* unary kernels switch to parallel
+/// execution -- `relu`, `abs`, `sqrt`, `floor`, sign, casts, predicates.
 /// Shared crate-wide (gradient kernels, activation maps, …).
-pub(crate) const PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+///
+/// Entering a rayon region costs a fixed ~25us here when the workers have
+/// parked, which they do between calls from Python. A cheap unary op moves
+/// about 0.05ns per element per core, so that overhead is not repaid until
+/// the array is large. Measured on a 4-core x86-64 container, float32 `relu`:
+///
+/// ```text
+///        N   sequential   parallel
+///     4096       1.4 us    32.4 us   <- 23x slower parallel
+///    16384       2.5 us    26.2 us
+///    65536       8.6 us    26.4 us
+///   262144      84.5 us    54.0 us   <- parallel finally wins
+///  1048576     373.8 us   150.5 us
+/// ```
+///
+/// The previous value of 4096 therefore made every cheap unary op between 4K
+/// and ~200K elements slower than doing nothing at all, by up to 23x. This
+/// value sits below the measured crossover on that machine so that hosts with
+/// more cores -- where parallel repays sooner -- are not held back.
+pub(crate) const PAR_THRESHOLD: usize = 1 << 17; // 131072 elements
 
-/// Element count above which binary/broadcast kernels parallelize. Kept at
-/// the historical `broadcast_binary_op` threshold so parallelization behavior
-/// is unchanged by the uninit-output refactor.
-pub(crate) const BINARY_PAR_THRESHOLD: usize = 1024;
+/// Element count above which *expensive* unary kernels parallelize: the
+/// transcendentals, whose per-element cost is hundreds of times a `relu`'s
+/// (float32 `tanh` measures ~27ns per element per core against `relu`'s
+/// ~0.05ns). The fixed region-entry cost is repaid almost immediately, so
+/// these keep the low threshold, and parallel is a win from 4096 up:
+///
+/// ```text
+///        N   sequential   parallel
+///     4096      104 us      82 us    1.3x
+///    65536     1626 us     559 us    2.9x
+///  1048576    26114 us    7024 us    3.7x
+/// ```
+pub(crate) const EXPENSIVE_PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
+
+/// Element count above which binary/broadcast kernels parallelize.
+///
+/// Same reasoning as [`PAR_THRESHOLD`]. Note this only governs the
+/// *broadcasting* path: equal-shape elementwise binary ops take the sequential
+/// SIMD fast path in `ops::kernels::binary` and never reach rayon at all.
+///
+/// The old value of 1024 is one `PAR_CHUNK`, so it was the first size at which
+/// a split actually happens -- and therefore the first size to pay the
+/// worker-wake cost. Measured broadcast add (`Nx1 + 1xN`, float32) against
+/// NumPy on the same 4-core machine:
+///
+/// ```text
+///        N   minitensor   numpy
+///     1024       1.4 us   2.3 us   (one chunk: runs inline, no wake)
+///     4096      21.6 us   4.7 us   <- 4.6x slower than numpy
+///    16384      25.6 us  14.6 us
+///    65536      30.9 us  41.9 us   <- parallel pays off
+/// ```
+pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
 
 /// Chunk size for parallel map loops.
 pub(crate) const PAR_CHUNK: usize = 1024;
