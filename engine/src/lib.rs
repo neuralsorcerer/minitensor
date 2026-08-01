@@ -12,6 +12,14 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
 
+// `blas-src` contributes nothing but a `#[link]` attribute, so an unreferenced
+// dependency is dropped and its link directive never reaches the link line.
+// Without this the `blas` feature builds an rlib fine -- rlibs do not resolve
+// symbols -- and then fails the first time anything links a binary against it,
+// with `undefined symbol: cblas_sgemm`.
+#[cfg(feature = "blas")]
+use blas_src as _;
+
 pub mod autograd;
 pub mod backends;
 pub mod custom_ops;

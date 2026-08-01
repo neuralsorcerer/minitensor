@@ -1650,7 +1650,7 @@ Feature flags for the `engine` crate:
 | `metal` | no | Metal scaffolding. **Apple targets only** — the dependency is declared under `cfg(target_vendor = "apple")`, so on other platforms the feature resolves to nothing rather than failing the build. |
 | `opencl` | no | OpenCL scaffolding via `opencl3`. |
 | `gpu` | no | `cuda` + `metal` + `opencl`; builds on every platform, contributing whichever of the three that platform can have. |
-| `blas` | no | Routes GEMM through a system OpenBLAS. |
+| `blas` | no | Routes GEMM through a system OpenBLAS (`libopenblas-dev` or equivalent). `openblas-src` is pinned to `system`, so the build links the installed library rather than downloading and compiling OpenBLAS itself. |
 | `dynamic-loading` | no | Runtime plugin loading (`docs/plugin_system.md`). |
 
 Neither `hardware` nor `debug` is used by any tensor or autograd execution

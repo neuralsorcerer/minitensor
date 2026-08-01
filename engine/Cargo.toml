@@ -39,6 +39,10 @@ statrs = { workspace = true }
 
 # BLAS integration (optional for now)
 blas-src = { version = "0.14", features = ["openblas"], optional = true }
+# Pin `openblas-src` to the system library. Its default is to download and
+# compile OpenBLAS from source, which is what `--features blas` used to do
+# (and fail at, on any machine without network access to the tarball).
+openblas-src = { version = "0.10", features = ["system"], default-features = false, optional = true }
 cblas = { version = "0.5", optional = true }
 
 # GPU backends (optional). `metal` is declared per-target below: it links Apple
@@ -84,10 +88,9 @@ conv = []
 dropout = []
 normalization = []
 dynamic-loading = ["dep:libloading"]
-blas = ["dep:blas-src", "dep:cblas"]
+blas = ["dep:blas-src", "dep:openblas-src", "dep:cblas"]
 
 [dev-dependencies]
-criterion = "0.8"
 proptest = "1.11"
 # Used only by tests/performance_tests.rs as a comparison baseline.
 ndarray = { workspace = true }

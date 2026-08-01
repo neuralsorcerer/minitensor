@@ -187,6 +187,11 @@ pub(crate) fn diagonal_scatter<T>(
     }
 }
 
+/// # Safety
+///
+/// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+/// readable (writable, for `c`) elements, the same contract the
+/// `matrixmultiply` path below documents.
 #[cfg(feature = "blas")]
 #[inline]
 pub(crate) unsafe fn gemm_f32(
@@ -197,24 +202,42 @@ pub(crate) unsafe fn gemm_f32(
     b: *const f32,
     c: *mut f32,
 ) {
-    cblas::sgemm(
-        Layout::RowMajor,
-        Transpose::None,
-        Transpose::None,
-        m as i32,
-        n as i32,
-        k as i32,
-        1.0,
-        a,
-        k as i32,
-        b,
-        n as i32,
-        0.0,
-        c,
-        n as i32,
-    );
+    // `cblas` takes slices, not the raw pointers this signature carries for the
+    // `matrixmultiply` path. Passing the pointers straight through did not
+    // compile, so `--features blas` has never built; the lengths come from the
+    // documented contract above.
+    let (a, b, c) = unsafe {
+        (
+            std::slice::from_raw_parts(a, m * k),
+            std::slice::from_raw_parts(b, k * n),
+            std::slice::from_raw_parts_mut(c, m * n),
+        )
+    };
+    unsafe {
+        cblas::sgemm(
+            Layout::RowMajor,
+            Transpose::None,
+            Transpose::None,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a,
+            k as i32,
+            b,
+            n as i32,
+            0.0,
+            c,
+            n as i32,
+        );
+    }
 }
 
+/// # Safety
+///
+/// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+/// readable (writable, for `c`) elements, the same contract the
+/// `matrixmultiply` path below documents.
 #[cfg(feature = "blas")]
 #[inline]
 pub(crate) unsafe fn gemm_f64(
@@ -225,22 +248,35 @@ pub(crate) unsafe fn gemm_f64(
     b: *const f64,
     c: *mut f64,
 ) {
-    cblas::dgemm(
-        Layout::RowMajor,
-        Transpose::None,
-        Transpose::None,
-        m as i32,
-        n as i32,
-        k as i32,
-        1.0,
-        a,
-        k as i32,
-        b,
-        n as i32,
-        0.0,
-        c,
-        n as i32,
-    );
+    // `cblas` takes slices, not the raw pointers this signature carries for the
+    // `matrixmultiply` path. Passing the pointers straight through did not
+    // compile, so `--features blas` has never built; the lengths come from the
+    // documented contract above.
+    let (a, b, c) = unsafe {
+        (
+            std::slice::from_raw_parts(a, m * k),
+            std::slice::from_raw_parts(b, k * n),
+            std::slice::from_raw_parts_mut(c, m * n),
+        )
+    };
+    unsafe {
+        cblas::dgemm(
+            Layout::RowMajor,
+            Transpose::None,
+            Transpose::None,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a,
+            k as i32,
+            b,
+            n as i32,
+            0.0,
+            c,
+            n as i32,
+        );
+    }
 }
 
 #[cfg(not(feature = "blas"))]

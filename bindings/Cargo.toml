@@ -16,7 +16,6 @@ crate-type = ["cdylib", "rlib"]
 engine = { path = "../engine" }
 pyo3 = { workspace = true }
 numpy = { workspace = true }
-thiserror = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 parking_lot = { workspace = true }
