@@ -135,6 +135,17 @@ module = [
 ]
 ignore_missing_imports = true
 
+# Scope coverage to the package. A bare `--cov` measures everything imported,
+# which is dominated by the test files themselves: they were 8928 of the 9392
+# statements in the report and are trivially ~100% covered, so the headline
+# number barely moved no matter what the library did.
+[tool.coverage.run]
+source = ["minitensor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
