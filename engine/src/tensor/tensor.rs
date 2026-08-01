@@ -1105,6 +1105,13 @@ impl Tensor {
         elu(self, alpha)
     }
 
+    /// LeakyReLU activation: `x` where positive, `negative_slope * x` below.
+    #[inline(always)]
+    pub fn leaky_relu(&self, negative_slope: f64) -> Result<Self> {
+        use crate::ops::activation::leaky_relu;
+        leaky_relu(self, negative_slope)
+    }
+
     /// SELU activation
     #[inline(always)]
     pub fn selu(&self) -> Result<Self> {

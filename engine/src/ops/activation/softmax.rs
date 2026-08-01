@@ -287,15 +287,20 @@ pub(crate) fn leaky_relu_f32(
     })?;
 
     // Safe chunked maps replace the previous raw-pointer parallel loop; the
-    // backward mask marks non-negative inputs and is only materialized when a
-    // gradient function will consume it.
+    // backward mask marks strictly positive inputs and is only materialized
+    // when a gradient function will consume it.
+    //
+    // `> 0`, not `>= 0`: at exactly zero the derivative is the negative
+    // slope, as in PyTorch and as in `relu_f32` right above, which has always
+    // used the strict comparison. The forward is unaffected -- both branches
+    // give zero at zero -- so only the gradient at the kink moves.
     let out = unary_map(
         input_data,
         move |v: f32| {
-            if v >= 0.0 { v } else { negative_slope * v }
+            if v > 0.0 { v } else { negative_slope * v }
         },
     );
-    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v >= 0.0));
+    let mask = store_mask.then(|| unary_map(input_data, |v: f32| v > 0.0));
     Ok((
         TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device()),
         mask,
@@ -312,15 +317,20 @@ pub(crate) fn leaky_relu_f64(
     })?;
 
     // Safe chunked maps replace the previous raw-pointer parallel loop; the
-    // backward mask marks non-negative inputs and is only materialized when a
-    // gradient function will consume it.
+    // backward mask marks strictly positive inputs and is only materialized
+    // when a gradient function will consume it.
+    //
+    // `> 0`, not `>= 0`: at exactly zero the derivative is the negative
+    // slope, as in PyTorch and as in `relu_f64` right above, which has always
+    // used the strict comparison. The forward is unaffected -- both branches
+    // give zero at zero -- so only the gradient at the kink moves.
     let out = unary_map(
         input_data,
         move |v: f64| {
-            if v >= 0.0 { v } else { negative_slope * v }
+            if v > 0.0 { v } else { negative_slope * v }
         },
     );
-    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v >= 0.0));
+    let mask = store_mask.then(|| unary_map(input_data, |v: f64| v > 0.0));
     Ok((
         TensorData::from_vec::<f64>(out, DataType::Float64, tensor.device()),
         mask,

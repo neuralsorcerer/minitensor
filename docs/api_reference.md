@@ -567,6 +567,8 @@ assert row_std.shape == (2, 3)
   methods, returning bool tensors
 - `floor_divide`, `remainder`, `bitwise_not`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
+- `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
+  `negative_slope`, the same side `relu` takes, matching PyTorch
 - `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
 - `round`, `floor`, `ceil` — `round` sends halves to the even neighbour
@@ -685,7 +687,7 @@ masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
 layer_norm, rms_norm, scaled_dot_product_attention, rope, glu,
-rsqrt, reciprocal, sign, abs, sqrt, exp, log, pow, matmul,
+rsqrt, reciprocal, sign, abs, sqrt, exp, log, pow, matmul, leaky_relu,
 eq, ne, lt, le, gt, ge, floor_divide, remainder, bitwise_not,
 reshape, view, triu, tril, diagonal,
 trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,

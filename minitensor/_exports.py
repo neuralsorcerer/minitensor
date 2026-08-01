@@ -61,6 +61,7 @@ _FUNCTIONAL_FORWARDERS = (
     "softplus",
     "gelu",
     "elu",
+    "leaky_relu",
     "selu",
     "silu",
     "softsign",

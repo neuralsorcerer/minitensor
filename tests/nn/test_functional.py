@@ -1310,3 +1310,55 @@ def test_regression_losses_propagate_gradients():
         np.testing.assert_allclose(
             x.grad.numpy(), _finite_diff_grad(np_loss, pred), rtol=1e-3, atol=1e-6
         )
+
+
+@pytest.mark.parametrize("negative_slope", [0.01, 0.1, 0.25, 1.0])
+def test_leaky_relu_has_a_functional_form_and_matches_the_layer(negative_slope):
+    # `relu`, `elu`, `selu`, `silu`, `gelu`, `softplus`, `hardshrink` and
+    # `softsign` all had free-function forms; `leaky_relu` had only the
+    # `nn.LeakyReLU` layer.
+    values = np.array([-3.0, -1.0, 0.0, 1.0, 3.0])
+    tensor = mt.as_tensor(values)
+    expected = np.where(values > 0, values, negative_slope * values)
+
+    np.testing.assert_allclose(mt.leaky_relu(tensor, negative_slope).numpy(), expected)
+    np.testing.assert_allclose(
+        mt.functional.leaky_relu(tensor, negative_slope).numpy(), expected
+    )
+    np.testing.assert_allclose(tensor.leaky_relu(negative_slope).numpy(), expected)
+
+
+def test_leaky_relu_default_slope_matches_the_layer():
+    values = np.array([-2.0, 2.0])
+    tensor = mt.as_tensor(values)
+    np.testing.assert_allclose(
+        mt.leaky_relu(tensor).numpy(), mt.nn.LeakyReLU()(tensor).numpy()
+    )
+    np.testing.assert_allclose(mt.leaky_relu(tensor).numpy(), [-0.02, 2.0])
+
+
+@pytest.mark.parametrize("negative_slope", [0.01, 0.25, 1.0])
+def test_leaky_relu_gradient_takes_the_slope_side_at_zero(negative_slope):
+    # The kink at zero has no derivative; the convention is the negative side,
+    # which is what PyTorch uses and what `relu` here has always used. This
+    # kernel used `>= 0` and so returned 1 at zero, disagreeing with the `relu`
+    # directly above it in the same file.
+    values = np.array([-1.0, 0.0, 1.0])
+    tensor = mt.Tensor(values.copy(), dtype="float64").requires_grad_(True)
+    mt.sum(mt.leaky_relu(tensor, negative_slope)).backward()
+    np.testing.assert_allclose(
+        tensor.grad.numpy(), [negative_slope, negative_slope, 1.0]
+    )
+
+
+def test_relu_and_leaky_relu_agree_on_which_side_zero_belongs_to():
+    relu_input = mt.Tensor(np.array([0.0]), dtype="float64").requires_grad_(True)
+    mt.sum(mt.relu(relu_input)).backward()
+
+    leaky_input = mt.Tensor(np.array([0.0]), dtype="float64").requires_grad_(True)
+    mt.sum(mt.leaky_relu(leaky_input, 0.5)).backward()
+
+    # relu is leaky_relu with slope 0, so their gradients at zero must relate
+    # the same way: both take the negative branch.
+    assert relu_input.grad.numpy()[0] == 0.0
+    assert leaky_input.grad.numpy()[0] == 0.5

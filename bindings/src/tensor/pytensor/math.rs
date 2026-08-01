@@ -361,6 +361,15 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    #[pyo3(signature = (negative_slope=None))]
+    pub fn leaky_relu(&self, negative_slope: Option<f64>) -> PyResult<Self> {
+        let result = self
+            .inner
+            .leaky_relu(negative_slope.unwrap_or(0.01))
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     pub fn selu(&self) -> PyResult<Self> {
         let result = self.inner.selu().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

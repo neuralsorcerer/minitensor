@@ -299,7 +299,11 @@ fn test_z_leaky_relu_backward_correct() {
     );
     let grads = autograd::backward_collect(&output, Some(grad_output)).unwrap();
     let grad_input = grads.get(&input.id()).unwrap();
-    assert_eq!(grad_input.data().as_f32_slice().unwrap(), &[0.1, 1.0, 1.0]);
+    // The middle entry used to be 1.0: the kernel masked on `v >= 0`, so the
+    // kink at zero was attributed to the positive side. `relu` in the same
+    // module has always used `v > 0`, and PyTorch puts zero on the slope side
+    // too, so the two now agree.
+    assert_eq!(grad_input.data().as_f32_slice().unwrap(), &[0.1, 0.1, 1.0]);
     autograd::clear_graph().unwrap();
 }
 

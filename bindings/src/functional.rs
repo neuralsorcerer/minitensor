@@ -1024,6 +1024,16 @@ pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
     tensor.elu(Some(alpha))
 }
 
+/// The one activation that had no functional form: `relu`, `elu`, `selu`,
+/// `silu`, `gelu`, `softplus`, `hardshrink` and `softsign` all did, and
+/// `nn.LeakyReLU` existed as a layer, but `F.leaky_relu` did not.
+#[pyfunction]
+#[pyo3(signature = (input, negative_slope=0.01))]
+pub fn leaky_relu(input: &Bound<PyAny>, negative_slope: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.leaky_relu(Some(negative_slope))
+}
+
 #[pyfunction]
 #[pyo3(signature = (input, diagonal=0))]
 pub fn triu(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
@@ -1373,6 +1383,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(softplus, parent)?)?;
     parent.add_function(wrap_pyfunction!(gelu, parent)?)?;
     parent.add_function(wrap_pyfunction!(elu, parent)?)?;
+    parent.add_function(wrap_pyfunction!(leaky_relu, parent)?)?;
     parent.add_function(wrap_pyfunction!(selu, parent)?)?;
     parent.add_function(wrap_pyfunction!(silu, parent)?)?;
     parent.add_function(wrap_pyfunction!(softsign, parent)?)?;
