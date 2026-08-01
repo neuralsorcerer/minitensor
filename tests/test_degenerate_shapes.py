@@ -12,10 +12,16 @@ the binding is far worse for a caller than an exception: it carries no useful
 message and can poison the interpreter state. Each case below must therefore
 either produce a sensible result or raise -- never abort.
 
-This file exists to keep an audit from becoming a one-off. It found nothing when
-written; its value is that a regression would now show up as a failure rather
-than as a crash in someone's training run.
+This file exists to keep an audit from becoming a one-off. Its first pass found
+nothing; a later sweep over every empty-axis position found eight operations
+that panicked -- `sum`, `mean`, `nansum`, `nanmean` reducing the last axis of a
+2-D tensor whose last axis is empty, and `sort`/`argsort` on any empty input,
+which between them took `std`, `var`, `logsumexp`, `trace`, `layer_norm` and
+`rms_norm` down as well. The cases below pin the results against NumPy.
 """
+
+import contextlib
+import warnings
 
 import numpy as np
 import pytest
@@ -23,6 +29,20 @@ import pytest
 import minitensor as mt
 from minitensor import functional as F
 from minitensor import nn
+
+
+@contextlib.contextmanager
+def numpy_reference():
+    """Silence NumPy while it computes an expected value.
+
+    Reducing an empty axis makes NumPy warn about an empty slice and about
+    dividing by zero. That warning *is* the reference behaviour being compared
+    against, but the suite runs with `filterwarnings = error`, so an unguarded
+    reference call fails the test before minitensor is ever exercised.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        yield
 
 
 def f32(*shape):
@@ -122,3 +142,75 @@ def test_recurrent_layers_reject_an_empty_sequence(kind):
     layer = getattr(nn, kind)(2, 3, dtype="float64")
     with pytest.raises(Exception):
         layer(f64(0, 1, 2))
+
+
+# The reduction kernels special-case rank 1 and rank 2 and fall back to a
+# generic loop above that, so an empty axis has to be tried in every position:
+# only the 2-D "last axis is the empty one" combination chunked the input by a
+# zero-length row and panicked. Rank 3 was always fine, which is why nothing
+# caught this earlier.
+EMPTY_SHAPES = [(0,), (0, 0), (3, 0), (0, 3), (2, 0, 3), (2, 3, 0), (0, 2, 3)]
+
+
+@pytest.mark.parametrize("shape", EMPTY_SHAPES)
+@pytest.mark.parametrize("name", ["sum", "mean", "nansum", "nanmean"])
+def test_reducing_an_empty_axis_matches_numpy(shape, name):
+    array = np.zeros(shape, dtype=np.float32)
+    tensor = mt.from_numpy(array)
+    for dim in range(len(shape)):
+        with numpy_reference():
+            expected = getattr(np, name)(array, axis=dim)
+        got = getattr(tensor, name)(dim, False).numpy()
+        assert got.shape == expected.shape
+        np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("shape", EMPTY_SHAPES)
+@pytest.mark.parametrize("name", ["std", "var"])
+def test_dispersion_over_an_empty_axis_is_nan_like_numpy(shape, name):
+    # 0/0 for the biased estimator, exactly as NumPy reports it.
+    array = np.zeros(shape, dtype=np.float32)
+    tensor = mt.from_numpy(array)
+    for dim in range(len(shape)):
+        with numpy_reference():
+            expected = getattr(np, name)(array, axis=dim)
+        got = getattr(tensor, name)(dim, False, False).numpy()
+        assert got.shape == expected.shape
+        np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("shape", EMPTY_SHAPES)
+def test_sort_and_argsort_return_the_empty_input(shape):
+    # NumPy and PyTorch both hand the empty input straight back rather than
+    # erroring, so an empty batch flows through a pipeline unchanged.
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    values, indices = tensor.sort()
+    assert values.shape == shape
+    assert indices.shape == shape
+    assert tensor.argsort().shape == shape
+
+
+@pytest.mark.parametrize("shape", [(3, 0), (0, 0), (0,), (0, 3)])
+def test_logsumexp_over_an_empty_axis_is_negative_infinity(shape):
+    # log(sum of nothing) = log(0). Finite only where the output itself is empty.
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    dim = len(shape) - 1
+    got = tensor.logsumexp([dim], False).numpy()
+    assert got.shape == np.sum(np.zeros(shape, np.float32), axis=dim).shape
+    assert np.all(np.isneginf(got)) or got.size == 0
+
+
+@pytest.mark.parametrize("shape", [(2, 0, 3), (2, 3, 0), (0, 1, 0)])
+def test_trace_over_an_empty_matrix_axis(shape):
+    # Summing an empty diagonal, which is zero rather than an error.
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    assert np.all(tensor.trace().numpy() == 0.0)
+
+
+@pytest.mark.parametrize("shape", [(3, 0), (0, 0), (1, 0)])
+@pytest.mark.parametrize("name", ["layer_norm", "rms_norm"])
+def test_normalization_over_an_empty_feature_axis(shape, name):
+    # Normalizing over zero features divides by an empty mean; the shape has to
+    # survive regardless of what the values come out as.
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    assert getattr(mt, name)(tensor, [shape[-1]]).shape == shape

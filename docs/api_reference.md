@@ -533,6 +533,51 @@ variance correction (`N / (N - 1)`) over the total number of reduced elements,
 and reductions with one or fewer samples return `NaN` rather than emitting a
 Python warning.
 
+### Reducing an empty axis
+
+Whether an empty reduction has an answer depends on whether the operation has
+an identity element:
+
+| Operation | Reducing a length-zero axis |
+| --- | --- |
+| `sum`, `nansum` | `0` |
+| `prod` | `1` |
+| `mean`, `nanmean`, `std`, `var` | `NaN` (0/0) |
+| `logsumexp` | `-inf` (`log 0`) |
+| `max`, `min`, `nanmax`, `nanmin`, `argmax`, `argmin` | raises |
+| `median`, `quantile`, `nanquantile` | raises |
+| `sort`, `argsort` | returns the empty input unchanged |
+
+The extrema raise because they have no identity to fall back on. Returning the
+fold identity — which is what they used to do — gives `-inf` for floats and
+`iinfo.min` for integers, and the integer case is indistinguishable from a
+genuine maximum, since `iinfo.min` is a value a real tensor can hold. `argmax`
+returned index `0`, which is not a valid index into an axis with no elements.
+NumPy and PyTorch both raise here as well.
+
+Only the **reduced** axis has to be non-empty, so an empty batch still flows
+through a reduction over some other axis:
+
+```python
+import minitensor as mt
+import numpy as np
+
+batch = mt.from_numpy(np.empty((0, 3), dtype=np.float32))
+
+values, indices = batch.max(dim=1)   # each row has 3 elements; there are 0 rows
+print(tuple(values.shape), tuple(indices.shape))
+
+try:
+    batch.max(dim=0)                 # would need 3 values from 0 elements
+except ValueError as exc:
+    print(exc)
+```
+
+```text
+(0,) (0,)
+Invalid argument: max() does not support empty tensors
+```
+
 `median` and `nanmedian` follow PyTorch: with an even number of elements they
 return the **lower** of the two middle values rather than averaging them the
 way `numpy.median` does. That is also what lets `median(dim=...)` report the

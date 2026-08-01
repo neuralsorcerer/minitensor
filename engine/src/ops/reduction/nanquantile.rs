@@ -206,7 +206,7 @@ pub(crate) fn median_along_dim(
     let dims = tensor.shape().dims();
     let dim_size = if dims.is_empty() { 1 } else { dims[dim] };
 
-    ensure_non_empty(dim_size)?;
+    ensure_non_empty(dim_size, "nanquantile")?;
 
     let mut out_dims = if dims.is_empty() {
         vec![1]

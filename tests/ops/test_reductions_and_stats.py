@@ -107,10 +107,17 @@ def test_max_min_all_equal():
     assert t.min().numpy() == 3.0
 
 
-def test_max_min_empty_tensor_values():
+def test_max_min_reject_an_empty_tensor():
+    # These used to return the fold identity: -inf for max, +inf for min. That
+    # is defensible for floats and indefensible for integers, where the identity
+    # is `iinfo.min` -- a value a real tensor can hold, so `max([])` came back
+    # bit-identical to `max([INT_MIN])` with no way to tell them apart. NumPy,
+    # PyTorch, and this library's own `median`/`quantile` all raise instead.
     t = mt.Tensor(np.array([], dtype=np.float32))
-    assert np.isneginf(t.max().numpy())
-    assert np.isinf(t.min().numpy())
+    with pytest.raises(Exception, match="does not support empty tensors"):
+        t.max()
+    with pytest.raises(Exception, match="does not support empty tensors"):
+        t.min()
 
 
 def test_max_min_all_nan_returns_nan():
@@ -119,28 +126,29 @@ def test_max_min_all_nan_returns_nan():
     assert np.isnan(t.min().numpy())
 
 
-def test_max_min_empty_tensor_with_dim():
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_max_min_reject_reducing_an_empty_axis(keepdim):
+    # Reducing axis 0 of a (0, 3) tensor has to produce three values out of no
+    # elements. The indices were the sharper problem: they came back as zeros,
+    # an index into an axis that has no element 0, which reads out of bounds if
+    # fed to a later `gather`.
     t = mt.Tensor(np.empty((0, 3), dtype=np.float32))
-    max_vals, max_idx = t.max(dim=0)
-    assert np.isneginf(max_vals.numpy()).all()
-    assert np.array_equal(max_idx.numpy(), np.zeros(3, dtype=np.int64))
-
-    min_vals, min_idx = t.min(dim=0)
-    assert np.isposinf(min_vals.numpy()).all()
-    assert np.array_equal(min_idx.numpy(), np.zeros(3, dtype=np.int64))
+    for op in ("max", "min", "argmax", "argmin"):
+        with pytest.raises(Exception, match="does not support empty tensors"):
+            getattr(t, op)(dim=0, keepdim=keepdim)
 
 
-def test_max_min_empty_tensor_with_dim_keepdim():
+def test_reducing_a_populated_axis_of_an_empty_tensor_is_still_allowed():
+    # Only the reduced axis has to be non-empty. Every slice along axis 1 here
+    # has three elements; there simply are not any slices, so an empty result is
+    # the honest answer -- and it is what NumPy returns.
     t = mt.Tensor(np.empty((0, 3), dtype=np.float32))
-    max_vals, max_idx = t.max(dim=0, keepdim=True)
-    assert max_vals.shape == (1, 3)
-    assert np.isneginf(max_vals.numpy()).all()
-    assert np.array_equal(max_idx.numpy(), np.zeros((1, 3), dtype=np.int64))
-
-    min_vals, min_idx = t.min(dim=0, keepdim=True)
-    assert min_vals.shape == (1, 3)
-    assert np.isposinf(min_vals.numpy()).all()
-    assert np.array_equal(min_idx.numpy(), np.zeros((1, 3), dtype=np.int64))
+    values, indices = t.max(dim=1)
+    assert values.shape == (0,)
+    assert indices.shape == (0,)
+    np.testing.assert_array_equal(
+        values.numpy(), np.max(np.empty((0, 3), dtype=np.float32), axis=1)
+    )
 
 
 def test_max_min_all_nan_with_dim_returns_nan():
@@ -199,15 +207,17 @@ def test_argmax_argmin_propagate_nan_and_match_reduction_indices():
     assert t.argmin().numpy() == np.argmin(data)
 
 
-def test_max_min_empty_int_tensor_with_dim():
+def test_max_min_reject_an_empty_int_axis_rather_than_returning_int_min():
+    # The case that forced the change: `iinfo(int32).min` is a legitimate tensor
+    # value, so the old result was unfalsifiable.
     t = mt.Tensor(np.empty((0, 2), dtype=np.int32), dtype="int32")
-    max_vals, max_idx = t.max(dim=0)
-    assert max_vals.numpy().tolist() == [np.iinfo(np.int32).min] * 2
-    assert np.array_equal(max_idx.numpy(), np.zeros(2, dtype=np.int64))
+    with pytest.raises(Exception, match="does not support empty tensors"):
+        t.max(dim=0)
+    with pytest.raises(Exception, match="does not support empty tensors"):
+        t.min(dim=0)
 
-    min_vals, min_idx = t.min(dim=0)
-    assert min_vals.numpy().tolist() == [np.iinfo(np.int32).max] * 2
-    assert np.array_equal(min_idx.numpy(), np.zeros(2, dtype=np.int64))
+    populated = mt.Tensor(np.array([[np.iinfo(np.int32).min]], dtype=np.int32), dtype="int32")
+    assert populated.max(dim=0)[0].numpy().tolist() == [np.iinfo(np.int32).min]
 
 
 def test_median_global_even_length():

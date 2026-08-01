@@ -201,11 +201,22 @@ pub(crate) fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
     }
 }
 
-pub(crate) fn ensure_non_empty(numel: usize) -> Result<()> {
+/// Reject an empty reduction for an operation that has no identity element.
+///
+/// `sum` and `prod` can answer for an empty input because they have identities
+/// (0 and 1). `max`, `median` and friends cannot, and a sentinel is worse than
+/// no answer: the int64 `max` of nothing is `i64::MIN`, which is also a
+/// perfectly ordinary value, so the caller cannot tell the two apart. NumPy and
+/// PyTorch both raise here.
+///
+/// `op` names the operation so the message points at what the caller actually
+/// called -- this used to be hardcoded to `median`, which is how `nanquantile`
+/// came to report a `median()` error.
+pub(crate) fn ensure_non_empty(numel: usize, op: &str) -> Result<()> {
     if numel == 0 {
-        Err(MinitensorError::invalid_argument(
-            "median() does not support empty tensors".to_string(),
-        ))
+        Err(MinitensorError::invalid_argument(format!(
+            "{op}() does not support empty tensors"
+        )))
     } else {
         Ok(())
     }
@@ -224,7 +235,7 @@ pub fn median(
     dim: Option<isize>,
     keepdim: bool,
 ) -> Result<(Tensor, Option<Tensor>)> {
-    ensure_non_empty(tensor.numel())?;
+    ensure_non_empty(tensor.numel(), "median")?;
 
     if tensor.ndim() == 0 {
         return Ok((tensor.clone(), None));
@@ -285,11 +296,7 @@ pub fn quantile(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    if tensor.numel() == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "quantile() does not support empty tensors".to_string(),
-        ));
-    }
+    ensure_non_empty(tensor.numel(), "quantile")?;
 
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
@@ -350,11 +357,7 @@ pub fn quantiles(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    if tensor.numel() == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "quantile() does not support empty tensors".to_string(),
-        ));
-    }
+    ensure_non_empty(tensor.numel(), "quantile")?;
 
     if qs.is_empty() {
         return Err(MinitensorError::invalid_argument(
@@ -392,11 +395,7 @@ pub fn nanquantile(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    if tensor.numel() == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "nanquantile() does not support empty tensors".to_string(),
-        ));
-    }
+    ensure_non_empty(tensor.numel(), "nanquantile")?;
 
     validate_quantile_value(q)?;
     ensure_floating_point_dtype(tensor.dtype())?;
@@ -456,11 +455,7 @@ pub fn nanquantiles(
     keepdim: bool,
     interpolation: QuantileInterpolation,
 ) -> Result<Tensor> {
-    if tensor.numel() == 0 {
-        return Err(MinitensorError::invalid_argument(
-            "nanquantile() does not support empty tensors".to_string(),
-        ));
-    }
+    ensure_non_empty(tensor.numel(), "nanquantile")?;
 
     if qs.is_empty() {
         return Err(MinitensorError::invalid_argument(
@@ -1026,7 +1021,7 @@ mod core_tests {
 
     #[test]
     fn test_ensure_non_empty_guard() {
-        assert!(ensure_non_empty(0).is_err());
-        assert!(ensure_non_empty(1).is_ok());
+        assert!(ensure_non_empty(0, "median").is_err());
+        assert!(ensure_non_empty(1, "median").is_ok());
     }
 }

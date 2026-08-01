@@ -83,6 +83,36 @@ pub fn sort(
         normalize_dim(dim_value, ndim)?
     };
 
+    // Nothing to order, and no storage to order it in: `sort_along_dim_par`
+    // chunks by `dim_size * inner`, which is zero here, and `par_chunks_mut(0)`
+    // panics. NumPy and PyTorch both return the empty input back, so do that --
+    // after `normalize_dim` above, so an out-of-range `dim` still errors.
+    if tensor.numel() == 0 {
+        let values = Tensor::new(
+            Arc::new(TensorData::zeros_on_device(
+                0,
+                tensor.dtype(),
+                tensor.device(),
+            )),
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            tensor.requires_grad(),
+        );
+        let indices = Tensor::new(
+            Arc::new(TensorData::zeros_on_device(
+                0,
+                DataType::Int64,
+                tensor.device(),
+            )),
+            tensor.shape().clone(),
+            DataType::Int64,
+            tensor.device(),
+            false,
+        );
+        return Ok((values, indices));
+    }
+
     if tensor.shape().dims().is_empty() {
         let mut values_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
         let mut indices_data = TensorData::zeros_on_device(1, DataType::Int64, tensor.device());

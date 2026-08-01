@@ -131,6 +131,16 @@ macro_rules! sum_along_dim_kernel {
                 ))
             })?;
             let input_shape = tensor.shape().dims();
+            // A zero-length reduced axis contributes no terms, so every output
+            // slot is the additive identity. Handled up front because the 2-D
+            // `dim == 1` branch below chunks the input by `cols`, and
+            // `chunks_exact(0)` panics rather than yielding no chunks. `.get`
+            // rather than `[dim]` so an out-of-range `dim` still reaches the
+            // index_error paths below.
+            if input_shape.get(dim) == Some(&0) {
+                result_slice.fill($zero);
+                return Ok(());
+            }
             if tensor.ndim() == 1 {
                 if dim != 0 {
                     return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
@@ -198,6 +208,13 @@ macro_rules! nansum_along_dim_kernel {
                 ))
             })?;
             let input_shape = tensor.shape().dims();
+            // See the note in `sum_along_dim_kernel!`: an empty reduced axis
+            // yields the identity everywhere, and short-circuiting here keeps
+            // the 2-D `dim == 1` branch from calling `chunks_exact(0)`.
+            if input_shape.get(dim) == Some(&0) {
+                result_slice.fill($zero);
+                return Ok(());
+            }
             if tensor.ndim() == 1 {
                 if dim != 0 {
                     return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));

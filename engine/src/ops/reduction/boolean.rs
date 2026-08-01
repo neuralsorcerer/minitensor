@@ -159,8 +159,40 @@ pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Resul
     ))
 }
 
+/// Reject an extremum reduction that has no elements to choose between.
+///
+/// Only the *reduced* axis matters. `max(dim=1)` on a `(0, 3)` tensor is fine --
+/// every slice it reduces has three elements, there just are not any slices, so
+/// the empty output is the honest answer and NumPy agrees. `max(dim=1)` on a
+/// `(3, 0)` tensor is not: it would have to invent three values out of nothing.
+///
+/// Without this the kernels returned their fold identity, which for floats is
+/// `-inf` (visibly wrong, at least) and for integers is `i64::MIN` -- a value a
+/// real tensor can hold, making an empty reduction silently indistinguishable
+/// from a legitimate result. `argmax` was worse still: index `0` into an axis
+/// that has no element `0`, which then reads out of bounds in a later `gather`.
+/// Normalizes `dim` and applies the check in one step, so each caller resolves
+/// the dimension exactly once.
+fn checked_reduction_dim(tensor: &Tensor, dim: Option<isize>, op: &str) -> Result<Option<usize>> {
+    let norm = match dim {
+        Some(d) => Some(normalize_dim(d, tensor.ndim())?),
+        None => None,
+    };
+    let empty = match norm {
+        None => tensor.numel() == 0,
+        Some(d) => tensor.shape().dims().get(d) == Some(&0),
+    };
+    if empty {
+        return Err(MinitensorError::invalid_argument(format!(
+            "{op}() does not support empty tensors"
+        )));
+    }
+    Ok(norm)
+}
+
 /// Maximum value along specified dimension
 pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    let dim = checked_reduction_dim(tensor, dim, "max")?;
     let (output, norm_dim) = match dim {
         None => {
             // Find global maximum
@@ -191,10 +223,7 @@ pub fn max(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
                 None,
             )
         }
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            (max_along_dim(tensor, d, keepdim)?, Some(d))
-        }
+        Some(d) => (max_along_dim(tensor, d, keepdim)?, Some(d)),
     };
     attach_minmax_grad(output, tensor, norm_dim, keepdim, true, false)
 }
@@ -258,6 +287,7 @@ fn attach_minmax_grad(
 
 /// Minimum value along specified dimension
 pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    let dim = checked_reduction_dim(tensor, dim, "min")?;
     let (output, norm_dim) = match dim {
         None => {
             // Find global minimum
@@ -288,19 +318,19 @@ pub fn min(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor>
                 None,
             )
         }
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            (min_along_dim(tensor, d, keepdim)?, Some(d))
-        }
+        Some(d) => (min_along_dim(tensor, d, keepdim)?, Some(d)),
     };
     attach_minmax_grad(output, tensor, norm_dim, keepdim, false, false)
 }
 
 /// NaN-aware maximum value along specified dimension
 pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    // Delegate before normalizing: integers have no NaN, so `nanmax` is just
+    // `max`, and `max` applies the same empty-input check itself.
     if !tensor.dtype().is_float() {
         return max(tensor, dim, keepdim);
     }
+    let dim = checked_reduction_dim(tensor, dim, "nanmax")?;
 
     let (output, norm_dim) = match dim {
         None => {
@@ -330,7 +360,6 @@ pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
             )
         }
         Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
             let (values, _) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
             (values, Some(d))
         }
@@ -340,9 +369,12 @@ pub fn nanmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
 
 /// NaN-aware minimum value along specified dimension
 pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    // Delegate before normalizing: integers have no NaN, so `nanmin` is just
+    // `min`, and `min` applies the same empty-input check itself.
     if !tensor.dtype().is_float() {
         return min(tensor, dim, keepdim);
     }
+    let dim = checked_reduction_dim(tensor, dim, "nanmin")?;
 
     let (output, norm_dim) = match dim {
         None => {
@@ -372,7 +404,6 @@ pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
             )
         }
         Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
             let (values, _) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
             (values, Some(d))
         }
@@ -382,7 +413,7 @@ pub fn nanmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
 
 /// Maximum values and their indices along specified dimension
 pub fn max_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
-    let d = normalize_dim(dim, tensor.ndim())?;
+    let d = checked_reduction_dim(tensor, Some(dim), "max")?.expect("dim was Some");
     let (values, indices) = max_along_dim_with_indices(tensor, d, keepdim)?;
     let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, false)?;
     Ok((values, indices))
@@ -394,7 +425,7 @@ pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
         return max_with_indices(tensor, dim, keepdim);
     }
 
-    let d = normalize_dim(dim, tensor.ndim())?;
+    let d = checked_reduction_dim(tensor, Some(dim), "nanmax")?.expect("dim was Some");
     let (values, indices) = nanmax_along_dim_with_indices(tensor, d, keepdim)?;
     let values = attach_minmax_grad(values, tensor, Some(d), keepdim, true, true)?;
     Ok((values, indices))
@@ -402,7 +433,7 @@ pub fn nanmax_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
 
 /// Minimum values and their indices along specified dimension
 pub fn min_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tensor)> {
-    let d = normalize_dim(dim, tensor.ndim())?;
+    let d = checked_reduction_dim(tensor, Some(dim), "min")?.expect("dim was Some");
     let (values, indices) = min_along_dim_with_indices(tensor, d, keepdim)?;
     let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, false)?;
     Ok((values, indices))
@@ -414,7 +445,7 @@ pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
         return min_with_indices(tensor, dim, keepdim);
     }
 
-    let d = normalize_dim(dim, tensor.ndim())?;
+    let d = checked_reduction_dim(tensor, Some(dim), "nanmin")?.expect("dim was Some");
     let (values, indices) = nanmin_along_dim_with_indices(tensor, d, keepdim)?;
     let values = attach_minmax_grad(values, tensor, Some(d), keepdim, false, true)?;
     Ok((values, indices))
@@ -422,6 +453,7 @@ pub fn nanmin_with_indices(tensor: &Tensor, dim: isize, keepdim: bool) -> Result
 
 /// Argument of maximum value along specified dimension
 pub fn argmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    let dim = checked_reduction_dim(tensor, dim, "argmax")?;
     match dim {
         None => {
             // Find global argmax
@@ -449,15 +481,13 @@ pub fn argmax(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
                 false, // argmax doesn't require gradients
             ))
         }
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            argmax_along_dim(tensor, d, keepdim)
-        }
+        Some(d) => argmax_along_dim(tensor, d, keepdim),
     }
 }
 
 /// Argument of minimum value along specified dimension
 pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    let dim = checked_reduction_dim(tensor, dim, "argmin")?;
     match dim {
         None => {
             // Find global argmin
@@ -485,10 +515,7 @@ pub fn argmin(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tens
                 false, // argmin doesn't require gradients
             ))
         }
-        Some(d) => {
-            let d = normalize_dim(d, tensor.ndim())?;
-            argmin_along_dim(tensor, d, keepdim)
-        }
+        Some(d) => argmin_along_dim(tensor, d, keepdim),
     }
 }
 
