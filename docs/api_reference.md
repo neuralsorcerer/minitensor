@@ -41,7 +41,7 @@ of convenience aliases.
 | `default_dtype(dtype)` | Context manager for temporary dtype overrides. |
 | `manual_seed(seed)` | Seed the RNG used by random ops. |
 | `get_gradient(tensor)` | Access a tensor’s gradient in the global graph. |
-| `clear_autograd_graph()` | Clear the global autograd graph. |
+| `clear_autograd_graph()` | Clear the global autograd graph, releasing every stored gradient. Required in any loop that calls `backward()` without an optimizer step -- see below. |
 | `is_autograd_graph_consumed()` | Inspect whether a graph has been consumed. |
 | `mark_autograd_graph_consumed()` | Mark the current graph as consumed. |
 | `no_grad()` | Context manager: disable gradient recording (results are detached leaves; nothing is saved for backward). |
@@ -1617,6 +1617,75 @@ values that do not fit is yours.
 Memory layout is normalised on the way in, so transposes, Fortran-ordered
 arrays, strided slices, negative strides and broadcast views all convert
 correctly. An already C-contiguous array is not copied.
+
+### What `backward()` retains
+
+Unlike PyTorch, MiniTensor exposes `.grad` on interior (non-leaf) tensors after
+a backward pass:
+
+```python
+import minitensor as mt
+
+x = mt.ones((4, 4))
+w = mt.ones((4, 4), requires_grad=True)
+h = mt.matmul(x, w)              # interior tensor
+mt.sum(mt.tanh(h)).backward()
+print(h.grad is not None)        # PyTorch would give None here
+```
+
+```text
+True
+```
+
+Keeping that available means the gradient map holds an entry per interior
+tensor until something resets it. Both `optimizer.step()` and
+`clear_autograd_graph()` do, so an ordinary training loop is bounded:
+
+```python
+import minitensor as mt
+
+w = mt.ones((4, 4), requires_grad=True)
+optimizer = mt.optim.SGD([w], 1e-3)
+
+for _ in range(3):               # bounded: step() clears the graph
+    optimizer.zero_grad()
+    h = mt.matmul(mt.ones((4, 4)), w)
+    mt.sum(h).backward()
+    optimizer.step()
+
+print(mt.get_gradient(h) is None)
+```
+
+```text
+True
+```
+
+A loop that backpropagates *without* stepping an optimizer -- gradient
+inspection, a custom optimizer written in Python, accumulating many
+micro-batches before one step -- has to clear the graph itself, or memory grows
+by roughly one intermediate tensor per iteration (measured at ~65 KB per
+iteration for a 256x32 intermediate, ~141 KB for 256x128):
+
+```python
+import minitensor as mt
+
+w = mt.ones((4, 4), requires_grad=True)
+
+for _ in range(3):
+    h = mt.matmul(mt.ones((4, 4)), w)
+    mt.sum(h).backward()
+    _ = w.grad                   # inspect it, no optimizer involved
+    mt.clear_autograd_graph()    # without this the graph grows without bound
+
+print(mt.get_gradient(h) is None)
+```
+
+```text
+True
+```
+
+Note `zero_grad()` is not a substitute: it clears the gradients of the
+parameters it was given, not the interior entries.
 
 ## 13) Notes on devices & backends
 
