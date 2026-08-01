@@ -931,11 +931,17 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             })?;
 
             let dot = if numel >= PAR_THRESHOLD {
-                lhs_slice
-                    .par_iter()
-                    .zip(rhs_slice.par_iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<f32>()
+                // Index-ordered partials: see `deterministic_par_sum`. A dot
+                // product that changes in its last bits between runs is the
+                // same reproducibility problem as a non-deterministic `sum`.
+                // Both operands are the same length here, so chunking them at
+                // the same size keeps the pairs aligned.
+                let partials: Vec<f32> = lhs_slice
+                    .par_chunks(8192)
+                    .zip(rhs_slice.par_chunks(8192))
+                    .map(|(a, b)| a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f32>())
+                    .collect();
+                crate::ops::util::pairwise_fold(partials, 0.0_f32, |a, b| a + b)
             } else {
                 lhs_slice
                     .iter()
@@ -955,11 +961,17 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             })?;
 
             let dot = if numel >= PAR_THRESHOLD {
-                lhs_slice
-                    .par_iter()
-                    .zip(rhs_slice.par_iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<f64>()
+                // Index-ordered partials: see `deterministic_par_sum`. A dot
+                // product that changes in its last bits between runs is the
+                // same reproducibility problem as a non-deterministic `sum`.
+                // Both operands are the same length here, so chunking them at
+                // the same size keeps the pairs aligned.
+                let partials: Vec<f64> = lhs_slice
+                    .par_chunks(8192)
+                    .zip(rhs_slice.par_chunks(8192))
+                    .map(|(a, b)| a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f64>())
+                    .collect();
+                crate::ops::util::pairwise_fold(partials, 0.0_f64, |a, b| a + b)
             } else {
                 lhs_slice
                     .iter()

@@ -7,6 +7,7 @@
 use super::*;
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
+use crate::ops::util::{deterministic_par_sum, pairwise_fold};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -701,7 +702,7 @@ pub(crate) fn sum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
     let sum: f32 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_sum_f32).sum::<f32>()
+        deterministic_par_sum(data, 8192, simd_sum_f32)
     } else {
         simd_sum_f32(data)
     };
@@ -721,7 +722,7 @@ pub(crate) fn sum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
     let sum: f64 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_sum_f64).sum::<f64>()
+        deterministic_par_sum(data, 8192, simd_sum_f64)
     } else {
         simd_sum_f64(data)
     };
@@ -780,10 +781,12 @@ pub(crate) fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> R
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let sum: f32 = data
-        .par_iter()
-        .map(|&v| if v.is_nan() { 0.0 } else { v })
-        .sum();
+    let sum: f32 = deterministic_par_sum(data, 8192, |chunk| {
+        chunk
+            .iter()
+            .map(|&v| if v.is_nan() { 0.0 } else { v })
+            .sum::<f32>()
+    });
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -798,10 +801,12 @@ pub(crate) fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> R
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let sum: f64 = data
-        .par_iter()
-        .map(|&v| if v.is_nan() { 0.0 } else { v })
-        .sum();
+    let sum: f64 = deterministic_par_sum(data, 8192, |chunk| {
+        chunk
+            .iter()
+            .map(|&v| if v.is_nan() { 0.0 } else { v })
+            .sum::<f64>()
+    });
 
     let result_slice = result_data
         .as_f64_slice_mut()
@@ -820,16 +825,17 @@ pub(crate) fn nanmean_all_f32(
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let (sum, count) = data
-        .par_iter()
-        .map(|&v| {
-            if v.is_nan() {
-                (0.0, 0usize)
-            } else {
-                (v, 1usize)
-            }
+    let partials: Vec<(f32, usize)> = data
+        .par_chunks(8192)
+        .map(|chunk| {
+            chunk.iter().fold((0.0_f32, 0usize), |(s, c), &v| {
+                if v.is_nan() { (s, c) } else { (s + v, c + 1) }
+            })
         })
-        .reduce(|| (0.0, 0usize), |(s1, c1), (s2, c2)| (s1 + s2, c1 + c2));
+        .collect();
+    let (sum, count) = pairwise_fold(partials, (0.0_f32, 0usize), |(s1, c1), (s2, c2)| {
+        (s1 + s2, c1 + c2)
+    });
 
     let sum_slice = sum_data
         .as_f32_slice_mut()
@@ -853,16 +859,17 @@ pub(crate) fn nanmean_all_f64(
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let (sum, count) = data
-        .par_iter()
-        .map(|&v| {
-            if v.is_nan() {
-                (0.0, 0usize)
-            } else {
-                (v, 1usize)
-            }
+    let partials: Vec<(f64, usize)> = data
+        .par_chunks(8192)
+        .map(|chunk| {
+            chunk.iter().fold((0.0_f64, 0usize), |(s, c), &v| {
+                if v.is_nan() { (s, c) } else { (s + v, c + 1) }
+            })
         })
-        .reduce(|| (0.0, 0usize), |(s1, c1), (s2, c2)| (s1 + s2, c1 + c2));
+        .collect();
+    let (sum, count) = pairwise_fold(partials, (0.0_f64, 0usize), |(s1, c1), (s2, c2)| {
+        (s1 + s2, c1 + c2)
+    });
 
     let sum_slice = sum_data
         .as_f64_slice_mut()

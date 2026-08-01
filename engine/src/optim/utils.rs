@@ -39,7 +39,13 @@ fn sum_squares<T: Copy + Send + Sync + Into<f64>>(values: &[T]) -> f64 {
     if values.len() < GRAD_PAR_THRESHOLD {
         values.iter().map(square).sum()
     } else {
-        values.par_iter().map(square).sum()
+        // Chunked and folded in index order: a gradient norm that shifts in
+        // its last bits between runs makes `clip_grad_norm_` scale by a
+        // slightly different factor each time, which is exactly the kind of
+        // irreproducibility a seeded training run is supposed to rule out.
+        crate::ops::util::deterministic_par_sum(values, 8192, |chunk| {
+            chunk.iter().map(square).sum::<f64>()
+        })
     }
 }
 

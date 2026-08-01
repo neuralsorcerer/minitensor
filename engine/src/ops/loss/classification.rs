@@ -7,12 +7,12 @@
 use super::*;
 use crate::ops::arithmetic::mul;
 use crate::ops::map::{PAR_THRESHOLD, binary_map, ternary_map, unary_map};
+use crate::ops::util::deterministic_par_sum;
 use crate::{
     error::{MinitensorError, Result},
     ops::{comparison, selection::masked_fill_scalar},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 pub(crate) fn fill_one_hot_f64<T, F>(
@@ -137,7 +137,10 @@ pub(crate) fn sum_all_elements(tensor: &Tensor) -> Result<Tensor> {
 /// Chunked sum of a float slice, parallel above [`PAR_THRESHOLD`].
 ///
 /// Chunking keeps the accumulation order (and therefore the rounding) stable
-/// for a given length regardless of how rayon schedules the chunks.
+/// for a given length regardless of how rayon schedules the chunks -- but only
+/// within a chunk. Combining the chunk partials with `sum()` on the parallel
+/// iterator reintroduced the scheduling dependence this comment claimed to
+/// rule out, so the partials go through `deterministic_par_sum` instead.
 fn sum_slice<T>(data: &[T]) -> T
 where
     T: Copy + Send + Sync + Default + std::iter::Sum<T> + std::ops::Add<Output = T>,
@@ -146,7 +149,7 @@ where
     if data.len() < PAR_THRESHOLD {
         chunk_sum(data)
     } else {
-        data.par_chunks(CHUNK).map(chunk_sum).sum()
+        deterministic_par_sum(data, CHUNK, chunk_sum)
     }
 }
 

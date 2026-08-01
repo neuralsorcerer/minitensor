@@ -29,6 +29,76 @@ pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     }
 }
 
+/// Sum a float slice in parallel with a result that does not depend on how
+/// rayon schedules the work.
+///
+/// `par_iter().sum()` and `par_chunks(n).map(..).sum()` both look deterministic
+/// and are not. Chunking fixes the accumulation order *inside* a chunk, but
+/// `sum()` on a parallel iterator folds the chunk partials together in
+/// split-and-steal order, which varies between runs. Floating point addition is
+/// not associative, so the last bits of the total move with it: summing 10^7
+/// `f32` values here produced several distinct results across repeated calls on
+/// the same input, which is enough to make a seeded training run
+/// irreproducible.
+///
+/// Collecting the partials first pins them to chunk order -- `collect` on an
+/// indexed parallel iterator is order-preserving -- so the combination step is
+/// then fully determined by the input length. The extra allocation is one
+/// element per chunk (about 1200 floats for a 10^7-element input), which does
+/// not measurably change the timing.
+///
+/// `sum_chunk` may widen (`&[f32] -> f64`), which is how the gradient-norm
+/// accumulator squares `f32` parameters into an `f64` total.
+pub(crate) fn deterministic_par_sum<T, U, F>(data: &[T], chunk: usize, sum_chunk: F) -> U
+where
+    T: Sync,
+    U: Copy + Send + Default + std::ops::Add<Output = U>,
+    F: Fn(&[T]) -> U + Send + Sync,
+{
+    use rayon::prelude::*;
+    let partials: Vec<U> = data.par_chunks(chunk).map(&sum_chunk).collect();
+    pairwise_fold(partials, U::default(), |a, b| a + b)
+}
+
+/// Combine `values` with a fixed binary tree rather than a running total.
+///
+/// The obvious way to finish `deterministic_par_sum` is a sequential fold over
+/// the partials, and it is deterministic -- but it is also a chain of one
+/// rounding error per chunk, so error grows with the number of chunks instead
+/// of with its logarithm. That measurably regressed accuracy: relative error on
+/// a 10^7-element `f32` sum went from 1.2e-08 to 8.1e-07, because rayon's own
+/// `sum()` had been reducing the partials as a tree all along. This keeps the
+/// tree and drops only the scheduling dependence, so the result is both stable
+/// across runs and as accurate as it was before.
+///
+/// `combine` is passed explicitly because not every accumulator is `Add`:
+/// `nanmean` carries `(sum, count)` pairs through the same fold.
+pub(crate) fn pairwise_fold<U, F>(mut values: Vec<U>, identity: U, combine: F) -> U
+where
+    U: Copy,
+    F: Fn(U, U) -> U,
+{
+    if values.is_empty() {
+        return identity;
+    }
+    let mut len = values.len();
+    while len > 1 {
+        let mut write = 0;
+        let mut read = 0;
+        while read + 1 < len {
+            values[write] = combine(values[read], values[read + 1]);
+            write += 1;
+            read += 2;
+        }
+        if read < len {
+            values[write] = values[read];
+            write += 1;
+        }
+        len = write;
+    }
+    values[0]
+}
+
 /// Sigmoid evaluated through whichever of `e^-x` / `e^x` cannot overflow, so a
 /// large-magnitude input saturates to 1 or 0 instead of producing `inf/inf`
 /// (NaN). Used by the sigmoid/SiLU forward kernels and their gradients.
