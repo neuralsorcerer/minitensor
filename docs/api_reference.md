@@ -1626,6 +1626,107 @@ True
 mylayer ['w']
 ```
 
+#### Writing a custom layer that trains
+
+`set_forward` takes a callable receiving a **list** of tensors, not a single
+tensor — that is what makes multi-input layers expressible. It may return a
+list or a bare tensor. Calling `forward` before `set_forward` raises
+`NotImplementedError`.
+
+The layer's forward runs as ordinary Python, so anything built from tensor ops
+records onto the autograd graph and its parameters train like any other:
+
+```python
+import minitensor as mt
+from minitensor.plugins import CustomLayer
+
+scale = CustomLayer("scale")
+gain = mt.ones(3, requires_grad=True)
+scale.add_parameter("gain", gain)
+scale.set_forward(lambda inputs: [inputs[0] * scale.get_parameter("gain")])
+
+x = mt.Tensor([[1.0, 2.0, 3.0]])
+optimizer = mt.optim.SGD([gain], lr=0.05)
+
+start = mt.sum(scale.forward([x])[0] ** 2).item()
+for _ in range(60):
+    optimizer.zero_grad()
+    loss = mt.sum(scale.forward([x])[0] ** 2)
+    loss.backward()
+    optimizer.step()
+
+print(gain.grad is not None)
+print(bool(loss.item() < start / 1000))
+```
+
+```text
+True
+True
+```
+
+A layer taking two inputs and returning two outputs is written the same way:
+
+```python
+import minitensor as mt
+from minitensor.plugins import CustomLayer
+
+pair = CustomLayer("pair")
+pair.set_forward(lambda inputs: [inputs[0] + inputs[1], inputs[0] * inputs[1]])
+
+total, product = pair.forward([mt.Tensor([1.0, 2.0]), mt.Tensor([3.0, 4.0])])
+print(total.tolist(), product.tolist())
+```
+
+```text
+[4.0, 6.0] [3.0, 8.0]
+```
+
+#### What does not compose
+
+Three limits are worth knowing before designing around containers:
+
+- `CustomLayer` is **not** an `nn.Module`, so it cannot be placed inside
+  `nn.Sequential`. Chain it in a plain Python function instead, as above —
+  gradients flow across the boundary either way, and an optimizer just needs
+  the parameters passed to it explicitly.
+- `nn.Sequential` cannot contain another `nn.Sequential`; both the constructor
+  and `add_module` reject it. Build one flat container, or compose in Python.
+- `nn.Module` cannot be subclassed from Python. Custom behaviour goes through
+  `CustomLayer` or a compiled plugin.
+
+Composing a custom layer with built-in ones in a Python function works, and one
+optimizer trains both sides:
+
+```python
+import minitensor as mt
+from minitensor import nn
+from minitensor.plugins import CustomLayer
+
+mt.manual_seed(0)
+dense = nn.DenseLayer(3, 3, dtype="float64")
+scale = CustomLayer("scale")
+gain = mt.Tensor([2.0, 2.0, 2.0], dtype="float64", requires_grad=True)
+scale.add_parameter("gain", gain)
+scale.set_forward(lambda inputs: [inputs[0] * scale.get_parameter("gain")])
+
+x = mt.Tensor([[1.0, 1.0, 1.0]], dtype="float64")
+optimizer = mt.optim.SGD(list(dense.parameters()) + [gain], lr=0.01)
+
+for _ in range(40):
+    optimizer.zero_grad()
+    loss = mt.sum(scale.forward([dense(x)])[0] ** 2)
+    loss.backward()
+    optimizer.step()
+
+print(gain.grad is not None)
+print(bool(loss.item() < 1e-6))
+```
+
+```text
+True
+True
+```
+
 ### Dynamic loading (if compiled)
 
 These operate on the process-wide registry of natively compiled plugins, which
