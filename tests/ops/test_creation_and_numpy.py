@@ -863,3 +863,51 @@ def test_numpy_export_is_correct_for_results_of_shape_ops():
     )
     np.testing.assert_array_equal(tensor[1:].numpy(), base[1:])
     np.testing.assert_array_equal(mt.flip(tensor, [1]).numpy(), np.flip(base, 1))
+
+
+@pytest.mark.parametrize(
+    "label,make",
+    [
+        ("c_contiguous", lambda a: a),
+        ("transposed", lambda a: a.T),
+        ("fortran_order", np.asfortranarray),
+        ("column_slice", lambda a: a[:, ::2]),
+        ("row_slice", lambda a: a[::2]),
+        ("reversed_rows", lambda a: a[::-1]),
+        ("reversed_both", lambda a: a[::-1, ::-1]),
+        ("broadcast_view", lambda a: np.broadcast_to(a[0], a.shape)),
+    ],
+)
+def test_numpy_import_respects_memory_layout(label, make):
+    # A Fortran-contiguous array has no gaps, so the buffer read succeeded and
+    # was then paired with the row-major shape: `as_tensor(x.T)` used to return
+    # the right shape holding transposed values, silently. Slices and reversed
+    # views raised instead. Both now go through `ascontiguousarray`.
+    base = np.arange(24, dtype=np.float32).reshape(4, 6)
+    source = make(base)
+
+    result = mt.as_tensor(source).numpy()
+
+    assert result.shape == source.shape, label
+    np.testing.assert_array_equal(result, source, err_msg=label)
+
+
+def test_transposed_import_is_not_merely_reshaped():
+    # Guards the specific failure: same shape, wrong values. A shape-only
+    # assertion would have passed against the old behaviour.
+    base = np.arange(12, dtype=np.float32).reshape(3, 4)
+    result = mt.as_tensor(base.T).numpy()
+
+    np.testing.assert_array_equal(result, base.T)
+    assert not np.array_equal(result, base.reshape(4, 3))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+def test_numpy_layouts_round_trip_for_every_supported_dtype(dtype):
+    base = np.arange(12).reshape(3, 4)
+    base = (base % 2 == 0) if dtype == "bool" else base.astype(dtype)
+
+    for source in (base, base.T, np.asfortranarray(base), base[:, ::2]):
+        result = mt.as_tensor(source).numpy()
+        assert result.dtype == source.dtype
+        np.testing.assert_array_equal(result, source)

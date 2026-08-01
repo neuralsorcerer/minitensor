@@ -984,10 +984,30 @@ fn sequence_via_numpy(
     tensor.astype(dtype).ok()
 }
 
+/// Force C-contiguous element order before any buffer is read.
+///
+/// `PyReadonlyArray::as_slice` accepts a Fortran-contiguous array -- there are
+/// no gaps in it -- and hands back the buffer in column-major order, which the
+/// callers below then pair with the row-major shape. That silently transposed
+/// the data: `as_tensor(x.T)` returned a tensor of the right shape holding the
+/// wrong values, with no error, for an input as ordinary as a transpose.
+///
+/// `np.ascontiguousarray` returns the same object when the array is already
+/// C-contiguous, so the common path does not copy.
+fn as_c_contiguous<'py>(array: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if let Ok(untyped) = array.cast::<numpy::PyUntypedArray>()
+        && untyped.is_c_contiguous()
+    {
+        return Ok(array.clone());
+    }
+    PyModule::import(array.py(), "numpy")?.call_method1("ascontiguousarray", (array,))
+}
+
 pub(crate) fn convert_numpy_to_tensor(
     array: &Bound<PyAny>,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
+    let array = &as_c_contiguous(array)?;
     if let Ok(array_f32) = array.cast::<PyArrayDyn<f32>>() {
         let readonly = array_f32.readonly();
         let shape = Shape::new(readonly.shape().to_vec());
