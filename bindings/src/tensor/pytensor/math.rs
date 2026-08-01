@@ -8,12 +8,12 @@ use super::*;
 #[pymethods]
 impl PyTensor {
     // Mathematical functions
-    fn abs(&self) -> PyResult<Self> {
+    pub fn abs(&self) -> PyResult<Self> {
         let result = self.inner.abs().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn sqrt(&self) -> PyResult<Self> {
+    pub fn sqrt(&self) -> PyResult<Self> {
         let result = self.inner.sqrt().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -23,7 +23,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
+    pub fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
             let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
             return Ok(Self::from_tensor(result));
@@ -39,12 +39,12 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    fn exp(&self) -> PyResult<Self> {
+    pub fn exp(&self) -> PyResult<Self> {
         let result = self.inner.exp().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
-    fn log(&self) -> PyResult<Self> {
+    pub fn log(&self) -> PyResult<Self> {
         let result = self.inner.log().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

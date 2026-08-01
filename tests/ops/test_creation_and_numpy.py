@@ -332,6 +332,43 @@ def test_functional_forwarder_binding_rejects_duplicates_and_missing_names():
         mt._bind_functional_forwarders(("missing",))
 
 
+@pytest.mark.parametrize("name", ["abs", "sqrt", "exp", "log"])
+def test_basic_math_has_free_function_forms(name):
+    # These were reachable only as tensor methods, while their own variants
+    # (log1p, log2, log10, expm1, rsqrt) were free functions -- so `mt.log10(x)`
+    # worked and `mt.log(x)` did not.
+    values = np.array([0.25, 1.0, 4.0, 9.0], dtype=np.float64)
+    tensor = mt.as_tensor(values)
+
+    free = getattr(mt, name)(tensor).numpy()
+    method = getattr(tensor, name)().numpy()
+    reference = getattr(np, name)(values)
+
+    np.testing.assert_array_equal(free, method)
+    np.testing.assert_allclose(free, reference, rtol=1e-15)
+    assert getattr(mt, name) is getattr(mt.functional, name)
+
+
+def test_pow_has_a_free_function_form_for_scalar_and_tensor_exponents():
+    values = np.array([1.0, 4.0, 9.0], dtype=np.float64)
+    tensor = mt.as_tensor(values)
+
+    np.testing.assert_allclose(mt.pow(tensor, 2.0).numpy(), values**2, rtol=1e-15)
+    exponents = np.array([2.0, 0.5, 0.0])
+    np.testing.assert_allclose(
+        mt.pow(tensor, mt.as_tensor(exponents)).numpy(),
+        values**exponents,
+        rtol=1e-15,
+    )
+
+
+def test_free_function_forms_stay_differentiable():
+    x = mt.as_tensor(np.array([1.5, 2.5, 4.0])).requires_grad_(True)
+    mt.sum(mt.log(mt.sqrt(mt.exp(x)))).backward()
+    # log(sqrt(exp(x))) == x / 2
+    np.testing.assert_allclose(x.grad.numpy(), np.full(3, 0.5), rtol=1e-12)
+
+
 def test_every_functional_export_is_either_forwarded_or_listed_as_namespaced():
     # Forwarding is a hand-maintained list. Checking only that each forwarded
     # name exists catches a removal from `functional`, but an op *added* to

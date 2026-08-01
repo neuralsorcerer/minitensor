@@ -73,6 +73,13 @@ _FUNCTIONAL_FORWARDERS = (
     "rsqrt",
     "reciprocal",
     "sign",
+    # The basics. These existed only as tensor methods while their own
+    # variants (log1p, log2, log10, expm1, rsqrt) were free functions.
+    "abs",
+    "sqrt",
+    "exp",
+    "log",
+    "pow",
     "reshape",
     "view",
     "triu",

@@ -289,12 +289,6 @@ pub fn flatten(
 }
 
 #[pyfunction]
-pub fn ravel(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.ravel()
-}
-
-#[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn reshape(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
@@ -441,6 +435,42 @@ pub fn clamp(
     tensor.clamp(min, max)
 }
 
+// Free-function forms of the tensor methods. Each is the same three lines --
+// borrow the operand, call the method of the same name -- so they are generated
+// rather than written out 34 times, which is also what kept `abs`, `sqrt`,
+// `exp` and `log` missing while `log1p`, `log2`, `log10`, `expm1` and `rsqrt`
+// were all present.
+macro_rules! unary_forwarders {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[pyfunction]
+            pub fn $name(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+                let tensor = borrow_tensor(input)?;
+                tensor.$name()
+            }
+        )*
+    };
+}
+
+macro_rules! binary_forwarders {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[pyfunction]
+            pub fn $name(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
+                let tensor = borrow_tensor(input)?;
+                tensor.$name(other)
+            }
+        )*
+    };
+}
+unary_forwarders!(
+    abs, acos, acosh, asin, asinh, atan, atanh, ceil, cos, cosh, erf, erfc, exp, expm1, floor, log,
+    log10, log1p, log2, ravel, reciprocal, relu, rsqrt, selu, sigmoid, sign, silu, sin, sinh,
+    softsign, sqrt, tan, tanh,
+);
+
+binary_forwarders!(bmm, pow, dot, logaddexp, maximum, minimum,);
+
 #[pyfunction]
 pub fn clamp_min(input: &Bound<PyAny>, min: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
@@ -458,30 +488,6 @@ pub fn clamp_max(input: &Bound<PyAny>, max: f64) -> PyResult<PyTensor> {
 pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.round(decimals)
-}
-
-#[pyfunction]
-pub fn floor(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.floor()
-}
-
-#[pyfunction]
-pub fn ceil(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.ceil()
-}
-
-#[pyfunction]
-pub fn sign(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.sign()
-}
-
-#[pyfunction]
-pub fn reciprocal(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.reciprocal()
 }
 
 #[pyfunction]
@@ -944,22 +950,10 @@ pub fn nan_to_num(
 }
 
 #[pyfunction]
-pub fn relu(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.relu()
-}
-
-#[pyfunction]
 #[pyo3(signature = (input, lambd=0.5))]
 pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.hardshrink(Some(lambd))
-}
-
-#[pyfunction]
-pub fn sigmoid(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.sigmoid()
 }
 
 #[pyfunction]
@@ -981,156 +975,6 @@ pub fn gelu(input: &Bound<PyAny>, approximate: &str) -> PyResult<PyTensor> {
 pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.elu(Some(alpha))
-}
-
-#[pyfunction]
-pub fn selu(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.selu()
-}
-
-#[pyfunction]
-pub fn silu(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.silu()
-}
-
-#[pyfunction]
-pub fn softsign(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.softsign()
-}
-
-#[pyfunction]
-pub fn tanh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.tanh()
-}
-
-#[pyfunction]
-pub fn log2(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.log2()
-}
-
-#[pyfunction]
-pub fn log10(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.log10()
-}
-
-#[pyfunction]
-pub fn erf(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.erf()
-}
-
-#[pyfunction]
-pub fn erfc(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.erfc()
-}
-
-#[pyfunction]
-pub fn log1p(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.log1p()
-}
-
-#[pyfunction]
-pub fn expm1(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.expm1()
-}
-
-#[pyfunction]
-pub fn sin(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.sin()
-}
-
-#[pyfunction]
-pub fn cos(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.cos()
-}
-
-#[pyfunction]
-pub fn tan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.tan()
-}
-
-#[pyfunction]
-pub fn asin(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.asin()
-}
-
-#[pyfunction]
-pub fn acos(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.acos()
-}
-
-#[pyfunction]
-pub fn atan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.atan()
-}
-
-#[pyfunction]
-pub fn sinh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.sinh()
-}
-
-#[pyfunction]
-pub fn cosh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.cosh()
-}
-
-#[pyfunction]
-pub fn asinh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.asinh()
-}
-
-#[pyfunction]
-pub fn acosh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.acosh()
-}
-
-#[pyfunction]
-pub fn atanh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.atanh()
-}
-
-#[pyfunction]
-pub fn rsqrt(input: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.rsqrt()
-}
-
-#[pyfunction]
-pub fn logaddexp(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.logaddexp(other)
-}
-
-#[pyfunction]
-pub fn maximum(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.maximum(other)
-}
-
-#[pyfunction]
-pub fn minimum(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.minimum(other)
 }
 
 #[pyfunction]
@@ -1378,18 +1222,6 @@ pub fn stack(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
 }
 
 #[pyfunction]
-pub fn dot(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.dot(other)
-}
-
-#[pyfunction]
-pub fn bmm(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-    let tensor = borrow_tensor(input)?;
-    tensor.bmm(other)
-}
-
-#[pyfunction]
 #[pyo3(signature = (input, other, rtol=None, atol=None, equal_nan=false))]
 pub fn isclose(
     input: &Bound<PyAny>,
@@ -1516,6 +1348,11 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(acosh, parent)?)?;
     parent.add_function(wrap_pyfunction!(atanh, parent)?)?;
     parent.add_function(wrap_pyfunction!(rsqrt, parent)?)?;
+    parent.add_function(wrap_pyfunction!(abs, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sqrt, parent)?)?;
+    parent.add_function(wrap_pyfunction!(exp, parent)?)?;
+    parent.add_function(wrap_pyfunction!(log, parent)?)?;
+    parent.add_function(wrap_pyfunction!(pow, parent)?)?;
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(maximum, parent)?)?;
     parent.add_function(wrap_pyfunction!(minimum, parent)?)?;

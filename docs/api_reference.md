@@ -562,6 +562,7 @@ assert row_std.shape == (2, 3)
 ### Elementwise math & activation
 
 - `softmax`, `log_softmax`
+- `abs`, `sqrt`, `exp`, `log`, `pow`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
 - `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
@@ -681,7 +682,8 @@ masked_softmax, masked_log_softmax, sum, prod,
 mean, all, any, max, min, argmax, argmin, cumsum, cumprod, std, var, relu,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
 layer_norm, rms_norm, scaled_dot_product_attention, rope, glu,
-rsqrt, reciprocal, sign, reshape, view, triu, tril, diagonal,
+rsqrt, reciprocal, sign, abs, sqrt, exp, log, pow,
+reshape, view, triu, tril, diagonal,
 trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
