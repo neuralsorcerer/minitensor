@@ -484,6 +484,16 @@ impl ComputationGraph {
     }
 
     /// Get all nodes that depend on a given tensor
+    /// Whether any live node consumes `tensor_id` as an input.
+    ///
+    /// Cheaper than `get_dependents` for the "is this safe to mutate" question:
+    /// it short-circuits and allocates nothing.
+    pub fn has_dependents(&self, tensor_id: TensorId) -> bool {
+        self.nodes
+            .values()
+            .any(|node| node.inputs.contains(&tensor_id))
+    }
+
     pub fn get_dependents(&self, tensor_id: TensorId) -> Vec<TensorId> {
         self.nodes
             .values()

@@ -2376,7 +2376,35 @@ impl Tensor {
 
 impl Tensor {
     /// Copy data from ``source`` into this tensor in-place, preserving dtype and device.
+    /// Refuse an in-place write that a live backward pass would read.
+    ///
+    /// `data_mut` copies on write for every tensor except a leaf that requires
+    /// grad, where it writes through on purpose so that a `layer.weight` handle
+    /// updates the layer. The gap is a leaf that is *also* held as an operand by
+    /// a live backward node: writing through it changes what the backward reads,
+    /// which silently produces a gradient for some *other* tensor computed from
+    /// the new value. `(a * b).sum()` followed by `a.fill_(99)` yielded `99` for
+    /// `b`'s gradient instead of `a`'s forward value.
+    ///
+    /// Non-leaves are unaffected -- they copy on write -- and so is the ordinary
+    /// case of writing a parameter before any forward has consumed it, which is
+    /// how weights get initialized. This is the same hazard that kept `+=` off
+    /// the Python surface.
+    fn ensure_not_consumed_by_graph(&self, op: &str) -> Result<()> {
+        if self.requires_grad
+            && self.grad_fn.is_none()
+            && crate::autograd::is_consumed_by_live_graph(self)
+        {
+            return Err(MinitensorError::invalid_operation(format!(
+                "{op} would modify a tensor that a pending backward pass still needs; \
+                 call backward() or clear_autograd_graph() first, or mutate a detached copy"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn copy_(&mut self, source: &Tensor) -> Result<()> {
+        self.ensure_not_consumed_by_graph("copy_")?;
         if self.shape != *source.shape() {
             return Err(MinitensorError::invalid_argument(format!(
                 "copy_ expected source with shape {:?}, but received {:?}",
@@ -2493,6 +2521,7 @@ impl Tensor {
 
     /// Fill the tensor in-place with ``value`` converted to the tensor dtype.
     pub fn fill_(&mut self, value: f64) -> Result<()> {
+        self.ensure_not_consumed_by_graph("fill_")?;
         if !self.device.is_cpu() {
             return Err(MinitensorError::invalid_operation(
                 "fill_ currently supports only CPU tensors".to_string(),

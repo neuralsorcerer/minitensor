@@ -674,6 +674,39 @@ Create a new tensor that inherits dtype and device from an existing one:
 - `grad` holds the accumulated gradient; `has_grad` is a **property** reporting
   whether one is present.
 
+`fill_` and `copy_` refuse to write to a leaf that a pending backward pass
+still needs, raising rather than corrupting it. Backward nodes hold their
+operands by reference, so overwriting one between the forward and the backward
+would change what the backward reads — and the damage lands on the *other*
+operand's gradient, as a plausible wrong number rather than an error:
+
+```python
+import minitensor as mt
+
+a = mt.Tensor([2.0], requires_grad=True)
+b = mt.Tensor([3.0], requires_grad=True)
+loss = mt.sum(a * b)
+
+try:
+    a.fill_(99.0)             # `a` is an operand of a live backward node
+except ValueError as exc:
+    print("refused:", "pending backward" in str(exc))
+
+loss.backward()
+print(b.grad.tolist())        # d/db of a*b is a, the forward value
+```
+
+```text
+refused: True
+[2.0]
+```
+
+The orderings you actually want are all still allowed: writing a parameter
+before any forward has consumed it, mutating and *then* building the graph, and
+clamping between training steps — `optimizer.step()` and
+`clear_autograd_graph()` both release the graph. Non-leaf tensors are unaffected
+either way, since they copy on write.
+
 ### Layout and conversion extras
 
 - `is_contiguous()` reports whether the storage is contiguous.
