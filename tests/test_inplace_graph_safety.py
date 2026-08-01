@@ -16,7 +16,10 @@ backward node.
 instead of 2, the value of `a` during the forward. Not an error, not a missing
 gradient -- a plausible number that is wrong, for a tensor the caller never
 touched. `mul`, `div` and `matmul` all did it. This is the same hazard that
-kept `+=` off the Python surface; `fill_` and `copy_` reached it anyway.
+kept `+=` off the Python surface; `fill_`, `copy_` and `t[i] = v` reached it
+anyway -- guarding the first two left the third still corrupting, which is why
+the sweep at the bottom of this file checks every method rather than the ones
+someone remembered.
 
 They now refuse. Non-leaves were always safe because they copy on write, and
 the ordinary orderings -- initializing a parameter, mutating before the forward,
@@ -123,3 +126,85 @@ def test_clearing_the_graph_unblocks_the_write():
     mt.clear_autograd_graph()
     a.fill_(99.0)  # nothing pending now
     np.testing.assert_allclose(a.numpy(), [99.0])
+
+
+@pytest.mark.parametrize(
+    "assign",
+    [
+        pytest.param(lambda t: t.__setitem__(0, 99.0), id="index"),
+        pytest.param(lambda t: t.__setitem__(slice(None), 99.0), id="slice"),
+        pytest.param(
+            lambda t: t.__setitem__(
+                slice(None), mt.Tensor(np.full(2, 99.0), dtype="float64")
+            ),
+            id="slice-tensor",
+        ),
+    ],
+)
+def test_index_assignment_is_refused_too(assign):
+    # `t[i] = v` writes through the same storage as `fill_`; guarding only the
+    # named mutators left this path corrupting.
+    a = mt.Tensor(np.full(2, 2.0), dtype="float64", requires_grad=True)
+    b = mt.Tensor(np.full(2, 3.0), dtype="float64", requires_grad=True)
+    loss = (a * b).sum()
+
+    with pytest.raises(Exception, match="pending backward"):
+        assign(a)
+
+    loss.backward()
+    np.testing.assert_allclose(b.grad.numpy(), [2.0, 2.0])
+
+
+def test_no_tensor_method_can_corrupt_a_pending_backward():
+    """Sweep every callable, so a new mutator cannot quietly reopen this.
+
+    The guard was added to `fill_` and `copy_` first, and `__setitem__` kept
+    corrupting gradients until this sweep pointed at it. Checking the whole
+    surface is the only version of this test that stays true as methods are
+    added.
+    """
+    probe = mt.Tensor(np.ones(2), dtype="float64")
+    source = mt.Tensor(np.full(2, 99.0), dtype="float64")
+    corrupted = []
+
+    def attempt(label, action):
+        a = mt.Tensor(np.full(2, 2.0), dtype="float64", requires_grad=True)
+        b = mt.Tensor(np.full(2, 3.0), dtype="float64", requires_grad=True)
+        loss = (a * b).sum()
+        try:
+            action(a)
+        except Exception:
+            mt.clear_autograd_graph()
+            return  # refused, or not applicable to this input
+        try:
+            loss.backward()
+        except Exception:
+            mt.clear_autograd_graph()
+            return
+        # d/db of a*b is a's forward value, 2 -- never the mutated one.
+        if b.grad is not None and not np.allclose(b.grad.numpy(), [2.0, 2.0]):
+            corrupted.append(f"{label} -> grad_b={b.grad.numpy()}")
+        mt.clear_autograd_graph()
+
+    attempt("t[0] = v", lambda t: t.__setitem__(0, 99.0))
+    attempt("t[:] = v", lambda t: t.__setitem__(slice(None), source))
+
+    for name in sorted(n for n in dir(probe) if not n.startswith("_")):
+        if not callable(getattr(probe, name, None)):
+            continue
+        for args in ((), (99.0,), (source,), (0,)):
+            try:
+                getattr(mt.Tensor(np.ones(2), dtype="float64"), name)(*args)
+            except TypeError:
+                continue  # wrong arity; try the next shape
+            except Exception:
+                pass  # raised for another reason, but the arity is right
+            attempt(
+                f".{name}", lambda t, n=name, a=args: getattr(t, n)(*a)
+            )
+            break
+
+    assert not corrupted, (
+        "these operations rewrote a tensor a pending backward still needed: "
+        + "; ".join(corrupted)
+    )

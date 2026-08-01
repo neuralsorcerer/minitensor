@@ -1647,6 +1647,9 @@ impl Tensor {
     /// Assign values to tensor slice
     #[inline(always)]
     pub fn index_assign(&mut self, indices: &[TensorIndex], value: &Tensor) -> Result<()> {
+        // `t[i] = v` writes through the same shared storage as `fill_`/`copy_`,
+        // so it carries the same hazard and needs the same refusal.
+        self.ensure_not_consumed_by_graph("index assignment")?;
         if indices.len() > self.ndim() {
             return Err(MinitensorError::invalid_argument(
                 "Too many indices for tensor",

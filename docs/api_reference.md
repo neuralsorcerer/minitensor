@@ -674,8 +674,8 @@ Create a new tensor that inherits dtype and device from an existing one:
 - `grad` holds the accumulated gradient; `has_grad` is a **property** reporting
   whether one is present.
 
-`fill_` and `copy_` refuse to write to a leaf that a pending backward pass
-still needs, raising rather than corrupting it. Backward nodes hold their
+`fill_`, `copy_` and index assignment (`t[i] = v`) refuse to write to a leaf
+that a pending backward pass still needs, raising rather than corrupting it. Backward nodes hold their
 operands by reference, so overwriting one between the forward and the backward
 would change what the backward reads — and the damage lands on the *other*
 operand's gradient, as a plausible wrong number rather than an error:
