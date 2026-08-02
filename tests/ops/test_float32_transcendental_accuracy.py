@@ -452,3 +452,53 @@ def test_gelu_gradient_tail_does_not_bottom_out(name, approximate, reference):
     assert got[-1] == 0.0, f"{name}: gradient at -20 should underflow, got {got[-1]}"
     # And it is the real tail, not an early truncation to zero.
     assert got[1] > 0.0 and got[3] > 0.0, f"{name} truncated too early: {got}"
+
+
+# `erfc` shares the erf kernel: `erfc(x)` is `1 + erf(-x)`, and above |x| = 2
+# the value comes from the erfc branch directly rather than from a subtraction.
+# That is the whole point of having a separate `erfc` -- once `erf(x)` rounds to
+# 1, `1 - erf(x)` is exactly 0 and the tail is gone.
+@pytest.mark.parametrize("length", [1, 7, 17, 1023, 1024, 16383, 16384, 40000])
+def test_vectorized_erfc_stays_within_one_ulp(length):
+    rng = np.random.default_rng(31337 + length)
+    sample = np.concatenate(
+        [
+            rng.standard_normal(length) * 2.0,
+            rng.uniform(1.9, 2.1, length),
+            rng.uniform(2.0, 11.0, length),
+        ]
+    ).astype(np.float32)[:length]
+
+    got = mt.from_numpy(sample).erfc().numpy()
+    want = np.array(
+        [__import__("math").erfc(float(v)) for v in sample.astype(np.float64)],
+        dtype=np.float32,
+    )
+    bad = _ulps_apart(got, want) > 1
+    assert not bad.any(), (
+        f"length {length}: {int(bad.sum())} off by >1 ulp, first at x={sample[bad][0]!r}"
+    )
+
+
+def test_erfc_keeps_the_tail_erf_cannot():
+    """Past x = 4, erf(x) is 1.0 in float32 and `1 - erf(x)` is exactly zero.
+
+    erfc has to keep decaying there; that is what it is for. The values below
+    span 30 orders of magnitude and must all be positive and monotone.
+    """
+    from math import erfc as erfc_ref
+
+    xs = np.array([3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=np.float32)
+    got = mt.from_numpy(xs).erfc().numpy().astype(np.float64)
+    want = np.array([erfc_ref(float(v)) for v in xs])
+
+    assert np.all(got > 0.0), f"erfc collapsed to zero: {got}"
+    assert np.all(np.diff(got) < 0), f"erfc stopped decaying: {got}"
+    # Compared in ulps, not rtol: erfc(10) is 2.09e-45, which lands between
+    # float32 subnormals spaced 1.4e-45 apart, so no relative tolerance is
+    # meaningful there -- but the correctly rounded value still is.
+    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
+        f"got {got}, want {want}"
+    )
+    # And the identity that motivates the separate routine really does fail:
+    assert np.all(1.0 - mt.from_numpy(xs).erf().numpy()[3:] == 0.0)

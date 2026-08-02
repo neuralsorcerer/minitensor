@@ -12,7 +12,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
 };
-use libm::{erf, erfc, erfcf};
+use libm::{erf, erfc};
 use std::sync::Arc;
 
 /// Masked softmax activation function with gradient support.
@@ -417,8 +417,26 @@ pub(crate) fn erf_f32(tensor: &Tensor) -> Result<TensorData> {
 float_unary_kernel!(erf_f64, as_f64_slice, f64, Float64, "f64", erf);
 
 // erfc is not `1 - erf(x)`: for large x that subtraction cancels away every
-// significant digit, and libm's dedicated routine keeps them.
-float_unary_kernel!(erfc_f32, as_f32_slice, f32, Float32, "f32", erfcf);
+// significant digit. The vectorized kernel does not form that subtraction --
+// above |x| = 2 it reads the erfc branch of `erf_parts` directly -- so it keeps
+// them for the same reason libm's dedicated routine does.
+pub(crate) fn erfc_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `erfc` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.erfc(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(erfc_f64, as_f64_slice, f64, Float64, "f64", erfc);
 

@@ -4,8 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Vectorized float32 kernels for `tanh`, `erf`, `expm1`, `sinh`, `cosh`, both
-//! GELU variants, and the two GELU gradients.
+//! Vectorized float32 kernels for `tanh`, `erf`, `erfc`, `expm1`, `sinh`,
+//! `cosh`, both GELU variants, and the two GELU gradients.
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
@@ -132,10 +132,14 @@
 //! 22,628,918 of the 2^32 inputs (0.527%), so there it is an accuracy gain as
 //! well as a speedup.
 //!
-//! `erf` is within one ulp of the correctly rounded result everywhere, and is
-//! *the* correctly rounded result on all but 68 of the 2^32 inputs. The
-//! `libm::erff` it replaces misrounds 127,576,760 of them -- 2.97% -- so this
-//! is a large accuracy gain as well as a 9x speedup.
+//! `erf` and `erfc` are within one ulp of the correctly rounded result
+//! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
+//! of the 2^32 inputs respectively. The routines they replace misround
+//! 127,576,760 (`erff`, 2.97%) and 19,954,784 (`erfcf`, 0.465%), so both are
+//! large accuracy gains as well as speedups. `erfc` misses more often than
+//! `erf` because below `|x| = 2` it does have to form `1 - erf`, which costs
+//! 7.7 bits at `x = 2`; above 2, where it matters, it reads the `erfc` branch
+//! directly and forms no difference at all.
 //!
 //! Both claims are checked exhaustively rather than sampled, by the ignored
 //! tests at the bottom of this file; the ordinary tests re-check a spread of
@@ -160,6 +164,7 @@
 //!                        before    after           vs NumPy
 //!     tanh               7090us    606us   11.7x      0.84x
 //!     erf                6708us    848us    7.9x         --
+//!     erfc               5347us    651us    8.2x         --
 //!     expm1              4696us    283us   16.6x      0.69x
 //!     sinh               6091us    410us   14.8x      0.81x
 //!     cosh               2138us    358us    6.0x      0.82x
@@ -495,6 +500,23 @@ fn one_plus_erf<const FMA: bool>(v: f64) -> f64 {
     if v < 0.0 { erfc_a } else { 2.0 - erfc_a }
 }
 
+/// `erfc` in float64.
+///
+/// `erfc(x)` is `1 + erf(-x)`, so this is [`one_plus_erf`] at `-x` and inherits
+/// its accuracy: above 2 the value comes from the `erfc` branch of
+/// [`erf_parts`] with no subtraction at all, which is exactly the regime
+/// `erfc` exists to serve. The clamp reaches far enough -- `erfc` underflows
+/// float32 at about 10.2, inside the fitted range.
+#[inline(always)]
+fn erfc_core<const FMA: bool>(xd: f64) -> f64 {
+    one_plus_erf::<FMA>(-xd)
+}
+
+#[inline(always)]
+fn erfc_one<const FMA: bool>(x: f32) -> f32 {
+    erfc_core::<FMA>(x as f64) as f32
+}
+
 /// Exact GELU: `0.5 * x * (1 + erf(x/sqrt 2))`, in float64 throughout.
 #[inline(always)]
 fn gelu_erf_one<const FMA: bool>(x: f32) -> f32 {
@@ -725,6 +747,7 @@ macro_rules! dispatch2 {
 
 block_kernel!(tanh_block, tanh_one, tanh_block_avx512, tanh_block_avx2);
 block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
+block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
 block_kernel!(cosh_block, cosh_one, cosh_block_avx512, cosh_block_avx2);
@@ -843,6 +866,19 @@ impl F32Kernel {
             erf_block,
             erf_block_avx512,
             erf_block_avx2
+        )
+    }
+
+    /// Write `erfc(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn erfc(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            erfc_block,
+            erfc_block_avx512,
+            erfc_block_avx2
         )
     }
 
@@ -966,6 +1002,7 @@ mod tests {
         Expm1,
         Sinh,
         Cosh,
+        Erfc,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -978,6 +1015,7 @@ mod tests {
             Op::Expm1 => k.expm1(input, out),
             Op::Sinh => k.sinh(input, out),
             Op::Cosh => k.cosh(input, out),
+            Op::Erfc => k.erfc(input, out),
         }
     }
 
@@ -1026,6 +1064,7 @@ mod tests {
             Op::Expm1 => xd.exp_m1() as f32,
             Op::Sinh => xd.sinh() as f32,
             Op::Cosh => xd.cosh() as f32,
+            Op::Erfc => libm::erfc(xd) as f32,
         }
     }
 
@@ -1110,7 +1149,7 @@ mod tests {
     #[test]
     fn erf_and_gelu_stay_within_one_ulp() {
         let xs = sample_inputs();
-        for op in [Op::Erf, Op::GeluErf, Op::GeluTanh] {
+        for op in [Op::Erf, Op::Erfc, Op::GeluErf, Op::GeluTanh] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
                     let want = reference(op, x);
@@ -1137,6 +1176,7 @@ mod tests {
             Op::Expm1,
             Op::Sinh,
             Op::Cosh,
+            Op::Erfc,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -1209,6 +1249,7 @@ mod tests {
             Op::Expm1,
             Op::Sinh,
             Op::Cosh,
+            Op::Erfc,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {
@@ -1281,14 +1322,21 @@ mod tests {
     #[test]
     #[ignore = "sweeps all 2^32 float32 inputs; takes ~1 minute"]
     fn erf_is_almost_always_correctly_rounded_exhaustively() {
-        for backend in available() {
-            let (worst, differing) = sweep(Op::Erf, backend);
-            println!("  erf/{backend:?}: {differing} of 2^32 misrounded, worst {worst} ulp");
-            assert!(worst <= 1, "{backend:?}: worst error {worst} ulp");
-            assert!(
-                differing <= 500,
-                "{backend:?}: {differing} of 2^32 not correctly rounded"
-            );
+        // Per-op bounds, each a few times the measured count: loose enough not
+        // to be a rounding-mode tripwire, tight enough that a regression to the
+        // routine being replaced (127.6M for `erff`, 20.0M for `erfcf`) fails.
+        // `erfc` misrounds more than `erf` because below |x| = 2 it does have to
+        // form `1 - erf`, which at x = 2 costs 7.7 bits.
+        for (op, bound) in [(Op::Erf, 500u64), (Op::Erfc, 500_000)] {
+            for backend in available() {
+                let (worst, differing) = sweep(op, backend);
+                println!("  {op:?}/{backend:?}: {differing} of 2^32 misrounded, worst {worst} ulp");
+                assert!(worst <= 1, "{op:?}/{backend:?}: worst error {worst} ulp");
+                assert!(
+                    differing <= bound,
+                    "{op:?}/{backend:?}: {differing} of 2^32 not correctly rounded"
+                );
+            }
         }
     }
 
