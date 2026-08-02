@@ -24,7 +24,7 @@ use std::sync::Arc;
 // `unary_map`: their per-element cost repays the fixed parallel-region entry
 // cost far sooner than a `relu`'s does.
 pub(crate) use crate::ops::map::{
-    EXPENSIVE_PAR_THRESHOLD, TANH_F32_PAR_THRESHOLD, unary_map, unary_map_blocks_threshold,
+    EXPENSIVE_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, unary_map, unary_map_blocks_threshold,
     unary_map_threshold,
 };
 

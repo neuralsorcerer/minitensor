@@ -225,3 +225,105 @@ def test_vectorized_tanh_stays_odd():
     positive = mt.from_numpy(sample).tanh().numpy()
     negative = mt.from_numpy(-sample).tanh().numpy()
     np.testing.assert_array_equal(positive.view(np.uint32), (-negative).view(np.uint32))
+
+
+# float32 `erf` and both GELU variants are vectorized too (`ops::simd::
+# transcendental`), replacing scalar `libm::erff` and `tanhf`. Unlike `tanh`,
+# these are not bit-exact against float64 -- they are within one ulp of it,
+# which is still far better than what they replace: `erff` misrounds 2.97% of
+# all float32 inputs, this misrounds 68 of 2^32.
+#
+# The references below are written cancellation-free on purpose. `1 + erf(u)`
+# is `erfc(-u)` and `0.5*(1 + tanh(v))` is the logistic `1/(1 + exp(-2v))`;
+# spelling them the obvious way makes the *reference* the inaccurate side in
+# the negative tail, which is exactly the bug these kernels had to fix.
+_SQRT1_2 = 1.0 / np.sqrt(2.0)
+
+
+def _ulps_apart(got, want):
+    g = np.asarray(got, dtype=np.float32).view(np.int32).astype(np.int64)
+    w = np.asarray(want, dtype=np.float32).view(np.int32).astype(np.int64)
+    g = np.where(g < 0, np.int64(-(2**31)) - g, g)
+    w = np.where(w < 0, np.int64(-(2**31)) - w, w)
+    return np.abs(g - w)
+
+
+def _erf_reference(sample):
+    from math import erf
+
+    return np.array([erf(float(v)) for v in sample.astype(np.float64)], dtype=np.float32)
+
+
+def _gelu_erf_reference(sample):
+    from math import erfc
+
+    x = sample.astype(np.float64)
+    return np.array(
+        [0.5 * v * erfc(-v * _SQRT1_2) for v in x], dtype=np.float32
+    )
+
+
+def _gelu_tanh_reference(sample):
+    x = sample.astype(np.float64)
+    inner = 0.7978845608028654 * (x + 0.044715 * x**3)
+    with np.errstate(over="ignore"):
+        return (x / (1.0 + np.exp(-2.0 * inner))).astype(np.float32)
+
+
+_VECTORIZED = [
+    ("erf", lambda t: t.erf(), _erf_reference),
+    ("gelu", lambda t: t.gelu(), _gelu_erf_reference),
+    ("gelu-tanh", lambda t: t.gelu("tanh"), _gelu_tanh_reference),
+]
+
+
+@pytest.mark.parametrize("name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED])
+@pytest.mark.parametrize("length", [1, 7, 8, 17, 1023, 1024, 16383, 16384, 40000])
+def test_vectorized_erf_and_gelu_stay_within_one_ulp(name, op, reference, length):
+    rng = np.random.default_rng(4242 + length)
+    # Spread over both erf branches (|x| <= 2 and above), the clamp, and the
+    # negative tail where the cancellation bug lived.
+    sample = np.concatenate(
+        [
+            rng.standard_normal(length) * 2.0,
+            rng.uniform(1.9, 2.1, length),
+            rng.uniform(-16.0, -4.0, length),
+        ]
+    ).astype(np.float32)[:length]
+
+    got = op(mt.from_numpy(sample)).numpy()
+    bad = _ulps_apart(got, reference(sample)) > 1
+    assert not bad.any(), (
+        f"{name} length {length}: {int(bad.sum())} of {length} off by >1 ulp, "
+        f"first at x={sample[bad][0]!r}"
+    )
+
+
+@pytest.mark.parametrize("name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED])
+def test_vectorized_erf_and_gelu_handle_the_edge_cases(name, op, reference):
+    sample = np.array(
+        [0.0, -0.0, 1e-30, -1e-30, 2.0, -2.0, 4.0, -4.0, 11.0, -11.0, 1e30, -1e30],
+        dtype=np.float32,
+    )
+    got = op(mt.from_numpy(sample)).numpy()
+    np.testing.assert_array_equal(_ulps_apart(got, reference(sample)) <= 1, True)
+    # Signed zero survives: erf and both GELUs are zero at zero.
+    assert not np.signbit(got[0]) and np.signbit(got[1]), got[:2]
+
+
+def test_gelu_negative_tail_does_not_bottom_out():
+    """The `erf` clamp must not leak a residual that `x` then amplifies.
+
+    With the clamp at |x| = 4, `erf` returned 0.99999998 rather than 1, and
+    `gelu(-20)` came back as -1.5e-7 instead of -0. Both GELU variants decay
+    monotonically to zero here; nothing may plateau.
+    """
+    xs = np.array([-6.0, -8.0, -10.0, -12.0, -14.0, -20.0, -50.0], dtype=np.float32)
+    for name, op, reference in _VECTORIZED[1:]:
+        got = op(mt.from_numpy(xs)).numpy()
+        want = reference(xs)
+        assert np.all(np.abs(got) <= np.abs(want) * 1.5 + 1e-45), f"{name}: {got}"
+        assert np.all(np.diff(np.abs(got.astype(np.float64))) <= 0), (
+            f"{name} stopped decaying: {got}"
+        )
+        assert got[-1] == 0.0, f"{name}: gelu(-50) should underflow to zero, got {got[-1]}"

@@ -61,13 +61,15 @@ pub(crate) const PAR_THRESHOLD: usize = 1 << 17; // 131072 elements
 /// ```
 pub(crate) const EXPENSIVE_PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
-/// Element count above which float32 `tanh` parallelizes.
+/// Element count above which the vectorized float32 kernels in
+/// `ops::simd::transcendental` parallelize -- `tanh`, `erf` and both GELU
+/// variants.
 ///
-/// It gets its own threshold because it is no longer an expensive kernel.
+/// They get their own threshold because they are no longer expensive kernels.
 /// [`EXPENSIVE_PAR_THRESHOLD`] is calibrated for transcendentals costing tens of
 /// nanoseconds per element; the vectorized `tanh` in `ops::simd::transcendental`
-/// costs about 2, so the fixed region-entry cost takes an order of magnitude
-/// more elements to repay. Fitting both sides on the same 4-core machine:
+/// cost 2 to 3, so the fixed region-entry cost takes an order of magnitude
+/// more elements to repay. Fitting both sides for `tanh` on a 4-core machine:
 ///
 /// ```text
 ///   sequential   2.17 ns/elem +  0.0 us fixed
@@ -77,7 +79,7 @@ pub(crate) const EXPENSIVE_PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 /// Same convention as [`PAR_THRESHOLD`]: sit just below the measured crossover,
 /// so hosts with more cores -- where the parallel side is cheaper per element
 /// and repays sooner -- are not held back.
-pub(crate) const TANH_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
+pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
 
 /// Element count above which binary/broadcast kernels parallelize.
 ///

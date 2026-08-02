@@ -105,11 +105,11 @@ pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
     // Vectorized, and bit-for-bit what `tanh_promoted_f32` produced -- see
     // `ops::simd::transcendental`. Dispatch is resolved once here rather than
     // per block.
-    let kernel = crate::ops::simd::TanhF32Block::select();
+    let kernel = crate::ops::simd::F32Kernel::select();
     // SAFETY: `apply` writes every element of each block it is given.
     let out = unsafe {
-        unary_map_blocks_threshold(input_data, TANH_F32_PAR_THRESHOLD, |src, dst| {
-            kernel.apply(src, dst)
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.tanh(src, dst)
         })
     };
     Ok(TensorData::from_vec::<f32>(

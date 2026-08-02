@@ -4,43 +4,23 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Vectorized transcendental kernels.
+//! Vectorized float32 kernels for `tanh`, `erf`, and both GELU variants.
 //!
-//! `tanh` is the one transcendental this engine leans on everywhere -- every
-//! RNN and LSTM cell, and most small MLPs -- and it was the slowest thing in
-//! the elementwise surface: a `libm` call per element, which no amount of
-//! rayon parallelism can vectorize away. Against NumPy (which ships its own
-//! SIMD `tanh`) float32 measured 11.8x slower at a million elements and 31x at
-//! 4096, *after* spreading the work over four cores.
+//! These were the slowest things in the elementwise surface, all for the same
+//! reason: a `libm` call per element, which no amount of rayon parallelism can
+//! vectorize away. `tanh` measured 11.8x slower than NumPy's own SIMD `tanh` at
+//! a million float32 elements and 31x at 4096, *after* spreading over four
+//! cores; `erf` -- and so the exact GELU that every transformer uses -- ran at
+//! 25 ns per element.
 //!
-//! The fix is to write the routine so that LLVM can vectorize it, then compile
+//! The fix is to write each routine so that LLVM can vectorize it, then compile
 //! it several times over -- once per instruction set -- and pick at runtime.
 //! That requires the whole loop to live inside the multiversioned function, so
-//! the entry point here takes a block rather than an element (see
-//! `ops::map::unary_map_blocks_threshold`).
+//! the entry points here take a block rather than an element (see
+//! `ops::map::unary_map_blocks_threshold`). All four share one `select`, one
+//! argument reduction, and one set of dispatch machinery.
 //!
-//! # What it computes
-//!
-//! `tanh(x) = u / (u + 2)` where `u = expm1(2x)`, evaluated in float64 and
-//! rounded once to float32. Writing it through `expm1` rather than the more
-//! obvious `1 - 2/(exp(2x) + 1)` is what makes it accurate near zero: the
-//! latter cancels catastrophically as `x -> 0`, while `u/(u+2)` has `u ~ 2x`
-//! over a denominator near 2 and stays well conditioned. Relative error in `u`
-//! reaches the result damped by `2/(u+2) <= 1`, so nothing amplifies.
-//!
-//! `expm1(t)` uses the textbook reduction `t = n*ln2 + r`, `|r| <= ln2/2`,
-//! recombined as
-//!
-//! ```text
-//!     expm1(t) = 2^n * p + (2^n - 1),   p = exp(r) - 1
-//! ```
-//!
-//! which is the same expression for every `n` and cancels for none of them:
-//! at `n = 0` it collapses to `p`, and for `n != 0` the `2^n - 1` term is
-//! bounded away from zero exactly where `p` is small. `2^n - 1` is exact for
-//! the `|n| <= 29` this range produces.
-//!
-//! Three details are what make it fast rather than merely correct:
+//! Three details are what make them fast rather than merely correct:
 //!
 //! * **Rounding without `roundpd`.** `f64::round` is round-half-away-from-zero,
 //!   which x86 cannot do in one instruction, so LLVM scalarizes the loop around
@@ -49,66 +29,129 @@
 //!   conversion either, which would otherwise scalarize again on Rust's
 //!   saturating cast.
 //! * **FMA, explicitly.** Rust never contracts `a*b + c` into an FMA on its
-//!   own. The polynomial is written with `f64::mul_add` on paths where the
+//!   own. The polynomials are written with `f64::mul_add` on paths where the
 //!   hardware has it, and with plain arithmetic where it does not (a software
 //!   `fma()` call would be far slower than the multiply and add it replaces).
 //! * **Estrin, not Horner.** Horner's 10-deep dependency chain cost more in
-//!   latency than the entire rest of the kernel -- switching to a balanced tree
-//!   took the portable path from 9.5 to 6.9 ns/element on its own.
+//!   latency than the entire rest of the `tanh` kernel -- switching to a
+//!   balanced tree took its portable path from 9.5 to 6.9 ns/element on its
+//!   own. Every polynomial here is evaluated that way.
+//!
+//! # tanh
+//!
+//! `tanh(x) = u / (u + 2)` where `u = expm1(2x)`, in float64, rounded once.
+//! Writing it through `expm1` rather than the more obvious `1 - 2/(exp(2x)+1)`
+//! is what makes it accurate near zero: the latter cancels catastrophically as
+//! `x -> 0`, while `u/(u+2)` has `u ~ 2x` over a denominator near 2 and stays
+//! well conditioned.
+//!
+//! `expm1(t)` uses the textbook reduction `t = n*ln2 + r`, `|r| <= ln2/2`,
+//! recombined as
+//!
+//! ```text
+//!     expm1(t) = 2^n * p + (2^n - 1),   p = exp(r) - 1
+//! ```
+//!
+//! which is the same expression for every `n` and cancels for none of them: at
+//! `n = 0` it collapses to `p`, and for `n != 0` the `2^n - 1` term is bounded
+//! away from zero exactly where `p` is small.
+//!
+//! # erf
+//!
+//! Two branches over `a = |x|`, selected branchlessly:
+//!
+//! ```text
+//!     a <= 2   erf(a)  = a * (2/sqrt(pi) + t*G(t)),  t = a*a,  G degree 15
+//!     a >  2   erfc(a) = exp(-t) * PB(1/a),                    PB degree 14
+//! ```
+//!
+//! [`erf_parts`] returns both without combining them, because which
+//! combination is safe depends on the caller -- see below. The split point and
+//! both degrees were chosen by measuring the float32 rounding, not from an
+//! error bound: 2 with degrees 15 and 14 was the cheapest pair that came out
+//! correctly rounded, and the high branch is parameterized in `1/a` because `h`
+//! is asymptotically `1/(a*sqrt(pi))`, which a polynomial in `1/a` captures in
+//! far fewer terms than one in `a`.
+//!
+//! # GELU, and the cancellation it needs avoided
+//!
+//! Both variants are `x` times something that goes to zero as `x -> -inf`, and
+//! the obvious spelling of that something destroys it:
+//!
+//! * `0.5 * x * (1 + erf(x/sqrt 2))`. For `x = -6.5`, `1 + erf` is 7.6e-11
+//!   reconstructed from a float64 within an ulp of -1, so it keeps about five
+//!   digits -- 24 ulp of error once `x` scales it back up. But `1 + erf(v)` is
+//!   `erfc(-v)`, which the high branch of [`erf_parts`] already has in hand
+//!   with no subtraction at all.
+//! * `0.5 * x * (1 + tanh(v))` has the same problem and the same cure: it is
+//!   `x * e/(e+1)` with `e = exp(2v)`, and `e` comes straight out of the
+//!   reduction.
+//!
+//! Neither is a rounding nicety. The scalar float32 path this replaces returned
+//! *exactly zero* from about `x = -5.5` down, for both variants.
 //!
 //! # Accuracy
 //!
-//! This does not trade accuracy for speed: it produces **bit-identical results
-//! to the previous `(x as f64).tanh() as f32` on all 2^32 float32 inputs**, on
-//! every dispatch path (AVX-512, AVX2+FMA, and portable). That was checked
-//! exhaustively rather than sampled, by sweeping the entire float32 domain
-//! through each block entry point; `tanh_matches_promoted_reference` below
-//! re-checks a spread of ranges and every special value on each run. So the
-//! accuracy argument recorded in `ops::activation::hyperbolic` -- worst
+//! `tanh` is **bit-identical to the previous `(x as f64).tanh() as f32` on all
+//! 2^32 float32 inputs**, on every dispatch path (AVX-512, AVX2+FMA, portable).
+//! So the accuracy argument recorded in `ops::activation::hyperbolic` -- worst
 //! relative error 5.9e-08, ahead of NumPy's 1.1e-07 -- carries over unchanged.
+//! Its polynomial degree was picked against that same sweep: one term shorter
+//! still matches everywhere, two terms shorter breaks 43 inputs, so degree 12
+//! is the first with a whole term of margin.
 //!
-//! The polynomial degree was chosen against that same sweep rather than from
-//! the error bound alone. Truncating it one term shorter (degree 11) still
-//! matches on all 2^32 inputs; two terms shorter breaks 43 of them by one ulp.
-//! Degree 12 is therefore the first degree with a whole term of margin, which
-//! is what keeps the claim from resting on the exact `libm` the reference was
-//! measured against. The cost of that margin is one FMA in about thirty.
+//! `erf` is within one ulp of the correctly rounded result everywhere, and is
+//! *the* correctly rounded result on all but 68 of the 2^32 inputs. The
+//! `libm::erff` it replaces misrounds 127,576,760 of them -- 2.97% -- so this
+//! is a large accuracy gain as well as a 9x speedup.
+//!
+//! Both claims are checked exhaustively rather than sampled, by the ignored
+//! tests at the bottom of this file; the ordinary tests re-check a spread of
+//! ranges, every branch boundary and every special value on each run.
 //!
 //! # Measured
 //!
 //! Single-threaded, 1M float32 elements, on a 4-core Xeon at 2.8GHz:
 //!
 //! ```text
-//!     promoted scalar (previous)   21.4 ns/elem
-//!     portable (this kernel)        6.8 ns/elem    3.1x
-//!     AVX2 + FMA                    4.0 ns/elem    5.4x
-//!     AVX-512                       2.0 ns/elem   10.4x
+//!                        tanh    erf
+//!     scalar (previous)  21.4   25.6  ns/elem
+//!     portable            6.8   13.4
+//!     AVX2 + FMA          4.0    6.2
+//!     AVX-512             2.0    3.2
 //! ```
 //!
-//! End to end from Python on the same machine, against NumPy's own SIMD
-//! `tanh` -- this is the number that motivated the work:
+//! End to end from Python at a million elements, which is the number that
+//! motivated the work:
 //!
 //! ```text
-//!            N     before     after
-//!         4096      31.3x      2.6x
-//!        65536      16.7x      1.8x
-//!      1048576      11.8x      1.1x
-//!      4194304         --      0.6x   (faster than NumPy)
+//!                     before    after
+//!     tanh            7090us    606us   11.7x
+//!     erf             6708us    848us    7.9x
+//!     gelu (exact)    6471us    953us    6.8x
+//!     gelu (tanh)     9340us    655us   14.3x
 //! ```
 //!
-//! The residual gap at small sizes is structural, and is the accuracy
-//! decision showing up as a cost: NumPy evaluates in float32 lanes (16 wide
-//! under AVX-512) with a shorter polynomial, while this evaluates in float64
-//! (8 wide) to keep the result exactly what the scalar promotion produced.
+//! Against NumPy's SIMD `tanh`, float32 `tanh` goes from 11.8x slower at a
+//! million elements to 1.1x, and is faster than NumPy past two million. The
+//! residual gap at small sizes is the accuracy decision showing up as a cost:
+//! NumPy evaluates in float32 lanes (16 wide under AVX-512) with a shorter
+//! polynomial, while these evaluate in float64 (8 wide).
 //!
 //! # Not covered
 //!
-//! float64 `tanh` still calls `libm`. The same skeleton would serve it, but a
-//! correctly-rounded float64 result needs the reduction and the polynomial
-//! carried to ~2^-60 -- double-double residuals in places where the float32
-//! path can round freely -- and that is a different piece of work. The float64
-//! gap against NumPy is also much smaller to begin with (2.5x at a million
-//! elements against float32's 11.8x).
+//! The float64 kernels all still call `libm`. The same skeleton would serve
+//! them, but a correctly-rounded float64 result needs the reduction and the
+//! polynomials carried to ~2^-60 -- double-double residuals in places where
+//! the float32 path can round freely -- and that is a different piece of work.
+//! The float64 gap is also much smaller to begin with (`tanh` is 2.5x NumPy at
+//! a million elements against float32's 11.8x).
+//!
+//! `erfc` is untouched: it needs relative accuracy out where `erf` has
+//! saturated, so it wants the high branch extended rather than reused. The
+//! GELU *backward* pass still calls scalar `erff`/`tanhf` through
+//! `unary_chain_grad`, which takes a per-element closure and so would need a
+//! two-input block variant to vectorize.
 
 use std::mem::MaybeUninit;
 
@@ -127,7 +170,7 @@ const LN2_LO: f64 = 1.9082149292705877e-10;
 /// already at `x > 9.011` -- so the input is clamped and the formula runs on a
 /// bounded range. Clamping rather than branching keeps the loop vectorizable,
 /// and NaN fails both comparisons and falls through to a NaN result.
-const LIMIT: f64 = 10.0;
+const TANH_LIMIT: f64 = 10.0;
 
 /// `2^52 + 2^51`. Adding this to a value of magnitude `< 2^51` forces
 /// round-to-nearest-even into the mantissa, so the low bits of the sum are the
@@ -173,58 +216,341 @@ fn expm1_poly<const FMA: bool>(r: f64) -> f64 {
     fma_or::<FMA>(r2, q, r)
 }
 
-/// One element. Branch-free by construction so the enclosing loop vectorizes.
+/// Split `v` into `2^n` and `r = v - n*ln2` with `|r| <= ln2/2`, the reduction
+/// every exponential here starts from.
+///
+/// `z` carries the rounded `n` in its low bits, and the same bits shifted into
+/// the exponent field give `2^n`. A NaN input makes both garbage, but `r` comes
+/// back NaN, and NaN then wins every arithmetic step downstream.
 #[inline(always)]
-fn tanh_one<const FMA: bool>(x: f32) -> f32 {
-    let xd = x as f64;
-    // `clamp` leaves NaN alone (both of its comparisons fail), which is what
-    // carries a NaN input through to a NaN result.
-    let t = xd.clamp(-LIMIT, LIMIT) * 2.0;
-
-    // `z` carries the rounded `n` in its low bits and `2^n` in bits 52..63
-    // after a shift; a NaN input makes both garbage, but `r` is then NaN too
-    // and NaN wins every arithmetic step below.
-    let z = fma_or::<FMA>(t, LOG2E, MAGIC);
+fn reduce_exp<const FMA: bool>(v: f64) -> (f64, f64) {
+    let z = fma_or::<FMA>(v, LOG2E, MAGIC);
     let n = z - MAGIC;
     let two_pow_n = f64::from_bits(z.to_bits().wrapping_add(1023) << 52);
+    let r = fma_or::<FMA>(-n, LN2_LO, fma_or::<FMA>(-n, LN2_HI, v));
+    (two_pow_n, r)
+}
 
-    let r = fma_or::<FMA>(-n, LN2_LO, fma_or::<FMA>(-n, LN2_HI, t));
+/// `tanh` in float64. Branch-free by construction so callers vectorize.
+#[inline(always)]
+fn tanh_core<const FMA: bool>(xd: f64) -> f64 {
+    // `clamp` leaves NaN alone (both of its comparisons fail), which is what
+    // carries a NaN input through to a NaN result.
+    let t = xd.clamp(-TANH_LIMIT, TANH_LIMIT) * 2.0;
+    let (two_pow_n, r) = reduce_exp::<FMA>(t);
     let p = expm1_poly::<FMA>(r);
     let u = fma_or::<FMA>(two_pow_n, p, two_pow_n - 1.0);
-    let y = (u / (u + 2.0)) as f32;
+    let y = u / (u + 2.0);
 
     // `tanh` is odd, so the result's sign is always the input's -- everywhere
     // except zero, where the arithmetic above loses it: at `x = -0.0` the
     // polynomial's `r * r` is `+0.0`, and `+0.0 + -0.0` is `+0.0` under
     // round-to-nearest, so `-0.0` comes back positive. Taking the sign from the
     // input restores it and is a no-op for every other value.
-    y.copysign(x)
+    y.copysign(xd)
 }
 
-/// The loop LLVM actually vectorizes. Every instantiation below is this same
-/// body compiled for a different instruction set.
 #[inline(always)]
-fn tanh_block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>]) {
-    debug_assert_eq!(input.len(), out.len());
-    for (o, &x) in out.iter_mut().zip(input.iter()) {
-        o.write(tanh_one::<FMA>(x));
-    }
+fn tanh_one<const FMA: bool>(x: f32) -> f32 {
+    tanh_core::<FMA>(x as f64) as f32
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-fn tanh_block_avx512(input: &[f32], out: &mut [MaybeUninit<f32>]) {
-    tanh_block::<true>(input, out)
+// ---------------------------------------------------------------------------
+// erf
+// ---------------------------------------------------------------------------
+
+/// `erf` reaches 1.0 in *float32* well before here (`1 - erf(x) < 2^-25`
+/// already at `x > 3.92`), but the clamp sits at 6 rather than 4 because GELU
+/// needs more: it forms `1 + erf(x/sqrt 2)` and multiplies by `x`, so a
+/// clamped `erf` of 0.99999998 leaks a residual that `x` then amplifies --
+/// `gelu(-20)` came back as -1.5e-7 instead of -0. GELU's negative tail is
+/// `0.5*x*erfc(|x|/sqrt 2)`, which stays a representable float32 down to about
+/// `x = -14`; 11 is where that argument lands, so the tail is computed rather
+/// than clamped for every `x` whose result is not already zero.
+/// As with `tanh`, clamping keeps the loop branch-free and lets NaN through.
+const ERF_LIMIT: f64 = 11.0;
+
+/// Where the polynomial branch hands over to the `exp`-based one. Chosen by
+/// measurement -- see the module docs.
+const ERF_SPLIT: f64 = 2.0;
+
+/// `erf(x) = |x| * (A00 + t*G(t))`, `t = x*x`, for `|x| <= 2`.
+///
+/// `A00` is `2/sqrt(pi)` correctly rounded and deliberately sits outside the
+/// polynomial: that makes the small-`x` limit `erf(x) -> 2x/sqrt(pi)` exact.
+/// Folding it in cost 1 ulp on inputs down around `1e-6`, which is how it was
+/// found.
+const A00: f64 = std::f64::consts::FRAC_2_SQRT_PI;
+const G00: f64 = -0.3761263890318367;
+const G01: f64 = 0.11283791670949633;
+const G02: f64 = -0.026866170644324023;
+const G03: f64 = 0.005223977619979951;
+const G04: f64 = -0.0008548326818884021;
+const G05: f64 = 0.00012055328255711209;
+const G06: f64 = -1.4925578101206095e-05;
+const G07: f64 = 1.646134799302676e-06;
+const G08: f64 = -1.6360026129096463e-07;
+const G09: f64 = 1.4774934544966013e-08;
+const G10: f64 = -1.2158547830560174e-09;
+const G11: f64 = 9.022812758721981e-11;
+const G12: f64 = -5.817801680396542e-12;
+const G13: f64 = 3.005698198104101e-13;
+const G14: f64 = -1.0701644628115967e-14;
+const G15: f64 = 1.8933956626349782e-16;
+
+/// `erf(x) = 1 - exp(-t) * PB(1/|x|)` for `2 < |x| <= 11`, where
+/// `PB(a) ~ erfc(a)*exp(a^2)`, degree 14 in `1/a`.
+///
+/// In `1/a` rather than `a` because `h` is asymptotically `1/(a*sqrt(pi))`:
+/// over [2,11] a degree-14 fit in `1/a` holds 2^-40 where a fit in `a` falls
+/// apart. It costs one division, measured at 0.26 ns per element -- cheaper
+/// than the extra terms, and it is what lets the range widen this far without
+/// losing accuracy on (2,4], which is the only part `erf` itself needs.
+const B00: f64 = 1.8179156235920146e-09;
+const B01: f64 = 0.5641894676558621;
+const B02: f64 = 3.1547652652352993e-06;
+const B03: f64 = -0.28214063825216956;
+const B04: f64 = 0.0003249173235522797;
+const B05: f64 = 0.4235999491180208;
+const B06: f64 = -0.03573853362794864;
+const B07: f64 = -0.6468243562176176;
+const B08: f64 = -2.770024822999806;
+const B09: f64 = 16.152979524845946;
+const B10: f64 = -37.46625850802945;
+const B11: f64 = 51.70220402502904;
+const B12: f64 = -44.66697822274648;
+const B13: f64 = 22.563581018752625;
+const B14: f64 = -5.130091355864232;
+
+/// `exp(r) - 1 = r * (E1 + r*(E2 + ...))` for `|r| <= ln2/2`.
+///
+/// Only degree 7, far shorter than [`expm1_poly`], because this one is used
+/// solely inside erf's high branch where its error reaches the result damped
+/// by `erfc/erf <= 0.0047`. Degree 6 already suffices; 7 is the usual spare
+/// term.
+const E1: f64 = 1.0;
+const E2: f64 = 0.5;
+const E3: f64 = 0.16666666666666666;
+const E4: f64 = 0.041666666666666664;
+const E5: f64 = 0.008333333333333333;
+const E6: f64 = 0.001388888888888889;
+const E7: f64 = 0.0001984126984126984;
+
+/// The two branch values `erf` and `erfc` are assembled from, for the clamped
+/// `a = |x|`: `erf(a)` on `[0,2]` and `erfc(a)` on `(2,6]`.
+///
+/// Returned separately rather than combined because the caller decides which
+/// combination is safe. `erf` wants `1 - erfc`; GELU wants the `erfc` itself,
+/// and reconstructing that as `1 - erf` would cancel away its digits -- at
+/// `x = -6.5` that cost 24 ulp before the split.
+#[inline(always)]
+fn erf_parts<const FMA: bool>(a: f64) -> (f64, f64) {
+    let t = a * a;
+    let t2 = t * t;
+    let t4 = t2 * t2;
+    let t8 = t4 * t4;
+
+    // Low branch: |x| <= 2. Estrin over the degree-15 tail.
+    let c0 = fma_or::<FMA>(t, G01, G00);
+    let c1 = fma_or::<FMA>(t, G03, G02);
+    let c2 = fma_or::<FMA>(t, G05, G04);
+    let c3 = fma_or::<FMA>(t, G07, G06);
+    let c4 = fma_or::<FMA>(t, G09, G08);
+    let c5 = fma_or::<FMA>(t, G11, G10);
+    let c6 = fma_or::<FMA>(t, G13, G12);
+    let c7 = fma_or::<FMA>(t, G15, G14);
+    let d0 = fma_or::<FMA>(t2, c1, c0);
+    let d1 = fma_or::<FMA>(t2, c3, c2);
+    let d2 = fma_or::<FMA>(t2, c5, c4);
+    let d3 = fma_or::<FMA>(t2, c7, c6);
+    let g = fma_or::<FMA>(t8, fma_or::<FMA>(t4, d3, d2), fma_or::<FMA>(t4, d1, d0));
+    let low = a * fma_or::<FMA>(t, g, A00);
+
+    // High branch: 2 < |x| <= 6, Estrin in `u = 1/a`. For low-branch inputs
+    // `u` can be infinite (at x = 0) and this whole branch garbage, which is
+    // fine: the select below discards it, and IEEE does not trap.
+    let u = 1.0 / a;
+    let u2 = u * u;
+    let u4 = u2 * u2;
+    let u8 = u4 * u4;
+    let e0 = fma_or::<FMA>(u, B01, B00);
+    let e1 = fma_or::<FMA>(u, B03, B02);
+    let e2 = fma_or::<FMA>(u, B05, B04);
+    let e3 = fma_or::<FMA>(u, B07, B06);
+    let e4 = fma_or::<FMA>(u, B09, B08);
+    let e5 = fma_or::<FMA>(u, B11, B10);
+    let e6 = fma_or::<FMA>(u, B13, B12);
+    let f0 = fma_or::<FMA>(u2, e1, e0);
+    let f1 = fma_or::<FMA>(u2, e3, e2);
+    let f2 = fma_or::<FMA>(u2, e5, e4);
+    let f3 = fma_or::<FMA>(u2, B14, e6);
+    let pb = fma_or::<FMA>(u8, fma_or::<FMA>(u4, f3, f2), fma_or::<FMA>(u4, f1, f0));
+
+    let (two_pow_n, r) = reduce_exp::<FMA>(-t);
+    let mut s = fma_or::<FMA>(r, E7, E6);
+    s = fma_or::<FMA>(r, s, E5);
+    s = fma_or::<FMA>(r, s, E4);
+    s = fma_or::<FMA>(r, s, E3);
+    s = fma_or::<FMA>(r, s, E2);
+    s = fma_or::<FMA>(r, s, E1);
+    let exp_neg_t = two_pow_n * fma_or::<FMA>(r, s, 1.0);
+    // `high` is erfc(a), not erf(a): the subtraction from 1 is left to the
+    // caller so that callers who want the small quantity never do it.
+    let high = exp_neg_t * pb;
+
+    (low, high)
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-fn tanh_block_avx2(input: &[f32], out: &mut [MaybeUninit<f32>]) {
-    tanh_block::<true>(input, out)
+/// `erf` in float64, accurate enough that rounding to float32 is the correctly
+/// rounded result on all but 68 of the 2^32 inputs.
+#[inline(always)]
+fn erf_core<const FMA: bool>(xd: f64) -> f64 {
+    let a = xd.abs().clamp(0.0, ERF_LIMIT);
+    let (erf_low, erfc_high) = erf_parts::<FMA>(a);
+    // NaN fails `a <= ERF_SPLIT` and takes the high branch, which is NaN there.
+    let y = if a <= ERF_SPLIT {
+        erf_low
+    } else {
+        1.0 - erfc_high
+    };
+    // Odd, and the same signed-zero argument as `tanh_core`.
+    y.copysign(xd)
 }
 
-/// Which compilation of [`tanh_block`] this CPU gets. Resolved once per
-/// operation by [`TanhF32Block::select`], not once per element.
+#[inline(always)]
+fn erf_one<const FMA: bool>(x: f32) -> f32 {
+    erf_core::<FMA>(x as f64) as f32
+}
+
+/// `1 + erf(v)`, kept accurate on the `v < 0` tail where it goes to zero.
+///
+/// `1 + erf(v)` is `erfc(-v)`, so the negative side reads the `erfc` branch
+/// straight out of [`erf_parts`] instead of adding 1 to something within an
+/// ulp of -1. The positive side is `2 - erfc(v)`, which never cancels.
+#[inline(always)]
+fn one_plus_erf<const FMA: bool>(v: f64) -> f64 {
+    let av = v.abs();
+    let a = av.clamp(0.0, ERF_LIMIT);
+    let (erf_low, erfc_high) = erf_parts::<FMA>(a);
+    let erfc_a = if a <= ERF_SPLIT {
+        1.0 - erf_low
+    } else {
+        erfc_high
+    };
+    // Past the fitted range, snap to zero rather than keep the clamped value.
+    // The caller scales by `0.5 * x` and `x` is `sqrt(2) * v`, so `x` grows
+    // linearly while `erfc(v)` decays like `exp(-v^2)`: once the product has
+    // underflowed float32 it stays underflowed, and the clamped `erfc(11)`
+    // would be enormously too large. NaN fails this comparison and survives.
+    let erfc_a = if av > ERF_LIMIT { 0.0 } else { erfc_a };
+    if v < 0.0 { erfc_a } else { 2.0 - erfc_a }
+}
+
+/// Exact GELU: `0.5 * x * (1 + erf(x/sqrt 2))`, in float64 throughout.
+#[inline(always)]
+fn gelu_erf_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let cdf = one_plus_erf::<FMA>(xd * std::f64::consts::FRAC_1_SQRT_2);
+    (0.5 * xd * cdf) as f32
+}
+
+/// Clamp on the tanh-GELU inner argument. It only has to be wide enough that
+/// `1 + tanh(v)` has already underflowed the float32 result, which happens far
+/// inside the range where `2^n` still fits an exponent field: `v = -100` gives
+/// `1 + tanh(v) ~ 1e-87`, and the `x` that produces it is about -14.
+const GELU_TANH_LIMIT: f64 = 100.0;
+
+/// Tanh-approximation GELU:
+/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 x^3)))`.
+///
+/// Written as `x * e/(e+1)` with `e = exp(2v)`, which is the same function
+/// with the cancellation taken out: `1 + tanh(v)` collapses to zero for
+/// negative `v`, and `e` comes straight from the reduction with its digits
+/// intact. The old scalar path computed `1 + tanhf(v)` in float32 and returned
+/// exactly 0 from about `x = -5.5` down.
+#[inline(always)]
+fn gelu_tanh_one<const FMA: bool>(x: f32) -> f32 {
+    const COEFF: f64 = 0.7978845608028654; // sqrt(2/pi)
+    const CUBIC: f64 = 0.044715;
+    let xd = x as f64;
+    let inner = COEFF * fma_or::<FMA>(CUBIC * xd, xd * xd, xd);
+    let (two_pow_n, r) = reduce_exp::<FMA>(inner.clamp(-GELU_TANH_LIMIT, GELU_TANH_LIMIT) * 2.0);
+    let e = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    // Below the clamp the factor has already underflowed the float32 result,
+    // so make it exactly zero rather than a clamped floor that an arbitrarily
+    // large `x` could scale back up. This also keeps `x = -inf` at NaN, which
+    // is what both the scalar path this replaces and the exact GELU return.
+    // NaN fails the comparison and carries through the other way.
+    let factor = if inner < -GELU_TANH_LIMIT {
+        0.0
+    } else {
+        e / (e + 1.0)
+    };
+    (xd * factor) as f32
+}
+
+/// Generate the block loop LLVM vectorizes, plus one compilation of it per
+/// instruction set. Every kernel in this module is the same shape: a
+/// branch-free element function, wrapped in a loop, compiled several times.
+macro_rules! block_kernel {
+    ($block:ident, $one:ident, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            debug_assert_eq!(input.len(), out.len());
+            for (o, &x) in out.iter_mut().zip(input.iter()) {
+                o.write($one::<FMA>(x));
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(input, out)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(input, out)
+        }
+    };
+}
+
+block_kernel!(tanh_block, tanh_one, tanh_block_avx512, tanh_block_avx2);
+block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
+block_kernel!(
+    gelu_erf_block,
+    gelu_erf_one,
+    gelu_erf_block_avx512,
+    gelu_erf_block_avx2
+);
+block_kernel!(
+    gelu_tanh_block,
+    gelu_tanh_one,
+    gelu_tanh_block_avx512,
+    gelu_tanh_block_avx2
+);
+
+/// Dispatch one selected backend to the right compilation of a kernel.
+macro_rules! dispatch {
+    ($self:expr, $input:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {
+        match $self.0 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `select` returned this variant only after
+            // `is_x86_feature_detected!` confirmed avx512f on this CPU.
+            Backend::Avx512 => unsafe { $avx512($input, $out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as above, for avx2 and fma.
+            Backend::Avx2Fma => unsafe { $avx2($input, $out) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::NativeFma => $block::<true>($input, $out),
+            Backend::Portable => $block::<false>($input, $out),
+        }
+    };
+}
+
+/// Which compilation of the block kernels this CPU gets. Resolved once per
+/// operation by [`F32Kernel::select`], not once per element.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Backend {
     #[cfg(target_arch = "x86_64")]
@@ -240,11 +566,12 @@ enum Backend {
     Portable,
 }
 
-/// A selected `tanh` kernel for float32.
+/// A selected set of float32 kernels. One `select` covers every operation
+/// here, so a caller that needs two of them pays for detection once.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TanhF32Block(Backend);
+pub(crate) struct F32Kernel(Backend);
 
-impl TanhF32Block {
+impl F32Kernel {
     /// Pick the widest kernel the host supports.
     pub(crate) fn select() -> Self {
         #[cfg(target_arch = "x86_64")]
@@ -270,21 +597,57 @@ impl TanhF32Block {
     /// Write `tanh(input[i])` into every element of `out`.
     ///
     /// On return every element of `out` has been initialized, which is what
-    /// [`crate::ops::map::unary_map_blocks_threshold`] requires of it.
+    /// [`crate::ops::map::unary_map_blocks_threshold`] requires of it. The
+    /// same holds for the other three.
     #[inline]
-    pub(crate) fn apply(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
-        match self.0 {
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: `select` returned this variant only after
-            // `is_x86_feature_detected!` confirmed avx512f on this CPU.
-            Backend::Avx512 => unsafe { tanh_block_avx512(input, out) },
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: as above, for avx2 and fma.
-            Backend::Avx2Fma => unsafe { tanh_block_avx2(input, out) },
-            #[cfg(target_arch = "aarch64")]
-            Backend::NativeFma => tanh_block::<true>(input, out),
-            Backend::Portable => tanh_block::<false>(input, out),
-        }
+    pub(crate) fn tanh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            tanh_block,
+            tanh_block_avx512,
+            tanh_block_avx2
+        )
+    }
+
+    /// Write `erf(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn erf(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            erf_block,
+            erf_block_avx512,
+            erf_block_avx2
+        )
+    }
+
+    /// Write the exact GELU of every element of `input` into `out`.
+    #[inline]
+    pub(crate) fn gelu_erf(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            gelu_erf_block,
+            gelu_erf_block_avx512,
+            gelu_erf_block_avx2
+        )
+    }
+
+    /// Write the tanh-approximation GELU of every element into `out`.
+    #[inline]
+    pub(crate) fn gelu_tanh(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            gelu_tanh_block,
+            gelu_tanh_block_avx512,
+            gelu_tanh_block_avx2
+        )
     }
 }
 
@@ -292,9 +655,30 @@ impl TanhF32Block {
 mod tests {
     use super::*;
 
-    fn run(backend: Backend, xs: &[f32]) -> Vec<f32> {
+    /// Which kernel a test is exercising. Every test runs against every backend
+    /// the host supports, so a vectorized compilation that disagrees with the
+    /// portable one fails rather than passing quietly.
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Tanh,
+        Erf,
+        GeluErf,
+        GeluTanh,
+    }
+
+    fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        let k = F32Kernel(backend);
+        match op {
+            Op::Tanh => k.tanh(input, out),
+            Op::Erf => k.erf(input, out),
+            Op::GeluErf => k.gelu_erf(input, out),
+            Op::GeluTanh => k.gelu_tanh(input, out),
+        }
+    }
+
+    fn run(op: Op, backend: Backend, xs: &[f32]) -> Vec<f32> {
         let mut out = vec![MaybeUninit::uninit(); xs.len()];
-        TanhF32Block(backend).apply(xs, &mut out);
+        apply(op, backend, xs, &mut out);
         out.into_iter()
             .map(|v| unsafe { v.assume_init() })
             .collect()
@@ -318,72 +702,53 @@ mod tests {
         v
     }
 
-    fn reference(x: f32) -> f32 {
-        (x as f64).tanh() as f32
-    }
-
-    /// This module's central claim, in runnable form: every float32 value maps
-    /// to exactly the bits the scalar promotion produced, on every backend the
-    /// host supports.
-    ///
-    /// Ignored by default because it walks all 2^32 of them, which takes about
-    /// a minute on four cores. Run it with:
-    ///
-    /// ```text
-    /// cargo test -p engine --release -- --ignored tanh_matches_promoted_reference_exhaustively
-    /// ```
-    #[test]
-    #[ignore = "sweeps all 2^32 float32 inputs; takes ~1 minute"]
-    fn tanh_matches_promoted_reference_exhaustively() {
-        use rayon::prelude::*;
-
-        const BLOCK: u64 = 8192;
-        const BLOCKS: u64 = (1u64 << 32) / BLOCK;
-
-        for backend in available() {
-            let bad: u64 = (0..BLOCKS)
-                .into_par_iter()
-                .map(|b| {
-                    let base = b * BLOCK;
-                    let xs: Vec<f32> = (0..BLOCK)
-                        .map(|k| f32::from_bits((base + k) as u32))
-                        .collect();
-                    let mut out = vec![MaybeUninit::uninit(); xs.len()];
-                    TanhF32Block(backend).apply(&xs, &mut out);
-                    xs.iter()
-                        .zip(out)
-                        .filter(|&(&x, ref o)| {
-                            // SAFETY: `apply` initialized every element.
-                            let got = unsafe { o.assume_init() };
-                            let want = reference(x);
-                            // NaN payloads are not part of the contract; every
-                            // other value must match bit for bit.
-                            got.to_bits() != want.to_bits() && !(got.is_nan() && want.is_nan())
-                        })
-                        .count() as u64
-                })
-                .sum();
-            assert_eq!(bad, 0, "{backend:?}: {bad} of 2^32 inputs differ");
+    /// The float64 routine each kernel is measured against, rounded once.
+    fn reference(op: Op, x: f32) -> f32 {
+        let xd = x as f64;
+        match op {
+            Op::Tanh => xd.tanh() as f32,
+            Op::Erf => libm::erf(xd) as f32,
+            // Both GELU references are written cancellation-free, matching
+            // the kernels. `1 + erf(u)` is `erfc(-u)`, and
+            // `0.5*(1 + tanh(v))` is the logistic `1/(1 + exp(-2v))`. Spelling
+            // them the naive way would make the *reference* the inaccurate
+            // side of the comparison in the negative tail.
+            Op::GeluErf => (0.5 * xd * libm::erfc(-xd * std::f64::consts::FRAC_1_SQRT_2)) as f32,
+            Op::GeluTanh => {
+                let inner = 0.7978845608028654 * (xd + 0.044715 * xd * xd * xd);
+                (xd / (1.0 + (-2.0 * inner).exp())) as f32
+            }
         }
     }
 
-    /// The whole point of the kernel: same bits as the routine it replaces.
-    /// The exhaustive 2^32 sweep lives outside the test suite (it takes ~50s);
-    /// this covers each regime and every boundary the code branches on.
-    #[test]
-    fn tanh_matches_promoted_reference() {
+    /// Signed distance in representable float32 steps.
+    fn ulps_apart(a: f32, b: f32) -> i64 {
+        let key = |v: f32| -> i64 {
+            let bits = v.to_bits() as i32;
+            if bits < 0 {
+                (i32::MIN as i64) - (bits as i64)
+            } else {
+                bits as i64
+            }
+        };
+        (key(a) - key(b)).abs()
+    }
+
+    /// A spread of inputs covering every regime these kernels branch on.
+    fn sample_inputs() -> Vec<f32> {
         let mut xs: Vec<f32> = Vec::new();
-        // Dense sweep across the interesting range, crossing every `n` step.
         for i in -200_000i32..200_000 {
             xs.push(i as f32 * 1e-4);
         }
-        // Decades from subnormal to overflow-clamp and beyond.
         for e in -45i32..40 {
             let m = (2.0f64).powi(e) as f32;
             xs.extend_from_slice(&[m, -m, m * 1.5, -m * 1.5, m * 1.9999, -m * 1.9999]);
         }
-        // The clamp boundary and the point where the result reaches 1.0.
-        for &b in &[8.9f32, 9.0, 9.010913, 9.011, 9.1, 9.9, 10.0, 10.1, 20.0] {
+        // The clamp and split boundaries of both kernels.
+        for &b in &[
+            1.9f32, 1.9999, 2.0, 2.0001, 2.1, 3.9, 3.99, 4.0, 4.01, 8.9, 9.010913, 9.011, 10.0,
+            10.1, 20.0,
+        ] {
             xs.extend_from_slice(&[b, -b]);
         }
         xs.extend_from_slice(&[
@@ -398,54 +763,186 @@ mod tests {
             f32::INFINITY,
             f32::NEG_INFINITY,
         ]);
+        xs
+    }
 
+    /// `tanh`'s contract is the strong one: the same bits as the scalar
+    /// promotion it replaced. The exhaustive sweep lives below; this covers
+    /// each regime and every boundary on an ordinary test run.
+    #[test]
+    fn tanh_matches_promoted_reference() {
+        let xs = sample_inputs();
         for backend in available() {
-            for (&x, got) in xs.iter().zip(run(backend, &xs)) {
+            for (&x, got) in xs.iter().zip(run(Op::Tanh, backend, &xs)) {
                 assert_eq!(
                     got.to_bits(),
-                    reference(x).to_bits(),
-                    "{backend:?}: tanh({x:e}) gave {got:e}, want {:e}",
-                    reference(x)
+                    reference(Op::Tanh, x).to_bits(),
+                    "{backend:?}: tanh({x:e})"
                 );
             }
         }
     }
 
+    /// `erf` and the two GELUs are not bit-exact against float64 -- they are
+    /// within one ulp of it, which is still far better than the scalar `erff`
+    /// and `tanhf` they replaced (2.97% of all float32 inputs misrounded).
     #[test]
-    fn tanh_propagates_nan() {
-        for backend in available() {
-            let out = run(backend, &[f32::NAN, -f32::NAN, 0.5]);
-            assert!(out[0].is_nan(), "{backend:?}: NaN did not propagate");
-            assert!(out[1].is_nan(), "{backend:?}: -NaN did not propagate");
-            assert_eq!(out[2].to_bits(), reference(0.5).to_bits());
-        }
-    }
-
-    /// Odd symmetry is a property callers rely on, and it is not automatic:
-    /// the argument reduction rounds `n` independently for `x` and `-x`.
-    #[test]
-    fn tanh_is_odd() {
-        for backend in available() {
-            let xs: Vec<f32> = (1..5000).map(|i| i as f32 * 3e-3).collect();
-            let neg: Vec<f32> = xs.iter().map(|v| -v).collect();
-            for (p, n) in run(backend, &xs).into_iter().zip(run(backend, &neg)) {
-                assert_eq!(p.to_bits(), (-n).to_bits(), "asymmetric at {p:e}");
-            }
-        }
-    }
-
-    /// Blocks are handed out by rayon at arbitrary lengths, so the tail past
-    /// the last full vector has to be right too.
-    #[test]
-    fn tanh_handles_every_block_length() {
-        let xs: Vec<f32> = (0..133).map(|i| (i as f32 - 66.0) * 0.21).collect();
-        for backend in available() {
-            for len in 0..xs.len() {
-                let got = run(backend, &xs[..len]);
-                for (&x, g) in xs[..len].iter().zip(got) {
-                    assert_eq!(g.to_bits(), reference(x).to_bits(), "len {len}, x {x:e}");
+    fn erf_and_gelu_stay_within_one_ulp() {
+        let xs = sample_inputs();
+        for op in [Op::Erf, Op::GeluErf, Op::GeluTanh] {
+            for backend in available() {
+                for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
+                    let want = reference(op, x);
+                    if want.is_nan() {
+                        assert!(got.is_nan(), "{op:?}/{backend:?}: {x:e} -> {got:e}");
+                        continue;
+                    }
+                    assert!(
+                        ulps_apart(got, want) <= 1,
+                        "{op:?}/{backend:?}: f({x:e}) gave {got:e}, want {want:e}"
+                    );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn propagates_nan() {
+        for op in [Op::Tanh, Op::Erf, Op::GeluErf, Op::GeluTanh] {
+            for backend in available() {
+                let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
+                assert!(out[0].is_nan(), "{op:?}/{backend:?}: NaN");
+                assert!(out[1].is_nan(), "{op:?}/{backend:?}: -NaN");
+                assert!(out[2].is_finite());
+            }
+        }
+    }
+
+    /// Odd symmetry is not automatic: the argument reduction rounds `n`
+    /// independently for `x` and `-x`, and erf picks its branch from `|x|`.
+    #[test]
+    fn odd_functions_stay_odd() {
+        let xs: Vec<f32> = (1..5000).map(|i| i as f32 * 1e-3).collect();
+        let neg: Vec<f32> = xs.iter().map(|v| -v).collect();
+        for op in [Op::Tanh, Op::Erf, Op::GeluErf, Op::GeluTanh] {
+            // GELU is not odd, but x*Phi(x) has x*Phi(-x) as its mirror; only
+            // the genuinely odd kernels are checked for exact antisymmetry.
+            if matches!(op, Op::GeluErf | Op::GeluTanh) {
+                continue;
+            }
+            for backend in available() {
+                for (p, n) in run(op, backend, &xs)
+                    .into_iter()
+                    .zip(run(op, backend, &neg))
+                {
+                    assert_eq!(p.to_bits(), (-n).to_bits(), "{op:?}/{backend:?}: {p:e}");
+                }
+            }
+        }
+    }
+
+    /// Signed zero survives, which the `copysign` at the end of each core is
+    /// there for -- the arithmetic loses it (`+0.0 + -0.0` is `+0.0`).
+    #[test]
+    fn signed_zero_survives() {
+        for op in [Op::Tanh, Op::Erf, Op::GeluErf, Op::GeluTanh] {
+            for backend in available() {
+                let out = run(op, backend, &[0.0, -0.0]);
+                assert!(
+                    out[0] == 0.0 && !out[0].is_sign_negative(),
+                    "{op:?}/{backend:?}: +0.0 -> {:e}",
+                    out[0]
+                );
+                assert!(
+                    out[1] == 0.0 && out[1].is_sign_negative(),
+                    "{op:?}/{backend:?}: -0.0 -> {:e}",
+                    out[1]
+                );
+            }
+        }
+    }
+
+    /// Blocks arrive from rayon at arbitrary lengths, so the tail past the last
+    /// full vector has to be right too.
+    #[test]
+    fn handles_every_block_length() {
+        let xs: Vec<f32> = (0..133).map(|i| (i as f32 - 66.0) * 0.11).collect();
+        for op in [Op::Tanh, Op::Erf, Op::GeluErf, Op::GeluTanh] {
+            for backend in available() {
+                for len in 0..xs.len() {
+                    for (&x, g) in xs[..len].iter().zip(run(op, backend, &xs[..len])) {
+                        assert!(
+                            ulps_apart(g, reference(op, x)) <= 1,
+                            "{op:?}/{backend:?}: len {len}, x {x:e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk the whole float32 domain through every backend.
+    ///
+    /// Ignored by default: about a minute per kernel on four cores. Run with
+    ///
+    /// ```text
+    /// cargo test -p engine --release --lib -- --ignored exhaustively
+    /// ```
+    fn sweep(op: Op, backend: Backend) -> (i64, u64) {
+        use rayon::prelude::*;
+        const BLOCK: u64 = 8192;
+        const BLOCKS: u64 = (1u64 << 32) / BLOCK;
+        (0..BLOCKS)
+            .into_par_iter()
+            .map(|b| {
+                let base = b * BLOCK;
+                let xs: Vec<f32> = (0..BLOCK)
+                    .map(|k| f32::from_bits((base + k) as u32))
+                    .collect();
+                let mut out = vec![MaybeUninit::uninit(); xs.len()];
+                apply(op, backend, &xs, &mut out);
+                xs.iter()
+                    .zip(out)
+                    .fold((0i64, 0u64), |(worst, n), (&x, o)| {
+                        // SAFETY: `apply` initialized every element.
+                        let got = unsafe { o.assume_init() };
+                        let want = reference(op, x);
+                        if got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()) {
+                            (worst, n)
+                        } else {
+                            (worst.max(ulps_apart(got, want)), n + 1)
+                        }
+                    })
+            })
+            .reduce(|| (0, 0), |a, b| (a.0.max(b.0), a.1 + b.1))
+    }
+
+    #[test]
+    #[ignore = "sweeps all 2^32 float32 inputs; takes ~1 minute"]
+    fn tanh_matches_promoted_reference_exhaustively() {
+        for backend in available() {
+            let (worst, differing) = sweep(Op::Tanh, backend);
+            assert_eq!(
+                differing, 0,
+                "{backend:?}: {differing} of 2^32 differ, worst {worst} ulp"
+            );
+        }
+    }
+
+    /// `erf`'s claim is weaker than `tanh`'s and stated as a number: at most one
+    /// ulp, on at most a couple of hundred of the 4.3 billion inputs. The bound
+    /// is loose enough not to be a rounding-mode tripwire and tight enough that
+    /// a real regression -- `libm::erff` misrounds 127.6 million -- fails it.
+    #[test]
+    #[ignore = "sweeps all 2^32 float32 inputs; takes ~1 minute"]
+    fn erf_is_almost_always_correctly_rounded_exhaustively() {
+        for backend in available() {
+            let (worst, differing) = sweep(Op::Erf, backend);
+            assert!(worst <= 1, "{backend:?}: worst error {worst} ulp");
+            assert!(
+                differing <= 500,
+                "{backend:?}: {differing} of 2^32 not correctly rounded"
+            );
         }
     }
 }
