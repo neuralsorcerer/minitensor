@@ -102,7 +102,11 @@ pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, f32::tanh);
+    let out = unary_map_threshold(
+        input_data,
+        EXPENSIVE_PAR_THRESHOLD,
+        crate::ops::activation::tanh_promoted_f32,
+    );
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
