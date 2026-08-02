@@ -90,7 +90,23 @@ pub(crate) fn extremum_along_dim_with_indices(
                     indices,
                     &layout,
                     seed,
-                    move |v: $ty, b: $ty| if is_max { v > b } else { v < b },
+                    // NaN folded in rather than left to the short-circuit, so
+                    // the memory-order path in `reduce_arg_along_dim_par` --
+                    // which has no per-element early exit -- stays correct. A
+                    // NaN beats any real value, and a later NaN does not beat an
+                    // earlier one, which reproduces the break-on-first-NaN index
+                    // the short-circuit produced.
+                    move |v: $ty, b: $ty| {
+                        if v.is_nan() {
+                            !b.is_nan()
+                        } else if b.is_nan() {
+                            false
+                        } else if is_max {
+                            v > b
+                        } else {
+                            v < b
+                        }
+                    },
                     |v: $ty| if v.is_nan() { Some(<$ty>::NAN) } else { None },
                 );
             }

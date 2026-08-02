@@ -51,6 +51,22 @@ pub(crate) fn reduction_layout(
     })
 }
 
+/// Reduced-axis width past which the memory-order path wins.
+///
+/// Not simply "wherever striding hurts". The blocked path parallelizes over
+/// bands of the *output*, so a narrow output has few bands to hand out: at
+/// width 16 it collapses to a single task and ran slower than the strided walk
+/// it replaced (3.2ms against 2.3ms on a 131072x16 f32 reduction), even though
+/// the strided walk touches a new cache line every step. The strided path
+/// parallelizes over output elements instead, which is the better trade while
+/// the output is small. Measured crossover on f32: 16 and 64 favour striding,
+/// 1024 and 32768 favour blocking by 3.5x and 1.6x.
+const BLOCKED_INNER_MIN: usize = 256;
+
+/// Floor on a column band, so a narrow slab is not split into slivers whose
+/// per-task overhead exceeds the work.
+const BLOCKED_MIN_BAND: usize = 64;
+
 /// Reduce `input` along a dimension into `output`, parallelizing over output
 /// elements (one rayon task per output position, each walking its column of the
 /// reduced dimension with a running offset). `combine` folds the accumulator
@@ -72,6 +88,61 @@ fn reduce_along_dim_par<T, C, S>(
     let inner = layout.inner;
     let dim_size = layout.dim_size;
     let outer_stride = layout.outer_stride;
+
+    // Walking one output at a time strides the input by `inner`, so with a wide
+    // reduced axis every step lands on a different cache line: `max(dim=0)` on a
+    // 2048x1024 f32 matrix took 4.3ms against 0.23ms for `sum` over the same
+    // axis, which walks row-major instead. The cost tracked `inner` exactly --
+    // 19x at 1024, 2.7x at 64, gone by 8 -- so above that width the loops are
+    // swapped: stream the input in memory order and keep `inner` accumulators
+    // live. `combine` alone decides the result here; the short-circuit is an
+    // optimization for the strided path, and every caller's combine is correct
+    // without it.
+    if inner >= BLOCKED_INNER_MIN {
+        let outer = if outer_stride == 0 {
+            1
+        } else {
+            input.len() / outer_stride.max(1)
+        };
+        if outer > 1 {
+            output
+                .par_chunks_mut(inner)
+                .enumerate()
+                .for_each(|(o, row)| {
+                    let base = o * outer_stride;
+                    row.fill(init);
+                    for step in 0..dim_size {
+                        let slab = &input[base + step * inner..][..inner];
+                        for (acc, &value) in row.iter_mut().zip(slab) {
+                            *acc = combine(*acc, value);
+                        }
+                    }
+                });
+        } else {
+            // A single slab has no outer parallelism, so split the accumulator
+            // range into column bands instead; each band still streams its own
+            // columns in order.
+            let band = inner
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(BLOCKED_MIN_BAND);
+            output
+                .par_chunks_mut(band)
+                .enumerate()
+                .for_each(|(index, cols)| {
+                    let start = index * band;
+                    let width = cols.len();
+                    cols.fill(init);
+                    for step in 0..dim_size {
+                        let slab = &input[step * inner + start..][..width];
+                        for (acc, &value) in cols.iter_mut().zip(slab) {
+                            *acc = combine(*acc, value);
+                        }
+                    }
+                });
+        }
+        return;
+    }
+
     output
         .par_iter_mut()
         .enumerate()
@@ -117,6 +188,48 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
     let inner = layout.inner;
     let dim_size = layout.dim_size;
     let outer_stride = layout.outer_stride;
+
+    // Same swap as `reduce_along_dim_par`, carrying the winning index alongside
+    // the value. This is the path Python's `max(dim=...)` actually takes, since
+    // it returns `(values, indices)`.
+    if inner >= BLOCKED_INNER_MIN {
+        let outer = if outer_stride == 0 {
+            1
+        } else {
+            input.len() / outer_stride.max(1)
+        };
+        let band = if outer > 1 {
+            inner
+        } else {
+            inner
+                .div_ceil(rayon::current_num_threads().max(1))
+                .max(BLOCKED_MIN_BAND)
+        };
+        values
+            .par_chunks_mut(band)
+            .zip(indices.par_chunks_mut(band))
+            .enumerate()
+            .for_each(|(index, (vals, idxs))| {
+                let flat = index * band;
+                let o = flat / inner;
+                let start = flat % inner;
+                let width = vals.len();
+                let base = o * outer_stride + start;
+                vals.fill(init);
+                idxs.fill(0);
+                for step in 0..dim_size {
+                    let slab = &input[base + step * inner..][..width];
+                    for (lane, &value) in slab.iter().enumerate() {
+                        if better(value, vals[lane]) {
+                            vals[lane] = value;
+                            idxs[lane] = step as i64;
+                        }
+                    }
+                }
+            });
+        return;
+    }
+
     values
         .par_iter_mut()
         .zip(indices.par_iter_mut())
@@ -336,7 +449,20 @@ fn extremum_along_dim(
                 output,
                 &layout,
                 seed,
-                move |a: $ty, v: $ty| if is_max { a.max(v) } else { a.min(v) },
+                // NaN-propagating on its own rather than relying on the
+                // short-circuit below: the blocked path in
+                // `reduce_along_dim_par` walks memory in order and has no
+                // per-element early exit to lean on. `a.max(v)` would be wrong
+                // here -- it returns the *non*-NaN operand.
+                move |a: $ty, v: $ty| {
+                    if a != a || v != v {
+                        <$ty>::NAN
+                    } else if (v > a) == is_max && v != a {
+                        v
+                    } else {
+                        a
+                    }
+                },
                 |v: $ty| if v.is_nan() { Some(<$ty>::NAN) } else { None },
             );
         }};

@@ -108,3 +108,81 @@ def test_integer_extremes_are_representable_winners(dtype):
     tensor = mt.from_numpy(values)
     assert tensor.max().numpy() == info.max
     assert tensor.min().numpy() == info.min
+
+
+# `max(dim=...)` used to walk one output at a time, striding the input by the
+# row width, so `max(dim=0)` on a 2048x1024 f32 matrix cost 4.3ms against 0.23ms
+# for `sum` over the same axis. Above a threshold the loops are now swapped to
+# stream memory in order. That path computes a whole band of outputs at once, so
+# the index bookkeeping is what needs pinning: ties must still resolve to the
+# first winner, and a NaN must still take the first NaN's position.
+BLOCKED_SHAPES = [
+    (2048, 1024),  # wide: takes the memory-order path
+    (5, 257),      # just over the threshold, with a remainder band
+    (2048, 64),    # narrow: stays on the strided path
+    (131072, 16),  # narrow and tall
+    (64, 32, 128),  # rank 3, so `inner` differs per dim
+]
+
+
+@pytest.mark.parametrize("shape", BLOCKED_SHAPES)
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
+def test_dim_reduction_matches_numpy_values_and_indices(shape, dtype):
+    values = _sample(int(np.prod(shape)), dtype, np.random.default_rng(4)).reshape(shape)
+    tensor = mt.from_numpy(values)
+    for dim in range(len(shape)):
+        got_values, got_indices = tensor.max(dim, False)
+        np.testing.assert_array_equal(got_values.numpy(), np.max(values, axis=dim))
+        np.testing.assert_array_equal(got_indices.numpy(), np.argmax(values, axis=dim))
+        np.testing.assert_array_equal(tensor.argmax(dim).numpy(), np.argmax(values, axis=dim))
+
+
+@pytest.mark.parametrize("shape", [(2048, 1024), (5, 257), (131072, 16)])
+def test_ties_resolve_to_the_first_index(shape):
+    # Every element equal, so the index is decided purely by the scan order.
+    values = np.full(shape, 7.0, dtype=np.float32)
+    tensor = mt.from_numpy(values)
+    for dim in range(len(shape)):
+        _, indices = tensor.max(dim, False)
+        np.testing.assert_array_equal(indices.numpy(), np.argmax(values, axis=dim))
+
+
+@pytest.mark.parametrize("shape", [(512, 1024), (5, 257)])
+@pytest.mark.parametrize("row", ["first", "middle", "last"])
+def test_a_nan_takes_the_first_nan_position(shape, row):
+    # The memory-order path has no early exit, so NaN is folded into the
+    # comparison instead. A later NaN must not displace an earlier one.
+    values = np.random.default_rng(5).standard_normal(shape).astype(np.float32)
+    index = {"first": 0, "middle": shape[0] // 2, "last": shape[0] - 1}[row]
+    values[index, :] = np.nan
+    tensor = mt.from_numpy(values)
+
+    got_values, got_indices = tensor.max(0, False)
+    assert np.all(np.isnan(got_values.numpy()))
+    np.testing.assert_array_equal(got_indices.numpy(), np.argmax(values, axis=0))
+
+
+def test_indices_do_not_depend_on_the_thread_count():
+    # The band split follows `rayon::current_num_threads`, so a result that
+    # varied with it would be a reproducibility bug rather than a wrong answer.
+    import os
+    import subprocess
+    import sys
+    import zlib
+
+    script = (
+        "import numpy as np, minitensor as mt, zlib\n"
+        "a = np.random.default_rng(3).standard_normal((512, 1024)).astype(np.float32)\n"
+        "a[100, 200] = a[300, 200]\n"
+        "v, i = mt.from_numpy(a).max(0, False)\n"
+        "print(zlib.crc32(v.numpy().tobytes()), zlib.crc32(i.numpy().tobytes()))\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def run(threads):
+        env = dict(os.environ, RAYON_NUM_THREADS=threads, PYTHONPATH=root)
+        return subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True
+        ).stdout.strip()
+
+    assert run("1") == run("2") == run("8")
