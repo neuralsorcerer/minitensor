@@ -327,41 +327,34 @@ macro_rules! float_unary_kernel_param {
     };
 }
 
-/// `sinhf`, `expm1f` and `log1pf` in glibc -- and `tanhf`, which is now handled
-/// separately -- are meaningfully less accurate than computing in `f64` and
-/// rounding once at the end. Rounding a correctly-computed `f64` lands within
-/// half an ulp of the true `f32` result, which is why worst relative error
-/// against an `f64` reference drops from 1.6e-07 to 5.9e-08 for tanh, 1.4e-07
-/// to 6.0e-08 for sinh, and 8.0e-08 to 6.0e-08 for expm1 and log1p. That
-/// argument is about rounding, so it holds on any libm. Measured over a
-/// 500k-element sample, this puts all four ahead of NumPy's own accuracy
-/// (5.9e-08 against its 1.1e-07 to 1.8e-07).
+/// `log1pf` in glibc -- and `tanhf`, `sinhf` and `expm1f`, which are now
+/// handled by vectorized kernels -- is meaningfully less accurate than
+/// computing in `f64` and rounding once at the end. Rounding a
+/// correctly-computed `f64` lands within half an ulp of the true `f32` result,
+/// which is why worst relative error against an `f64` reference drops from
+/// 1.6e-07 to 5.9e-08 for tanh, 1.4e-07 to 6.0e-08 for sinh, and 8.0e-08 to
+/// 6.0e-08 for expm1 and log1p. That argument is about rounding, so it holds on
+/// any libm. Measured over a 500k-element sample, this puts all four ahead of
+/// NumPy's own accuracy (5.9e-08 against its 1.1e-07 to 1.8e-07).
 ///
-/// This is an accuracy change, not a speed one. A scalar micro-benchmark makes
-/// promotion look 1.06x-1.24x faster than glibc's f32 routines, but that gain
-/// does not survive into the real kernels: at 2M elements the op is bound by
-/// memory traffic and rayon's parallelism, and end-to-end timings are unchanged
-/// within noise. The justification is the error figures above; the change is
-/// worth making because it costs nothing, not because it speeds anything up.
+/// For `log1p` this remains an accuracy change, not a speed one: promotion
+/// measures 1.06x-1.24x faster than glibc's f32 routine in a scalar
+/// micro-benchmark, but that does not survive into the real kernel, which is
+/// bound by memory traffic and rayon. It is worth making because it costs
+/// nothing.
 ///
 /// It is deliberately *not* applied to the rest of the f32 math surface.
 /// `expf`, `logf`, `sinf`, `cosf` and `cbrtf` are all substantially faster than
 /// promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at equal accuracy, so the
-/// same change there would be a real regression for nothing. These four are the
-/// ones where measurement showed promotion strictly ahead.
+/// same change there would be a real regression for nothing.
 ///
-/// float32 `tanh` no longer routes through here: `ops::simd::transcendental`
-/// computes the same `f64`-then-round value with a vectorized kernel, which is
-/// bit-identical on all 2^32 inputs and roughly 10x faster. The error figures
-/// above still describe what the engine returns for it.
+/// `tanh`, `sinh` and `expm1` no longer route through here:
+/// `ops::simd::transcendental` computes the same `f64`-then-round values with
+/// vectorized kernels, bit-identical on all 2^32 inputs and several times
+/// faster. The error figures above still describe what the engine returns.
 #[inline(always)]
-fn sinh_promoted_f32(value: f32) -> f32 {
-    (value as f64).sinh() as f32
-}
-
-#[inline(always)]
-fn expm1_promoted_f32(value: f32) -> f32 {
-    (value as f64).exp_m1() as f32
+fn log1p_promoted_f32(value: f32) -> f32 {
+    (value as f64).ln_1p() as f32
 }
 
 float_unary_kernel!(exp_f32, as_f32_slice, f32, Float32, "f32", f32::exp);
@@ -378,8 +371,7 @@ float_unary_kernel!(log1p_f32, as_f32_slice, f32, Float32, "f32", |val: f32| {
     } else if val < -1.0 {
         f32::NAN
     } else {
-        // See `tanh_promoted_f32`: log1pf is slower and less accurate here.
-        (val as f64).ln_1p() as f32
+        log1p_promoted_f32(val)
     }
 });
 
@@ -430,14 +422,24 @@ float_unary_kernel!(erfc_f32, as_f32_slice, f32, Float32, "f32", erfcf);
 
 float_unary_kernel!(erfc_f64, as_f64_slice, f64, Float64, "f64", erfc);
 
-float_unary_kernel!(
-    expm1_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    expm1_promoted_f32
-);
+/// Vectorized; bit-identical to the `expm1_promoted_f32` it replaces.
+pub(crate) fn expm1_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `expm1` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.expm1(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1);
 
@@ -465,18 +467,47 @@ float_unary_kernel!(atan_f32, as_f32_slice, f32, Float32, "f32", f32::atan);
 
 float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan);
 
-float_unary_kernel!(
-    sinh_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    sinh_promoted_f32
-);
+/// Vectorized; bit-identical to the `sinh_promoted_f32` it replaces.
+pub(crate) fn sinh_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `sinh` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.sinh(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(sinh_f64, as_f64_slice, f64, Float64, "f64", f64::sinh);
 
-float_unary_kernel!(cosh_f32, as_f32_slice, f32, Float32, "f32", f32::cosh);
+/// Vectorized. Unlike its neighbours this replaces glibc's `coshf` rather
+/// than a promoted scalar, so it is an accuracy gain as well: see the module
+/// docs in `ops::simd::transcendental`.
+pub(crate) fn cosh_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `cosh` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.cosh(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(cosh_f64, as_f64_slice, f64, Float64, "f64", f64::cosh);
 

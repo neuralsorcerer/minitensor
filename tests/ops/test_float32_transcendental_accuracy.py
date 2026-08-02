@@ -180,6 +180,62 @@ def _tanh_reference(sample):
     return np.tanh(sample.astype(np.float64)).astype(np.float32)
 
 
+# `expm1`, `sinh` and `cosh` are vectorized on the same `expm1` core and carry
+# the same bit-identity contract. `expm1` and `sinh` replaced promoted scalars,
+# so this preserves what they already returned; `cosh` replaced glibc's `coshf`,
+# which misrounds 22,628,918 of the 2^32 float32 inputs, so there it is an
+# accuracy gain too.
+_EXP_FAMILY = [
+    ("expm1", lambda t: t.expm1(), np.expm1),
+    ("sinh", lambda t: t.sinh(), np.sinh),
+    ("cosh", lambda t: t.cosh(), np.cosh),
+]
+
+
+@pytest.mark.parametrize("name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY])
+@pytest.mark.parametrize("length", [1, 7, 8, 17, 1023, 1024, 16383, 16384, 40000])
+def test_exp_family_is_bit_identical_to_the_float64_reference(name, op, reference, length):
+    rng = np.random.default_rng(777 + length)
+    # Across the whole useful range: near zero where `expm1` must not lose the
+    # leading term, the mid range that steps through every `n`, and out past
+    # where the float32 result overflows to infinity.
+    sample = np.concatenate(
+        [
+            rng.standard_normal(length) * 5.0,
+            rng.standard_normal(length) * 1e-5,
+            rng.uniform(-95.0, 95.0, length),
+        ]
+    ).astype(np.float32)[:length]
+
+    got = op(mt.from_numpy(sample)).numpy()
+    with np.errstate(over="ignore"):  # |x| up to 95 overflows float32 for cosh/sinh
+        want = reference(sample.astype(np.float64)).astype(np.float32)
+    mismatched = got.view(np.uint32) != want.view(np.uint32)
+    assert not mismatched.any(), (
+        f"{name} length {length}: {int(mismatched.sum())} of {length} differ, "
+        f"first at x={sample[mismatched][0]!r}"
+    )
+
+
+@pytest.mark.parametrize("name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY])
+def test_exp_family_handles_the_saturating_ends(name, op, reference):
+    """Overflow to infinity, and the underflow that `sinh` used to get wrong.
+
+    Evaluating `sinh` as `u(u+2)/(2(u+1))` at negative `x` divides by `exp(x)`,
+    which underflows to zero -- `sinh(-100)` came back as -inf until the kernel
+    was made to work on `|x|` and restore the sign afterwards.
+    """
+    sample = np.array(
+        [0.0, -0.0, 1e-30, -1e-30, 88.0, -88.0, 89.0, -89.0, 100.0, -100.0, 1e30, -1e30],
+        dtype=np.float32,
+    )
+    got = op(mt.from_numpy(sample)).numpy()
+    with np.errstate(over="ignore"):  # the reference overflows here on purpose
+        want = reference(sample.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got, want, err_msg=f"{name} at the saturating ends")
+    assert np.all(np.isfinite(got) | np.isinf(want)), f"{name} produced a spurious infinity"
+
+
 @pytest.mark.parametrize("length", _TANH_LENGTHS)
 def test_vectorized_tanh_is_bit_identical_to_the_promoted_reference(length):
     rng = np.random.default_rng(20240607 + length)
