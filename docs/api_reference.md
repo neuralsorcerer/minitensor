@@ -2001,8 +2001,36 @@ Feature flags for the `engine` crate:
 | `metal` | no | Metal scaffolding. **Apple targets only** — the dependency is declared under `cfg(target_vendor = "apple")`, so on other platforms the feature resolves to nothing rather than failing the build. |
 | `opencl` | no | OpenCL scaffolding via `opencl3`. |
 | `gpu` | no | `cuda` + `metal` + `opencl`; builds on every platform, contributing whichever of the three that platform can have. |
-| `blas` | no | Routes GEMM through a system OpenBLAS (`libopenblas-dev` or equivalent). `openblas-src` is pinned to `system`, so the build links the installed library rather than downloading and compiling OpenBLAS itself. |
+| `blas` | no | Routes GEMM through a system OpenBLAS (`libopenblas-dev` or equivalent). `openblas-src` is pinned to `system`, so the build links the installed library rather than downloading and compiling OpenBLAS itself. Worth roughly 1.4x-2.0x on square `f32` GEMM — see below. |
 | `dynamic-loading` | no | Runtime plugin loading (`docs/plugin_system.md`). |
+
+### Building the Python extension with BLAS
+
+The feature table above describes the engine crate, but the same names work
+when building the Python extension — they are forwarded by the bindings:
+
+```text
+sudo apt-get install libopenblas-dev        # or your platform's equivalent
+maturin develop --release --features blas
+```
+
+Without it, GEMM uses `matrixmultiply`, which is pure Rust and needs no system
+library. With it, square `f32` matmul is roughly at parity with NumPy, which
+links OpenBLAS itself; without it MiniTensor is 1.5x-2.4x behind. Measured on
+x86-64 with OpenBLAS 0.3.26, each timing taken in its own process so the two
+thread pools do not contend:
+
+| size | default | `--features blas` | NumPy |
+| --- | --- | --- | --- |
+| 256 | 0.41 ms | 0.21 ms | 0.11 ms |
+| 512 | 1.76 ms | 0.94 ms | 0.67 ms |
+| 1024 | 9.22 ms | 5.18 ms | 4.82 ms |
+| 2048 | 55.2 ms | 37.1 ms | 36.6 ms |
+
+The gap that remains at 256 is fixed per-call overhead, not GEMM throughput; it
+stops mattering by 1024. Everything else in the library is unaffected, so this
+is worth enabling only if matmul dominates your workload and you are willing to
+carry the system dependency.
 
 Neither `hardware` nor `debug` is used by any tensor or autograd execution
 path, so a Rust consumer embedding the engine can drop both:

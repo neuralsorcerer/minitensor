@@ -72,6 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -84,6 +87,17 @@ jobs:
         run: cargo clippy -p engine --all-targets --features blas -- -D warnings
       - name: Run tests against BLAS
         run: cargo test -p engine --features blas
+      # Every job above passes `-p engine`, which is how `blas` came to be
+      # unreachable from the Python extension without anyone noticing: the
+      # bindings crate never forwarded it, so `maturin develop --features blas`
+      # failed with "the package 'bindings' does not contain this feature".
+      # The extension is how almost everyone builds this, so it needs its own
+      # check rather than being inferred from the engine's.
+      - name: Build the Python extension with BLAS
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "maturin[patchelf]"
+          maturin build --release --features blas --out /tmp/blas-wheel
 
   # examples/rust_plugin_example is its own workspace, so neither the
   # `cargo fmt --all` / `cargo clippy` in pre-commit nor the workspace clippy

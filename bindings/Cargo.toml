@@ -32,3 +32,12 @@ extension-module = ["pyo3/extension-module"]
 # (`unresolved import engine::load_plugin`), so Python plugin loading could
 # never be turned on at all.
 dynamic-loading = ["engine/dynamic-loading"]
+# Same forwarding requirement, and the same bug: the engine's `blas` feature was
+# reachable from `cargo`, and every CI job that exercised it used `-p engine`, so
+# nobody noticed that `maturin develop --features blas` fails outright --
+# "the package 'bindings' does not contain this feature". The Python extension is
+# how almost everyone builds this, which made a documented performance option
+# unreachable from the only path that matters. Measured through the engine
+# example on x86-64 with OpenBLAS 0.3.26, it is worth 1.4x-2.0x on square f32
+# GEMM (1024x1024: 9.22ms -> 6.55ms, 233 -> 328 GFLOP/s).
+blas = ["engine/blas"]
