@@ -327,14 +327,15 @@ macro_rules! float_unary_kernel_param {
     };
 }
 
-/// `tanhf`, `sinhf`, `expm1f` and `log1pf` in glibc are meaningfully less
-/// accurate than computing in `f64` and rounding once at the end. Rounding a
-/// correctly-computed `f64` lands within half an ulp of the true `f32` result,
-/// which is why worst relative error against an `f64` reference drops from
-/// 1.6e-07 to 5.9e-08 for tanh, 1.4e-07 to 6.0e-08 for sinh, and 8.0e-08 to
-/// 6.0e-08 for expm1 and log1p. That argument is about rounding, so it holds
-/// on any libm. Measured over a 500k-element sample, this puts all four ahead
-/// of NumPy's own accuracy (5.9e-08 against its 1.1e-07 to 1.8e-07).
+/// `sinhf`, `expm1f` and `log1pf` in glibc -- and `tanhf`, which is now handled
+/// separately -- are meaningfully less accurate than computing in `f64` and
+/// rounding once at the end. Rounding a correctly-computed `f64` lands within
+/// half an ulp of the true `f32` result, which is why worst relative error
+/// against an `f64` reference drops from 1.6e-07 to 5.9e-08 for tanh, 1.4e-07
+/// to 6.0e-08 for sinh, and 8.0e-08 to 6.0e-08 for expm1 and log1p. That
+/// argument is about rounding, so it holds on any libm. Measured over a
+/// 500k-element sample, this puts all four ahead of NumPy's own accuracy
+/// (5.9e-08 against its 1.1e-07 to 1.8e-07).
 ///
 /// This is an accuracy change, not a speed one. A scalar micro-benchmark makes
 /// promotion look 1.06x-1.24x faster than glibc's f32 routines, but that gain
@@ -348,11 +349,11 @@ macro_rules! float_unary_kernel_param {
 /// promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at equal accuracy, so the
 /// same change there would be a real regression for nothing. These four are the
 /// ones where measurement showed promotion strictly ahead.
-#[inline(always)]
-pub(crate) fn tanh_promoted_f32(value: f32) -> f32 {
-    (value as f64).tanh() as f32
-}
-
+///
+/// float32 `tanh` no longer routes through here: `ops::simd::transcendental`
+/// computes the same `f64`-then-round value with a vectorized kernel, which is
+/// bit-identical on all 2^32 inputs and roughly 10x faster. The error figures
+/// above still describe what the engine returns for it.
 #[inline(always)]
 fn sinh_promoted_f32(value: f32) -> f32 {
     (value as f64).sinh() as f32

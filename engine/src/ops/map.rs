@@ -61,6 +61,24 @@ pub(crate) const PAR_THRESHOLD: usize = 1 << 17; // 131072 elements
 /// ```
 pub(crate) const EXPENSIVE_PAR_THRESHOLD: usize = 1 << 12; // 4096 elements
 
+/// Element count above which float32 `tanh` parallelizes.
+///
+/// It gets its own threshold because it is no longer an expensive kernel.
+/// [`EXPENSIVE_PAR_THRESHOLD`] is calibrated for transcendentals costing tens of
+/// nanoseconds per element; the vectorized `tanh` in `ops::simd::transcendental`
+/// costs about 2, so the fixed region-entry cost takes an order of magnitude
+/// more elements to repay. Fitting both sides on the same 4-core machine:
+///
+/// ```text
+///   sequential   2.17 ns/elem +  0.0 us fixed
+///   parallel     0.66 ns/elem + 26.1 us fixed   -> they cross at N ~ 18500
+/// ```
+///
+/// Same convention as [`PAR_THRESHOLD`]: sit just below the measured crossover,
+/// so hosts with more cores -- where the parallel side is cheaper per element
+/// and repays sooner -- are not held back.
+pub(crate) const TANH_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
+
 /// Element count above which binary/broadcast kernels parallelize.
 ///
 /// Same reasoning as [`PAR_THRESHOLD`]. Note this only governs the
@@ -171,6 +189,50 @@ where
                     .par_chunks(PAR_CHUNK)
                     .zip(spare.par_chunks_mut(PAR_CHUNK))
                     .for_each(|(ic, oc)| map_into(ic, oc, &op));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
+    }
+}
+
+/// [`unary_map_threshold`], but handing `op` a whole contiguous block at a time
+/// instead of one element at a time.
+///
+/// A per-element `Fn(T) -> U` is the wrong shape for a kernel that wants to be
+/// vectorized: the closure is opaque at the call site, so the loop that drives
+/// it cannot be turned into vector code. Kernels that carry their own
+/// `#[target_feature]` instantiations (see `crate::ops::simd::transcendental`)
+/// need the loop *inside* the multiversioned function, which means being handed
+/// the slice.
+///
+/// # Safety
+///
+/// On return `op` must have initialized **every** element of each output block
+/// it was given. The blocking here covers the output exactly, so initializing
+/// each block in full initializes the whole `Vec`.
+pub(crate) unsafe fn unary_map_blocks_threshold<T, U, F>(
+    input: &[T],
+    threshold: usize,
+    op: F,
+) -> Vec<U>
+where
+    T: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(&[T], &mut [MaybeUninit<U>]) + Send + Sync,
+{
+    let len = input.len();
+    // SAFETY: forwarded to the caller by this function's own contract — `op`
+    // initializes every element of every block, and the blocks tile the output.
+    unsafe {
+        build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
+            if len < threshold {
+                op(input, spare);
+            } else {
+                input
+                    .par_chunks(PAR_CHUNK)
+                    .zip(spare.par_chunks_mut(PAR_CHUNK))
+                    .for_each(|(ic, oc)| op(ic, oc));
             }
             Ok(())
         })

@@ -158,3 +158,70 @@ def test_fused_backward_handles_saturation_without_producing_nan(name):
     assert np.all(np.isfinite(gradient)), gradient
     np.testing.assert_allclose(gradient, np.zeros(4), atol=1e-20)
     mt.clear_autograd_graph()
+
+
+# float32 `tanh` no longer promotes element by element -- `ops::simd::
+# transcendental` computes the same f64-then-round value with a vectorized,
+# runtime-dispatched kernel (AVX-512, AVX2+FMA, or portable), which measured
+# 10.4x faster single-threaded and took the op from 11.8x slower than NumPy at
+# a million elements to roughly parity.
+#
+# Its contract is stronger than a tolerance and is what these pin: *identical
+# bits* to the scalar routine it replaced. The failure modes a tolerance would
+# miss are structural -- a tail block past the last full vector handled
+# differently from the body, or the sequential and parallel sides of the
+# threshold disagreeing -- so the lengths below straddle the vector widths (4,
+# 8, 16), the rayon block size (1024) and the parallel threshold (16384).
+_TANH_LENGTHS = [1, 3, 7, 8, 15, 17, 1023, 1024, 1025, 16383, 16384, 16385, 40000]
+
+
+def _tanh_reference(sample):
+    """What the previous scalar kernel returned: f64 `tanh`, rounded once."""
+    return np.tanh(sample.astype(np.float64)).astype(np.float32)
+
+
+@pytest.mark.parametrize("length", _TANH_LENGTHS)
+def test_vectorized_tanh_is_bit_identical_to_the_promoted_reference(length):
+    rng = np.random.default_rng(20240607 + length)
+    # Spread across every regime the kernel branches on: the near-zero range
+    # where the polynomial carries the result, the mid range that exercises
+    # each argument-reduction step, and past the clamp where it saturates.
+    sample = np.concatenate(
+        [
+            rng.standard_normal(length) * 4.0,
+            rng.standard_normal(length) * 1e-4,
+            rng.uniform(8.5, 12.0, length) * rng.choice([-1.0, 1.0], length),
+        ]
+    ).astype(np.float32)[:length]
+
+    got = mt.from_numpy(sample).tanh().numpy()
+    want = _tanh_reference(sample)
+    mismatched = got.view(np.uint32) != want.view(np.uint32)
+    assert not mismatched.any(), (
+        f"length {length}: {int(mismatched.sum())} of {length} differ, "
+        f"first at x={sample[mismatched][0]!r}: "
+        f"{got[mismatched][0]!r} != {want[mismatched][0]!r}"
+    )
+
+
+def test_vectorized_tanh_agrees_across_the_parallel_threshold():
+    # The same values, once below the threshold and once above it, must come
+    # back the same: block splitting must not be observable in the output.
+    rng = np.random.default_rng(99)
+    head = (rng.standard_normal(16_000) * 3).astype(np.float32)
+    padded = np.concatenate([head, (rng.standard_normal(20_000) * 3).astype(np.float32)])
+
+    sequential = mt.from_numpy(head).tanh().numpy()
+    parallel = mt.from_numpy(padded).tanh().numpy()[: head.size]
+    np.testing.assert_array_equal(sequential.view(np.uint32), parallel.view(np.uint32))
+
+
+def test_vectorized_tanh_stays_odd():
+    # Oddness is not automatic: the argument reduction rounds `n` separately
+    # for `x` and `-x`, so the two sides could in principle disagree.
+    sample = np.concatenate(
+        [np.linspace(1e-6, 9.5, 20_001), [9.010913, 9.011, 10.0, 1e30]]
+    ).astype(np.float32)
+    positive = mt.from_numpy(sample).tanh().numpy()
+    negative = mt.from_numpy(-sample).tanh().numpy()
+    np.testing.assert_array_equal(positive.view(np.uint32), (-negative).view(np.uint32))

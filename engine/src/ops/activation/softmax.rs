@@ -102,11 +102,16 @@ pub(crate) fn tanh_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map_threshold(
-        input_data,
-        EXPENSIVE_PAR_THRESHOLD,
-        crate::ops::activation::tanh_promoted_f32,
-    );
+    // Vectorized, and bit-for-bit what `tanh_promoted_f32` produced -- see
+    // `ops::simd::transcendental`. Dispatch is resolved once here rather than
+    // per block.
+    let kernel = crate::ops::simd::TanhF32Block::select();
+    // SAFETY: `apply` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, TANH_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.apply(src, dst)
+        })
+    };
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,
