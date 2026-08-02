@@ -15,7 +15,7 @@ use crate::{
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
-use libm::{erf, erff};
+use libm::erfc;
 use num_traits::Float;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -71,8 +71,55 @@ pub struct GeluBackward {
     pub approximate: bool,
 }
 /// The cubic coefficient of GELU's tanh approximation.
-const GELU_CUBIC_F32: f32 = 0.044_715;
 const GELU_CUBIC_F64: f64 = 0.044_715;
+/// The float32 GELU gradient, through the vectorized kernels.
+///
+/// Shaped like the forward pass in `ops::activation`: one backend selection,
+/// then whole blocks handed to the multiversioned kernel. The `approximate`
+/// branch is chosen per block, never per element.
+fn gelu_backward_f32(input: &Tensor, grad_output: &Tensor, approximate: bool) -> Result<Tensor> {
+    let saved = input.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from saved tensor")
+    })?;
+    let gout = grad_output.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from grad_output tensor")
+    })?;
+    if gout.len() != saved.len() {
+        return Err(MinitensorError::shape_mismatch(
+            grad_output.shape().dims().to_vec(),
+            input.shape().dims().to_vec(),
+        ));
+    }
+
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: both block kernels write every element of each block.
+    let out = unsafe {
+        crate::ops::map::binary_map_blocks_threshold(
+            saved,
+            gout,
+            crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+            |x, g, dst| {
+                if approximate {
+                    kernel.gelu_tanh_backward(x, g, dst)
+                } else {
+                    kernel.gelu_erf_backward(x, g, dst)
+                }
+            },
+        )
+    };
+    Ok(Tensor::new(
+        Arc::new(TensorData::from_vec::<f32>(
+            out,
+            DataType::Float32,
+            input.device(),
+        )),
+        input.shape().clone(),
+        DataType::Float32,
+        input.device(),
+        false,
+    ))
+}
+
 impl GradientFunction for GeluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         // Exact:  d/dx x*Phi(x) = Phi(x) + x*phi(x).
@@ -82,45 +129,36 @@ impl GradientFunction for GeluBackward {
         // written as decimal literals, so each dtype keeps the exact rounding
         // of its own `sqrt`.
         let approximate = self.approximate;
-        let coeff32 = (2.0f32 / std::f32::consts::PI).sqrt();
         let coeff64 = (2.0f64 / std::f64::consts::PI).sqrt();
-        let inv_sqrt_2pi32 = 1.0f32 / (2.0f32 * std::f32::consts::PI).sqrt();
         let inv_sqrt_2pi64 = 1.0f64 / (2.0f64 * std::f64::consts::PI).sqrt();
-        let grad = unary_chain_grad(
-            &self.input,
-            grad_output,
-            "GELU",
-            move |x: f32, gout: f32| {
-                let local = if approximate {
-                    let x2 = x * x;
-                    let inner = coeff32 * (x + GELU_CUBIC_F32 * x * x2);
-                    let tanh_inner = inner.tanh();
-                    let sech2 = 1.0 - tanh_inner * tanh_inner;
-                    0.5 * (1.0 + tanh_inner)
-                        + 0.5 * x * sech2 * coeff32 * (1.0 + 3.0 * GELU_CUBIC_F32 * x2)
-                } else {
-                    let cdf = 0.5 * (1.0 + erff(x * std::f32::consts::FRAC_1_SQRT_2));
-                    let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi32;
-                    cdf + x * pdf
-                };
-                gout * local
-            },
-            move |x: f64, gout: f64| {
-                let local = if approximate {
-                    let x2 = x * x;
-                    let inner = coeff64 * (x + GELU_CUBIC_F64 * x * x2);
-                    let tanh_inner = inner.tanh();
-                    let sech2 = 1.0 - tanh_inner * tanh_inner;
-                    0.5 * (1.0 + tanh_inner)
-                        + 0.5 * x * sech2 * coeff64 * (1.0 + 3.0 * GELU_CUBIC_F64 * x2)
-                } else {
-                    let cdf = 0.5 * (1.0 + erf(x * std::f64::consts::FRAC_1_SQRT_2));
-                    let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi64;
-                    cdf + x * pdf
-                };
-                gout * local
-            },
-        )?;
+
+        // float32 takes the vectorized kernels (`ops::simd::transcendental`),
+        // which is a 7.5x saving on what was the most expensive gradient in the
+        // activation set. They also carry the forward pass's cancellation fix
+        // into the derivative: `1 + tanh(v)` and `sech^2(v) = 1 - tanh(v)^2`
+        // both collapse for negative `v`, and the scalar form destroyed them.
+        if self.input.dtype() == DataType::Float32 {
+            let grad = gelu_backward_f32(&self.input, grad_output, approximate)?;
+            return Ok(single(self.input_id, grad));
+        }
+
+        // Same cancellation-free spellings as the float32 kernels and as the
+        // forward pass: `0.5*(1 + tanh(v))` is the logistic `s`, and
+        // `sech^2(v) = 1 - tanh(v)^2` is `4*s*(1 - s)`. Written the obvious way
+        // this gradient was 1% wrong at x = -10 and lost every digit past that.
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "GELU", move |x: f64| {
+            if approximate {
+                let x2 = x * x;
+                let inner = coeff64 * (x + GELU_CUBIC_F64 * x * x2);
+                let s = 1.0 / (1.0 + (-2.0 * inner).exp());
+                let sech2 = 4.0 * s * (1.0 - s);
+                s + 0.5 * x * sech2 * coeff64 * (1.0 + 3.0 * GELU_CUBIC_F64 * x2)
+            } else {
+                let cdf = 0.5 * erfc(-x * std::f64::consts::FRAC_1_SQRT_2);
+                let pdf = (-0.5 * x * x).exp() * inv_sqrt_2pi64;
+                cdf + x * pdf
+            }
+        })?;
         Ok(single(self.input_id, grad))
     }
 

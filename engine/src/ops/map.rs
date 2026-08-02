@@ -310,6 +310,50 @@ where
     }
 }
 
+/// [`binary_map`], but handing `op` a whole contiguous block at a time.
+///
+/// The two-input counterpart to [`unary_map_blocks_threshold`], and there for
+/// the same reason: a gradient kernel that carries its own `#[target_feature]`
+/// instantiations needs the loop *inside* the multiversioned function, which
+/// means being handed slices rather than elements. Gradient kernels take the
+/// saved input and the incoming gradient, so they need two.
+///
+/// # Safety
+///
+/// On return `op` must have initialized **every** element of each output block
+/// it was given. The blocking covers the output exactly, so initializing each
+/// block in full initializes the whole `Vec`.
+pub(crate) unsafe fn binary_map_blocks_threshold<A, B, U, F>(
+    lhs: &[A],
+    rhs: &[B],
+    threshold: usize,
+    op: F,
+) -> Vec<U>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    U: Copy + Send + Sync,
+    F: Fn(&[A], &[B], &mut [MaybeUninit<U>]) + Send + Sync,
+{
+    debug_assert_eq!(lhs.len(), rhs.len());
+    let len = lhs.len();
+    // SAFETY: forwarded to the caller by this function's own contract.
+    unsafe {
+        build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
+            if len < threshold {
+                op(lhs, rhs, spare);
+            } else {
+                lhs.par_chunks(PAR_CHUNK)
+                    .zip(rhs.par_chunks(PAR_CHUNK))
+                    .zip(spare.par_chunks_mut(PAR_CHUNK))
+                    .for_each(|((lc, rc), oc)| op(lc, rc, oc));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| match e {})
+    }
+}
+
 /// Zip `op` over three equal-length slices into a fresh, exactly-sized `Vec`.
 /// Parallel above [`BINARY_PAR_THRESHOLD`].
 ///

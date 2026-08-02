@@ -560,17 +560,23 @@ pub(crate) fn gelu_f64(tensor: &Tensor, approximate: bool) -> Result<TensorData>
     })?;
 
     // The `approximate` branch is selected once, outside the element loop.
+    //
+    // Both are written cancellation-free, as the float32 kernels are: GELU is
+    // `x` times a factor that decays to zero as `x -> -inf`, and forming that
+    // factor as `1 + erf` or `1 + tanh` destroys it just where `x` is largest.
+    // `1 + erf(v)` is `erfc(-v)`, and `0.5*(1 + tanh(v))` is the logistic
+    // `1/(1 + exp(-2v))`; both are exact expressions, not approximations.
     let out = if approximate {
         let coeff = (2.0f64 / std::f64::consts::PI).sqrt();
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
             let x3 = x * x * x;
             let inner = coeff * (x + 0.044715f64 * x3);
-            0.5f64 * x * (1.0f64 + inner.tanh())
+            x / (1.0f64 + (-2.0f64 * inner).exp())
         })
     } else {
         let inv_sqrt_2 = std::f64::consts::FRAC_1_SQRT_2;
         unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, |x: f64| {
-            0.5f64 * x * (1.0f64 + erf(x * inv_sqrt_2))
+            0.5f64 * x * erfc(-x * inv_sqrt_2)
         })
     };
     Ok(TensorData::from_vec(

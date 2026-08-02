@@ -4,7 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Vectorized float32 kernels for `tanh`, `erf`, and both GELU variants.
+//! Vectorized float32 kernels for `tanh`, `erf`, both GELU variants, and the
+//! two GELU gradients.
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
@@ -17,8 +18,9 @@
 //! it several times over -- once per instruction set -- and pick at runtime.
 //! That requires the whole loop to live inside the multiversioned function, so
 //! the entry points here take a block rather than an element (see
-//! `ops::map::unary_map_blocks_threshold`). All four share one `select`, one
-//! argument reduction, and one set of dispatch machinery.
+//! `ops::map::unary_map_blocks_threshold`, and its two-input sibling
+//! `binary_map_blocks_threshold` for the gradients). All six share one
+//! `select`, one argument reduction, and one set of dispatch machinery.
 //!
 //! Three details are what make them fast rather than merely correct:
 //!
@@ -90,6 +92,13 @@
 //! Neither is a rounding nicety. The scalar float32 path this replaces returned
 //! *exactly zero* from about `x = -5.5` down, for both variants.
 //!
+//! The gradients inherit both the problem and the cure. `Phi(x)` is the same
+//! `1 + erf` in disguise, and `sech^2(v) = 1 - tanh(v)^2` collapses the same
+//! way -- as `4*s*(1 - s)` with `s = e/(e+1)` it does not. This mattered for
+//! float64 too, which is scalar and stayed so: its exact-GELU gradient was 1%
+//! wrong at `x = -10` and had no correct digits past that, so both float64
+//! spellings were fixed alongside.
+//!
 //! # Accuracy
 //!
 //! `tanh` is **bit-identical to the previous `(x as f64).tanh() as f32` on all
@@ -125,12 +134,18 @@
 //! motivated the work:
 //!
 //! ```text
-//!                     before    after
-//!     tanh            7090us    606us   11.7x
-//!     erf             6708us    848us    7.9x
-//!     gelu (exact)    6471us    953us    6.8x
-//!     gelu (tanh)     9340us    655us   14.3x
+//!                        before    after
+//!     tanh               7090us    606us   11.7x
+//!     erf                6708us    848us    7.9x
+//!     gelu (exact)       6471us    953us    6.8x
+//!     gelu (tanh)        9340us    655us   14.3x
+//!     gelu backward      7937us   2372us    3.3x
 //! ```
+//!
+//! The backward figure is the whole gradient step, so about 1.3ms of it is
+//! autograd graph and allocation overhead that this work does not touch -- the
+//! kernel itself went from roughly 6.6ms to 1.1ms. It was the most expensive
+//! gradient in the activation set, costing more than the forward pass.
 //!
 //! Against NumPy's SIMD `tanh`, float32 `tanh` goes from 11.8x slower at a
 //! million elements to 1.1x, and is faster than NumPy past two million. The
@@ -148,10 +163,7 @@
 //! a million elements against float32's 11.8x).
 //!
 //! `erfc` is untouched: it needs relative accuracy out where `erf` has
-//! saturated, so it wants the high branch extended rather than reused. The
-//! GELU *backward* pass still calls scalar `erff`/`tanhf` through
-//! `unary_chain_grad`, which takes a per-element closure and so would need a
-//! two-input block variant to vectorize.
+//! saturated, so it wants the high branch extended rather than reused.
 
 use std::mem::MaybeUninit;
 
@@ -489,6 +501,60 @@ fn gelu_tanh_one<const FMA: bool>(x: f32) -> f32 {
     (xd * factor) as f32
 }
 
+// ---------------------------------------------------------------------------
+// GELU backward
+// ---------------------------------------------------------------------------
+
+/// Clamp on `x^2/2` inside the exact-GELU derivative. `exp(-300)` is 5e-131,
+/// and the `x` that multiplies it is about 24, so the `x*pdf` term has long
+/// since underflowed the float32 result; the clamp only keeps the exponent
+/// field in range for absurd inputs.
+const GELU_PDF_LIMIT: f64 = 300.0;
+
+/// `1/sqrt(2*pi)`, the normal density's normalization.
+const INV_SQRT_2PI: f64 = 0.3989422804014327;
+
+/// `d/dx [x * Phi(x)] = Phi(x) + x * phi(x)`, times the incoming gradient.
+#[inline(always)]
+fn gelu_erf_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    let xd = x as f64;
+    // `one_plus_erf` is already the cancellation-free form, so `cdf` keeps its
+    // digits into the negative tail where it decays to zero.
+    let cdf = 0.5 * one_plus_erf::<FMA>(xd * std::f64::consts::FRAC_1_SQRT_2);
+    let (two_pow_n, r) = reduce_exp::<FMA>(-(0.5 * xd * xd).min(GELU_PDF_LIMIT));
+    let pdf = two_pow_n * (1.0 + expm1_poly::<FMA>(r)) * INV_SQRT_2PI;
+    (fma_or::<FMA>(xd, pdf, cdf) * gout as f64) as f32
+}
+
+/// Derivative of the tanh-approximation GELU, times the incoming gradient.
+///
+/// Written through `e = exp(2v)` for the same reason the forward pass is:
+/// `1 + tanh(v)` and `sech^2(v) = 1 - tanh(v)^2` both collapse to zero for
+/// negative `v`, and subtracting from 1 destroys them. As products of
+/// `e/(e+1)` they keep their digits -- `sech^2` is `4e/(e+1)^2`.
+#[inline(always)]
+fn gelu_tanh_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    const COEFF: f64 = 0.7978845608028654; // sqrt(2/pi)
+    const CUBIC: f64 = 0.044715;
+    let xd = x as f64;
+    let x2 = xd * xd;
+    let inner = COEFF * fma_or::<FMA>(CUBIC * xd, x2, xd);
+    let (two_pow_n, r) = reduce_exp::<FMA>(inner.clamp(-GELU_TANH_LIMIT, GELU_TANH_LIMIT) * 2.0);
+    let e = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    let recip = 1.0 / (e + 1.0);
+    let saturated = inner < -GELU_TANH_LIMIT;
+    // 0.5*(1 + tanh) = e/(e+1);  sech^2 = 4e/(e+1)^2.
+    let half_one_plus_tanh = if saturated { 0.0 } else { e * recip };
+    let sech2 = if saturated {
+        0.0
+    } else {
+        4.0 * e * recip * recip
+    };
+    let d_inner = COEFF * fma_or::<FMA>(3.0 * CUBIC, x2, 1.0);
+    let local = fma_or::<FMA>(0.5 * xd * sech2, d_inner, half_one_plus_tanh);
+    (local * gout as f64) as f32
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -516,6 +582,51 @@ macro_rules! block_kernel {
     };
 }
 
+/// The two-input form, for gradient kernels: saved input and incoming
+/// gradient in, gradient out.
+macro_rules! block_kernel2 {
+    ($block:ident, $one:ident, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            debug_assert_eq!(lhs.len(), out.len());
+            debug_assert_eq!(rhs.len(), out.len());
+            for ((o, &x), &g) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                o.write($one::<FMA>(x, g));
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(lhs: &[f32], rhs: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(lhs, rhs, out)
+        }
+    };
+}
+
+/// Dispatch for [`block_kernel2!`].
+macro_rules! dispatch2 {
+    ($self:expr, $lhs:expr, $rhs:expr, $out:expr, $block:ident, $avx512:ident, $avx2:ident) => {
+        match $self.0 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `select` returned this variant only after
+            // `is_x86_feature_detected!` confirmed avx512f on this CPU.
+            Backend::Avx512 => unsafe { $avx512($lhs, $rhs, $out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as above, for avx2 and fma.
+            Backend::Avx2Fma => unsafe { $avx2($lhs, $rhs, $out) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::NativeFma => $block::<true>($lhs, $rhs, $out),
+            Backend::Portable => $block::<false>($lhs, $rhs, $out),
+        }
+    };
+}
+
 block_kernel!(tanh_block, tanh_one, tanh_block_avx512, tanh_block_avx2);
 block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
 block_kernel!(
@@ -529,6 +640,18 @@ block_kernel!(
     gelu_tanh_one,
     gelu_tanh_block_avx512,
     gelu_tanh_block_avx2
+);
+block_kernel2!(
+    gelu_erf_backward_block,
+    gelu_erf_backward_one,
+    gelu_erf_backward_block_avx512,
+    gelu_erf_backward_block_avx2
+);
+block_kernel2!(
+    gelu_tanh_backward_block,
+    gelu_tanh_backward_one,
+    gelu_tanh_backward_block_avx512,
+    gelu_tanh_backward_block_avx2
 );
 
 /// Dispatch one selected backend to the right compilation of a kernel.
@@ -647,6 +770,44 @@ impl F32Kernel {
             gelu_tanh_block,
             gelu_tanh_block_avx512,
             gelu_tanh_block_avx2
+        )
+    }
+
+    /// Write the exact-GELU gradient for `input`, scaled by `grad`, into `out`.
+    #[inline]
+    pub(crate) fn gelu_erf_backward(
+        self,
+        input: &[f32],
+        grad: &[f32],
+        out: &mut [MaybeUninit<f32>],
+    ) {
+        dispatch2!(
+            self,
+            input,
+            grad,
+            out,
+            gelu_erf_backward_block,
+            gelu_erf_backward_block_avx512,
+            gelu_erf_backward_block_avx2
+        )
+    }
+
+    /// Write the tanh-approximation GELU gradient into `out`.
+    #[inline]
+    pub(crate) fn gelu_tanh_backward(
+        self,
+        input: &[f32],
+        grad: &[f32],
+        out: &mut [MaybeUninit<f32>],
+    ) {
+        dispatch2!(
+            self,
+            input,
+            grad,
+            out,
+            gelu_tanh_backward_block,
+            gelu_tanh_backward_block_avx512,
+            gelu_tanh_backward_block_avx2
         )
     }
 }
@@ -943,6 +1104,110 @@ mod tests {
                 differing <= 500,
                 "{backend:?}: {differing} of 2^32 not correctly rounded"
             );
+        }
+    }
+
+    /// The two gradient kernels, which take an extra operand and so go through
+    /// their own dispatch. Checked against float64 references written the
+    /// cancellation-free way, for the same reason the forward ones are.
+    #[derive(Clone, Copy, Debug)]
+    enum BinOp {
+        GeluErfBackward,
+        GeluTanhBackward,
+    }
+
+    fn run2(op: BinOp, backend: Backend, xs: &[f32], gs: &[f32]) -> Vec<f32> {
+        let k = F32Kernel(backend);
+        let mut out = vec![MaybeUninit::uninit(); xs.len()];
+        match op {
+            BinOp::GeluErfBackward => k.gelu_erf_backward(xs, gs, &mut out),
+            BinOp::GeluTanhBackward => k.gelu_tanh_backward(xs, gs, &mut out),
+        }
+        out.into_iter()
+            .map(|v| unsafe { v.assume_init() })
+            .collect()
+    }
+
+    fn reference2(op: BinOp, x: f32, g: f32) -> f32 {
+        let xd = x as f64;
+        let local = match op {
+            BinOp::GeluErfBackward => {
+                let cdf = 0.5 * libm::erfc(-xd * std::f64::consts::FRAC_1_SQRT_2);
+                let pdf = (-0.5 * xd * xd).exp() * 0.3989422804014327;
+                cdf + xd * pdf
+            }
+            BinOp::GeluTanhBackward => {
+                let x2 = xd * xd;
+                let v = 0.7978845608028654 * (xd + 0.044715 * xd * x2);
+                // sigmoid(2v) is 0.5*(1 + tanh(v)); sech^2(v) is 4*s*(1-s).
+                let s = 1.0 / (1.0 + (-2.0 * v).exp());
+                let sech2 = 4.0 * s * (1.0 - s);
+                s + 0.5 * xd * sech2 * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x2)
+            }
+        };
+        (local * g as f64) as f32
+    }
+
+    #[test]
+    fn gelu_backward_matches_the_analytic_derivative() {
+        let xs: Vec<f32> = sample_inputs()
+            .into_iter()
+            .filter(|v| v.is_finite() && v.abs() < 1e30)
+            .collect();
+        // A non-uniform incoming gradient, so a kernel that ignored it or
+        // mismatched the two operands' blocking would show up.
+        let gs: Vec<f32> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (i % 17) as f32 * 0.25 - 2.0 + x.signum() * 0.5)
+            .collect();
+        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+            for backend in available() {
+                for ((&x, &g), got) in xs.iter().zip(gs.iter()).zip(run2(op, backend, &xs, &gs)) {
+                    let want = reference2(op, x, g);
+                    assert!(
+                        ulps_apart(got, want) <= 2,
+                        "{op:?}/{backend:?}: f'({x:e})*{g:e} gave {got:e}, want {want:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The gradient's negative tail decays to zero rather than plateauing --
+    /// the same failure the forward pass had, and it reaches the derivative
+    /// through the same `1 + erf` / `1 + tanh` cancellation.
+    #[test]
+    fn gelu_backward_tail_decays_to_zero() {
+        let xs: Vec<f32> = vec![-4.0, -6.0, -8.0, -10.0, -12.0, -14.0, -20.0, -40.0];
+        let gs = vec![1.0f32; xs.len()];
+        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+            for backend in available() {
+                let got = run2(op, backend, &xs, &gs);
+                for w in got.windows(2) {
+                    assert!(
+                        w[1].abs() < w[0].abs() || w[1] == 0.0,
+                        "{op:?}/{backend:?}: stopped decaying: {got:?}"
+                    );
+                }
+                assert_eq!(
+                    *got.last().unwrap(),
+                    0.0,
+                    "{op:?}/{backend:?}: should underflow to zero"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gelu_backward_propagates_nan() {
+        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+            for backend in available() {
+                let got = run2(op, backend, &[f32::NAN, 1.0, 1.0], &[1.0, f32::NAN, 1.0]);
+                assert!(got[0].is_nan(), "{op:?}/{backend:?}: NaN input");
+                assert!(got[1].is_nan(), "{op:?}/{backend:?}: NaN gradient");
+                assert!(got[2].is_finite());
+            }
         }
     }
 }

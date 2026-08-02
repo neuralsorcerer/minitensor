@@ -327,3 +327,72 @@ def test_gelu_negative_tail_does_not_bottom_out():
             f"{name} stopped decaying: {got}"
         )
         assert got[-1] == 0.0, f"{name}: gelu(-50) should underflow to zero, got {got[-1]}"
+
+
+# The float32 GELU *gradient* is vectorized too, and was the most expensive
+# gradient in the activation set (7.9ms per million elements, more than the
+# forward pass). float64 still goes through the scalar path, so both dtypes are
+# checked here -- the two must agree.
+def _gelu_erf_grad_reference(sample):
+    from math import erfc, exp, pi, sqrt
+
+    return np.array(
+        [
+            0.5 * erfc(-v / sqrt(2.0)) + v * exp(-0.5 * v * v) / sqrt(2.0 * pi)
+            for v in sample.astype(np.float64)
+        ]
+    )
+
+
+def _gelu_tanh_grad_reference(sample):
+    x = sample.astype(np.float64)
+    v = 0.7978845608028654 * (x + 0.044715 * x**3)
+    with np.errstate(over="ignore"):
+        s = 1.0 / (1.0 + np.exp(-2.0 * v))  # 0.5*(1 + tanh(v))
+    sech2 = 4.0 * s * (1.0 - s)
+    return s + 0.5 * x * sech2 * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x**2)
+
+
+_GELU_GRADS = [
+    ("gelu", None, _gelu_erf_grad_reference),
+    ("gelu-tanh", "tanh", _gelu_tanh_grad_reference),
+]
+
+
+@pytest.mark.parametrize("name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_gelu_gradient_matches_the_analytic_derivative(name, approximate, reference, dtype):
+    sample = np.concatenate(
+        [
+            np.random.default_rng(5).standard_normal(5000) * 3,
+            np.linspace(-12.0, -4.0, 500),
+            [0.0, -0.0, 1e-30, 2.0, -2.0, 11.0, -11.0],
+        ]
+    ).astype(dtype)
+    tensor = mt.Tensor(sample, dtype=dtype, requires_grad=True)
+    tensor.gelu(approximate).sum().backward()
+    got = tensor.grad.numpy()
+    mt.clear_autograd_graph()
+
+    expected = reference(sample)
+    tolerance = 2e-7 if dtype == "float32" else 1e-12
+    np.testing.assert_allclose(got, expected.astype(dtype), rtol=tolerance, atol=1e-45)
+
+
+@pytest.mark.parametrize("name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS])
+def test_gelu_gradient_tail_does_not_bottom_out(name, approximate, reference):
+    """Same failure mode as the forward pass, reached through the derivative.
+
+    `Phi(x)` and `0.5*(1 + tanh(v))` both collapse to zero as `x -> -inf`, and
+    reconstructing either by subtraction leaves a floor that never decays.
+    """
+    xs = np.array([-4.0, -6.0, -8.0, -10.0, -12.0, -14.0, -20.0], dtype="float32")
+    tensor = mt.Tensor(xs, dtype="float32", requires_grad=True)
+    tensor.gelu(approximate).sum().backward()
+    got = np.abs(tensor.grad.numpy().astype(np.float64))
+    mt.clear_autograd_graph()
+
+    assert np.all(np.diff(got) <= 0), f"{name} gradient stopped decaying: {got}"
+    assert got[-1] == 0.0, f"{name}: gradient at -20 should underflow, got {got[-1]}"
+    # And it is the real tail, not an early truncation to zero.
+    assert got[1] > 0.0 and got[3] > 0.0, f"{name} truncated too early: {got}"
