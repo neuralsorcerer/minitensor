@@ -66,6 +66,12 @@ struct LayerWeights {
 /// it is correct by construction. The cost is the intermediate tensors each step
 /// allocates — a fused kernel would be faster, and is the obvious later
 /// optimisation.
+///
+/// Within that composed form, the work that does *not* depend on the recurrence
+/// is hoisted out of the timestep loop: both weight transposes are taken once
+/// per direction, and each layer projects its whole input sequence in a single
+/// matmul. See [`Recurrent::forward_with_state`]. What remains per step is the
+/// hidden matmul and the gate arithmetic, which are sequential by definition.
 #[derive(Clone)]
 pub struct Recurrent {
     kind: CellKind,
@@ -227,9 +233,13 @@ impl Recurrent {
         self.hidden_size * self.num_directions()
     }
 
-    /// `x @ W^T + b`, the affine map each gate block shares.
-    fn affine(x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-        let projected = matmul(x, &weight.transpose(0, 1)?)?;
+    /// `x @ Wt + b`, the affine map each gate block shares.
+    ///
+    /// Takes the weight already transposed. The transpose materialises a copy,
+    /// and these weights are reused at every timestep, so it is hoisted out of
+    /// the recurrence by the caller rather than repeated here.
+    fn affine(x: &Tensor, weight_t: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+        let projected = matmul(x, weight_t)?;
         match bias {
             Some(b) => add(&projected, b),
             None => Ok(projected),
@@ -242,17 +252,20 @@ impl Recurrent {
     }
 
     /// One LSTM step: returns the new `(h, c)`.
+    ///
+    /// `from_input` is this timestep's slice of the input projection, which the
+    /// caller computed for the whole sequence at once.
     fn lstm_step(
         &self,
-        weights: &LayerWeights,
-        x: &Tensor,
+        w_hh_t: &Tensor,
+        b_hh: Option<&Tensor>,
+        from_input: &Tensor,
         h: &Tensor,
         c: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         // The four gates share one matmul; they are only separated afterwards.
-        let from_input = Self::affine(x, &weights.w_ih, weights.b_ih.as_ref())?;
-        let from_hidden = Self::affine(h, &weights.w_hh, weights.b_hh.as_ref())?;
-        let gates = add(&from_input, &from_hidden)?;
+        let from_hidden = Self::affine(h, w_hh_t, b_hh)?;
+        let gates = add(from_input, &from_hidden)?;
 
         // Block order is i, f, g, o — the same layout PyTorch's weights use, so
         // a state dict transfers without permuting.
@@ -267,13 +280,21 @@ impl Recurrent {
     }
 
     /// One GRU step: returns the new `h`.
-    fn gru_step(&self, weights: &LayerWeights, x: &Tensor, h: &Tensor) -> Result<Tensor> {
-        let from_input = Self::affine(x, &weights.w_ih, weights.b_ih.as_ref())?;
-        let from_hidden = Self::affine(h, &weights.w_hh, weights.b_hh.as_ref())?;
+    ///
+    /// `from_input` is this timestep's slice of the input projection, which the
+    /// caller computed for the whole sequence at once.
+    fn gru_step(
+        &self,
+        w_hh_t: &Tensor,
+        b_hh: Option<&Tensor>,
+        from_input: &Tensor,
+        h: &Tensor,
+    ) -> Result<Tensor> {
+        let from_hidden = Self::affine(h, w_hh_t, b_hh)?;
 
         // Block order is r, z, n.
-        let reset = add(&self.gate(&from_input, 0)?, &self.gate(&from_hidden, 0)?)?.sigmoid()?;
-        let update = add(&self.gate(&from_input, 1)?, &self.gate(&from_hidden, 1)?)?.sigmoid()?;
+        let reset = add(&self.gate(from_input, 0)?, &self.gate(&from_hidden, 0)?)?.sigmoid()?;
+        let update = add(&self.gate(from_input, 1)?, &self.gate(&from_hidden, 1)?)?.sigmoid()?;
 
         // The reset gate multiplies the *projected* hidden contribution, not the
         // hidden state before its matmul. The two are not equivalent — with the
@@ -281,7 +302,7 @@ impl Recurrent {
         // this is the detail GRU implementations most often get wrong. This
         // matches PyTorch and cuDNN.
         let gated_hidden = mul(&reset, &self.gate(&from_hidden, 2)?)?;
-        let candidate = add(&self.gate(&from_input, 2)?, &gated_hidden)?.tanh()?;
+        let candidate = add(&self.gate(from_input, 2)?, &gated_hidden)?.tanh()?;
 
         // h' = (1 - z) * n + z * h
         //
@@ -402,23 +423,47 @@ impl Recurrent {
             narrow(state, 0, layer, 1)?.reshape(Shape::new(vec![batch, self.hidden_size]))
         };
 
-        // Every timestep of the input, as (batch, feature) slices.
-        let mut layer_input: Vec<Tensor> = Vec::with_capacity(seq_len);
-        for t in 0..seq_len {
-            layer_input
-                .push(narrow(&source, 0, t, 1)?.reshape(Shape::new(vec![batch, self.input_size]))?);
-        }
-
         let directions = self.num_directions();
         let mut final_h = Vec::with_capacity(self.num_layers * directions);
         let mut final_c = Vec::with_capacity(self.num_layers * directions);
 
+        // Carried as one `(seq, batch, feature)` tensor rather than a timestep
+        // list, so each layer can project its whole input in a single matmul.
+        let mut layer_input = source;
+        let mut layer_feature = self.input_size;
+
         for layer in 0..self.num_layers {
+            // The input path does not depend on the recurrence, so it does not
+            // have to be walked one timestep at a time: `seq` products of
+            // `(batch, feature) x (feature, gates * hidden)` are one product of
+            // `(seq * batch, feature)` instead. Only the hidden path is
+            // genuinely sequential. The per-step slices are then rows of the
+            // result, which is why the flattened layout is `(seq * batch, _)`
+            // and not `(batch * seq, _)`.
+            //
+            // This holds the whole sequence's projection live at once, where
+            // the per-step form could drop each one after its step. That costs
+            // nothing while building a graph -- every step's projection is
+            // retained for the backward pass either way -- and under `no_grad`
+            // it peaks at `gates` times the output sequence this call already
+            // allocates, so the bound stays proportional to what the caller
+            // asked for.
+            let flat = layer_input
+                .contiguous()?
+                .reshape(Shape::new(vec![seq_len * batch, layer_feature]))?;
+
             let mut per_direction: Vec<Vec<Tensor>> = Vec::with_capacity(directions);
 
             for direction in 0..directions {
                 let index = layer * directions + direction;
                 let weights = &self.layers[index];
+
+                // Both weight transposes materialise a copy, so they are done
+                // once per direction instead of once per timestep.
+                let w_ih_t = weights.w_ih.transpose(0, 1)?;
+                let w_hh_t = weights.w_hh.transpose(0, 1)?;
+                let projected = Self::affine(&flat, &w_ih_t, weights.b_ih.as_ref())?;
+
                 let mut h = per_layer(&h0, index)?;
                 let mut c = match &c0 {
                     Some(c0) => Some(per_layer(c0, index)?),
@@ -434,15 +479,18 @@ impl Recurrent {
 
                 let mut outputs = Vec::with_capacity(seq_len);
                 for &t in &order {
-                    let x = &layer_input[t];
+                    let x = narrow(&projected, 0, t * batch, batch)?;
                     match self.kind {
                         CellKind::Lstm => {
                             let cell = c.as_ref().expect("LSTM always carries a cell state");
-                            let (new_h, new_c) = self.lstm_step(weights, x, &h, cell)?;
+                            let (new_h, new_c) =
+                                self.lstm_step(&w_hh_t, weights.b_hh.as_ref(), &x, &h, cell)?;
                             h = new_h;
                             c = Some(new_c);
                         }
-                        CellKind::Gru => h = self.gru_step(weights, x, &h)?,
+                        CellKind::Gru => {
+                            h = self.gru_step(&w_hh_t, weights.b_hh.as_ref(), &x, &h)?
+                        }
                     }
                     outputs.push(h.clone());
                 }
@@ -463,7 +511,7 @@ impl Recurrent {
 
             // The next layer consumes this one's states; when bidirectional the
             // two directions are joined along the feature axis at each step.
-            layer_input = if directions == 1 {
+            let steps: Vec<Tensor> = if directions == 1 {
                 per_direction.pop().expect("one direction")
             } else {
                 (0..seq_len)
@@ -473,19 +521,22 @@ impl Recurrent {
                     })
                     .collect::<Result<_>>()?
             };
+
+            // Restack into `(seq, batch, feature)` for the next layer to
+            // project in one go; after the last layer this is the output.
+            layer_feature = self.output_size();
+            let stacked: Vec<Tensor> = steps
+                .iter()
+                .map(|h| h.reshape(Shape::new(vec![1, batch, layer_feature])))
+                .collect::<Result<_>>()?;
+            let refs: Vec<&Tensor> = stacked.iter().collect();
+            layer_input = concatenate(&refs, 0)?;
         }
 
-        let output_size = self.output_size();
-        let stacked: Vec<Tensor> = layer_input
-            .iter()
-            .map(|h| h.reshape(Shape::new(vec![1, batch, output_size])))
-            .collect::<Result<_>>()?;
-        let refs: Vec<&Tensor> = stacked.iter().collect();
-        let output = concatenate(&refs, 0)?;
         let output = if self.batch_first {
-            output.transpose(0, 1)?
+            layer_input.transpose(0, 1)?
         } else {
-            output
+            layer_input
         };
 
         let h_refs: Vec<&Tensor> = final_h.iter().collect();
