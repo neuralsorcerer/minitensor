@@ -327,53 +327,67 @@ macro_rules! float_unary_kernel_param {
     };
 }
 
-/// `log1pf` in glibc -- and `tanhf`, `sinhf` and `expm1f`, which are now
-/// handled by vectorized kernels -- is meaningfully less accurate than
-/// computing in `f64` and rounding once at the end. Rounding a
-/// correctly-computed `f64` lands within half an ulp of the true `f32` result,
-/// which is why worst relative error against an `f64` reference drops from
-/// 1.6e-07 to 5.9e-08 for tanh, 1.4e-07 to 6.0e-08 for sinh, and 8.0e-08 to
-/// 6.0e-08 for expm1 and log1p. That argument is about rounding, so it holds on
-/// any libm. Measured over a 500k-element sample, this puts all four ahead of
-/// NumPy's own accuracy (5.9e-08 against its 1.1e-07 to 1.8e-07).
-///
-/// For `log1p` this remains an accuracy change, not a speed one: promotion
-/// measures 1.06x-1.24x faster than glibc's f32 routine in a scalar
-/// micro-benchmark, but that does not survive into the real kernel, which is
-/// bound by memory traffic and rayon. It is worth making because it costs
-/// nothing.
-///
-/// It is deliberately *not* applied to the rest of the f32 math surface.
-/// `expf`, `logf`, `sinf`, `cosf` and `cbrtf` are all substantially faster than
-/// promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at equal accuracy, so the
-/// same change there would be a real regression for nothing.
-///
-/// `tanh`, `sinh` and `expm1` no longer route through here:
-/// `ops::simd::transcendental` computes the same `f64`-then-round values with
-/// vectorized kernels, bit-identical on all 2^32 inputs and several times
-/// faster. The error figures above still describe what the engine returns.
-#[inline(always)]
-fn log1p_promoted_f32(value: f32) -> f32 {
-    (value as f64).ln_1p() as f32
-}
+// Which float32 routines stay on the scalar libm, and why.
+//
+// `tanh`, `sinh`, `cosh`, `expm1`, `log`, `log1p`, `erf`, `erfc` and both GELUs
+// now run through `ops::simd::transcendental`, which computes each in float64
+// and rounds once -- the accuracy the old promoted scalars bought, at several
+// times the speed. Nothing is left promoted; promotion was a way of getting the
+// float64 rounding cheaply, and the vectorized kernels get it for less.
+//
+// The rest stay scalar deliberately. `expf`, `sinf`, `cosf` and `cbrtf` are
+// substantially faster than promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at
+// equal accuracy, so promoting them would be a regression for nothing, and none
+// has yet been worth a vectorized kernel of its own: `exp` already measures
+// within 1.6x of NumPy, against the 12x that `sinh` and `expm1` started from.
+// `sin` and `cos` are the strongest remaining candidates at about 3.7x, and
+// they need an argument reduction none of the existing kernels provide.
 
 float_unary_kernel!(exp_f32, as_f32_slice, f32, Float32, "f32", f32::exp);
 
 float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);
 
-float_unary_kernel!(log_f32, as_f32_slice, f32, Float32, "f32", f32::ln);
+/// Vectorized. Bit-identical to `(x as f64).ln() as f32` on all 2^32 float32
+/// inputs, where the `f32::ln` it replaces misrounds 416,909 of them.
+pub(crate) fn log_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `log` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.log(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(log_f64, as_f64_slice, f64, Float64, "f64", f64::ln);
 
-float_unary_kernel!(log1p_f32, as_f32_slice, f32, Float32, "f32", |val: f32| {
-    if val == -1.0 {
-        f32::NEG_INFINITY
-    } else if val < -1.0 {
-        f32::NAN
-    } else {
-        log1p_promoted_f32(val)
-    }
-});
+/// Vectorized. The kernel handles `x <= -1` itself: `1 + x` is zero or
+/// negative there and `log_core` maps those to -inf and NaN.
+pub(crate) fn log1p_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `log1p` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.log1p(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(log1p_f64, as_f64_slice, f64, Float64, "f64", |val: f64| {
     if val == -1.0 {
@@ -541,22 +555,25 @@ float_unary_kernel!(atanh_f32, as_f32_slice, f32, Float32, "f32", f32::atanh);
 
 float_unary_kernel!(atanh_f64, as_f64_slice, f64, Float64, "f64", f64::atanh);
 
-float_unary_kernel_param!(
-    softplus_f32,
-    as_f32_slice,
-    f32,
-    Float32,
-    "f32",
-    (beta: f32, threshold: f32),
-    |val: f32| {
-        let scaled = beta * val;
-        if scaled > threshold {
-            val
-        } else {
-            scaled.exp().ln_1p() / beta
-        }
-    }
-);
+/// Vectorized. `log1p(exp(beta*x))/beta`, with the linear tail above
+/// `threshold` selected per block rather than per element.
+pub(crate) fn softplus_f32(tensor: &Tensor, beta: f32, threshold: f32) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `softplus` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.softplus(src, dst, beta as f64, threshold as f64)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel_param!(
     softplus_f64,

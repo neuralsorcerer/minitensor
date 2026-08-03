@@ -502,3 +502,89 @@ def test_erfc_keeps_the_tail_erf_cannot():
     )
     # And the identity that motivates the separate routine really does fail:
     assert np.all(1.0 - mt.from_numpy(xs).erf().numpy()[3:] == 0.0)
+
+
+# `log`, `log1p` and `softplus` run on a second reduction (`u = 2^k * m`), not
+# the exp core. `log` comes out bit-identical to the float64 value where
+# `f32::ln` misrounds 416,909 of the 2^32 inputs; `log1p` misses exactly one.
+#
+# The interesting case is small `x`: `1 + x` rounds away most of it, so a naive
+# `log(1 + x)` keeps about six digits at `x = 1e-10`. The kernel passes the
+# exact residual of that sum through to the log, which restores them.
+_LOG_FAMILY = [
+    ("log", lambda t: t.log(), np.log, lambda n, rng: np.abs(rng.standard_normal(n)) + 1e-3),
+    ("log1p", lambda t: t.log1p(), np.log1p, lambda n, rng: rng.uniform(-0.999, 5.0, n)),
+]
+
+
+@pytest.mark.parametrize("name,op,reference,gen", _LOG_FAMILY, ids=[c[0] for c in _LOG_FAMILY])
+@pytest.mark.parametrize("length", [1, 7, 17, 1023, 1024, 16383, 16384, 40000])
+def test_log_family_stays_within_one_ulp(name, op, reference, gen, length):
+    rng = np.random.default_rng(8080 + length)
+    sample = gen(length, rng).astype(np.float32)
+    got = op(mt.from_numpy(sample)).numpy()
+    want = reference(sample.astype(np.float64)).astype(np.float32)
+    bad = _ulps_apart(got, want) > 1
+    assert not bad.any(), (
+        f"{name} length {length}: {int(bad.sum())} off by >1 ulp, "
+        f"first at x={sample[bad][0]!r}"
+    )
+
+
+def test_log1p_keeps_the_digits_that_one_plus_x_would_round_away():
+    """The reason `log1p` exists: `log(1 + x)` cannot be formed naively.
+
+    At these magnitudes `1 + x` in float32 *is* 1, and even in float64 it keeps
+    only a few digits of `x`. `log1p(x)` must still come back as `x` to within
+    an ulp.
+    """
+    xs = np.array([1e-3, 1e-5, 1e-7, 1e-9, 1e-20, -1e-9, -1e-20], dtype=np.float32)
+    got = mt.from_numpy(xs).log1p().numpy()
+    want = np.log1p(xs.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(_ulps_apart(got, want) <= 1, True, err_msg=f"{got} vs {want}")
+    # Naive float32 reconstruction really does fail here, which is the point:
+    # from 1e-9 down, `1 + x` in float32 is exactly 1 and the value is gone.
+    assert np.all((1.0 + xs.astype(np.float32))[3:] == 1.0)
+
+
+@pytest.mark.parametrize("value,expected", [(-1.0, -np.inf), (-1.5, np.nan), (0.0, 0.0)])
+def test_log1p_domain_edges(value, expected):
+    got = mt.from_numpy(np.array([value], dtype=np.float32)).log1p().numpy()[0]
+    if np.isnan(expected):
+        assert np.isnan(got)
+    else:
+        assert got == expected
+
+
+def test_log1p_preserves_signed_zero():
+    got = mt.from_numpy(np.array([0.0, -0.0], dtype=np.float32)).log1p().numpy()
+    assert not np.signbit(got[0]) and np.signbit(got[1]), got
+
+
+def test_softplus_matches_the_stable_reference():
+    # softplus(x) = log1p(exp(x)); the reference is written as the max form so
+    # the large-x side does not overflow before the comparison.
+    sample = np.concatenate(
+        [np.random.default_rng(11).standard_normal(20_000) * 8, np.linspace(-60, 60, 2000)]
+    ).astype(np.float32)
+    got = mt.from_numpy(sample).softplus().numpy()
+    x = sample.astype(np.float64)
+    want = (np.maximum(x, 0.0) + np.log1p(np.exp(-np.abs(x)))).astype(np.float32)
+    np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-45)
+
+
+def test_softplus_negative_tail_is_exponential_not_zero():
+    """For very negative x, softplus(x) decays like exp(x) and must not floor.
+
+    Going through `log(2 + expm1(v))` instead of `log1p(exp(v))` rounds the tail
+    away and leaves it about 0.2% wrong. Compared against the true
+    `log1p(exp(x))`, not against `exp(x)` -- those differ by `exp(2x)/2`, which
+    is 2.3e-5 relative at x = -10 and would make the test measure the asymptote
+    rather than the kernel.
+    """
+    xs = np.array([-10.0, -20.0, -30.0, -40.0, -60.0], dtype=np.float32)
+    got = mt.from_numpy(xs).softplus().numpy().astype(np.float64)
+    want = np.log1p(np.exp(xs.astype(np.float64)))
+    np.testing.assert_allclose(got, want, rtol=1e-6)
+    assert np.all(np.diff(got) < 0), f"softplus tail stopped decaying: {got}"
+    assert got[-1] > 0.0, "softplus underflowed to zero at x = -60"

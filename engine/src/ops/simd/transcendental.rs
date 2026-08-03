@@ -5,7 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 //! Vectorized float32 kernels for `tanh`, `erf`, `erfc`, `expm1`, `sinh`,
-//! `cosh`, both GELU variants, and the two GELU gradients.
+//! `cosh`, `log`, `log1p`, `softplus`, both GELU variants, and the two GELU
+//! gradients.
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
@@ -75,6 +76,39 @@
 //! zero -- `sinh(-100)` would come back as -inf. On `|x|` the denominator never
 //! drops below 1, and oddness restores the sign afterwards.
 //!
+//! # log, log1p, softplus
+//!
+//! The other half of the module, on its own reduction: `u = 2^k * m` with `m`
+//! in `[0.6875, 1.375)`, then
+//!
+//! ```text
+//!     log(u) = k*ln2 + 2*atanh(s),   s = (m - 1)/(m + 1),  s^2 <= 0.0343
+//! ```
+//!
+//! `atanh` rather than a series in `m - 1` because only odd powers appear and
+//! `s` is four times smaller, which is the difference between a degree-9
+//! polynomial and about forty terms.
+//!
+//! The decomposition is branchless, and that matters more than it looks.
+//! Folding `[sqrt2, 2)` down to keep `s` small is naturally a comparison, but
+//! biasing the bits by `0x3fe6...` first makes the exponent field of the
+//! difference *be* `k`, with no comparison at all. Written the obvious way the
+//! branch mispredicted about half the time and cost more than the rest of the
+//! kernel.
+//!
+//! [`log_core`] takes a correction term `c` and returns `log(u) + c/u`, which
+//! is what makes `log1p` accurate rather than merely correct-looking. `1 + x`
+//! rounds, and for small `x` it rounds away most of `x`: at `x = 1e-10` a naive
+//! `log(1 + x)` keeps six digits. Passing `c = x - ((1 + x) - 1)` -- exact, by
+//! Sterbenz -- restores them. `log` itself passes no correction, and the
+//! division compiles out entirely.
+//!
+//! `softplus` is `log1p(exp(beta*x))/beta`, and goes through `exp` rather than
+//! `expm1` for the same class of reason: `log(2 + expm1(v))` is algebraically
+//! equal and numerically useless, because for very negative `v` it forms
+//! `2 + (-1 + tiny)` and rounds the tiny part away, leaving the tail 0.2%
+//! wrong.
+//!
 //! # erf
 //!
 //! Two branches over `a = |x|`, selected branchlessly:
@@ -132,6 +166,10 @@
 //! 22,628,918 of the 2^32 inputs (0.527%), so there it is an accuracy gain as
 //! well as a speedup.
 //!
+//! `log` is bit-identical too, where the `f32::ln` it replaces misrounds
+//! 416,909 of the 2^32 inputs (0.0097%). `log1p` misses exactly one input by
+//! one ulp.
+//!
 //! `erf` and `erfc` are within one ulp of the correctly rounded result
 //! everywhere, and are *the* correctly rounded result on all but 68 and 131,334
 //! of the 2^32 inputs respectively. The routines they replace misround
@@ -171,6 +209,9 @@
 //!     gelu (exact)       6471us    953us    6.8x         --
 //!     gelu (tanh)        9340us    655us   14.3x         --
 //!     gelu backward      7937us   2372us    3.3x         --
+//!     log                 895us    438us    2.0x      0.64x
+//!     log1p              4257us    453us    9.4x      0.67x
+//!     softplus           7388us   1031us    7.2x         --
 //! ```
 //!
 //! Everything with a NumPy column is now faster than NumPy, which has no
@@ -185,6 +226,20 @@
 //! At small sizes a gap remains, and it is the accuracy decision showing up as
 //! a cost: NumPy evaluates in float32 lanes (16 wide under AVX-512) with a
 //! shorter polynomial, while these evaluate in float64 (8 wide).
+//!
+//! # The portable fallback
+//!
+//! One honest caveat. On a host with neither AVX-512 nor AVX2+FMA the loops
+//! still compile, but to SSE2 without fused multiply-add, and the log kernel
+//! measures about 10 ns/element against `f32::ln`'s 4 -- it is latency-bound on
+//! a division and a ten-deep polynomial that the vector paths hide across
+//! lanes. Every other kernel here is still ahead of what it replaced on that
+//! path.
+//!
+//! It is kept anyway, rather than falling back to the scalar routine, because
+//! every kernel in this module returns identical bits on every backend, and a
+//! result that depends on which CPU it ran on is worth more than the throughput
+//! of a fallback no x86-64 part since 2013 selects.
 //!
 //! # Not covered
 //!
@@ -673,6 +728,117 @@ fn cosh_one<const FMA: bool>(x: f32) -> f32 {
     cosh_core::<FMA>(x as f64) as f32
 }
 
+// ---------------------------------------------------------------------------
+// log family: log, log1p, softplus
+// ---------------------------------------------------------------------------
+
+const R0: f64 = 1.0 / 3.0;
+const R1: f64 = 1.0 / 5.0;
+const R2: f64 = 1.0 / 7.0;
+const R3: f64 = 1.0 / 9.0;
+const R4: f64 = 1.0 / 11.0;
+const R5: f64 = 1.0 / 13.0;
+const R6: f64 = 1.0 / 15.0;
+const R7: f64 = 1.0 / 17.0;
+const R8: f64 = 1.0 / 19.0;
+const R9: f64 = 1.0 / 21.0;
+
+/// `log(u) + c/u`. `c` carries the residual of a `1 + x` that rounded.
+#[inline(always)]
+fn log_core<const FMA: bool, const CORRECT: bool>(u: f64, c: f64) -> f64 {
+    // Branchless decompose u = 2^k * m with m in [0.6875, 1.375). Biasing by
+    // OFF first makes the exponent field of the difference *be* k, so no
+    // data-dependent branch is needed to fold the [sqrt2, 2) half down -- that
+    // branch mispredicted about half the time and cost more than the rest of
+    // the kernel on the scalar path.
+    const OFF: u64 = 0x3fe6_0000_0000_0000;
+    let bits = u.to_bits();
+    let tmp = bits.wrapping_sub(OFF);
+    let k = ((tmp as i64) >> 52) as i32;
+    let m = f64::from_bits(bits.wrapping_sub(tmp & (0xfff << 52)));
+    let s = (m - 1.0) / (m + 1.0);
+    let t = s * s;
+    // Estrin over R(t) = 1/3 + t/5 + t^2/7 + ...
+    let t2 = t * t;
+    let t4 = t2 * t2;
+    let a0 = fma_or::<FMA>(t, R1, R0);
+    let a1 = fma_or::<FMA>(t, R3, R2);
+    let a2 = fma_or::<FMA>(t, R5, R4);
+    let a3 = fma_or::<FMA>(t, R7, R6);
+    let a4 = fma_or::<FMA>(t, R9, R8);
+    let b0 = fma_or::<FMA>(t2, a1, a0);
+    let b1 = fma_or::<FMA>(t2, a3, a2);
+    let r = fma_or::<FMA>(t4, fma_or::<FMA>(t4, a4, b1), b0);
+    // log(m) = 2s(1 + t R(t)); the leading `s` stays outside so relative
+    // accuracy survives m -> 1.
+    let log_m = 2.0 * fma_or::<FMA>(s * t, r, s);
+    let kf = k as f64;
+    // `log` passes no correction, so its division is compiled away entirely --
+    // it is the single most expensive instruction in the kernel.
+    let corr = if CORRECT { c / u } else { 0.0 };
+    let y = fma_or::<FMA>(kf, LN2_HI, log_m + fma_or::<FMA>(kf, LN2_LO, corr));
+
+    // u == 0 -> -inf; u < 0 or NaN -> NaN; u == +inf -> +inf.
+    if u > 0.0 {
+        if u.is_finite() { y } else { u }
+    } else if u == 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        f64::NAN
+    }
+}
+
+#[inline(always)]
+fn log_one<const FMA: bool>(x: f32) -> f32 {
+    log_core::<FMA, false>(x as f64, 0.0) as f32
+}
+
+#[inline(always)]
+fn log1p_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let u = 1.0 + xd;
+    // The exact residual of the sum: `u - 1` is exact by Sterbenz for the
+    // |x| <= 1 that matters, so `c` is precisely what `1 + x` rounded away.
+    // Without it `log1p(1e-10)` keeps only six digits -- the whole point of a
+    // separate `log1p` is that `log(1 + x)` cannot be formed naively.
+    let c = xd - (u - 1.0);
+    // `log1p` is increasing through zero, so it carries the sign of its
+    // argument; the arithmetic loses that at `x = -0.0`, where `c` is `-0.0`
+    // and `-0.0/1.0` gets added into a `+0.0`. Same repair as `tanh` and
+    // `expm1`, and a no-op for every other input.
+    (log_core::<FMA, true>(u, c) as f32).copysign(x)
+}
+
+/// Lower clamp on `beta * x` inside softplus. `exp(-300)` is 5e-131 and the
+/// result is that same value divided by `beta`, so everything below has long
+/// since underflowed float32.
+const SOFTPLUS_LIMIT: f64 = 300.0;
+
+/// `log1p(exp(beta*x)) / beta`, with the large-`x` linear tail taken by the
+/// caller's threshold.
+///
+/// Goes through `exp` rather than `expm1` on purpose. `log(2 + expm1(v))` looks
+/// equivalent and is not: for very negative `v` it forms `2 + (-1 + tiny)`,
+/// which rounds the tiny part away and leaves the tail 0.2% wrong. `exp(v)` as
+/// `2^n(1 + p)` never cancels, and `log1p` then keeps it.
+#[inline(always)]
+fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
+    let xd = x as f64;
+    let v = beta * xd;
+    let (two_pow_n, r) = reduce_exp::<FMA>(v.max(-SOFTPLUS_LIMIT));
+    let w = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    let u = 1.0 + w;
+    let c = w - (u - 1.0);
+    let soft = log_core::<FMA, true>(u, c) / beta;
+    // Above the threshold softplus is `x` to within float32; NaN fails the
+    // comparison and comes through the computed side, which is NaN too.
+    if v > threshold {
+        xd as f32
+    } else {
+        soft as f32
+    }
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -696,6 +862,51 @@ macro_rules! block_kernel {
         #[target_feature(enable = "avx2,fma")]
         fn $avx2(input: &[f32], out: &mut [MaybeUninit<f32>]) {
             $block::<true>(input, out)
+        }
+    };
+}
+
+/// The parameterized form, for kernels that take runtime scalars. The
+/// parameters are captured once per block, never per element.
+macro_rules! block_kernel_param {
+    ($block:ident, $one:ident, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            debug_assert_eq!(input.len(), out.len());
+            for (o, &x) in out.iter_mut().zip(input.iter()) {
+                o.write($one::<FMA>(x, a, b));
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            $block::<true>(input, out, a, b)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(input: &[f32], out: &mut [MaybeUninit<f32>], a: f64, b: f64) {
+            $block::<true>(input, out, a, b)
+        }
+    };
+}
+
+/// Dispatch for [`block_kernel_param!`].
+macro_rules! dispatch_param {
+    ($self:expr, $input:expr, $out:expr, $a:expr, $b:expr,
+     $block:ident, $avx512:ident, $avx2:ident) => {
+        match $self.0 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: `select` returned this variant only after
+            // `is_x86_feature_detected!` confirmed avx512f on this CPU.
+            Backend::Avx512 => unsafe { $avx512($input, $out, $a, $b) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: as above, for avx2 and fma.
+            Backend::Avx2Fma => unsafe { $avx2($input, $out, $a, $b) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::NativeFma => $block::<true>($input, $out, $a, $b),
+            Backend::Portable => $block::<false>($input, $out, $a, $b),
         }
     };
 }
@@ -748,6 +959,14 @@ macro_rules! dispatch2 {
 block_kernel!(tanh_block, tanh_one, tanh_block_avx512, tanh_block_avx2);
 block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
 block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
+block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
+block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
+block_kernel_param!(
+    softplus_block,
+    softplus_one,
+    softplus_block_avx512,
+    softplus_block_avx2
+);
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
 block_kernel!(cosh_block, cosh_one, cosh_block_avx512, cosh_block_avx2);
@@ -866,6 +1085,53 @@ impl F32Kernel {
             erf_block,
             erf_block_avx512,
             erf_block_avx2
+        )
+    }
+
+    /// Write `log(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn log(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            log_block,
+            log_block_avx512,
+            log_block_avx2
+        )
+    }
+
+    /// Write `log1p(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn log1p(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            log1p_block,
+            log1p_block_avx512,
+            log1p_block_avx2
+        )
+    }
+
+    /// Write `softplus(input[i], beta, threshold)` into every element of `out`.
+    #[inline]
+    pub(crate) fn softplus(
+        self,
+        input: &[f32],
+        out: &mut [MaybeUninit<f32>],
+        beta: f64,
+        threshold: f64,
+    ) {
+        dispatch_param!(
+            self,
+            input,
+            out,
+            beta,
+            threshold,
+            softplus_block,
+            softplus_block_avx512,
+            softplus_block_avx2
         )
     }
 
@@ -1003,6 +1269,8 @@ mod tests {
         Sinh,
         Cosh,
         Erfc,
+        Log,
+        Log1p,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1016,6 +1284,8 @@ mod tests {
             Op::Sinh => k.sinh(input, out),
             Op::Cosh => k.cosh(input, out),
             Op::Erfc => k.erfc(input, out),
+            Op::Log => k.log(input, out),
+            Op::Log1p => k.log1p(input, out),
         }
     }
 
@@ -1065,6 +1335,8 @@ mod tests {
             Op::Sinh => xd.sinh() as f32,
             Op::Cosh => xd.cosh() as f32,
             Op::Erfc => libm::erfc(xd) as f32,
+            Op::Log => xd.ln() as f32,
+            Op::Log1p => xd.ln_1p() as f32,
         }
     }
 
@@ -1073,8 +1345,8 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 4] {
-        [Op::Tanh, Op::Expm1, Op::Sinh, Op::Cosh]
+    fn bit_exact_ops() -> [Op; 5] {
+        [Op::Tanh, Op::Expm1, Op::Sinh, Op::Cosh, Op::Log]
     }
 
     /// Signed distance in representable float32 steps.
@@ -1149,7 +1421,7 @@ mod tests {
     #[test]
     fn erf_and_gelu_stay_within_one_ulp() {
         let xs = sample_inputs();
-        for op in [Op::Erf, Op::Erfc, Op::GeluErf, Op::GeluTanh] {
+        for op in [Op::Erf, Op::Erfc, Op::GeluErf, Op::GeluTanh, Op::Log1p] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
                     let want = reference(op, x);
@@ -1177,6 +1449,8 @@ mod tests {
             Op::Sinh,
             Op::Cosh,
             Op::Erfc,
+            Op::Log,
+            Op::Log1p,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -1250,12 +1524,20 @@ mod tests {
             Op::Sinh,
             Op::Cosh,
             Op::Erfc,
+            Op::Log,
+            Op::Log1p,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {
                     for (&x, g) in xs[..len].iter().zip(run(op, backend, &xs[..len])) {
+                        let want = reference(op, x);
+                        // NaN payloads are not part of any kernel's contract.
+                        if want.is_nan() {
+                            assert!(g.is_nan(), "{op:?}/{backend:?}: len {len}, x {x:e}");
+                            continue;
+                        }
                         assert!(
-                            ulps_apart(g, reference(op, x)) <= 1,
+                            ulps_apart(g, want) <= 1,
                             "{op:?}/{backend:?}: len {len}, x {x:e}"
                         );
                     }
@@ -1327,7 +1609,7 @@ mod tests {
         // routine being replaced (127.6M for `erff`, 20.0M for `erfcf`) fails.
         // `erfc` misrounds more than `erf` because below |x| = 2 it does have to
         // form `1 - erf`, which at x = 2 costs 7.7 bits.
-        for (op, bound) in [(Op::Erf, 500u64), (Op::Erfc, 500_000)] {
+        for (op, bound) in [(Op::Erf, 500u64), (Op::Erfc, 500_000), (Op::Log1p, 100)] {
             for backend in available() {
                 let (worst, differing) = sweep(op, backend);
                 println!("  {op:?}/{backend:?}: {differing} of 2^32 misrounded, worst {worst} ulp");
