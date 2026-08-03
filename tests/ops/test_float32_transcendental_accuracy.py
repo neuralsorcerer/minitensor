@@ -671,3 +671,64 @@ def test_silu_gradient_matches_the_analytic_derivative(dtype):
     one_minus_s = _stable_logistic(-x)
     want = s * (1.0 + x * one_minus_s)
     np.testing.assert_allclose(got, want.astype(dtype), rtol=2e-6, atol=1e-45)
+
+
+# `sin`, `cos` and `tan` share one argument reduction: x = n*(pi/2) + r with
+# |r| <= pi/4, then two polynomials and a quadrant select. pi/2 is split three
+# ways so that n*(pi/2) is exact for every |n| the reduction produces -- at
+# x ~ 2^20 the subtraction discards 20 bits and there has to be something below
+# them. Past 2^20 the kernel hands those elements to the scalar float64 routine,
+# which reduces properly, so the whole float32 domain stays correct.
+_TRIG = [
+    ("sin", lambda t: t.sin(), np.sin),
+    ("cos", lambda t: t.cos(), np.cos),
+    ("tan", lambda t: t.tan(), np.tan),
+]
+
+
+@pytest.mark.parametrize("name,op,reference", _TRIG, ids=[c[0] for c in _TRIG])
+@pytest.mark.parametrize("length", [1, 7, 17, 1023, 1024, 16383, 16384, 40000])
+def test_trig_is_bit_identical_to_the_float64_reference(name, op, reference, length):
+    rng = np.random.default_rng(2024 + length)
+    sample = np.concatenate(
+        [
+            rng.uniform(-10.0, 10.0, length),
+            rng.uniform(-1e6, 1e6, length),
+            # Straddle the 2^20 handover between the fast reduction and the
+            # scalar fallback, and go well past it.
+            rng.uniform(1e6, 1.2e6, length),
+            rng.uniform(-1e30, 1e30, length),
+        ]
+    ).astype(np.float32)[:length]
+
+    got = op(mt.from_numpy(sample)).numpy()
+    want = reference(sample.astype(np.float64)).astype(np.float32)
+    mismatched = got.view(np.uint32) != want.view(np.uint32)
+    assert not mismatched.any(), (
+        f"{name} length {length}: {int(mismatched.sum())} of {length} differ, "
+        f"first at x={sample[mismatched][0]!r}"
+    )
+
+
+@pytest.mark.parametrize("name,op,reference", _TRIG, ids=[c[0] for c in _TRIG])
+def test_trig_crosses_the_reduction_handover_cleanly(name, op, reference):
+    """The 2^20 boundary must not be visible in the output."""
+    base = np.float32(1048576.0)
+    steps = np.arange(-40, 41, dtype=np.float32)
+    sample = (base + steps * np.spacing(base)).astype(np.float32)
+    got = op(mt.from_numpy(sample)).numpy()
+    want = reference(sample.astype(np.float64)).astype(np.float32)
+    np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+
+
+def test_trig_special_values():
+    sample = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float32)
+    for name, op, reference in _TRIG:
+        got = op(mt.from_numpy(sample)).numpy()
+        with np.errstate(invalid="ignore"):  # the reference warns on sin(inf)
+            want = reference(sample.astype(np.float64)).astype(np.float32)
+        assert np.isnan(got[2]) and np.isnan(got[3]) and np.isnan(got[4]), f"{name}: {got}"
+        # sin and tan are odd, so they keep the sign of zero; cos(±0) is 1.
+        np.testing.assert_array_equal(
+            got[:2].view(np.uint32), want[:2].view(np.uint32), err_msg=f"{name} at zero"
+        )

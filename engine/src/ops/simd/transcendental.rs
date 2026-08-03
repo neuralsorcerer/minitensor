@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 //! Vectorized float32 kernels for `tanh`, `erf`, `erfc`, `expm1`, `sinh`,
-//! `cosh`, `log`, `log1p`, `softplus`, `sigmoid`, `silu`, both GELU variants,
-//! and the GELU and SiLU gradients.
+//! `cosh`, `log`, `log1p`, `softplus`, `sigmoid`, `silu`, `sin`, `cos`, `tan`,
+//! both GELU variants, and the GELU and SiLU gradients.
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
@@ -125,6 +125,32 @@
 //! tail away: at `x = 40` the true value is 4e-18 and `1 - s` in float64 is
 //! exactly 0. The reciprocal is shared, so it is free.
 //!
+//! # sin, cos, tan
+//!
+//! A third reduction, and the only one here that cannot cover its whole input
+//! range: `x = n*(pi/2) + r` with `|r| <= pi/4`, then `sin(r)/r` and `cos(r)`
+//! as polynomials in `r^2` and a quadrant select on `n & 3`. `tan` is the same
+//! reduction plus a division, which is why it comes nearly free and is the
+//! biggest speedup of the three.
+//!
+//! `pi/2` is split three ways, each part carrying at most 33 significant bits,
+//! so `n * PIO2_k` is exact for every `|n| < 2^20`. That exactness is the whole
+//! game: at `x ~ 2^20` the subtraction `x - n*(pi/2)` discards 20 bits, and
+//! there has to be something below them or the result is noise.
+//!
+//! Past `2^20` there is nothing below them, and the honest fix is to stop:
+//! [`trig_block_kernel`] runs a second pass that redoes those elements with the
+//! scalar float64 routine, which reduces properly. It is a separate pass rather
+//! than a branch in the element function because a `libm` call inside the main
+//! loop would scalarize all of it, for inputs that essentially never occur.
+//!
+//! One subtlety worth recording: `sin` is *not* sign-preserving, so the
+//! `copysign` repair the other kernels use for `-0.0` would be wrong here
+//! (`sin(4)` is negative). The cause was `fma(r*t, ps, r)` -- at `r = -0.0`,
+//! `ps` is negative, so `-0.0 * ps` is `+0.0` and the sum is `+0.0`. Writing it
+//! as `r * (1 + t*ps)` keeps the sign for free, and was the difference between
+//! one differing input and none.
+//!
 //! # erf
 //!
 //! Two branches over `a = |x|`, selected branchlessly:
@@ -182,6 +208,9 @@
 //! 22,628,918 of the 2^32 inputs (0.527%), so there it is an accuracy gain as
 //! well as a speedup.
 //!
+//! `sin`, `cos` and `tan` are bit-identical on all 2^32 inputs as well, the
+//! fallback pass included -- the handover at 2^20 is not visible in the output.
+//!
 //! `log` is bit-identical too, where the `f32::ln` it replaces misrounds
 //! 416,909 of the 2^32 inputs (0.0097%). `log1p` misses exactly one input by
 //! one ulp.
@@ -231,6 +260,9 @@
 //!     sigmoid            2541us    640us    4.0x         --
 //!     silu               1888us    687us    2.7x         --
 //!     silu backward      ~2.1ms   ~0.7ms    ~3x          --
+//!     sin                2538us    515us    4.9x      0.64x
+//!     cos                2632us    457us    5.8x      0.70x
+//!     tan                6319us    544us   11.6x      0.72x
 //! ```
 //!
 //! Everything with a NumPy column is now faster than NumPy, which has no
@@ -917,6 +949,107 @@ fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
     (local * gout as f64) as f32
 }
 
+// ---------------------------------------------------------------------------
+// trig: sin, cos, tan
+// ---------------------------------------------------------------------------
+
+/// `2/pi`, and `pi/2` split three ways.
+///
+/// Each part carries at most 33 significant bits, so `n * PIO2_k` is exact for
+/// every `|n| < 2^20` the reduction produces, and the three together represent
+/// `pi/2` to within 1e-37. That is what lets `x - n*pi/2` be computed without
+/// losing the cancellation: at `x ~ 2^20` the subtraction discards 20 bits, and
+/// there has to be something below them.
+const TWO_OVER_PI: f64 = std::f64::consts::FRAC_2_PI;
+const PIO2_0: f64 = 1.5707963267341256;
+const PIO2_1: f64 = 6.077100506303966e-11;
+const PIO2_2: f64 = 2.0222662487959506e-21;
+
+/// Above this the three-part split runs out of exactness. Those elements are
+/// redone with the scalar float64 routine, which reduces properly
+/// (Payne-Hanek) -- see [`trig_block_kernel`].
+const TRIG_LIMIT: f32 = 1048576.0; // 2^20
+
+/// `sin(r)/r` and `cos(r)` for |r| <= pi/4, as polynomials in `t = r*r`.
+#[inline(always)]
+fn sin_cos_poly<const FMA: bool>(r: f64, t: f64) -> (f64, f64) {
+    const S1: f64 = -1.0 / 6.0;
+    const S2: f64 = 1.0 / 120.0;
+    const S3: f64 = -1.0 / 5040.0;
+    const S4: f64 = 1.0 / 362880.0;
+    const S5: f64 = -1.0 / 39916800.0;
+    const S6: f64 = 1.0 / 6227020800.0;
+    const S7: f64 = -1.0 / 1307674368000.0;
+    const S8: f64 = 1.0 / 355687428096000.0;
+    const C1: f64 = -1.0 / 2.0;
+    const C2: f64 = 1.0 / 24.0;
+    const C3: f64 = -1.0 / 720.0;
+    const C4: f64 = 1.0 / 40320.0;
+    const C5: f64 = -1.0 / 3628800.0;
+    const C6: f64 = 1.0 / 479001600.0;
+    const C7: f64 = -1.0 / 87178291200.0;
+    const C8: f64 = 1.0 / 20922789888000.0;
+    const C9: f64 = -1.0 / 6402373705728000.0;
+
+    let t2 = t * t;
+    let t4 = t2 * t2;
+    // sin: r * (1 + t*Ps(t)), Ps degree 7, Estrin
+    let a0 = fma_or::<FMA>(t, S2, S1);
+    let a1 = fma_or::<FMA>(t, S4, S3);
+    let a2 = fma_or::<FMA>(t, S6, S5);
+    let a3 = fma_or::<FMA>(t, S8, S7);
+    let ps = fma_or::<FMA>(t4, fma_or::<FMA>(t2, a3, a2), fma_or::<FMA>(t2, a1, a0));
+    let s = r * fma_or::<FMA>(t, ps, 1.0);
+    // cos: 1 + t*Pc(t), Pc degree 8, Estrin
+    let b0 = fma_or::<FMA>(t, C2, C1);
+    let b1 = fma_or::<FMA>(t, C4, C3);
+    let b2 = fma_or::<FMA>(t, C6, C5);
+    let b3 = fma_or::<FMA>(t, C8, C7);
+    let pc = fma_or::<FMA>(
+        t4,
+        fma_or::<FMA>(t4, C9, fma_or::<FMA>(t2, b3, b2)),
+        fma_or::<FMA>(t2, b1, b0),
+    );
+    let c = fma_or::<FMA>(t, pc, 1.0);
+    (s, c)
+}
+
+/// `(sin(r)/., cos(r), quadrant)` after reducing `x` mod pi/2.
+#[inline(always)]
+fn reduce_trig<const FMA: bool>(xd: f64) -> (f64, f64, u64) {
+    let z = fma_or::<FMA>(xd, TWO_OVER_PI, MAGIC);
+    let n = z - MAGIC;
+    let q = z.to_bits() & 3;
+    let r = fma_or::<FMA>(
+        -n,
+        PIO2_2,
+        fma_or::<FMA>(-n, PIO2_1, fma_or::<FMA>(-n, PIO2_0, xd)),
+    );
+    let (s, c) = sin_cos_poly::<FMA>(r, r * r);
+    (s, c, q)
+}
+
+#[inline(always)]
+fn sin_one<const FMA: bool>(x: f32) -> f32 {
+    let (s, c, q) = reduce_trig::<FMA>(x as f64);
+    let v = if q & 1 != 0 { c } else { s };
+    (if q & 2 != 0 { -v } else { v }) as f32
+}
+
+#[inline(always)]
+fn cos_one<const FMA: bool>(x: f32) -> f32 {
+    let (s, c, q) = reduce_trig::<FMA>(x as f64);
+    let v = if q & 1 != 0 { s } else { c };
+    // cos leads sin by one quadrant: negate on q in {1,2}
+    (if ((q + 1) & 2) != 0 { -v } else { v }) as f32
+}
+
+#[inline(always)]
+fn tan_one<const FMA: bool>(x: f32) -> f32 {
+    let (s, c, q) = reduce_trig::<FMA>(x as f64);
+    (if q & 1 != 0 { -c / s } else { s / c }) as f32
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -927,6 +1060,42 @@ macro_rules! block_kernel {
             debug_assert_eq!(input.len(), out.len());
             for (o, &x) in out.iter_mut().zip(input.iter()) {
                 o.write($one::<FMA>(x));
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512f")]
+        fn $avx512(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(input, out)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2,fma")]
+        fn $avx2(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            $block::<true>(input, out)
+        }
+    };
+}
+
+/// The trig form: the vectorized loop, then a second pass redoing the rare
+/// elements the reduction cannot handle.
+///
+/// The fallback has to be a separate pass rather than a branch inside the
+/// element function. A `libm` call in the main loop would scalarize all of it,
+/// for inputs that essentially never occur -- the second pass is a compare per
+/// element over a block still in cache, and its body is almost never taken.
+macro_rules! trig_block_kernel {
+    ($block:ident, $one:ident, $scalar:path, $avx512:ident, $avx2:ident) => {
+        #[inline(always)]
+        fn $block<const FMA: bool>(input: &[f32], out: &mut [MaybeUninit<f32>]) {
+            debug_assert_eq!(input.len(), out.len());
+            for (o, &x) in out.iter_mut().zip(input.iter()) {
+                o.write($one::<FMA>(x));
+            }
+            for (o, &x) in out.iter_mut().zip(input.iter()) {
+                if x.abs() >= TRIG_LIMIT {
+                    o.write($scalar(x as f64) as f32);
+                }
             }
         }
 
@@ -1046,6 +1215,27 @@ block_kernel!(
     sigmoid_block_avx2
 );
 block_kernel!(silu_block, silu_one, silu_block_avx512, silu_block_avx2);
+trig_block_kernel!(
+    sin_block,
+    sin_one,
+    f64::sin,
+    sin_block_avx512,
+    sin_block_avx2
+);
+trig_block_kernel!(
+    cos_block,
+    cos_one,
+    f64::cos,
+    cos_block_avx512,
+    cos_block_avx2
+);
+trig_block_kernel!(
+    tan_block,
+    tan_one,
+    f64::tan,
+    tan_block_avx512,
+    tan_block_avx2
+);
 block_kernel_param!(
     softplus_block,
     softplus_one,
@@ -1176,6 +1366,45 @@ impl F32Kernel {
             erf_block,
             erf_block_avx512,
             erf_block_avx2
+        )
+    }
+
+    /// Write `sin(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn sin(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            sin_block,
+            sin_block_avx512,
+            sin_block_avx2
+        )
+    }
+
+    /// Write `cos(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn cos(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            cos_block,
+            cos_block_avx512,
+            cos_block_avx2
+        )
+    }
+
+    /// Write `tan(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn tan(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            tan_block,
+            tan_block_avx512,
+            tan_block_avx2
         )
     }
 
@@ -1404,6 +1633,9 @@ mod tests {
         Log1p,
         Sigmoid,
         Silu,
+        Sin,
+        Cos,
+        Tan,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1421,6 +1653,9 @@ mod tests {
             Op::Log1p => k.log1p(input, out),
             Op::Sigmoid => k.sigmoid(input, out),
             Op::Silu => k.silu(input, out),
+            Op::Sin => k.sin(input, out),
+            Op::Cos => k.cos(input, out),
+            Op::Tan => k.tan(input, out),
         }
     }
 
@@ -1476,6 +1711,9 @@ mod tests {
             // negative x, which is the bug these kernels fix.
             Op::Sigmoid => stable_logistic(xd) as f32,
             Op::Silu => (xd * stable_logistic(xd)) as f32,
+            Op::Sin => xd.sin() as f32,
+            Op::Cos => xd.cos() as f32,
+            Op::Tan => xd.tan() as f32,
         }
     }
 
@@ -1494,8 +1732,17 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 5] {
-        [Op::Tanh, Op::Expm1, Op::Sinh, Op::Cosh, Op::Log]
+    fn bit_exact_ops() -> [Op; 8] {
+        [
+            Op::Tanh,
+            Op::Expm1,
+            Op::Sinh,
+            Op::Cosh,
+            Op::Log,
+            Op::Sin,
+            Op::Cos,
+            Op::Tan,
+        ]
     }
 
     /// Signed distance in representable float32 steps.
@@ -1578,6 +1825,9 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Sin,
+            Op::Cos,
+            Op::Tan,
         ] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
@@ -1610,6 +1860,9 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Sin,
+            Op::Cos,
+            Op::Tan,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -1628,7 +1881,7 @@ mod tests {
         let neg: Vec<f32> = xs.iter().map(|v| -v).collect();
         // Only the genuinely odd kernels. GELU is not odd, `cosh` is even, and
         // `expm1` is neither.
-        for op in [Op::Tanh, Op::Erf, Op::Sinh] {
+        for op in [Op::Tanh, Op::Erf, Op::Sinh, Op::Sin, Op::Tan] {
             for backend in available() {
                 for (p, n) in run(op, backend, &xs)
                     .into_iter()
@@ -1687,6 +1940,9 @@ mod tests {
             Op::Log1p,
             Op::Sigmoid,
             Op::Silu,
+            Op::Sin,
+            Op::Cos,
+            Op::Tan,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {

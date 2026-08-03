@@ -475,15 +475,67 @@ pub(crate) fn expm1_f32(tensor: &Tensor) -> Result<TensorData> {
 
 float_unary_kernel!(expm1_f64, as_f64_slice, f64, Float64, "f64", f64::exp_m1);
 
-float_unary_kernel!(sin_f32, as_f32_slice, f32, Float32, "f32", f32::sin);
+/// Vectorized; bit-identical to `(x as f64).sin() as f32` on all 2^32 inputs.
+pub(crate) fn sin_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `sin` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.sin(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(sin_f64, as_f64_slice, f64, Float64, "f64", f64::sin);
 
-float_unary_kernel!(cos_f32, as_f32_slice, f32, Float32, "f32", f32::cos);
+/// Vectorized; bit-identical to `(x as f64).cos() as f32` on all 2^32 inputs.
+pub(crate) fn cos_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `cos` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.cos(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(cos_f64, as_f64_slice, f64, Float64, "f64", f64::cos);
 
-float_unary_kernel!(tan_f32, as_f32_slice, f32, Float32, "f32", f32::tan);
+/// Vectorized; bit-identical to `(x as f64).tan() as f32` on all 2^32 inputs.
+/// Shares the reduction with `sin` and `cos`, so it costs a division more.
+pub(crate) fn tan_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `tan` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.tan(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(tan_f64, as_f64_slice, f64, Float64, "f64", f64::tan);
 
