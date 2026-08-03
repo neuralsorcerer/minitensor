@@ -167,6 +167,61 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         Ok(loss)
     }
 }
+/// The per-sample loss `-log_predictions[i, targets[i]]`, one gather per row.
+///
+/// The dense path forms the same value as a class-axis reduction of
+/// `one_hot * log_p`, which for class-index targets is a 4-million-element
+/// multiply and reduction to read out 4096 numbers. It also needs four more
+/// full-size passes first (a zeros, an `eq`, a `masked_fill` and a `negate`),
+/// purely so that multiplying a zero target by an infinite log-probability
+/// cannot produce NaN where there is no target mass. None of that arises here:
+/// only the target class is ever touched.
+fn nll_from_indices(log_predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    let rows = targets.numel();
+    let classes = log_predictions.size(log_predictions.ndim() - 1)?;
+    let device = log_predictions.device();
+
+    macro_rules! gather {
+        ($pred_slice:ident, $ty:ty, $variant:ident, $idx_slice:ident, $idx_ty:ty) => {{
+            let preds = log_predictions.data().$pred_slice().ok_or_else(|| {
+                MinitensorError::internal_error("cross_entropy: bad prediction slice")
+            })?;
+            let idx = targets.data().$idx_slice().ok_or_else(|| {
+                MinitensorError::internal_error("cross_entropy: bad target slice")
+            })?;
+            let mut out = Vec::with_capacity(rows);
+            for (row, &raw) in idx.iter().enumerate().take(rows) {
+                let class = checked_index_from_i64(raw as i64, classes)?;
+                out.push(-preds[row * classes + class]);
+            }
+            TensorData::from_vec::<$ty>(out, DataType::$variant, device)
+        }};
+    }
+
+    let data = match (log_predictions.dtype(), targets.dtype()) {
+        (DataType::Float32, DataType::Int32) => {
+            gather!(as_f32_slice, f32, Float32, as_i32_slice, i32)
+        }
+        (DataType::Float32, DataType::Int64) => {
+            gather!(as_f32_slice, f32, Float32, as_i64_slice, i64)
+        }
+        (DataType::Float64, DataType::Int32) => {
+            gather!(as_f64_slice, f64, Float64, as_i32_slice, i32)
+        }
+        (DataType::Float64, DataType::Int64) => {
+            gather!(as_f64_slice, f64, Float64, as_i64_slice, i64)
+        }
+        _ => unreachable!("nll_from_indices is only reached for integer targets"),
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(vec![rows]),
+        log_predictions.dtype(),
+        device,
+        false,
+    ))
+}
 
 /// Cross Entropy loss function for classification
 ///
@@ -188,8 +243,22 @@ pub fn cross_entropy_loss(
     // Validate inputs
     validate_classification_inputs(predictions, targets, false)?;
 
-    // Convert class indices to one-hot encoding if needed
-    let targets_one_hot = prepare_classification_targets(predictions, targets)?;
+    // Class-index targets take a gather instead of the dense one-hot path; the
+    // one-hot is still needed for the analytical backward, so it is built only
+    // when a gradient will actually be taken.
+    // Only integer indices take the fast path. Float-typed class indices are
+    // accepted by the dense path too, and keeping them on it means this change
+    // cannot alter any result it does not also speed up.
+    let index_targets = targets.ndim() + 1 == predictions.ndim()
+        && matches!(targets.dtype(), DataType::Int32 | DataType::Int64);
+    let needs_grad = predictions.requires_grad() && crate::autograd::is_grad_enabled();
+    // The backward takes indices directly, so the one-hot is only ever needed
+    // for soft/dense targets now -- never materialized for class indices.
+    let targets_one_hot = if index_targets {
+        None
+    } else {
+        Some(prepare_classification_targets(predictions, targets)?)
+    };
 
     // Cross-entropy owns an analytical backward node. Do not record the
     // primitive log-softmax/multiply/reduction graph as well: those nodes are
@@ -199,12 +268,24 @@ pub fn cross_entropy_loss(
     let (loss, softmax_predictions) = {
         let _guard = NoGradGuard::new();
         let log_predictions = log_softmax(predictions, None)?;
-        // Keep probabilities only for the analytical backward formula. The
-        // loss itself remains in log-space so finite log-probabilities cannot
-        // be turned into infinity by exponentiation underflow.
-        let softmax_predictions = exp(&log_predictions.detach())?;
-        let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
-        let per_sample = sum(&nll, Some(vec![1]), false)?;
+        // Keep probabilities only for the analytical backward formula, and only
+        // when there is one to take. The loss itself remains in log-space so
+        // finite log-probabilities cannot be turned into infinity by
+        // exponentiation underflow.
+        let softmax_predictions = if needs_grad {
+            Some(exp(&log_predictions.detach())?)
+        } else {
+            None
+        };
+        let per_sample = if index_targets {
+            nll_from_indices(&log_predictions, targets)?
+        } else {
+            let one_hot = targets_one_hot
+                .as_ref()
+                .expect("dense targets prepared above");
+            let nll = negative_log_likelihood(&log_predictions, one_hot)?;
+            sum(&nll, Some(vec![1]), false)?
+        };
 
         let loss = match reduction {
             "mean" => {
@@ -225,14 +306,21 @@ pub fn cross_entropy_loss(
     };
 
     // Set up gradient function if needed
-    if predictions.requires_grad() && crate::autograd::is_grad_enabled() {
+    if needs_grad {
+        let softmax_predictions =
+            softmax_predictions.expect("probabilities computed whenever a gradient is needed");
+        let targets_shape = targets_one_hot
+            .as_ref()
+            .map(|t| t.shape().dims().to_vec())
+            .unwrap_or_else(|| predictions.shape().dims().to_vec());
         let grad_fn = Arc::new(CrossEntropyLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
-            targets_shape: targets_one_hot.shape().dims().to_vec(),
+            targets_shape,
             input_ids: [predictions.id()],
             reduction: reduction.to_string(),
-            softmax_predictions: softmax_predictions.clone().detach(),
-            targets: targets_one_hot.clone().detach(),
+            softmax_predictions: softmax_predictions.detach(),
+            targets: targets_one_hot.map(|t| t.detach()),
+            target_indices: index_targets.then(|| targets.detach()),
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);

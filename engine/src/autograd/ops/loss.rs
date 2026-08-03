@@ -14,6 +14,7 @@ use crate::{
     ops::{activation, arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -218,8 +219,46 @@ pub struct CrossEntropyLossBackward {
     pub input_ids: [TensorId; 1],
     pub reduction: String,
     pub softmax_predictions: Tensor,
-    pub targets: Tensor,
+    /// One-hot (or soft) targets, for the general formula below.
+    pub targets: Option<Tensor>,
+    /// Class indices, when that is what the caller passed. The gradient is
+    /// then `(softmax - one_hot) * scale`, which needs no one-hot to exist:
+    /// subtracting 1 at one column per row is a scatter, not a dense subtract.
+    /// Taking it collapses five full-size passes -- a class-axis sum, a
+    /// broadcast multiply, a subtract, a scalar multiply and the grad_output
+    /// multiply -- into one.
+    pub target_indices: Option<Tensor>,
 }
+
+/// `grad[i, c] = scale_i * (softmax[i, c] - [c == index_i])`, in one pass.
+macro_rules! cross_entropy_index_grad {
+    ($name:ident, $ty:ty, $idx:ty) => {
+        fn $name(probs: &[$ty], idx: &[$idx], classes: usize, scale: &[f64], out: &mut [$ty]) {
+            out.par_chunks_mut(classes)
+                .zip(probs.par_chunks(classes))
+                .enumerate()
+                .for_each(|(row, (o, p))| {
+                    let s = if scale.len() == 1 {
+                        scale[0]
+                    } else {
+                        scale[row]
+                    };
+                    for (c, slot) in o.iter_mut().enumerate() {
+                        *slot = (p[c] as f64 * s) as $ty;
+                    }
+                    let target = idx[row] as usize;
+                    if target < classes {
+                        o[target] = ((p[target] as f64 - 1.0) * s) as $ty;
+                    }
+                });
+        }
+    };
+}
+
+cross_entropy_index_grad!(ce_index_grad_f32_i32, f32, i32);
+cross_entropy_index_grad!(ce_index_grad_f32_i64, f32, i64);
+cross_entropy_index_grad!(ce_index_grad_f64_i32, f64, i32);
+cross_entropy_index_grad!(ce_index_grad_f64_i64, f64, i64);
 impl GradientFunction for CrossEntropyLossBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
@@ -231,7 +270,116 @@ impl GradientFunction for CrossEntropyLossBackward {
         // probability/weighted targets mathematically correct while reducing
         // to the usual formula for class-index and normalized one-hot targets.
         let probabilities = self.softmax_predictions.detach();
-        let targets = self.targets.detach();
+
+        if let Some(indices) = &self.target_indices {
+            let classes = *self.predictions_shape.last().unwrap_or(&1);
+            let rows = indices.numel();
+            // Per-row scaling: grad_output is a scalar for `mean`/`sum` and one
+            // value per sample for `none`; `mean` folds in the 1/batch.
+            let go = grad_output.detach();
+            let mut scale: Vec<f64> = match go.dtype() {
+                DataType::Float32 => go
+                    .data()
+                    .as_f32_slice()
+                    .map(|s| s.iter().map(|&v| v as f64).collect())
+                    .unwrap_or_default(),
+                DataType::Float64 => go
+                    .data()
+                    .as_f64_slice()
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default(),
+                _ => {
+                    return Err(MinitensorError::invalid_operation(
+                        "CrossEntropy backward only supports floating point tensors",
+                    ));
+                }
+            };
+            if self.reduction == "mean" {
+                let batch = self.predictions_shape.first().copied().unwrap_or(1).max(1) as f64;
+                for v in scale.iter_mut() {
+                    *v /= batch;
+                }
+            }
+            if scale.is_empty() {
+                scale.push(0.0);
+            }
+
+            let mut out = TensorData::zeros_on_device(
+                rows * classes,
+                probabilities.dtype(),
+                probabilities.device(),
+            );
+            macro_rules! run {
+                ($pslice:ident, $oslice:ident, $islice:ident, $kernel:ident) => {{
+                    let p = probabilities.data().$pslice().ok_or_else(|| {
+                        MinitensorError::internal_error("cross_entropy backward: bad probabilities")
+                    })?;
+                    let i = indices.data().$islice().ok_or_else(|| {
+                        MinitensorError::internal_error("cross_entropy backward: bad indices")
+                    })?;
+                    let o = out.$oslice().ok_or_else(|| {
+                        MinitensorError::internal_error("cross_entropy backward: bad output")
+                    })?;
+                    $kernel(p, i, classes, &scale, o);
+                }};
+            }
+            match (probabilities.dtype(), indices.dtype()) {
+                (DataType::Float32, DataType::Int32) => {
+                    run!(
+                        as_f32_slice,
+                        as_f32_slice_mut,
+                        as_i32_slice,
+                        ce_index_grad_f32_i32
+                    )
+                }
+                (DataType::Float32, DataType::Int64) => {
+                    run!(
+                        as_f32_slice,
+                        as_f32_slice_mut,
+                        as_i64_slice,
+                        ce_index_grad_f32_i64
+                    )
+                }
+                (DataType::Float64, DataType::Int32) => {
+                    run!(
+                        as_f64_slice,
+                        as_f64_slice_mut,
+                        as_i32_slice,
+                        ce_index_grad_f64_i32
+                    )
+                }
+                (DataType::Float64, DataType::Int64) => {
+                    run!(
+                        as_f64_slice,
+                        as_f64_slice_mut,
+                        as_i64_slice,
+                        ce_index_grad_f64_i64
+                    )
+                }
+                _ => {
+                    return Err(MinitensorError::invalid_operation(
+                        "CrossEntropy backward: unsupported dtype pair",
+                    ));
+                }
+            }
+            let grad = Tensor::new(
+                Arc::new(out),
+                Shape::new(self.predictions_shape.clone()),
+                probabilities.dtype(),
+                probabilities.device(),
+                false,
+            );
+            accumulate_grad(&mut gradients, self.input_ids[0], grad)?;
+            return Ok(gradients);
+        }
+
+        let targets = self
+            .targets
+            .as_ref()
+            .ok_or_else(|| {
+                MinitensorError::internal_error("cross_entropy backward: no targets saved")
+            })?
+            .detach();
         let class_dim = (targets.ndim() - 1) as isize;
         let target_mass = reduction::sum(&targets, Some(vec![class_dim]), true)?;
         let weighted_probabilities = arithmetic::mul(&probabilities, &target_mass)?;

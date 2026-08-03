@@ -1362,3 +1362,69 @@ def test_relu_and_leaky_relu_agree_on_which_side_zero_belongs_to():
     # the same way: both take the negative branch.
     assert relu_input.grad.numpy()[0] == 0.0
     assert leaky_input.grad.numpy()[0] == 0.5
+
+
+# Class-index targets take a gather path through cross_entropy rather than the
+# dense one-hot one. The dense path forms `-sum(one_hot * log_p)` over the class
+# axis -- a 4-million-element multiply and reduction to read out 4096 numbers --
+# behind four more full-size passes (a zeros, an `eq`, a `masked_fill` and a
+# `negate`) that exist only so `0 * -inf` cannot make a NaN where there is no
+# target mass. None of that arises when only the target class is touched.
+#
+# The backward takes the indices directly too: `softmax - one_hot` needs no
+# one-hot, since subtracting 1 at one column per row is a scatter.
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+@pytest.mark.parametrize("dtype,index_dtype", [("float32", np.int64), ("float64", np.int32)])
+def test_cross_entropy_index_targets_match_the_dense_formula(reduction, dtype, index_dtype):
+    rng = np.random.default_rng(hash((reduction, dtype)) % 2**31)
+    rows, classes = 64, 40
+    logits = rng.standard_normal((rows, classes)).astype(dtype)
+    idx = rng.integers(0, classes, rows).astype(index_dtype)
+
+    x = mt.Tensor(logits, dtype=dtype, requires_grad=True)
+    loss = mt.nn.cross_entropy(x, mt.from_numpy(idx), reduction=reduction)
+    (loss.sum() if reduction == "none" else loss).backward()
+    grad = x.grad.numpy()
+    value = loss.numpy()
+    mt.clear_autograd_graph()
+
+    a = logits.astype(np.float64)
+    z = a - a.max(-1, keepdims=True)
+    log_p = z - np.log(np.exp(z).sum(-1, keepdims=True))
+    per_sample = -log_p[np.arange(rows), idx]
+    expected = {"mean": per_sample.mean(), "sum": per_sample.sum(), "none": per_sample}[reduction]
+    np.testing.assert_allclose(value, expected, rtol=1e-5, atol=1e-6)
+
+    probabilities = np.exp(log_p)
+    expected_grad = probabilities.copy()
+    expected_grad[np.arange(rows), idx] -= 1.0
+    if reduction == "mean":
+        expected_grad /= rows
+    np.testing.assert_allclose(grad, expected_grad, rtol=1e-5, atol=1e-6)
+
+
+def test_cross_entropy_index_and_one_hot_targets_agree():
+    """The two paths must not have drifted apart -- same loss, same gradient."""
+    rng = np.random.default_rng(77)
+    rows, classes = 32, 12
+    logits = rng.standard_normal((rows, classes)).astype(np.float32)
+    idx = rng.integers(0, classes, rows)
+    one_hot = np.zeros((rows, classes), dtype=np.float32)
+    one_hot[np.arange(rows), idx] = 1.0
+
+    results = []
+    for target in (mt.from_numpy(idx.astype(np.int64)), mt.from_numpy(one_hot)):
+        x = mt.Tensor(logits, dtype="float32", requires_grad=True)
+        loss = mt.nn.cross_entropy(x, target)
+        loss.backward()
+        results.append((loss.numpy(), x.grad.numpy()))
+        mt.clear_autograd_graph()
+
+    np.testing.assert_allclose(results[0][0], results[1][0], rtol=1e-6)
+    np.testing.assert_allclose(results[0][1], results[1][1], rtol=1e-5, atol=1e-7)
+
+
+def test_cross_entropy_rejects_an_out_of_range_class_index():
+    logits = mt.from_numpy(np.zeros((2, 3), dtype=np.float32))
+    with pytest.raises(Exception):
+        mt.nn.cross_entropy(logits, mt.from_numpy(np.array([0, 5], dtype=np.int64)))
