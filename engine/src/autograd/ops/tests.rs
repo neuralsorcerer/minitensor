@@ -15,6 +15,102 @@ mod tests {
     use crate::tensor::{Shape, Tensor, TensorData};
     use std::sync::Arc;
 
+    /// How many gradients the global graph currently stores.
+    fn backward_collect_len() -> usize {
+        crate::autograd::ops::core::graph_gradient_count()
+    }
+
+    /// Repeated forward/backward without an optimizer step used to grow the
+    /// stored gradient map forever. Interior tensors get a fresh id on every
+    /// forward pass, so an entry was added per interior tensor per backward and
+    /// nothing but `optimizer.step()` resetting the whole graph ever removed
+    /// one. That is exactly the shape of gradient accumulation: `backward()` a
+    /// few times, `step()` once.
+    #[test]
+    fn repeated_backward_without_a_step_keeps_the_gradient_map_bounded() {
+        use crate::ops::linalg::matmul;
+
+        clear_graph().unwrap();
+        let w = Tensor::ones(
+            Shape::new(vec![8, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let x = Tensor::ones(
+            Shape::new(vec![4, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let mut sizes = Vec::new();
+        for _ in 0..8 {
+            let h = activation::relu(&matmul(&x, &w).unwrap()).unwrap();
+            let loss = reduction::sum(&h, None, false).unwrap();
+            backward(&loss, None).unwrap();
+            // What the bindings do for a non-retaining backward.
+            mark_graph_consumed();
+            release_saved_subgraph(&loss);
+            sizes.push(backward_collect_len());
+        }
+
+        // Steady state from the second pass on. Without the bound this grew by
+        // one entry per interior tensor on every pass.
+        let steady = sizes[1];
+        for (pass, &n) in sizes.iter().enumerate().skip(1) {
+            assert_eq!(
+                n, steady,
+                "pass {pass} stored {n} gradients, pass 1 stored {steady}"
+            );
+        }
+        clear_graph().unwrap();
+    }
+
+    /// Bounding the map must not cost the accumulation itself: the leaf
+    /// gradients are the whole point of running several backwards before a
+    /// step, and they have to keep adding up.
+    #[test]
+    fn leaf_gradients_accumulate_across_released_passes() {
+        use crate::ops::linalg::matmul;
+
+        clear_graph().unwrap();
+        let w = Tensor::ones(
+            Shape::new(vec![8, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            true,
+        );
+        let x = Tensor::ones(
+            Shape::new(vec![4, 8]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+
+        let mut previous: Option<f32> = None;
+        for pass in 1..=4u32 {
+            let loss = reduction::sum(&matmul(&x, &w).unwrap(), None, false).unwrap();
+            backward(&loss, None).unwrap();
+            mark_graph_consumed();
+            release_saved_subgraph(&loss);
+
+            let grad = get_gradient(&w).expect("leaf gradient survives release");
+            let first = grad.data().as_f32_slice().unwrap()[0];
+            if let Some(prev) = previous {
+                assert!(
+                    first > prev,
+                    "pass {pass} did not add to the stored gradient ({first} vs {prev})"
+                );
+            }
+            // Each pass contributes the same amount, so after `pass` passes the
+            // stored gradient is `pass` times one pass's worth.
+            assert_eq!(first, 4.0 * pass as f32);
+            previous = Some(first);
+        }
+        clear_graph().unwrap();
+    }
+
     #[test]
     fn test_tensor_id_generation() {
         let id1 = TensorId::new();

@@ -6,7 +6,7 @@
 
 use super::{GradientFunction, TensorId};
 use crate::{error::Result, ops::arithmetic, tensor::Tensor};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -139,6 +139,10 @@ pub struct ComputationGraph {
     nodes: FxHashMap<TensorId, GraphNode>,
     /// Gradients computed during backward pass
     gradients: FxHashMap<TensorId, Tensor>,
+    /// Interior tensors whose gradients the most recent
+    /// [`Self::release_saved_subgraph`] kept, so that a non-leaf `.grad` can
+    /// still be read after the pass that produced it. Dropped one pass later.
+    retained_interior: FxHashSet<TensorId>,
 }
 
 impl ComputationGraph {
@@ -147,6 +151,7 @@ impl ComputationGraph {
         Self {
             nodes: FxHashMap::default(),
             gradients: FxHashMap::default(),
+            retained_interior: FxHashSet::default(),
         }
     }
 
@@ -316,20 +321,35 @@ impl ComputationGraph {
     /// them until the next optimizer step. Leaf nodes and stored gradients are
     /// preserved so `get_gradient` keeps working.
     pub fn release_saved_subgraph(&mut self, start: TensorId) {
-        let mut interior: Vec<TensorId> = Vec::new();
+        let mut interior = FxHashSet::default();
         // Ignore cycle errors here: releasing is best-effort cleanup.
         let _ = self.visit_reachable_reverse_topo(start, |node| {
             if node.grad_fn.is_some() {
-                interior.push(node.tensor_id);
+                interior.insert(node.tensor_id);
             }
         });
-        for id in interior {
-            self.nodes.remove(&id);
-            // Interior gradient *entries* are intentionally kept: minitensor
-            // exposes non-leaf `.grad` after backward (unlike PyTorch), and
-            // tests rely on it. The stored map stays bounded because
-            // `optimizer.step()` / `clear_autograd_graph()` reset the graph, and
-            // `zero_grad` clears per-tensor entries, between training steps.
+
+        // Interior gradient *entries* are kept, not dropped with their node:
+        // minitensor exposes non-leaf `.grad` after backward, unlike PyTorch.
+        // They are only meaningful for the pass that produced them, though, so
+        // this drops the ones the previous pass left behind.
+        //
+        // Keeping them indefinitely was a leak. Interior tensors get a fresh
+        // id on every forward pass, so nothing ever overwrote an old entry, and
+        // the only thing that emptied the map was `optimizer.step()` resetting
+        // the whole graph. A `backward()` not followed by a step -- which is
+        // exactly what gradient accumulation does -- therefore retained every
+        // activation gradient it had ever computed.
+        let stale = std::mem::replace(&mut self.retained_interior, interior);
+        for id in stale {
+            // A tensor that this pass wrote a gradient for keeps it.
+            if !self.retained_interior.contains(&id) {
+                self.gradients.remove(&id);
+            }
+        }
+
+        for id in &self.retained_interior {
+            self.nodes.remove(id);
         }
     }
 
@@ -392,6 +412,8 @@ impl ComputationGraph {
     /// Clear all gradients
     pub fn zero_grad(&mut self) {
         self.gradients.clear();
+        // Nothing left for the next release to drop.
+        self.retained_interior.clear();
     }
 
     /// Remove the stored gradient for a single tensor, if any.
@@ -915,6 +937,8 @@ mod tests {
         // Gradients stay readable after release.
         assert!(graph.get_gradient(a).is_some());
         assert!(graph.get_gradient(b).is_some());
+        // Including the interior one, for a non-leaf `.grad` read.
+        assert!(graph.get_gradient(c).is_some());
     }
 
     #[test]

@@ -201,10 +201,6 @@ pub fn backward_collect(
     Ok(GLOBAL_GRAPH.with(|graph| graph.borrow().gradients_snapshot()))
 }
 
-/// Release the autograd nodes (and the tensors they saved for backward)
-/// reachable from `tensor`. Stored gradients remain available. Called by the
-/// bindings after a non-retaining backward pass so saved activations are freed
-/// immediately rather than at the next optimizer step.
 /// Whether a live backward node still needs this tensor's current values.
 ///
 /// Backward nodes keep their operands by `Arc`, so a leaf that requires grad
@@ -217,6 +213,10 @@ pub fn is_consumed_by_live_graph(tensor: &Tensor) -> bool {
     GLOBAL_GRAPH.with(|graph| graph.borrow().has_dependents(tensor.id()))
 }
 
+/// Release the autograd nodes (and the tensors they saved for backward)
+/// reachable from `tensor`. Stored gradients remain available. Called by the
+/// bindings after a non-retaining backward pass so saved activations are freed
+/// immediately rather than at the next optimizer step.
 pub fn release_saved_subgraph(tensor: &Tensor) {
     GLOBAL_GRAPH.with(|graph| graph.borrow_mut().release_saved_subgraph(tensor.id()));
 }
@@ -261,6 +261,13 @@ pub fn clear_graph() -> Result<()> {
 #[cfg(test)]
 pub(crate) fn graph_node_count() -> usize {
     GLOBAL_GRAPH.with(|graph| graph.borrow().num_nodes())
+}
+
+/// How many gradients the graph currently stores. Used by the test that holds
+/// the line on repeated backward passes not growing it without bound.
+#[cfg(test)]
+pub(crate) fn graph_gradient_count() -> usize {
+    GLOBAL_GRAPH.with(|graph| graph.borrow().gradients_snapshot().len())
 }
 
 /// Mark the computation graph as consumed after a backward pass completes.
