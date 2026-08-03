@@ -588,3 +588,86 @@ def test_softplus_negative_tail_is_exponential_not_zero():
     np.testing.assert_allclose(got, want, rtol=1e-6)
     assert np.all(np.diff(got) < 0), f"softplus tail stopped decaying: {got}"
     assert got[-1] > 0.0, "softplus underflowed to zero at x = -60"
+
+
+# `sigmoid` and `silu` are vectorized on the same exp core, as `e/(e+1)` rather
+# than `1/(1 + exp(-x))`. That is not just a rearrangement: `exp(-x)` overflows
+# float32 below about x = -89, so the old form returned exactly zero where the
+# true value was still representable. `silu(-100)` was -0 against -3.72e-42,
+# and the softplus gradient (which is sigmoid) was 0 at x = -95 against
+# 5.52e-42.
+def _stable_logistic(x):
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    pos = x >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    e = np.exp(x[~pos])
+    out[~pos] = e / (1.0 + e)
+    return out
+
+
+_LOGISTIC = [
+    ("sigmoid", lambda t: t.sigmoid(), _stable_logistic),
+    ("silu", lambda t: t.silu(), lambda x: np.asarray(x, dtype=np.float64) * _stable_logistic(x)),
+]
+
+
+@pytest.mark.parametrize("name,op,reference", _LOGISTIC, ids=[c[0] for c in _LOGISTIC])
+@pytest.mark.parametrize("length", [1, 7, 17, 1023, 1024, 16383, 16384, 40000])
+def test_logistic_family_stays_within_one_ulp(name, op, reference, length):
+    rng = np.random.default_rng(606 + length)
+    sample = np.concatenate(
+        [rng.standard_normal(length) * 6.0, rng.uniform(-110.0, -80.0, length)]
+    ).astype(np.float32)[:length]
+    got = op(mt.from_numpy(sample)).numpy()
+    want = reference(sample.astype(np.float64)).astype(np.float32)
+    bad = _ulps_apart(got, want) > 1
+    assert not bad.any(), (
+        f"{name} length {length}: {int(bad.sum())} off by >1 ulp, "
+        f"first at x={sample[bad][0]!r}"
+    )
+
+
+def test_silu_keeps_its_negative_tail():
+    """`x / (1 + exp(-x))` returned -0 here; `x * e/(e+1)` does not."""
+    xs = np.array([-80.0, -90.0, -95.0, -100.0, -103.0], dtype=np.float32)
+    got = mt.from_numpy(xs).silu().numpy().astype(np.float64)
+    want = xs.astype(np.float64) * _stable_logistic(xs)
+    assert np.all(got != 0.0), f"silu truncated its tail: {got}"
+    # In ulps, not rtol: these land in the float32 subnormals, where the spacing
+    # is 1.4e-45 and no relative tolerance below ~4e-4 is achievable.
+    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
+        f"got {got}, want {want}"
+    )
+
+
+def test_softplus_gradient_keeps_its_tail():
+    """The softplus gradient is sigmoid, and had the same overflow."""
+    xs = np.array([-80.0, -90.0, -95.0, -100.0], dtype=np.float32)
+    tensor = mt.Tensor(xs, dtype="float32", requires_grad=True)
+    tensor.softplus().sum().backward()
+    got = tensor.grad.numpy().astype(np.float64)
+    mt.clear_autograd_graph()
+    assert np.all(got > 0.0), f"softplus gradient truncated: {got}"
+    want = _stable_logistic(xs)
+    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
+        f"got {got}, want {want}"
+    )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_silu_gradient_matches_the_analytic_derivative(dtype):
+    sample = np.concatenate(
+        [np.random.default_rng(7).standard_normal(20_000) * 6, np.linspace(-100.0, -20.0, 500)]
+    ).astype(dtype)
+    tensor = mt.Tensor(sample, dtype=dtype, requires_grad=True)
+    tensor.silu().sum().backward()
+    got = tensor.grad.numpy()
+    mt.clear_autograd_graph()
+
+    x = sample.astype(np.float64)
+    s = _stable_logistic(x)
+    # `1 - s` from the reciprocal: past x = 40 the subtraction is exactly zero.
+    one_minus_s = _stable_logistic(-x)
+    want = s * (1.0 + x * one_minus_s)
+    np.testing.assert_allclose(got, want.astype(dtype), rtol=2e-6, atol=1e-45)

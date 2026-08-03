@@ -40,12 +40,16 @@ impl GradientFunction for SoftplusBackward {
             &self.input,
             grad_output,
             "Softplus",
+            // `1/(1 + exp(-s))` overflows for large negative `s` and returns a
+            // zero gradient where the true one is still representable -- at
+            // x = -95 it was 0 against 5.5e-42. The stable form branches on the
+            // sign and keeps it.
             move |x: f32, gout: f32| {
                 let scaled = beta32 * x;
                 if scaled > thr32 {
                     gout
                 } else {
-                    gout / (1.0 + (-scaled).exp())
+                    gout * stable_sigmoid_f32(scaled)
                 }
             },
             move |x: f64, gout: f64| {
@@ -53,7 +57,7 @@ impl GradientFunction for SoftplusBackward {
                 if scaled > thr64 {
                     gout
                 } else {
-                    gout / (1.0 + (-scaled).exp())
+                    gout * stable_sigmoid_f64(scaled)
                 }
             },
         )?;
@@ -237,22 +241,58 @@ pub struct SiluBackward {
     pub input_id: TensorId,
     pub input: Tensor,
 }
+/// The float32 SiLU gradient, through the vectorized kernel.
+fn silu_backward_f32(input: &Tensor, grad_output: &Tensor) -> Result<Tensor> {
+    let saved = input.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from saved tensor")
+    })?;
+    let gout = grad_output.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from grad_output tensor")
+    })?;
+    if gout.len() != saved.len() {
+        return Err(MinitensorError::shape_mismatch(
+            grad_output.shape().dims().to_vec(),
+            input.shape().dims().to_vec(),
+        ));
+    }
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `silu_backward` writes every element of each block.
+    let out = unsafe {
+        crate::ops::map::binary_map_blocks_threshold(
+            saved,
+            gout,
+            crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+            |x, g, dst| kernel.silu_backward(x, g, dst),
+        )
+    };
+    Ok(Tensor::new(
+        Arc::new(TensorData::from_vec::<f32>(
+            out,
+            DataType::Float32,
+            input.device(),
+        )),
+        input.shape().clone(),
+        DataType::Float32,
+        input.device(),
+        false,
+    ))
+}
+
 impl GradientFunction for SiluBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         // d/dx x*sigmoid(x) = sigmoid(x) * (1 + x*(1 - sigmoid(x))).
-        let grad = unary_chain_grad(
-            &self.input,
-            grad_output,
-            "SiLU",
-            |x: f32, gout: f32| {
-                let s = stable_sigmoid_f32(x);
-                gout * (s * (1.0 + x * (1.0 - s)))
-            },
-            |x: f64, gout: f64| {
-                let s = stable_sigmoid_f64(x);
-                gout * (s * (1.0 + x * (1.0 - s)))
-            },
-        )?;
+        //
+        // float32 takes the vectorized kernel, which also gets `1 - sigmoid(x)`
+        // from `1/(e + 1)` rather than by subtraction -- past x = 40 the
+        // subtraction returns exactly zero.
+        if self.input.dtype() == DataType::Float32 {
+            let grad = silu_backward_f32(&self.input, grad_output)?;
+            return Ok(single(self.input_id, grad));
+        }
+        let grad = unary_chain_grad_f64(&self.input, grad_output, "SiLU", |x: f64| {
+            let s = stable_sigmoid_f64(x);
+            s * (1.0 + x * (1.0 - s))
+        })?;
         Ok(single(self.input_id, grad))
     }
 

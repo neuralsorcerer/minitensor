@@ -696,13 +696,31 @@ float_unary_kernel!(selu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
     }
 });
 
-float_unary_kernel!(silu_f32, as_f32_slice, f32, Float32, "f32", |x: f32| {
-    let sigmoid = 1.0 / (1.0 + (-x).exp());
-    x * sigmoid
-});
+/// Vectorized. Also fixes the negative tail: the scalar form was
+/// `x / (1 + exp(-x))`, and `exp(-x)` overflows float32 below about x = -89, so
+/// `silu(-100)` returned -0 where -3.72e-42 is representable.
+pub(crate) fn silu_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `silu` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.silu(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(silu_f64, as_f64_slice, f64, Float64, "f64", |x: f64| {
-    let sigmoid = 1.0 / (1.0 + (-x).exp());
+    // `1/(1 + exp(-x))` overflows for large negative x and loses the tail; the
+    // stable form costs a branch and keeps it.
+    let sigmoid = crate::ops::util::stable_sigmoid_f64(x);
     x * sigmoid
 });
 

@@ -7,7 +7,7 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
-use crate::ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64};
+use crate::ops::util::{broadcast_mask_index, stable_sigmoid_f64};
 use crate::tensor::DataType;
 use crate::tensor::Shape;
 use crate::tensor::Strides;
@@ -137,7 +137,15 @@ pub(crate) fn sigmoid_f32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    let out = unary_map_threshold(input_data, EXPENSIVE_PAR_THRESHOLD, stable_sigmoid_f32);
+    // Vectorized -- see `ops::simd::transcendental`. `e/(e+1)` rather than the
+    // branchy stable form, which needed a sign test per element.
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `sigmoid` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.sigmoid(src, dst)
+        })
+    };
     Ok(TensorData::from_vec::<f32>(
         out,
         DataType::Float32,

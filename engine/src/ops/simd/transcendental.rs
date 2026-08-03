@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 //! Vectorized float32 kernels for `tanh`, `erf`, `erfc`, `expm1`, `sinh`,
-//! `cosh`, `log`, `log1p`, `softplus`, both GELU variants, and the two GELU
-//! gradients.
+//! `cosh`, `log`, `log1p`, `softplus`, `sigmoid`, `silu`, both GELU variants,
+//! and the GELU and SiLU gradients.
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
@@ -108,6 +108,22 @@
 //! equal and numerically useless, because for very negative `v` it forms
 //! `2 + (-1 + tiny)` and rounds the tiny part away, leaving the tail 0.2%
 //! wrong.
+//!
+//! # sigmoid, silu
+//!
+//! `sigmoid(x) = e/(e + 1)` with `e = exp(x)`, and `silu(x) = x * sigmoid(x)`.
+//!
+//! The scalar forms these replace were `1/(1 + exp(-x))`, which overflows:
+//! below about `x = -89`, `exp(-x)` is infinite in float32 and the result
+//! collapses to exactly zero while the true value is still representable.
+//! `silu(-100)` returned -0 against -3.72e-42, and the softplus gradient --
+//! which *is* sigmoid -- returned 0 at `x = -95` against 5.52e-42. `e/(e + 1)`
+//! never forms that reciprocal.
+//!
+//! [`logistic_parts`] returns `1 - sigmoid(x)` alongside, as `1/(e + 1)`,
+//! because the derivatives want it and forming it by subtraction throws the
+//! tail away: at `x = 40` the true value is 4e-18 and `1 - s` in float64 is
+//! exactly 0. The reciprocal is shared, so it is free.
 //!
 //! # erf
 //!
@@ -212,6 +228,9 @@
 //!     log                 895us    438us    2.0x      0.64x
 //!     log1p              4257us    453us    9.4x      0.67x
 //!     softplus           7388us   1031us    7.2x         --
+//!     sigmoid            2541us    640us    4.0x         --
+//!     silu               1888us    687us    2.7x         --
+//!     silu backward      ~2.1ms   ~0.7ms    ~3x          --
 //! ```
 //!
 //! Everything with a NumPy column is now faster than NumPy, which has no
@@ -839,6 +858,65 @@ fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// logistic family: sigmoid, silu
+// ---------------------------------------------------------------------------
+
+/// Clamp for the logistic kernels. `sigmoid` saturates to 1.0 in float32 by
+/// `x = 17` and underflows by `x = -104`, and `x*sigmoid(x)` underflows by
+/// about -110, so 300 is far outside anything observable; it only keeps `2^n`
+/// inside an exponent field.
+const LOGISTIC_LIMIT: f64 = 300.0;
+
+/// `(sigmoid(x), 1 - sigmoid(x))`, both from one `exp` and one reciprocal.
+///
+/// Returned as a pair because `1 - sigmoid(x)` is what the derivatives want and
+/// forming it by subtraction throws away the tail: at `x = 40` the true value
+/// is 4e-18 and `1 - s` in float64 is exactly 0. As `1/(e + 1)` it is simply
+/// correct, and costs nothing extra -- the reciprocal is shared.
+#[inline(always)]
+fn logistic_parts<const FMA: bool>(xd: f64) -> (f64, f64) {
+    let (two_pow_n, r) = reduce_exp::<FMA>(xd.clamp(-LOGISTIC_LIMIT, LOGISTIC_LIMIT));
+    let e = two_pow_n * (1.0 + expm1_poly::<FMA>(r));
+    let recip = 1.0 / (e + 1.0);
+    (e * recip, recip)
+}
+
+#[inline(always)]
+fn sigmoid_one<const FMA: bool>(x: f32) -> f32 {
+    logistic_parts::<FMA>(x as f64).0 as f32
+}
+
+/// `x * sigmoid(x)`.
+///
+/// The scalar form this replaces was `x / (1 + exp(-x))`, which overflows: at
+/// `x = -100`, `exp(-x)` is infinite in float32, so it returned `-0` where
+/// -3.72e-42 is perfectly representable. `e/(e+1)` never forms that reciprocal
+/// and gets the tail right.
+#[inline(always)]
+fn silu_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let (s, _) = logistic_parts::<FMA>(xd);
+    // Below the clamp the product has underflowed float32 anyway; zeroing keeps
+    // `x = -inf` at NaN, which is what the scalar form returned.
+    let s = if xd < -LOGISTIC_LIMIT { 0.0 } else { s };
+    (xd * s) as f32
+}
+
+/// `d/dx [x*sigmoid(x)] = s * (1 + x*(1 - s))`, times the incoming gradient.
+#[inline(always)]
+fn silu_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
+    let xd = x as f64;
+    let (s, one_minus_s) = logistic_parts::<FMA>(xd);
+    let (s, one_minus_s) = if xd < -LOGISTIC_LIMIT {
+        (0.0, 1.0)
+    } else {
+        (s, one_minus_s)
+    };
+    let local = s * fma_or::<FMA>(xd, one_minus_s, 1.0);
+    (local * gout as f64) as f32
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -961,6 +1039,13 @@ block_kernel!(erf_block, erf_one, erf_block_avx512, erf_block_avx2);
 block_kernel!(erfc_block, erfc_one, erfc_block_avx512, erfc_block_avx2);
 block_kernel!(log_block, log_one, log_block_avx512, log_block_avx2);
 block_kernel!(log1p_block, log1p_one, log1p_block_avx512, log1p_block_avx2);
+block_kernel!(
+    sigmoid_block,
+    sigmoid_one,
+    sigmoid_block_avx512,
+    sigmoid_block_avx2
+);
+block_kernel!(silu_block, silu_one, silu_block_avx512, silu_block_avx2);
 block_kernel_param!(
     softplus_block,
     softplus_one,
@@ -981,6 +1066,12 @@ block_kernel!(
     gelu_tanh_one,
     gelu_tanh_block_avx512,
     gelu_tanh_block_avx2
+);
+block_kernel2!(
+    silu_backward_block,
+    silu_backward_one,
+    silu_backward_block_avx512,
+    silu_backward_block_avx2
 );
 block_kernel2!(
     gelu_erf_backward_block,
@@ -1085,6 +1176,46 @@ impl F32Kernel {
             erf_block,
             erf_block_avx512,
             erf_block_avx2
+        )
+    }
+
+    /// Write `sigmoid(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn sigmoid(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            sigmoid_block,
+            sigmoid_block_avx512,
+            sigmoid_block_avx2
+        )
+    }
+
+    /// Write `x * sigmoid(x)` for every element into `out`.
+    #[inline]
+    pub(crate) fn silu(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            silu_block,
+            silu_block_avx512,
+            silu_block_avx2
+        )
+    }
+
+    /// Write the SiLU gradient for `input`, scaled by `grad`, into `out`.
+    #[inline]
+    pub(crate) fn silu_backward(self, input: &[f32], grad: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch2!(
+            self,
+            input,
+            grad,
+            out,
+            silu_backward_block,
+            silu_backward_block_avx512,
+            silu_backward_block_avx2
         )
     }
 
@@ -1271,6 +1402,8 @@ mod tests {
         Erfc,
         Log,
         Log1p,
+        Sigmoid,
+        Silu,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1286,6 +1419,8 @@ mod tests {
             Op::Erfc => k.erfc(input, out),
             Op::Log => k.log(input, out),
             Op::Log1p => k.log1p(input, out),
+            Op::Sigmoid => k.sigmoid(input, out),
+            Op::Silu => k.silu(input, out),
         }
     }
 
@@ -1337,6 +1472,20 @@ mod tests {
             Op::Erfc => libm::erfc(xd) as f32,
             Op::Log => xd.ln() as f32,
             Op::Log1p => xd.ln_1p() as f32,
+            // Written the stable way: `1/(1 + exp(-x))` overflows for large
+            // negative x, which is the bug these kernels fix.
+            Op::Sigmoid => stable_logistic(xd) as f32,
+            Op::Silu => (xd * stable_logistic(xd)) as f32,
+        }
+    }
+
+    /// `1/(1 + exp(-x))`, branching on the sign so neither side overflows.
+    fn stable_logistic(x: f64) -> f64 {
+        if x >= 0.0 {
+            1.0 / (1.0 + (-x).exp())
+        } else {
+            let e = x.exp();
+            e / (1.0 + e)
         }
     }
 
@@ -1421,7 +1570,15 @@ mod tests {
     #[test]
     fn erf_and_gelu_stay_within_one_ulp() {
         let xs = sample_inputs();
-        for op in [Op::Erf, Op::Erfc, Op::GeluErf, Op::GeluTanh, Op::Log1p] {
+        for op in [
+            Op::Erf,
+            Op::Erfc,
+            Op::GeluErf,
+            Op::GeluTanh,
+            Op::Log1p,
+            Op::Sigmoid,
+            Op::Silu,
+        ] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
                     let want = reference(op, x);
@@ -1451,6 +1608,8 @@ mod tests {
             Op::Erfc,
             Op::Log,
             Op::Log1p,
+            Op::Sigmoid,
+            Op::Silu,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -1526,6 +1685,8 @@ mod tests {
             Op::Erfc,
             Op::Log,
             Op::Log1p,
+            Op::Sigmoid,
+            Op::Silu,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {
@@ -1622,42 +1783,56 @@ mod tests {
         }
     }
 
-    /// The two gradient kernels, which take an extra operand and so go through
+    /// The gradient kernels, which take an extra operand and so go through
     /// their own dispatch. Checked against float64 references written the
     /// cancellation-free way, for the same reason the forward ones are.
     #[derive(Clone, Copy, Debug)]
-    enum BinOp {
-        GeluErfBackward,
-        GeluTanhBackward,
+    enum GradKernel {
+        GeluErf,
+        GeluTanh,
+        Silu,
     }
 
-    fn run2(op: BinOp, backend: Backend, xs: &[f32], gs: &[f32]) -> Vec<f32> {
+    fn run2(op: GradKernel, backend: Backend, xs: &[f32], gs: &[f32]) -> Vec<f32> {
         let k = F32Kernel(backend);
         let mut out = vec![MaybeUninit::uninit(); xs.len()];
         match op {
-            BinOp::GeluErfBackward => k.gelu_erf_backward(xs, gs, &mut out),
-            BinOp::GeluTanhBackward => k.gelu_tanh_backward(xs, gs, &mut out),
+            GradKernel::GeluErf => k.gelu_erf_backward(xs, gs, &mut out),
+            GradKernel::GeluTanh => k.gelu_tanh_backward(xs, gs, &mut out),
+            GradKernel::Silu => k.silu_backward(xs, gs, &mut out),
         }
         out.into_iter()
             .map(|v| unsafe { v.assume_init() })
             .collect()
     }
 
-    fn reference2(op: BinOp, x: f32, g: f32) -> f32 {
+    fn reference2(op: GradKernel, x: f32, g: f32) -> f32 {
         let xd = x as f64;
         let local = match op {
-            BinOp::GeluErfBackward => {
+            GradKernel::GeluErf => {
                 let cdf = 0.5 * libm::erfc(-xd * std::f64::consts::FRAC_1_SQRT_2);
                 let pdf = (-0.5 * xd * xd).exp() * 0.3989422804014327;
                 cdf + xd * pdf
             }
-            BinOp::GeluTanhBackward => {
+            GradKernel::GeluTanh => {
                 let x2 = xd * xd;
                 let v = 0.7978845608028654 * (xd + 0.044715 * xd * x2);
                 // sigmoid(2v) is 0.5*(1 + tanh(v)); sech^2(v) is 4*s*(1-s).
                 let s = 1.0 / (1.0 + (-2.0 * v).exp());
                 let sech2 = 4.0 * s * (1.0 - s);
                 s + 0.5 * xd * sech2 * 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x2)
+            }
+            GradKernel::Silu => {
+                let s = stable_logistic(xd);
+                // `1 - s` from the reciprocal, not by subtraction: past x = 40
+                // the subtraction is exactly zero.
+                let one_minus_s = if xd >= 0.0 {
+                    let e = (-xd).exp();
+                    e / (1.0 + e)
+                } else {
+                    1.0 / (1.0 + xd.exp())
+                };
+                s * (1.0 + xd * one_minus_s)
             }
         };
         (local * g as f64) as f32
@@ -1676,7 +1851,7 @@ mod tests {
             .enumerate()
             .map(|(i, &x)| (i % 17) as f32 * 0.25 - 2.0 + x.signum() * 0.5)
             .collect();
-        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+        for op in [GradKernel::GeluErf, GradKernel::GeluTanh, GradKernel::Silu] {
             for backend in available() {
                 for ((&x, &g), got) in xs.iter().zip(gs.iter()).zip(run2(op, backend, &xs, &gs)) {
                     let want = reference2(op, x, g);
@@ -1696,7 +1871,9 @@ mod tests {
     fn gelu_backward_tail_decays_to_zero() {
         let xs: Vec<f32> = vec![-4.0, -6.0, -8.0, -10.0, -12.0, -14.0, -20.0, -40.0];
         let gs = vec![1.0f32; xs.len()];
-        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+        // GELU only: SiLU's gradient is still 1.7e-16 at x = -40, because it
+        // decays like x*exp(x) rather than exp(-x^2/2).
+        for op in [GradKernel::GeluErf, GradKernel::GeluTanh] {
             for backend in available() {
                 let got = run2(op, backend, &xs, &gs);
                 for w in got.windows(2) {
@@ -1714,9 +1891,32 @@ mod tests {
         }
     }
 
+    /// SiLU's gradient decays like `x*exp(x)`, so it is still representable far
+    /// out. It must neither plateau nor truncate early -- the scalar form it
+    /// replaced went to exactly zero from about x = -89, where `exp(-x)`
+    /// overflows float32.
+    #[test]
+    fn silu_backward_tail_decays_without_truncating() {
+        let xs: Vec<f32> = vec![-20.0, -40.0, -60.0, -80.0, -95.0, -105.0, -200.0];
+        let gs = vec![1.0f32; xs.len()];
+        for backend in available() {
+            let got = run2(GradKernel::Silu, backend, &xs, &gs);
+            for (i, w) in got.windows(2).enumerate() {
+                assert!(
+                    w[1].abs() < w[0].abs() || w[1] == 0.0,
+                    "{backend:?}: stopped decaying at {i}: {got:?}"
+                );
+            }
+            // Still nonzero where the true value is representable ...
+            assert!(got[4] != 0.0, "{backend:?}: truncated at x = -95: {got:?}");
+            // ... and zero once it is not.
+            assert_eq!(got[6], 0.0, "{backend:?}: should underflow at x = -200");
+        }
+    }
+
     #[test]
     fn gelu_backward_propagates_nan() {
-        for op in [BinOp::GeluErfBackward, BinOp::GeluTanhBackward] {
+        for op in [GradKernel::GeluErf, GradKernel::GeluTanh, GradKernel::Silu] {
             for backend in available() {
                 let got = run2(op, backend, &[f32::NAN, 1.0, 1.0], &[1.0, f32::NAN, 1.0]);
                 assert!(got[0].is_nan(), "{op:?}/{backend:?}: NaN input");
