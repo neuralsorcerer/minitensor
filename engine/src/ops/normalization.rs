@@ -8,6 +8,7 @@ use crate::autograd::{LayerNormBackward, TensorId, add_to_graph};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -201,6 +202,83 @@ pub fn batch_norm(
 }
 
 /// Apply layer normalization to the input tensor.
+/// Fused LayerNorm forward, one row at a time.
+///
+/// The composed form this replaces cost six full-size tensor operations --
+/// `mean`, `sub`, `mul`, `mean`, `sqrt`, `div`, then two more for weight and
+/// bias -- each allocating and traversing a tensor the size of the input, and
+/// three of them going through the *broadcasting* path because the statistics
+/// have a trailing 1. On a 32x128x512 float32 tensor that measured 18.4ms
+/// against 0.47ms for a single `mean` over the same data.
+///
+/// The normalized dimensions are trailing and contiguous, so the input is just
+/// `[rows, norm]` in memory and each row can be reduced and written while it is
+/// still in L1. The three passes over a row cost far less than one pass over
+/// the whole tensor.
+///
+/// `normalized` and `inv_std` are produced here rather than recovered later
+/// because [`crate::autograd::LayerNormBackward`] saves both, so fusing the
+/// forward must not cost the backward its inputs.
+macro_rules! layer_norm_rows {
+    ($name:ident, $ty:ty) => {
+        fn $name(
+            input: &[$ty],
+            norm: usize,
+            weight: Option<&[$ty]>,
+            bias: Option<&[$ty]>,
+            eps: f64,
+            out: &mut [$ty],
+            normalized: &mut [$ty],
+            inv_std: &mut [$ty],
+        ) {
+            // Normalizing over an empty axis: every buffer is empty and
+            // `par_chunks_mut(0)` would panic. The shape still has to survive,
+            // which the caller handles.
+            if norm == 0 {
+                return;
+            }
+            let recip = 1.0 / norm as f64;
+            out.par_chunks_mut(norm)
+                .zip(normalized.par_chunks_mut(norm))
+                .zip(inv_std.par_iter_mut())
+                .zip(input.par_chunks(norm))
+                .for_each(|(((o, n), is), row)| {
+                    // Two reduction passes rather than one. `E[x^2] - E[x]^2`
+                    // would halve the traffic and lose every significant digit
+                    // when the mean dominates the spread, which is exactly the
+                    // regime a normalization layer sits in.
+                    let mut sum = 0.0f64;
+                    for &v in row {
+                        sum += v as f64;
+                    }
+                    let mean = sum * recip;
+                    let mut sq = 0.0f64;
+                    for &v in row {
+                        let d = v as f64 - mean;
+                        sq += d * d;
+                    }
+                    let scale = 1.0 / (sq * recip + eps).sqrt();
+                    *is = scale as $ty;
+                    for i in 0..norm {
+                        let z = (row[i] as f64 - mean) * scale;
+                        n[i] = z as $ty;
+                        let mut y = z;
+                        if let Some(w) = weight {
+                            y *= w[i] as f64;
+                        }
+                        if let Some(b) = bias {
+                            y += b[i] as f64;
+                        }
+                        o[i] = y as $ty;
+                    }
+                });
+        }
+    };
+}
+
+layer_norm_rows!(layer_norm_rows_f32, f32);
+layer_norm_rows!(layer_norm_rows_f64, f64);
+
 pub fn layer_norm(
     input: &Tensor,
     normalized_shape: &[usize],
@@ -283,40 +361,86 @@ pub fn layer_norm(
         }
     }
 
-    let axes: Vec<usize> = (axis_start..input.ndim()).collect();
-    let axes_isize: Vec<isize> = axes.iter().map(|&d| d as isize).collect();
-    let mean = input.mean(Some(axes_isize.clone()), true)?;
-    let centered = crate::ops::arithmetic::sub(input, &mean)?;
-    let var =
-        crate::ops::arithmetic::mul(&centered, &centered)?.mean(Some(axes_isize.clone()), true)?;
-    let eps_tensor = scalar_tensor(eps, input.dtype(), input.device())?;
-    let var_eps = crate::ops::arithmetic::add(&var, &eps_tensor)?;
-    let std = crate::ops::activation::sqrt(&var_eps)?;
-    let ones = Tensor::ones(std.shape().clone(), std.dtype(), std.device(), false);
-    let inv_std = crate::ops::arithmetic::div(&ones, &std)?;
-    let normalized = crate::ops::arithmetic::mul(&centered, &inv_std)?;
+    let norm: usize = normalized_shape.iter().product();
+    let total = input.numel();
+    let rows = if norm == 0 { 0 } else { total / norm };
 
-    let mut output = normalized.clone();
+    // Statistics shape: the input's, with the normalized dims collapsed to 1.
+    let mut stat_dims = input.shape().dims().to_vec();
+    for d in stat_dims.iter_mut().skip(axis_start) {
+        *d = 1;
+    }
+    let stat_shape = Shape::new(stat_dims);
+
+    let (output_data, normalized_data, inv_std_data) = match input.dtype() {
+        DataType::Float32 => {
+            let src = input.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+            })?;
+            let w = weight.and_then(|t| t.data().as_f32_slice());
+            let b = bias.and_then(|t| t.data().as_f32_slice());
+            let mut o = vec![0f32; total];
+            let mut n = vec![0f32; total];
+            let mut s = vec![0f32; rows];
+            layer_norm_rows_f32(src, norm, w, b, eps, &mut o, &mut n, &mut s);
+            (
+                TensorData::from_vec::<f32>(o, DataType::Float32, input.device()),
+                TensorData::from_vec::<f32>(n, DataType::Float32, input.device()),
+                TensorData::from_vec::<f32>(s, DataType::Float32, input.device()),
+            )
+        }
+        _ => {
+            let src = input.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+            })?;
+            let w = weight.and_then(|t| t.data().as_f64_slice());
+            let b = bias.and_then(|t| t.data().as_f64_slice());
+            let mut o = vec![0f64; total];
+            let mut n = vec![0f64; total];
+            let mut s = vec![0f64; rows];
+            layer_norm_rows_f64(src, norm, w, b, eps, &mut o, &mut n, &mut s);
+            (
+                TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
+                TensorData::from_vec::<f64>(n, DataType::Float64, input.device()),
+                TensorData::from_vec::<f64>(s, DataType::Float64, input.device()),
+            )
+        }
+    };
+
+    let requires_grad = input.requires_grad()
+        || weight.map(|w| w.requires_grad()).unwrap_or(false)
+        || bias.map(|b| b.requires_grad()).unwrap_or(false);
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+    let normalized = Tensor::new(
+        Arc::new(normalized_data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    );
+    let inv_std = Tensor::new(
+        Arc::new(inv_std_data),
+        stat_shape,
+        input.dtype(),
+        input.device(),
+        false,
+    );
+
     let mut weight_broadcast: Option<Tensor> = None;
     if let Some(w) = weight {
         let mut view = w.clone();
         for _ in 0..axis_start {
             view = view.unsqueeze(0)?;
         }
-        output = crate::ops::arithmetic::mul(&output, &view)?;
         weight_broadcast = Some(view.detach());
     }
-    if let Some(b) = bias {
-        let mut view = b.clone();
-        for _ in 0..axis_start {
-            view = view.unsqueeze(0)?;
-        }
-        output = crate::ops::arithmetic::add(&output, &view)?;
-    }
-
-    let requires_grad = input.requires_grad()
-        || weight.map(|w| w.requires_grad()).unwrap_or(false)
-        || bias.map(|b| b.requires_grad()).unwrap_or(false);
 
     if !requires_grad {
         return Ok(output);
