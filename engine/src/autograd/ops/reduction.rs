@@ -11,6 +11,7 @@ use crate::{
     ops::{arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -635,5 +636,181 @@ where
         T::from(-1.0f32)
     } else {
         zero
+    }
+}
+
+/// Gradient of RMSNorm.
+///
+/// With `r = 1/sqrt(mean(x^2) + eps)` and `y_i = x_i * r * w_i`, the input
+/// couples to every element of its row through `r`:
+///
+/// ```text
+///     dL/dx_j = r * (g_j w_j  -  x_j * r^2 * dot / N),   dot = sum_i g_i w_i x_i
+///     dL/dw_i = sum over rows of  g_i x_i r
+/// ```
+///
+/// `r` is saved from the forward, so this is one reduction pass per row for
+/// `dot` and one to write -- the same shape as the fused forward. The forward
+/// used to be a chain of autograd-tracked primitives, which is what let RMSNorm
+/// go without an explicit gradient at all; fusing it means writing this out.
+pub struct RmsNormBackward {
+    pub input_ids: SmallVec<[TensorId; 2]>,
+    pub input_id: TensorId,
+    pub weight_id: Option<TensorId>,
+    pub input: Tensor,
+    pub inv_rms: Tensor,
+    pub weight: Option<Tensor>,
+    pub normalized_shape: Vec<usize>,
+    pub element_count: usize,
+    pub input_requires_grad: bool,
+    pub weight_requires_grad: bool,
+}
+
+macro_rules! rms_norm_grad {
+    ($name:ident, $ty:ty) => {
+        #[allow(clippy::too_many_arguments)]
+        fn $name(
+            input: &[$ty],
+            grad: &[$ty],
+            inv_rms: &[$ty],
+            weight: Option<&[$ty]>,
+            norm: usize,
+            want_input: bool,
+            want_weight: bool,
+        ) -> (Vec<$ty>, Vec<$ty>) {
+            let mut grad_input = vec![0 as $ty; if want_input { input.len() } else { 0 }];
+            if norm == 0 {
+                return (
+                    grad_input,
+                    vec![0 as $ty; if want_weight { norm } else { 0 }],
+                );
+            }
+            let recip = 1.0 / norm as f64;
+
+            if want_input {
+                grad_input
+                    .par_chunks_mut(norm)
+                    .zip(input.par_chunks(norm))
+                    .zip(grad.par_chunks(norm))
+                    .zip(inv_rms.par_iter())
+                    .for_each(|(((gi, row), g), &r)| {
+                        let r = r as f64;
+                        let mut dot = 0.0f64;
+                        for i in 0..norm {
+                            let w = weight.map_or(1.0, |w| w[i] as f64);
+                            dot += g[i] as f64 * w * row[i] as f64;
+                        }
+                        let coeff = r * r * dot * recip;
+                        for i in 0..norm {
+                            let w = weight.map_or(1.0, |w| w[i] as f64);
+                            gi[i] = (r * (g[i] as f64 * w - row[i] as f64 * coeff)) as $ty;
+                        }
+                    });
+            }
+
+            let grad_weight = if want_weight {
+                let acc = input
+                    .par_chunks(norm)
+                    .zip(grad.par_chunks(norm))
+                    .zip(inv_rms.par_iter())
+                    .fold(
+                        || vec![0.0f64; norm],
+                        |mut acc, ((row, g), &r)| {
+                            let r = r as f64;
+                            for i in 0..norm {
+                                acc[i] += g[i] as f64 * row[i] as f64 * r;
+                            }
+                            acc
+                        },
+                    )
+                    .reduce(
+                        || vec![0.0f64; norm],
+                        |mut a, b| {
+                            for i in 0..norm {
+                                a[i] += b[i];
+                            }
+                            a
+                        },
+                    );
+                acc.into_iter().map(|v| v as $ty).collect()
+            } else {
+                Vec::new()
+            };
+            (grad_input, grad_weight)
+        }
+    };
+}
+
+rms_norm_grad!(rms_norm_grad_f32, f32);
+rms_norm_grad!(rms_norm_grad_f64, f64);
+
+impl GradientFunction for RmsNormBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        let grad_output = grad_output.detach();
+        let norm = self.element_count;
+        let device = self.input.device();
+        let dtype = self.input.dtype();
+
+        macro_rules! arm {
+            ($accessor:ident, $ty:ty, $variant:ident, $kernel:ident) => {{
+                let inp = self.input.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("rms_norm backward: bad input slice")
+                })?;
+                let g = grad_output.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("rms_norm backward: bad gradient slice")
+                })?;
+                let r = self.inv_rms.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("rms_norm backward: bad inv_rms slice")
+                })?;
+                let w = self.weight.as_ref().and_then(|t| t.data().$accessor());
+                let (gi, gw) = $kernel(
+                    inp,
+                    g,
+                    r,
+                    w,
+                    norm,
+                    self.input_requires_grad,
+                    self.weight_requires_grad,
+                );
+                if self.input_requires_grad {
+                    let t = Tensor::new(
+                        Arc::new(TensorData::from_vec::<$ty>(gi, DataType::$variant, device)),
+                        self.input.shape().clone(),
+                        DataType::$variant,
+                        device,
+                        false,
+                    );
+                    accumulate_grad(&mut gradients, self.input_id, t)?;
+                }
+                if self.weight_requires_grad
+                    && let Some(weight_id) = self.weight_id
+                {
+                    let t = Tensor::new(
+                        Arc::new(TensorData::from_vec::<$ty>(gw, DataType::$variant, device)),
+                        Shape::new(self.normalized_shape.clone()),
+                        DataType::$variant,
+                        device,
+                        false,
+                    );
+                    accumulate_grad(&mut gradients, weight_id, t)?;
+                }
+            }};
+        }
+
+        match dtype {
+            DataType::Float32 => arm!(as_f32_slice, f32, Float32, rms_norm_grad_f32),
+            DataType::Float64 => arm!(as_f64_slice, f64, Float64, rms_norm_grad_f64),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "rms_norm backward only supports floating point tensors",
+                ));
+            }
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
     }
 }

@@ -4,7 +4,7 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""`layer_norm` computes its statistics and output in one fused pass per row.
+"""`layer_norm` and `rms_norm` compute statistics and output in one fused pass.
 
 It used to be six full-size tensor operations -- mean, sub, mul, mean, sqrt,
 div, then weight and bias -- each allocating and traversing a tensor the size of
@@ -117,4 +117,95 @@ def test_layer_norm_input_gradient_vanishes_without_a_weight():
 def test_layer_norm_keeps_shape_over_an_empty_axis():
     for shape in [(0, 4), (3, 0)]:
         out = mt.layer_norm(mt.from_numpy(np.zeros(shape, dtype=np.float32)), [shape[-1]])
+        assert out.shape == shape
+
+
+# `rms_norm` got the same treatment, and needed more of it: unlike `layer_norm`
+# it had no explicit gradient at all -- the forward was a chain of
+# autograd-tracked primitives, so gradients fell out of the graph for free.
+# Fusing the forward means writing the backward out, which is:
+#
+#     dL/dx_j = r * (g_j w_j - x_j r^2 dot / N),  dot = sum_i g_i w_i x_i
+#     dL/dw_i = sum over rows of g_i x_i r
+#
+# with r = 1/sqrt(mean(x^2) + eps) saved from the forward. Checked below against
+# that formula written independently in numpy, and against finite differences.
+def _rms_reference(x, weight=None, eps=1e-5, axes=1):
+    a = np.asarray(x, dtype=np.float64)
+    dims = tuple(range(a.ndim - axes, a.ndim))
+    out = a / np.sqrt((a * a).mean(dims, keepdims=True) + eps)
+    if weight is not None:
+        out = out * np.asarray(weight, dtype=np.float64)
+    return out
+
+
+@pytest.mark.parametrize("shape,norm", [((4, 8), [8]), ((3, 5, 16), [16]), ((2, 3, 4, 7), [7])])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_rms_norm_matches_the_float64_reference(shape, norm, dtype):
+    rng = np.random.default_rng(sum(shape) * 7 + len(dtype))
+    x = rng.standard_normal(shape).astype(dtype)
+    w = rng.standard_normal(norm).astype(dtype)
+    got = mt.rms_norm(mt.from_numpy(x), norm, mt.from_numpy(w), 1e-5).numpy()
+    want = _rms_reference(x, w)
+    tolerance = 3e-6 if dtype == "float32" else 1e-12
+    np.testing.assert_allclose(got, want.astype(dtype), rtol=tolerance, atol=tolerance)
+
+
+def test_rms_norm_without_a_weight():
+    rng = np.random.default_rng(21)
+    x = rng.standard_normal((6, 12)).astype(np.float32)
+    got = mt.rms_norm(mt.from_numpy(x), [12], None, 1e-5).numpy()
+    np.testing.assert_allclose(got, _rms_reference(x), rtol=3e-6, atol=3e-6)
+
+
+def test_rms_norm_gradient_matches_the_analytic_formula():
+    rng = np.random.default_rng(3)
+    n = 17
+    xv = rng.standard_normal((6, n))
+    wv = rng.standard_normal(n)
+    gv = rng.standard_normal((6, n))
+    eps = 1e-5
+
+    x = mt.Tensor(xv, dtype="float64", requires_grad=True)
+    w = mt.Tensor(wv, dtype="float64", requires_grad=True)
+    (mt.rms_norm(x, [n], w, eps) * mt.from_numpy(gv)).sum().backward()
+    grad_x, grad_w = x.grad.numpy(), w.grad.numpy()
+    mt.clear_autograd_graph()
+
+    r = 1.0 / np.sqrt((xv * xv).mean(-1, keepdims=True) + eps)
+    dot = (gv * wv * xv).sum(-1, keepdims=True)
+    np.testing.assert_allclose(grad_x, r * (gv * wv - xv * r * r * dot / n), rtol=1e-11)
+    np.testing.assert_allclose(grad_w, (gv * xv * r).sum(0), rtol=1e-11)
+
+
+def test_rms_norm_gradient_matches_finite_differences():
+    """Independent of the formula above, in case both were derived wrong."""
+    rng = np.random.default_rng(9)
+    n = 7
+    xv = rng.standard_normal((3, n))
+    wv = rng.standard_normal(n)
+    gv = rng.standard_normal((3, n))
+    eps, h = 1e-5, 1e-6
+
+    x = mt.Tensor(xv, dtype="float64", requires_grad=True)
+    (mt.rms_norm(x, [n], mt.from_numpy(wv), eps) * mt.from_numpy(gv)).sum().backward()
+    grad_x = x.grad.numpy()
+    mt.clear_autograd_graph()
+
+    def loss(a):
+        return (_rms_reference(a, wv, eps) * gv).sum()
+
+    numeric = np.zeros_like(xv)
+    for i in range(xv.shape[0]):
+        for j in range(n):
+            up, dn = xv.copy(), xv.copy()
+            up[i, j] += h
+            dn[i, j] -= h
+            numeric[i, j] = (loss(up) - loss(dn)) / (2 * h)
+    np.testing.assert_allclose(grad_x, numeric, rtol=1e-6, atol=1e-8)
+
+
+def test_rms_norm_keeps_shape_over_an_empty_axis():
+    for shape in [(0, 4), (3, 0)]:
+        out = mt.rms_norm(mt.from_numpy(np.zeros(shape, dtype=np.float32)), [shape[-1]])
         assert out.shape == shape

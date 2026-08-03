@@ -4,7 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::autograd::{LayerNormBackward, TensorId, add_to_graph};
+use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId, add_to_graph};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
@@ -493,6 +493,56 @@ pub fn layer_norm(
 /// centering) while matching or improving training stability. Built by composing
 /// autograd-tracked primitives, so gradients — including the coupling of the
 /// input through the RMS denominator — flow automatically.
+/// Fused RMSNorm forward, one row at a time.
+///
+/// Same shape as [`layer_norm_rows`] and for the same reason: the composed form
+/// cost a full-size `mul`, a reduction, a broadcast `add`, an `rsqrt` and two
+/// more full-size broadcast multiplies. On a 32x128x512 float32 tensor that
+/// measured 21.6ms, against 0.47ms for a single `mean` over the same data.
+///
+/// Only one reduction pass here -- RMSNorm has no mean to subtract, so there is
+/// no cancellation to avoid and `sum(x^2)` is the whole statistic. It still
+/// accumulates in float64.
+macro_rules! rms_norm_rows {
+    ($name:ident, $ty:ty) => {
+        fn $name(
+            input: &[$ty],
+            norm: usize,
+            weight: Option<&[$ty]>,
+            eps: f64,
+            out: &mut [$ty],
+            inv_rms: &mut [$ty],
+        ) {
+            if norm == 0 {
+                return;
+            }
+            let recip = 1.0 / norm as f64;
+            out.par_chunks_mut(norm)
+                .zip(inv_rms.par_iter_mut())
+                .zip(input.par_chunks(norm))
+                .for_each(|((o, ir), row)| {
+                    let mut sq = 0.0f64;
+                    for &v in row {
+                        let d = v as f64;
+                        sq += d * d;
+                    }
+                    let scale = 1.0 / (sq * recip + eps).sqrt();
+                    *ir = scale as $ty;
+                    for i in 0..norm {
+                        let mut y = row[i] as f64 * scale;
+                        if let Some(w) = weight {
+                            y *= w[i] as f64;
+                        }
+                        o[i] = y as $ty;
+                    }
+                });
+        }
+    };
+}
+
+rms_norm_rows!(rms_norm_rows_f32, f32);
+rms_norm_rows!(rms_norm_rows_f64, f64);
+
 pub fn rms_norm(
     input: &Tensor,
     normalized_shape: &[usize],
@@ -550,23 +600,88 @@ pub fn rms_norm(
         }
     }
 
-    let axes: Vec<isize> = (axis_start..input.ndim()).map(|d| d as isize).collect();
-    // mean(x²) over the normalized dimensions, kept for broadcasting.
-    let mean_sq = crate::ops::arithmetic::mul(input, input)?.mean(Some(axes), true)?;
-    let eps_tensor = scalar_tensor(eps, input.dtype(), input.device())?;
-    let denom = crate::ops::arithmetic::add(&mean_sq, &eps_tensor)?;
-    let inv_rms = crate::ops::activation::rsqrt(&denom)?;
-    let mut output = crate::ops::arithmetic::mul(input, &inv_rms)?;
+    let norm: usize = normalized_shape.iter().product();
+    let total = input.numel();
+    let rows = if norm == 0 { 0 } else { total / norm };
 
-    if let Some(w) = weight {
-        let mut view = w.clone();
-        for _ in 0..axis_start {
-            view = view.unsqueeze(0)?;
+    let mut stat_dims = input.shape().dims().to_vec();
+    for d in stat_dims.iter_mut().skip(axis_start) {
+        *d = 1;
+    }
+    let stat_shape = Shape::new(stat_dims);
+
+    let (output_data, inv_rms_data) = match input.dtype() {
+        DataType::Float32 => {
+            let src = input.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+            })?;
+            let w = weight.and_then(|t| t.data().as_f32_slice());
+            let mut o = vec![0f32; total];
+            let mut r = vec![0f32; rows];
+            rms_norm_rows_f32(src, norm, w, eps, &mut o, &mut r);
+            (
+                TensorData::from_vec::<f32>(o, DataType::Float32, input.device()),
+                TensorData::from_vec::<f32>(r, DataType::Float32, input.device()),
+            )
         }
-        output = crate::ops::arithmetic::mul(&output, &view)?;
+        _ => {
+            let src = input.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get f64 slice from input tensor")
+            })?;
+            let w = weight.and_then(|t| t.data().as_f64_slice());
+            let mut o = vec![0f64; total];
+            let mut r = vec![0f64; rows];
+            rms_norm_rows_f64(src, norm, w, eps, &mut o, &mut r);
+            (
+                TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
+                TensorData::from_vec::<f64>(r, DataType::Float64, input.device()),
+            )
+        }
+    };
+
+    let requires_grad = input.requires_grad() || weight.map(|w| w.requires_grad()).unwrap_or(false);
+
+    let output = Tensor::new(
+        Arc::new(output_data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        requires_grad,
+    );
+    if !requires_grad {
+        return Ok(output);
     }
 
-    Ok(output)
+    let inv_rms = Tensor::new(
+        Arc::new(inv_rms_data),
+        stat_shape,
+        input.dtype(),
+        input.device(),
+        false,
+    );
+
+    let mut input_ids: SmallVec<[TensorId; 2]> = SmallVec::new();
+    input_ids.push(input.id());
+    if let Some(w) = weight {
+        input_ids.push(w.id());
+    }
+    let grad_fn = Arc::new(RmsNormBackward {
+        input_ids,
+        input_id: input.id(),
+        weight_id: weight.map(|w| w.id()),
+        input: input.detach(),
+        inv_rms,
+        weight: weight.map(|w| w.detach()),
+        normalized_shape: normalized_shape.to_vec(),
+        element_count: norm,
+        input_requires_grad: input.requires_grad(),
+        weight_requires_grad: weight.map(|w| w.requires_grad()).unwrap_or(false),
+    });
+
+    let mut output_with_grad = output;
+    output_with_grad.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&output_with_grad, Some(grad_fn))?;
+    Ok(output_with_grad)
 }
 
 #[cfg(test)]
