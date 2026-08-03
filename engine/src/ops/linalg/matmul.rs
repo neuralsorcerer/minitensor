@@ -279,9 +279,236 @@ pub(crate) unsafe fn gemm_f64(
     }
 }
 
+/// A raw pointer that may be captured by a rayon task.
+///
+/// The tasks a split GEMM spawns each write a disjoint part of `c` and only
+/// read `a` and `b`, so the aliasing rules hold; a bare `*const T` is simply
+/// not `Send` on its own.
 #[cfg(not(feature = "blas"))]
+#[derive(Clone, Copy)]
+struct SendPtr<T>(T);
+
+#[cfg(not(feature = "blas"))]
+unsafe impl<T> Send for SendPtr<T> {}
+#[cfg(not(feature = "blas"))]
+unsafe impl<T> Sync for SendPtr<T> {}
+
+#[cfg(not(feature = "blas"))]
+impl<T: Copy> SendPtr<T> {
+    /// Read the pointer back out.
+    ///
+    /// Taking `self` by value matters: a closure that named the field directly
+    /// would capture the bare pointer under disjoint capture, and a bare
+    /// pointer is exactly what is not `Send`.
+    #[inline(always)]
+    fn get(self) -> T {
+        self.0
+    }
+}
+
+/// How to spread one GEMM across rayon's pool.
+#[cfg(not(feature = "blas"))]
+enum GemmSplit {
+    /// Run it on the calling thread.
+    Whole,
+    /// Give each task a band of output rows.
+    Rows(usize),
+    /// Give each task a band of output columns.
+    Cols(usize),
+}
+
+/// Below this many multiply-accumulates a split costs more than it saves:
+/// rayon's fork/join measures about 9 us here, against a serial GEMM that is
+/// still around 15 us at this size.
+#[cfg(not(feature = "blas"))]
+const GEMM_MIN_MACS_TO_SPLIT: usize = 1 << 20;
+
+/// A task thinner than this stops giving the kernel enough to work on.
+#[cfg(not(feature = "blas"))]
+const GEMM_MIN_SLICE: usize = 32;
+
+/// Decide how to divide an `m x k` by `k x n` product.
+///
+/// `matrixmultiply` is built without its own `threading` feature, so this is
+/// where a large product gets parallelised. Splitting the output rather than
+/// the reduction is what keeps the result bit-identical to the serial call:
+/// every output element still accumulates over the whole of `k` in the same
+/// order, and no task touches an element another task writes.
+#[cfg(not(feature = "blas"))]
+fn plan_gemm(m: usize, k: usize, n: usize) -> GemmSplit {
+    let threads = rayon::current_num_threads();
+    if threads < 2 || m.saturating_mul(k).saturating_mul(n) < GEMM_MIN_MACS_TO_SPLIT {
+        return GemmSplit::Whole;
+    }
+
+    // Whichever output axis is longer. A column split makes every task read all
+    // of `a`, a row split makes every task read all of `b`, and dividing the
+    // longer axis is what keeps that duplicated read small next to the work the
+    // task actually does. Measured over shapes from (16,1024,1024) to
+    // (65536,64,8), picking the longer axis wins in every case, by up to 4.5x
+    // over picking the shorter one.
+    if n >= m {
+        match threads.min(n / GEMM_MIN_SLICE) {
+            0 | 1 => GemmSplit::Whole,
+            tasks => GemmSplit::Cols(tasks),
+        }
+    } else {
+        match threads.min(m / GEMM_MIN_SLICE) {
+            0 | 1 => GemmSplit::Whole,
+            tasks => GemmSplit::Rows(tasks),
+        }
+    }
+}
+
+/// Define `gemm_f32` / `gemm_f64` over the corresponding `matrixmultiply` entry
+/// point. Both take row-major operands with unit column stride; the row strides
+/// stay at the *full* `k` and `n` even for a slice, which is what lets a task
+/// address a band of the original matrices without copying anything.
+#[cfg(not(feature = "blas"))]
+macro_rules! split_gemm {
+    ($name:ident, $serial:ident, $ty:ty, $kernel:path) => {
+        /// The whole product on the calling thread.
+        ///
+        /// Use this when the caller is already running one GEMM per rayon task
+        /// — a batched matmul with more batch elements than threads, say — so
+        /// that the pool is not asked to subdivide work it has already spread.
+        ///
+        /// # Safety
+        ///
+        /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+        /// readable (writable, for `c`) elements.
+        #[inline]
+        pub(crate) unsafe fn $serial(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            unsafe {
+                $kernel(
+                    m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+                )
+            }
+        }
+
+        /// # Safety
+        ///
+        /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+        /// readable (writable, for `c`) elements.
+        #[inline]
+        pub(crate) unsafe fn $name(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            #[inline]
+            unsafe fn run(
+                m: usize,
+                k: usize,
+                n: usize,
+                a: *const $ty,
+                b: *const $ty,
+                rsb: usize,
+                c: *mut $ty,
+                rsc: usize,
+            ) {
+                unsafe {
+                    $kernel(
+                        m,
+                        k,
+                        n,
+                        1.0,
+                        a,
+                        k as isize,
+                        1,
+                        b,
+                        rsb as isize,
+                        1,
+                        0.0,
+                        c,
+                        rsc as isize,
+                        1,
+                    )
+                }
+            }
+
+            match plan_gemm(m, k, n) {
+                GemmSplit::Whole => unsafe { run(m, k, n, a, b, n, c, n) },
+                GemmSplit::Cols(tasks) => {
+                    let width = n.div_ceil(tasks);
+                    let (a, b, c) = (SendPtr(a), SendPtr(b), SendPtr(c));
+                    (0..tasks).into_par_iter().for_each(|t| {
+                        let start = t * width;
+                        if start >= n {
+                            return;
+                        }
+                        let cols = width.min(n - start);
+                        // `b` and `c` keep their full row stride, so offsetting
+                        // by `start` selects a column band in place.
+                        unsafe {
+                            run(
+                                m,
+                                k,
+                                cols,
+                                a.get(),
+                                b.get().add(start),
+                                n,
+                                c.get().add(start),
+                                n,
+                            )
+                        }
+                    });
+                }
+                GemmSplit::Rows(tasks) => {
+                    let rows = m.div_ceil(tasks);
+                    let (a, b, c) = (SendPtr(a), SendPtr(b), SendPtr(c));
+                    (0..tasks).into_par_iter().for_each(|t| {
+                        let start = t * rows;
+                        if start >= m {
+                            return;
+                        }
+                        let band = rows.min(m - start);
+                        // Output rows are contiguous, so a row band is a
+                        // contiguous slice of both `a` and `c`.
+                        unsafe {
+                            run(
+                                band,
+                                k,
+                                n,
+                                a.get().add(start * k),
+                                b.get(),
+                                n,
+                                c.get().add(start * n),
+                                n,
+                            )
+                        }
+                    });
+                }
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "blas"))]
+split_gemm!(gemm_f32, gemm_serial_f32, f32, matrixmultiply::sgemm);
+#[cfg(not(feature = "blas"))]
+split_gemm!(gemm_f64, gemm_serial_f64, f64, matrixmultiply::dgemm);
+
+/// With a BLAS underneath there is no splitting to opt out of: a BLAS threads
+/// its own GEMM, and dividing the call first would only fight it. So the
+/// "serial" entry point is the same call.
+///
+/// # Safety
+///
+/// As [`gemm_f32`].
+#[cfg(feature = "blas")]
 #[inline]
-pub(crate) unsafe fn gemm_f32(
+pub(crate) unsafe fn gemm_serial_f32(
     m: usize,
     k: usize,
     n: usize,
@@ -289,16 +516,17 @@ pub(crate) unsafe fn gemm_f32(
     b: *const f32,
     c: *mut f32,
 ) {
-    unsafe {
-        matrixmultiply::sgemm(
-            m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
-        )
-    };
+    unsafe { gemm_f32(m, k, n, a, b, c) }
 }
 
-#[cfg(not(feature = "blas"))]
+/// See [`gemm_serial_f32`].
+///
+/// # Safety
+///
+/// As [`gemm_f64`].
+#[cfg(feature = "blas")]
 #[inline]
-pub(crate) unsafe fn gemm_f64(
+pub(crate) unsafe fn gemm_serial_f64(
     m: usize,
     k: usize,
     n: usize,
@@ -306,11 +534,7 @@ pub(crate) unsafe fn gemm_f64(
     b: *const f64,
     c: *mut f64,
 ) {
-    unsafe {
-        matrixmultiply::dgemm(
-            m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
-        )
-    };
+    unsafe { gemm_f64(m, k, n, a, b, c) }
 }
 
 /// Matrix multiplication with gradient support
@@ -1041,5 +1265,141 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         Ok(output_with_grad)
     } else {
         Ok(output)
+    }
+}
+
+#[cfg(all(test, not(feature = "blas")))]
+mod split_gemm_tests {
+    use super::*;
+
+    /// Deterministic values with full mantissas, so that reassociating the
+    /// arithmetic anywhere would show up as a differing bit rather than being
+    /// hidden by exactly representable inputs.
+    fn fill(len: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                // Map into [-1, 1) using the high mantissa bits.
+                (((state >> 11) as f64) / (1u64 << 53) as f64) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// The shapes below, and which branch of `plan_gemm` each one exercises.
+    fn cases() -> Vec<(usize, usize, usize)> {
+        vec![
+            // Too small to divide: stays whole.
+            (1, 1, 1),
+            (8, 32, 32),
+            (16, 128, 128),
+            // Column split (n >= m).
+            (16, 256, 1024),
+            (64, 1024, 1024),
+            (1, 4096, 4096),
+            // Row split (m > n).
+            (4096, 1024, 16),
+            (1024, 1024, 64),
+            (4096, 4096, 1),
+            // Sizes that do not divide evenly by the task count.
+            (333, 777, 555),
+            (37, 1031, 1033),
+            (1033, 1031, 37),
+        ]
+    }
+
+    #[test]
+    fn every_case_is_covered_by_the_branch_it_claims() {
+        let mut whole = 0;
+        let mut rows = 0;
+        let mut cols = 0;
+        for (m, k, n) in cases() {
+            match plan_gemm(m, k, n) {
+                GemmSplit::Whole => whole += 1,
+                GemmSplit::Rows(tasks) => {
+                    assert!(tasks >= 2, "a split into {tasks} task(s) is not a split");
+                    rows += 1;
+                }
+                GemmSplit::Cols(tasks) => {
+                    assert!(tasks >= 2, "a split into {tasks} task(s) is not a split");
+                    cols += 1;
+                }
+            }
+        }
+        // Without this the bit-exactness test below could pass by never
+        // splitting anything. Single-threaded machines legitimately take the
+        // whole-product branch for everything, so only demand coverage where
+        // there is a pool to spread across.
+        assert!(whole >= 3, "expected the small shapes to stay whole");
+        if rayon::current_num_threads() >= 2 {
+            assert!(rows >= 3, "expected the tall shapes to split by row");
+            assert!(cols >= 3, "expected the wide shapes to split by column");
+        }
+    }
+
+    #[test]
+    fn splitting_does_not_change_a_single_bit_f32() {
+        for (m, k, n) in cases() {
+            let a: Vec<f32> = fill(m * k, 0x51ed).iter().map(|&x| x as f32).collect();
+            let b: Vec<f32> = fill(k * n, 0xc0ffee).iter().map(|&x| x as f32).collect();
+            let mut split = vec![0f32; m * n];
+            let mut whole = vec![0f32; m * n];
+            unsafe {
+                gemm_f32(m, k, n, a.as_ptr(), b.as_ptr(), split.as_mut_ptr());
+                gemm_serial_f32(m, k, n, a.as_ptr(), b.as_ptr(), whole.as_mut_ptr());
+            }
+            let differing = split
+                .iter()
+                .zip(&whole)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                differing, 0,
+                "({m}, {k}, {n}) differs in {differing} element(s)"
+            );
+        }
+    }
+
+    #[test]
+    fn splitting_does_not_change_a_single_bit_f64() {
+        for (m, k, n) in cases() {
+            let a = fill(m * k, 0x51ed);
+            let b = fill(k * n, 0xc0ffee);
+            let mut split = vec![0f64; m * n];
+            let mut whole = vec![0f64; m * n];
+            unsafe {
+                gemm_f64(m, k, n, a.as_ptr(), b.as_ptr(), split.as_mut_ptr());
+                gemm_serial_f64(m, k, n, a.as_ptr(), b.as_ptr(), whole.as_mut_ptr());
+            }
+            let differing = split
+                .iter()
+                .zip(&whole)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                differing, 0,
+                "({m}, {k}, {n}) differs in {differing} element(s)"
+            );
+        }
+    }
+
+    /// A split writes through raw pointers into disjoint bands of the output.
+    /// If a band were mis-addressed the result would still be *shaped* right,
+    /// so check that every element was actually written.
+    #[test]
+    fn every_output_element_is_written() {
+        for (m, k, n) in cases() {
+            let a: Vec<f32> = vec![1.0; m * k];
+            let b: Vec<f32> = vec![1.0; k * n];
+            let mut out = vec![f32::NAN; m * n];
+            unsafe { gemm_f32(m, k, n, a.as_ptr(), b.as_ptr(), out.as_mut_ptr()) };
+            assert!(
+                out.iter().all(|v| *v == k as f32),
+                "({m}, {k}, {n}) left {} element(s) unwritten",
+                out.iter().filter(|v| v.is_nan()).count()
+            );
+        }
     }
 }

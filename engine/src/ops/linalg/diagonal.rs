@@ -563,7 +563,8 @@ fn optimized_matmul_f32(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
-        // Avoid parallel overhead for single matrix multiplication
+        // One product, so `gemm_f32` is the one that decides whether to spread
+        // it across the pool.
         unsafe {
             gemm_f32(
                 m,
@@ -574,7 +575,9 @@ fn optimized_matmul_f32(
                 output_data.as_mut_ptr(),
             )
         };
-    } else {
+    } else if batch >= rayon::current_num_threads() {
+        // The batch axis alone already fills the pool, so each element runs
+        // whole rather than being subdivided again inside its own task.
         output_data
             .par_chunks_mut(m * n)
             .enumerate()
@@ -582,9 +585,20 @@ fn optimized_matmul_f32(
                 let a = &lhs_data[b * m * k..(b + 1) * m * k];
                 let r = &rhs_data[b * k * n..(b + 1) * k * n];
                 unsafe {
-                    gemm_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+                    gemm_serial_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
                 }
             });
+    } else {
+        // Too few batch elements to keep every thread busy; walk them in turn
+        // and let each product split itself.
+        for b in 0..batch {
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+            let chunk = &mut output_data[b * m * n..(b + 1) * m * n];
+            unsafe {
+                gemm_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+            }
+        }
     }
 
     Ok(())
@@ -609,6 +623,8 @@ fn optimized_matmul_f64(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
+        // One product, so `gemm_f64` is the one that decides whether to spread
+        // it across the pool.
         unsafe {
             gemm_f64(
                 m,
@@ -619,7 +635,9 @@ fn optimized_matmul_f64(
                 output_data.as_mut_ptr(),
             )
         };
-    } else {
+    } else if batch >= rayon::current_num_threads() {
+        // The batch axis alone already fills the pool, so each element runs
+        // whole rather than being subdivided again inside its own task.
         output_data
             .par_chunks_mut(m * n)
             .enumerate()
@@ -627,9 +645,20 @@ fn optimized_matmul_f64(
                 let a = &lhs_data[b * m * k..(b + 1) * m * k];
                 let r = &rhs_data[b * k * n..(b + 1) * k * n];
                 unsafe {
-                    gemm_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+                    gemm_serial_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
                 }
             });
+    } else {
+        // Too few batch elements to keep every thread busy; walk them in turn
+        // and let each product split itself.
+        for b in 0..batch {
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+            let chunk = &mut output_data[b * m * n..(b + 1) * m * n];
+            unsafe {
+                gemm_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+            }
+        }
     }
 
     Ok(())
