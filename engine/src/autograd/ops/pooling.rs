@@ -246,30 +246,6 @@ impl GradientFunction for AvgPool2dBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
-
-/// Map an output tap `(oh, ow, kh, kw)` to the input coordinate it reads, or
-/// `None` when it lands in the zero padding. The padding bound already forces
-/// `0 <= ih < in_h` (and likewise for `iw`), so no second range check is needed.
-#[inline(always)]
-fn conv_input_coord(
-    oh: usize,
-    ow: usize,
-    kh: usize,
-    kw: usize,
-    stride: (usize, usize),
-    padding: (usize, usize),
-    in_h: usize,
-    in_w: usize,
-) -> Option<(usize, usize)> {
-    let h_in = oh * stride.0 + kh;
-    let w_in = ow * stride.1 + kw;
-    if h_in < padding.0 || w_in < padding.1 || h_in >= in_h + padding.0 || w_in >= in_w + padding.1
-    {
-        None
-    } else {
-        Some((h_in - padding.0, w_in - padding.1))
-    }
-}
 /// Gradient function for 2D convolution (`ops::conv2d`).
 ///
 /// Given `grad_output` of shape `[N, C_out, OH, OW]`, produces:
@@ -371,6 +347,11 @@ impl Conv2dBackward {
                         grad_cols.as_mut_ptr(),
                     );
                 }
+                // Output positions are walked as nested loops and their
+                // in-bounds range is hoisted, for the reason the forward's
+                // im2col does the same: recovering `(oh, ow)` from a flat `p`
+                // cost two runtime-divisor divisions per element, over 4.7M
+                // elements for a 16x32x32x32 conv.
                 grad_input
                     .par_chunks_mut(in_stride)
                     .enumerate()
@@ -382,13 +363,19 @@ impl Conv2dBackward {
                             let kx = rem % kernel_w;
                             let row_base = k * n_ohw + n * ohw;
                             let ic_base = ic * in_h * in_w;
-                            for p in 0..ohw {
-                                let oh = p / out_w;
-                                let ow = p % out_w;
-                                if let Some((ih, iw)) =
-                                    conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
-                                {
-                                    gi[ic_base + ih * in_w + iw] += grad_cols[row_base + p];
+                            let (oh_lo, oh_hi) = crate::ops::conv::in_bounds_range(
+                                ky, padding.0, in_h, stride.0, out_h,
+                            );
+                            let (ow_lo, ow_hi) = crate::ops::conv::in_bounds_range(
+                                kx, padding.1, in_w, stride.1, out_w,
+                            );
+                            for oh in oh_lo..oh_hi {
+                                let ih = oh * stride.0 + ky - padding.0;
+                                let dst = ic_base + ih * in_w;
+                                let src = row_base + oh * out_w;
+                                for ow in ow_lo..ow_hi {
+                                    let iw = ow * stride.1 + kx - padding.1;
+                                    gi[dst + iw] += grad_cols[src + ow];
                                 }
                             }
                         }
@@ -411,6 +398,9 @@ impl Conv2dBackward {
             let mut grad_weight = vec![T::default(); out_channels * k_dim];
             if n_ohw > 0 {
                 let mut cols = vec![T::default(); n_ohw * k_dim];
+                // `k` is walked as nested (ic, ky, kx) loops rather than
+                // decomposed: three divisions per element, and this buffer has
+                // the same 4.7M elements as the one above.
                 cols.par_chunks_mut(k_dim)
                     .enumerate()
                     .for_each(|(r, prow)| {
@@ -418,16 +408,20 @@ impl Conv2dBackward {
                         let p = r % ohw;
                         let oh = p / out_w;
                         let ow = p % out_w;
-                        for (k, slot) in prow.iter_mut().enumerate() {
-                            let ic = k / kh_kw;
-                            let rem = k % kh_kw;
-                            let ky = rem / kernel_w;
-                            let kx = rem % kernel_w;
-                            if let Some((ih, iw)) =
-                                conv_input_coord(oh, ow, ky, kx, stride, padding, in_h, in_w)
-                            {
-                                *slot =
-                                    input[(n * in_channels + ic) * in_h * in_w + ih * in_w + iw];
+                        let mut k = 0usize;
+                        for ic in 0..in_channels {
+                            let plane = (n * in_channels + ic) * in_h * in_w;
+                            for ky in 0..kernel_h {
+                                let ih = oh * stride.0 + ky;
+                                let row_ok = ih >= padding.0 && ih < in_h + padding.0;
+                                let ih = ih.wrapping_sub(padding.0);
+                                for kx in 0..kernel_w {
+                                    let iw = ow * stride.1 + kx;
+                                    if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
+                                        prow[k] = input[plane + ih * in_w + (iw - padding.1)];
+                                    }
+                                    k += 1;
+                                }
                             }
                         }
                     });

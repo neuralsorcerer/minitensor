@@ -310,6 +310,33 @@ pub(crate) struct ConvGeometry {
     pub padding: (usize, usize),
 }
 
+/// The half-open range of output positions along one axis whose input
+/// coordinate `o*stride + k_off - pad` lands inside `[0, dim)`.
+///
+/// Padding only ever clips a prefix and a suffix of the axis, so hoisting this
+/// out of the element loop removes the per-element bounds test as well as the
+/// index arithmetic behind it.
+#[inline]
+pub(crate) fn in_bounds_range(
+    k_off: usize,
+    pad: usize,
+    dim: usize,
+    stride: usize,
+    out: usize,
+) -> (usize, usize) {
+    let lo = if pad > k_off {
+        (pad - k_off).div_ceil(stride).min(out)
+    } else {
+        0
+    };
+    let hi = if dim + pad > k_off {
+        (dim + pad - k_off).div_ceil(stride).min(out)
+    } else {
+        0
+    };
+    (lo, hi.max(lo))
+}
+
 /// im2col + GEMM forward pass, for one element type.
 ///
 /// Lower each output position's receptive field into a column of `cols`
@@ -361,6 +388,18 @@ fn conv2d_forward<T: ConvScalar>(
     if !output_vec.is_empty() {
         // Build cols row by row (one row per kernel-input index `k`), so each
         // row is written contiguously.
+        //
+        // The output position is walked with nested loops rather than recovered
+        // from a flat counter. Decomposing the counter needed four integer
+        // divisions per element -- by `ohw` and `output_width`, both runtime
+        // values, so they stay real divisions -- across 4.7M elements for a
+        // 16x32x32x32 conv. Walking `n`, `oh`, `ow` costs none.
+        //
+        // The in-bounds range of output positions is also computed once per
+        // row instead of testing each element: padding only ever clips a prefix
+        // and a suffix, and `cols` starts zeroed, so the pad needs no writing at
+        // all. What is left is a contiguous copy per row when the horizontal
+        // stride is 1, which is the overwhelmingly common case.
         let mut cols = vec![T::default(); k_dim * n_cols];
         cols.par_chunks_mut(n_cols)
             .enumerate()
@@ -369,24 +408,30 @@ fn conv2d_forward<T: ConvScalar>(
                 let rem = k % kh_kw;
                 let ky = rem / kernel_w;
                 let kx = rem % kernel_w;
-                for (c, slot) in row.iter_mut().enumerate() {
-                    let n = c / ohw;
-                    let p = c % ohw;
-                    let oh = p / output_width;
-                    let ow = p % output_width;
-                    let ih = oh * stride.0 + ky;
-                    let iw = ow * stride.1 + kx;
-                    // Padded coordinate; the valid (unpadded) region is
-                    // [padding, dim + padding); everything else is zero pad.
-                    if ih >= padding.0
-                        && iw >= padding.1
-                        && ih < input_height + padding.0
-                        && iw < input_width + padding.1
-                    {
-                        let ih = ih - padding.0;
-                        let iw = iw - padding.1;
-                        let idx = ((n * in_channels + ic) * input_height + ih) * input_width + iw;
-                        *slot = input_data[idx];
+                let (oh_lo, oh_hi) =
+                    in_bounds_range(ky, padding.0, input_height, stride.0, output_height);
+                let (ow_lo, ow_hi) =
+                    in_bounds_range(kx, padding.1, input_width, stride.1, output_width);
+                if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                    return;
+                }
+                let span = ow_hi - ow_lo;
+                for n in 0..batch_size {
+                    let dst_n = n * ohw;
+                    let plane = (n * in_channels + ic) * input_height;
+                    for oh in oh_lo..oh_hi {
+                        let ih = oh * stride.0 + ky - padding.0;
+                        let src = (plane + ih) * input_width;
+                        let dst = dst_n + oh * output_width + ow_lo;
+                        if stride.1 == 1 {
+                            let s = src + ow_lo + kx - padding.1;
+                            row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
+                        } else {
+                            for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
+                                let iw = (ow_lo + i) * stride.1 + kx - padding.1;
+                                *slot = input_data[src + iw];
+                            }
+                        }
                     }
                 }
             });
