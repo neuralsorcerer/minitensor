@@ -5,7 +5,17 @@ frameworks, and avoid common benchmarking mistakes.
 
 ## Benchmark commands
 
-Run the bundled Python benchmark from the repository root:
+Run the benchmark suite, which covers the operations a training step is
+actually made of:
+
+```bash
+python examples/benchmark_suite.py
+python examples/benchmark_suite.py --json before.json   # then again, after a change
+python examples/benchmark_suite.py --compare before.json after.json
+```
+
+Or the framework comparison, which times one matmul against PyTorch and
+TensorFlow when they are installed:
 
 ```bash
 python examples/performance_benchmark.py
@@ -17,9 +27,11 @@ You can also use the Makefile target:
 make benchmark
 ```
 
-The benchmark script attempts to import optional comparison frameworks such as
-PyTorch and TensorFlow. Missing optional frameworks are skipped rather than
-failing the MiniTensor benchmark.
+`performance_benchmark.py` skips any comparison framework it cannot import
+rather than failing. Note that it skips the MiniTensor half the same way, so
+a run that prints only "Skipping" lines is reporting an import problem, not a
+result. `benchmark_suite.py` adds the repository root to `sys.path` itself, so
+it works when run by path from a source checkout.
 
 ## Conversion to and from NumPy
 
@@ -57,19 +69,39 @@ Ratios below 1 mean MiniTensor is faster.
 
 | op | 4K | 64K | 1M |
 | --- | --- | --- | --- |
-| `add` / `mul` | 0.9x | 0.8x | 0.9x |
-| `relu` | 0.24x | 0.21x | 0.14x |
-| `abs`, `sqrt` | 0.8x | ~1.0x | 0.4-0.5x |
-| `sum` | 0.35x | 0.78x | 0.25x |
-| `exp` | 2.9x | 1.4x | 1.3x |
-| `tanh` | 19x | 13x | 12x |
+| `add` / `mul` | 0.85x | 0.62x | 0.81x |
+| `relu` | 0.35x | 0.42x | 0.41x |
+| `abs`, `sqrt` | 0.86x | 0.99x | 0.51x |
+| `sum` | 0.30x | 0.62x | 0.19x |
+| `exp` | 1.41x | 0.80x | 0.51x |
+| `tanh` | 2.56x | 1.45x | 0.94x |
+| `sigmoid` | 0.80x | 0.46x | 0.20x |
+| `log` | 2.07x | 0.98x | 0.67x |
+| `sin` | 2.09x | 0.91x | 0.61x |
 
-The transcendentals are the outlier, and the reason is known: MiniTensor calls
-the scalar libm routine per element, while NumPy ships hand-written SIMD
-kernels for them. On this machine float32 `tanh` costs about 27ns per element
-per core against `relu`'s 0.05ns, so the gap is the vectorisation, not the
-threading -- these kernels *are* parallelised. Closing it means writing SIMD
-transcendentals with their own accuracy budget, which has not been done.
+The float32 transcendentals used to be the outlier -- `tanh` was 12-19x slower
+than NumPy, because this library called the scalar libm routine per element
+while NumPy ships hand-written SIMD kernels. They now have their own block
+kernels (`engine/src/ops/simd/transcendental.rs`), compiled once per instruction
+set and selected at run time, so at a megabyte and up they are at or ahead of
+NumPy.
+
+What remains is a per-call overhead of a few microseconds, which is why the 4K
+column is worse than the 1M column for every transcendental and better for
+none. At 4096 elements the work is a few microseconds either way, so the
+crossing into the Python binding and the output allocation dominate; by 1M they
+are noise. Read the 4K column as the cost of calling an op, not the cost of the
+op.
+
+Accuracy did not pay for the speed. `tanh`, `exp`, `expm1`, `sinh`, `cosh`,
+`log`, `sin`, `cos` and `tan` are bit-identical to the correctly-rounded
+float64 value on **all 2^32 float32 inputs**, checked exhaustively; `erf`,
+`erfc` and `log1p` carry a stated budget of at most one ulp on a bounded number
+of inputs. The tests are `#[ignore]`d because a sweep takes minutes:
+
+```bash
+cargo test --release -p engine -- --ignored --nocapture transcendental
+```
 
 `sort` deserves a note because it is easy to mis-measure: `mt.sort` always
 returns values *and* indices, so the comparable NumPy operation is
@@ -82,27 +114,30 @@ comparing different work.
 Matrix multiplication runs through `matrixmultiply` by default -- pure Rust, no
 system library. The `blas` feature routes it to an installed OpenBLAS instead.
 Which is faster depends on the machine and the size, so measure rather than
-assume:
+assume. On the machine these docs were last measured on (x86-64, OpenBLAS 0.3 from
+`libopenblas-dev`), square float32 matmul came out:
+
+| size | matrixmultiply, older | matrixmultiply, now | OpenBLAS, older |
+| --- | --- | --- | --- |
+| 128 | 49 GFLOP/s | 69 GFLOP/s | 55 GFLOP/s |
+| 256 | 101 GFLOP/s | 211 GFLOP/s | 156 GFLOP/s |
+| 512 | 150 GFLOP/s | 265 GFLOP/s | 226 GFLOP/s |
+| 1024 | 189 GFLOP/s | 365 GFLOP/s | 287 GFLOP/s |
+
+The middle column is current; the outer two are from when this section was
+first measured. `matrixmultiply` is no longer built with its own `threading`
+feature -- a single product is now divided across rayon by `gemm_f32` itself,
+along whichever output axis is longer -- and that moved the pure-Rust path past
+the OpenBLAS figures previously recorded here.
+
+Those OpenBLAS numbers were not re-measured, so the honest reading is that the
+comparison needs redoing on your machine rather than that one backend now wins.
+Run both and see:
 
 ```bash
 cargo run --release --example gemm_benchmark
 cargo run --release --features blas --example gemm_benchmark
 ```
-
-On the machine these docs were last measured on (x86-64, OpenBLAS 0.3 from
-`libopenblas-dev`), square float32 matmul came out:
-
-| size | matrixmultiply | OpenBLAS | speedup |
-| --- | --- | --- | --- |
-| 128 | 49 GFLOP/s | 55 GFLOP/s | 1.1x |
-| 256 | 101 GFLOP/s | 156 GFLOP/s | 1.5x |
-| 512 | 150 GFLOP/s | 226 GFLOP/s | 1.5x |
-| 1024 | 189 GFLOP/s | 287 GFLOP/s | 1.5x |
-
-The gap widens with size and is small enough at 128 that the extra build
-dependency may not be worth it for workloads dominated by small matrices. These
-are single-run figures from one machine; treat them as a reason to run the
-benchmark, not as a result to quote.
 
 ## Recommended benchmark setup
 
@@ -164,9 +199,25 @@ with mt.no_grad():
         predictions = model(batch)
 ```
 
-Measured over 1000 forward passes of a small MLP, the first form grew resident
-memory by about 215 MB and kept climbing linearly; the second was flat, as was a
-normal training loop that calls `backward()` and `optimizer.step()`.
+Over 1000 forward passes of the model above, the first form leaves 5005 nodes
+in the graph -- five per pass, climbing linearly and never released -- while the
+second leaves none, as does a normal training loop that calls `backward()` and
+`optimizer.step()`.
+
+What that costs in memory depends on the model, since each node holds the
+tensors its backward would need: the 4-to-8-to-2 network above grows about
+2.7 MB over those 1000 passes, but a network with megabyte activations grows by
+megabytes per pass. The node count is the part that is stable enough to check,
+and `autograd_graph_size()` returns it:
+
+```python
+import minitensor as mt
+
+nodes, gradients = mt.autograd_graph_size()
+```
+
+A count that rises across iterations of a loop is this bug; one that returns to
+the same value each iteration is not.
 
 `model.eval()` does **not** imply this. It switches dropout and batch norm to
 inference behaviour and nothing else, so use both together:
@@ -208,7 +259,11 @@ operation execution, NumPy conversion, and training-loop overhead separately.
 
 ## Related files
 
+- [`examples/benchmark_suite.py`](../examples/benchmark_suite.py) — benchmarks
+  for the paths a training step spends its time in, with `--json` and
+  `--compare` for diffing two builds. Its module docstring covers the
+  measurement pitfalls specific to this workload.
 - [`examples/performance_benchmark.py`](../examples/performance_benchmark.py) —
-  bundled matrix-multiplication benchmark.
+  bundled matrix-multiplication benchmark against PyTorch and TensorFlow.
 - [`Makefile`](../Makefile) — project convenience targets.
 - [Development guide](development.md) — validation and contributor workflow.
