@@ -174,7 +174,11 @@ impl Layer for Tanh {
 /// lie in the range \[0, 1\] and sum to 1.
 #[derive(Clone)]
 pub struct Softmax {
-    dim: Option<usize>,
+    /// Kept as given, negative included, and resolved against the input's rank
+    /// at forward time. A layer is built before it sees a tensor, so `-1` --
+    /// which is how a softmax is almost always written -- cannot be turned
+    /// into an axis index until then.
+    dim: Option<isize>,
 }
 
 impl Softmax {
@@ -184,12 +188,12 @@ impl Softmax {
     /// * `dim` - A dimension along which Softmax will be computed (so every
     ///   slice along dim will sum to 1). Default: None (applies to the last
     ///   dimension)
-    pub fn new(dim: Option<usize>) -> Self {
+    pub fn new(dim: Option<isize>) -> Self {
         Self { dim }
     }
 
     /// Get the dimension along which softmax is computed
-    pub fn dim(&self) -> Option<usize> {
+    pub fn dim(&self) -> Option<isize> {
         self.dim
     }
 }
@@ -202,8 +206,11 @@ impl Default for Softmax {
 
 impl Layer for Softmax {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        let dim = self.dim.or(Some(input.ndim() - 1));
-        softmax(input, dim)
+        let dim = match self.dim {
+            Some(dim) => crate::ops::util::normalize_dim(dim, input.ndim())?,
+            None => input.ndim().saturating_sub(1),
+        };
+        softmax(input, Some(dim))
     }
 
     fn parameters(&self) -> Vec<&Tensor> {

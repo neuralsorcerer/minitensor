@@ -21,11 +21,14 @@ use std::sync::Arc;
 /// it falls outside `[-ndim, ndim)`. Shared by the shape, linalg, and
 /// reduction clusters.
 pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
-    let dim = if dim < 0 { dim + ndim as isize } else { dim };
-    if dim < 0 || dim >= ndim as isize {
+    let resolved = if dim < 0 { dim + ndim as isize } else { dim };
+    if resolved < 0 || resolved >= ndim as isize {
+        // Report what the caller passed, not what it resolved to: `-4` on a
+        // 3-D tensor is a mistake about `-4`, and being told that `-1` is out
+        // of bounds sends the reader looking for a different bug.
         Err(MinitensorError::index_error(dim, 0, ndim))
     } else {
-        Ok(dim as usize)
+        Ok(resolved as usize)
     }
 }
 

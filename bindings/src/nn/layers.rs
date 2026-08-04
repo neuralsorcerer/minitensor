@@ -52,14 +52,14 @@ impl PySoftmax {
     /// Create a new Softmax layer
     #[new]
     #[pyo3(signature = (dim=None))]
-    fn new(dim: Option<usize>) -> PyClassInitializer<Self> {
+    fn new(dim: Option<isize>) -> PyClassInitializer<Self> {
         let softmax = Softmax::new(dim);
         PyClassInitializer::from(PyModule::from_softmax(softmax)).add_subclass(Self)
     }
 
     /// Get the dimension along which softmax is computed
     #[getter]
-    fn dim(slf: PyRef<Self>) -> PyResult<Option<usize>> {
+    fn dim(slf: PyRef<Self>) -> PyResult<Option<isize>> {
         let module = slf.as_ref();
         if let ModuleType::Softmax(layer) = &module.inner {
             Ok(layer.dim())
