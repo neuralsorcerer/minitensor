@@ -669,6 +669,99 @@ pub(crate) unsafe fn gemm_serial_f64(
     unsafe { gemm_f64(m, k, n, a, b, c) }
 }
 
+/// Reject a product whose operands cannot be multiplied, describing both of
+/// them as the caller wrote them.
+///
+/// Run before the 1-D promotion and batch folding below, because those rewrite
+/// the shapes before anything checks them. `[3, 4] @ [7]` used to be reported
+/// as "Shape mismatch: expected [4, 1], got [7, 1]" -- three of those four
+/// numbers appear nowhere in the call, and the `[4, 1]` labelled "expected" is
+/// not a shape either operand could have had.
+fn validate_matmul_shapes(lhs: &[usize], rhs: &[usize]) -> Result<()> {
+    if lhs.is_empty() || rhs.is_empty() {
+        // Scalar operands are rejected further down, with their own message.
+        return Ok(());
+    }
+
+    // A 1-D operand contributes its whole length; a matrix contributes the
+    // axis that faces the other operand.
+    let (inner_lhs, lhs_clause) = if lhs.len() == 1 {
+        (
+            lhs[0],
+            format!("the length of the first operand ({})", lhs[0]),
+        )
+    } else {
+        let k = lhs[lhs.len() - 1];
+        (k, format!("the last dimension of the first operand ({k})"))
+    };
+    let (inner_rhs, rhs_clause) = if rhs.len() == 1 {
+        (rhs[0], format!("the length of the second ({})", rhs[0]))
+    } else {
+        let k = rhs[rhs.len() - 2];
+        (
+            k,
+            format!("the second-to-last dimension of the second ({k})"),
+        )
+    };
+
+    if inner_lhs != inner_rhs {
+        return Err(MinitensorError::invalid_argument_with_suggestion(
+            format!(
+                "matmul: shapes {lhs:?} and {rhs:?} cannot be multiplied -- \
+                 {lhs_clause} must equal {rhs_clause}"
+            ),
+            matmul_transpose_hint(lhs, rhs),
+        ));
+    }
+
+    // Everything but the last two axes is batch, and batches broadcast.
+    if lhs.len() > 2 || rhs.len() > 2 {
+        let lhs_batch = Shape::new(lhs[..lhs.len().saturating_sub(2)].to_vec());
+        let rhs_batch = Shape::new(rhs[..rhs.len().saturating_sub(2)].to_vec());
+        if lhs_batch.broadcast_with(&rhs_batch).is_err() {
+            return Err(MinitensorError::invalid_argument_with_suggestion(
+                format!(
+                    "matmul: shapes {lhs:?} and {rhs:?} cannot be multiplied -- the \
+                     matrix dimensions agree, but the batch dimensions {:?} and {:?} \
+                     do not broadcast",
+                    lhs_batch.dims(),
+                    rhs_batch.dims()
+                ),
+                "Batch dimensions broadcast like elementwise operands: each pair must \
+                 be equal, or one of them 1",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// The usual cause of a mismatched inner dimension is one operand stored the
+/// other way round, and the shapes say which one.
+fn matmul_transpose_hint(lhs: &[usize], rhs: &[usize]) -> String {
+    if lhs.len() >= 2 && rhs.len() >= 2 {
+        let cols_lhs = lhs[lhs.len() - 1];
+        let rows_lhs = lhs[lhs.len() - 2];
+        let cols_rhs = rhs[rhs.len() - 1];
+        let rows_rhs = rhs[rhs.len() - 2];
+        if cols_lhs == cols_rhs {
+            return format!(
+                "Both operands end in {cols_lhs}, so the second is likely stored \
+                 transposed: try b.transpose(-1, -2)"
+            );
+        }
+        if rows_lhs == rows_rhs {
+            return format!(
+                "Both operands have {rows_lhs} rows, so the first is likely stored \
+                 transposed: try a.transpose(-1, -2)"
+            );
+        }
+    }
+    "Check that the operands are the right way round, and that any transpose you \
+     meant to apply was applied"
+        .to_string()
+}
+
 /// Matrix multiplication with gradient support
 pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     // Check device compatibility
@@ -686,6 +779,8 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             format!("{:?}", rhs.dtype()),
         ));
     }
+
+    validate_matmul_shapes(lhs.shape().dims(), rhs.shape().dims())?;
 
     // For 1-D vectors, `lhs` is promoted by prepending a 1 and `rhs` by appending
     // a 1; the added axes are removed from the result
@@ -785,13 +880,15 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_cols = rhs_shape[rhs_shape.len() - 1];
 
     if lhs_cols != rhs_rows {
-        // "expected" is the rhs shape that would make the inner dimensions
-        // agree; reporting the lhs shape here made the message claim a
-        // mismatch between two identical shapes for (n,k)@(n,k) inputs.
-        return Err(MinitensorError::shape_mismatch(
-            vec![lhs_cols, rhs_cols],
-            vec![rhs_rows, rhs_cols],
-        ));
+        // `validate_matmul_shapes` has already run on the operands as the
+        // caller passed them, so reaching here means the promotion or folding
+        // above produced something it did not. Re-run it rather than
+        // hand-rolling a second message: one of them would go stale.
+        validate_matmul_shapes(lhs_shape, rhs_shape)?;
+        return Err(MinitensorError::internal_error(format!(
+            "matmul: inner dimensions {lhs_cols} and {rhs_rows} disagree after \
+             reshaping {lhs_shape:?} and {rhs_shape:?}, which the shape check accepted"
+        )));
     }
 
     // Compute output shape

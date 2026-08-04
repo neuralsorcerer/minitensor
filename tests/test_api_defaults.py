@@ -80,10 +80,22 @@ def test_timer_profiler_optional():
         assert timer.elapsed_ms() >= 0.0
 
 
-def test_matmul_mismatch_reports_expected_rhs_shape(t22):
+def test_matmul_mismatch_names_both_operands(t22):
+    """Both shapes as passed, and neither invented.
+
+    This used to read "expected [2, 2], got [3, 2]" for `(3,2) @ (3,2)`: the
+    `[2, 2]` labelled "expected" was synthesised from one dimension of each
+    operand and was never a shape the caller had.
+    """
     other = mt.from_numpy(np.ones((3, 2), dtype=np.float32))
-    with pytest.raises(Exception, match=r"expected \[2, 2\], got \[3, 2\]"):
+    with pytest.raises(Exception) as excinfo:
         mt.from_numpy(np.ones((3, 2), dtype=np.float32)).matmul(other)
+
+    message = str(excinfo.value)
+    assert "[3, 2] and [3, 2]" in message
+    assert "[2, 2]" not in message
+    # Both operands ending in 2 is the signature of a missing transpose.
+    assert "transpose" in message
 
 
 def test_numeric_protocol_dunders(t22):
