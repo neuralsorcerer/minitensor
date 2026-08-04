@@ -70,16 +70,44 @@ def test_clear_autograd_graph_releases_interior_gradients():
     assert mt.get_gradient(interior) is None
 
 
-def test_optimizer_step_releases_interior_gradients():
-    # A normal training loop is bounded because `step()` clears the graph.
+def test_optimizer_step_releases_only_its_own_parameters_gradients():
+    # `step()` consumes what it applied and leaves the rest alone -- clearing
+    # the whole graph is what made a second optimizer over a different
+    # parameter group silently do nothing. The loop stays bounded regardless,
+    # because `backward()` releases its own subgraph and holds interior
+    # gradients for a single pass.
     weight, interior, loss = _interior_and_loss()
     optimizer = mt.optim.SGD([weight], 1e-3)
     loss.backward()
+    assert mt.get_gradient(weight) is not None
     assert mt.get_gradient(interior) is not None
 
     optimizer.step()
 
-    assert mt.get_gradient(interior) is None
+    assert (
+        mt.get_gradient(weight) is None
+    ), "the stepped parameter's gradient is consumed"
+    assert (
+        mt.get_gradient(interior) is not None
+    ), "an interior gradient is not this step's to drop"
+
+
+def test_a_training_loop_stays_bounded_without_the_wholesale_clear():
+    model = mt.nn.Sequential(
+        [mt.nn.DenseLayer(8, 8), mt.nn.ReLU(), mt.nn.DenseLayer(8, 4)]
+    )
+    optimizer = mt.optim.SGD(model.parameters(), 1e-3)
+    x = mt.Tensor(np.zeros((4, 8), dtype=np.float32))
+    y = mt.Tensor(np.zeros((4, 4), dtype=np.float32))
+
+    sizes = []
+    for _ in range(6):
+        optimizer.zero_grad()
+        mt.nn.mse_loss(model(x), y).backward()
+        optimizer.step()
+        sizes.append(mt.autograd_graph_size())
+
+    assert sizes[1:] == sizes[1:2] * 5, sizes
 
 
 def test_repeated_backward_keeps_only_the_latest_interior_gradients():

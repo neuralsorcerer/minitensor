@@ -67,11 +67,28 @@ impl PyOptimizer {
                 OptimizerType::Lion(opt) => opt.step(tensor_refs.as_mut_slice()),
             }
             .map_err(_convert_error)?;
+
+            // Consume only this optimizer's gradients, not the whole graph.
+            //
+            // This used to call `clear_graph()`, which discarded every stored
+            // gradient -- including those belonging to a *different* optimizer
+            // over a different parameter group. Its `step()` then found nothing
+            // to apply and silently did nothing: no error, no warning, the
+            // parameters simply never moved. Two optimizers over disjoint
+            // groups is an ordinary arrangement (a lower learning rate for a
+            // pretrained encoder than for a fresh head, a generator and a
+            // discriminator sharing one loss).
+            //
+            // The wholesale clear was there to bound memory per iteration,
+            // back when `backward()` marked the graph consumed without freeing
+            // it. It frees the subgraph it walked now, and holds interior
+            // gradients for only one pass, so what is left to release here is
+            // just what this optimizer consumed.
+            for tensor in &tensor_refs {
+                autograd::clear_gradient(tensor);
+            }
         }
 
-        if let Err(e) = autograd::clear_graph() {
-            return Err(_convert_error(e));
-        }
         Ok(())
     }
 

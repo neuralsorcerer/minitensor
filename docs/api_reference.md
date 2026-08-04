@@ -703,8 +703,8 @@ refused: True
 
 The orderings you actually want are all still allowed: writing a parameter
 before any forward has consumed it, mutating and *then* building the graph, and
-clamping between training steps — `optimizer.step()` and
-`clear_autograd_graph()` both release the graph. Non-leaf tensors are unaffected
+clamping between training steps — `backward()` releases the subgraph it walked,
+and `clear_autograd_graph()` releases everything. Non-leaf tensors are unaffected
 either way, since they copy on write.
 
 ### Layout and conversion extras
@@ -1427,7 +1427,9 @@ print(rates)
 
 All optimizer classes share a common interface:
 
-- `step()` -- apply parameter updates and clear the global autograd graph.
+- `step()` -- apply parameter updates and consume the gradients it applied.
+  Gradients belonging to parameters this optimizer does not hold are left
+  alone, so several optimizers can step off one backward pass.
 - `zero_grad(set_to_none: bool = False)` -- reset gradients.
 - `lr` property -- read/write learning rate.
 
@@ -1852,8 +1854,9 @@ True
 ```
 
 Keeping that available means the gradient map holds an entry per interior
-tensor until something resets it. Both `optimizer.step()` and
-`clear_autograd_graph()` do, so an ordinary training loop is bounded:
+tensor -- but only for one pass. Each `backward()` releases the interior
+gradients the previous one left, so an ordinary training loop is bounded, and
+so is a loop that accumulates over several backward passes before stepping:
 
 ```python
 import minitensor as mt
@@ -1861,13 +1864,14 @@ import minitensor as mt
 w = mt.ones((4, 4), requires_grad=True)
 optimizer = mt.optim.SGD([w], 1e-3)
 
-for _ in range(3):               # bounded: step() clears the graph
+for _ in range(3):
     optimizer.zero_grad()
     h = mt.matmul(mt.ones((4, 4)), w)
     mt.sum(h).backward()
     optimizer.step()
 
-print(mt.get_gradient(h) is None)
+# The last pass's interior gradient is still readable; earlier ones are not.
+print(mt.get_gradient(h) is not None)
 ```
 
 ```text
