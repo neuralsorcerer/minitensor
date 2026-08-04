@@ -43,20 +43,22 @@ impl QuantileInterpolation {
     }
 }
 
+/// Resolve a reduction's `dim` list: negatives counted from the end, sorted,
+/// duplicates dropped.
+///
+/// Sorting matters beyond tidiness -- callers that remove axes from the output
+/// shape walk the list in reverse, which only removes the right axes if it is
+/// ascending. Deduplicating matters for the same reason: `sum(dim=[0, 0])`
+/// would otherwise drop two axes.
 pub(crate) fn normalize_reduction_dims(
     dims: Option<Vec<isize>>,
     ndim: usize,
 ) -> Result<Option<Vec<usize>>> {
-    let ndim = ndim as isize;
     Ok(match dims {
         Some(dims) => {
             let mut normalized = Vec::with_capacity(dims.len());
             for d in dims {
-                let d = if d < 0 { d + ndim } else { d };
-                if d < 0 || d >= ndim {
-                    return Err(MinitensorError::index_error(d, 0, ndim as usize));
-                }
-                normalized.push(d as usize);
+                normalized.push(normalize_dim(d, ndim)?);
             }
             normalized.sort_unstable();
             normalized.dedup();
@@ -251,7 +253,7 @@ pub fn median(
                 if dim_value == 0 || dim_value == -1 {
                     0
                 } else {
-                    return Err(MinitensorError::index_error(dim_value, 0, 1));
+                    return Err(MinitensorError::dim_out_of_range(dim_value, 1));
                 }
             } else {
                 normalize_dim(dim_value, tensor.ndim())?
@@ -308,7 +310,7 @@ pub fn quantile(
                 if dim_value == 0 || dim_value == -1 {
                     (quantile_all(tensor, q, keepdim, interpolation)?, None)
                 } else {
-                    return Err(MinitensorError::index_error(dim_value, 0, 1));
+                    return Err(MinitensorError::dim_out_of_range(dim_value, 1));
                 }
             } else {
                 let axis = normalize_dim(dim_value, tensor.ndim())?;
@@ -378,7 +380,7 @@ pub fn quantiles(
                 if dim_value == 0 || dim_value == -1 {
                     return quantiles_all(tensor, qs, keepdim, interpolation);
                 }
-                return Err(MinitensorError::index_error(dim_value, 0, 1));
+                return Err(MinitensorError::dim_out_of_range(dim_value, 1));
             }
 
             let axis = normalize_dim(dim_value, tensor.ndim())?;
@@ -407,7 +409,7 @@ pub fn nanquantile(
                 if dim_value == 0 || dim_value == -1 {
                     (nanquantile_all(tensor, q, keepdim, interpolation)?, None)
                 } else {
-                    return Err(MinitensorError::index_error(dim_value, 0, 1));
+                    return Err(MinitensorError::dim_out_of_range(dim_value, 1));
                 }
             } else {
                 let axis = normalize_dim(dim_value, tensor.ndim())?;
@@ -436,7 +438,7 @@ pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<T
                 if dim_value == 0 || dim_value == -1 {
                     (nanmedian_all(tensor, keepdim)?, None)
                 } else {
-                    return Err(MinitensorError::index_error(dim_value, 0, 1));
+                    return Err(MinitensorError::dim_out_of_range(dim_value, 1));
                 }
             } else {
                 let axis = normalize_dim(dim_value, tensor.ndim())?;
@@ -476,7 +478,7 @@ pub fn nanquantiles(
                 if dim_value == 0 || dim_value == -1 {
                     return nanquantiles_all(tensor, qs, keepdim, interpolation);
                 }
-                return Err(MinitensorError::index_error(dim_value, 0, 1));
+                return Err(MinitensorError::dim_out_of_range(dim_value, 1));
             }
 
             let axis = normalize_dim(dim_value, tensor.ndim())?;

@@ -17,25 +17,17 @@ use std::sync::Arc;
 
 /// Transpose operation with gradient support
 pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
-    let ndim = tensor.ndim() as isize;
-    let dim0 = if dim0 < 0 { dim0 + ndim } else { dim0 };
-    let dim1 = if dim1 < 0 { dim1 + ndim } else { dim1 };
+    // Validated one argument at a time. Reporting `dim0.max(dim1)` after
+    // resolving both named the *valid* argument on `transpose(-5, 1)`: the
+    // resolved -5 was -3, so the max was 1, and the message complained about a
+    // dimension the caller had got right.
+    let dim0_usize = normalize_dim_named(dim0, tensor.ndim(), "transpose: dim0")?;
+    let dim1_usize = normalize_dim_named(dim1, tensor.ndim(), "transpose: dim1")?;
 
-    if dim0 < 0 || dim0 >= ndim || dim1 < 0 || dim1 >= ndim {
-        return Err(MinitensorError::index_error(
-            dim0.max(dim1),
-            0,
-            ndim as usize,
-        ));
-    }
-
-    if dim0 == dim1 {
+    if dim0_usize == dim1_usize {
         // No-op transpose
         return Ok(tensor.clone());
     }
-
-    let dim0_usize = dim0 as usize;
-    let dim1_usize = dim1 as usize;
 
     // Create new shape with swapped dimensions
     let mut new_shape = tensor.shape().dims().to_vec();

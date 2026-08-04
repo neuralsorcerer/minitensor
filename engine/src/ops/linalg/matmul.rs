@@ -29,7 +29,7 @@ pub(crate) struct DiagonalSpec {
     pub output_dims: Vec<usize>,
 }
 
-pub(crate) use crate::ops::util::normalize_dim;
+pub(crate) use crate::ops::util::{normalize_dim, normalize_dim_named};
 
 pub(crate) fn compute_diagonal_spec(
     dims: &[usize],

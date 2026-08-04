@@ -16,7 +16,7 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
-pub(crate) use crate::ops::util::normalize_dim;
+pub(crate) use crate::ops::util::{normalize_dim, normalize_dim_named};
 
 fn empty_tensor(shape: Shape, dtype: DataType, device: Device, requires_grad: bool) -> Tensor {
     Tensor::new(
@@ -186,12 +186,7 @@ pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
     let new_dims: Vec<usize> = match dim {
         None => dims.iter().copied().filter(|&d| d != 1).collect(),
         Some(d) => {
-            let ndim = tensor.ndim() as isize;
-            let d = if d < 0 { d + ndim } else { d };
-            if d < 0 || d >= ndim {
-                return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-            }
-            let d = d as usize;
+            let d = normalize_dim(d, tensor.ndim())?;
             if dims[d] != 1 {
                 // A non-unit axis remains untouched.
                 dims.to_vec()
@@ -208,39 +203,25 @@ pub fn squeeze(tensor: &Tensor, dim: Option<isize>) -> Result<Tensor> {
 /// Unsqueeze operation - add a dimension of size 1. See [`squeeze`] for why this
 /// goes through [`reshape`] rather than the view-based `Tensor::unsqueeze`.
 pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {
-    let ndim = tensor.ndim() as isize;
-    let d = if dim < 0 { dim + ndim + 1 } else { dim };
-    if d < 0 || d > ndim {
-        return Err(MinitensorError::index_error(d, 0, (ndim + 1) as usize));
-    }
+    // An axis may be inserted one past the last, so `unsqueeze` accepts a
+    // range one wider than the tensor's rank: `[-(ndim + 1), ndim]`.
+    let d = normalize_dim(dim, tensor.ndim() + 1)?;
     let mut new_dims = tensor.shape().dims().to_vec();
-    new_dims.insert(d as usize, 1);
+    new_dims.insert(d, 1);
     reshape(tensor, Shape::new(new_dims))
 }
 
 /// Flatten dimensions `start_dim..=end_dim` into one. Routed through [`reshape`]
 /// so gradients flow (see [`squeeze`]).
 pub fn flatten(tensor: &Tensor, start_dim: isize, end_dim: isize) -> Result<Tensor> {
-    let ndim = tensor.ndim() as isize;
-    let start = if start_dim < 0 {
-        start_dim + ndim
-    } else {
-        start_dim
-    };
-    let end = if end_dim < 0 { end_dim + ndim } else { end_dim };
-    if start < 0 || start >= ndim {
-        return Err(MinitensorError::index_error(start, 0, tensor.ndim()));
-    }
-    if end < 0 || end >= ndim {
-        return Err(MinitensorError::index_error(end, 0, tensor.ndim()));
-    }
+    let start = normalize_dim_named(start_dim, tensor.ndim(), "flatten: start_dim")?;
+    let end = normalize_dim_named(end_dim, tensor.ndim(), "flatten: end_dim")?;
     if start > end {
         return Err(MinitensorError::invalid_argument(
             "start_dim must be less than or equal to end_dim",
         ));
     }
 
-    let (start, end) = (start as usize, end as usize);
     let dims = tensor.shape().dims();
     let mut new_dims = dims[..start].to_vec();
     new_dims.push(dims[start..=end].iter().product());
@@ -262,11 +243,7 @@ pub fn permute(tensor: &Tensor, dims: Vec<isize>) -> Result<Tensor> {
     // Normalise negative dimensions and validate range
     let mut normalized = Vec::with_capacity(ndim);
     for &d in &dims {
-        let d = if d < 0 { d + ndim as isize } else { d };
-        if d < 0 || d >= ndim as isize {
-            return Err(MinitensorError::index_error(d, 0, ndim));
-        }
-        normalized.push(d as usize);
+        normalized.push(normalize_dim(d, ndim)?);
     }
     // Check that dims form a proper permutation
     let mut sorted = normalized.clone();
@@ -307,22 +284,14 @@ pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Resu
     let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(source.len());
 
     for (&s, &d) in source.iter().zip(destination.iter()) {
-        let s = if s < 0 { s + ndim as isize } else { s };
-        if s < 0 || s >= ndim as isize {
-            return Err(MinitensorError::index_error(s, 0, ndim));
-        }
-        let s = s as usize;
+        let s = normalize_dim_named(s, ndim, "movedim: source")?;
         if src_seen[s] {
             return Err(MinitensorError::invalid_operation(
                 "movedim: duplicate dimensions in source".to_string(),
             ));
         }
         src_seen[s] = true;
-        let d = if d < 0 { d + ndim as isize } else { d };
-        if d < 0 || d >= ndim as isize {
-            return Err(MinitensorError::index_error(d, 0, ndim));
-        }
-        let d = d as usize;
+        let d = normalize_dim_named(d, ndim, "movedim: destination")?;
         if dst_seen[d] {
             return Err(MinitensorError::invalid_operation(
                 "movedim: duplicate dimensions in destination".to_string(),

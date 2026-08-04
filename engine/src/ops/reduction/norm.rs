@@ -23,7 +23,7 @@ pub(crate) fn normalize_norm_dims(dim: Option<Vec<isize>>, ndim: usize) -> Resul
             for d in dims {
                 let normalized = if d < 0 { d + n } else { d };
                 if normalized < 0 || normalized >= n {
-                    return Err(MinitensorError::index_error(d, 0, ndim));
+                    return Err(MinitensorError::dim_out_of_range(d, ndim));
                 }
                 out.push(normalized as usize);
             }

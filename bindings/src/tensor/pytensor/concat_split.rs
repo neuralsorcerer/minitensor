@@ -95,16 +95,9 @@ impl PyTensor {
             ));
         }
 
-        let ndim = self.inner.ndim() as isize;
-        let axis = if dim < 0 { dim + ndim } else { dim };
-        if axis < 0 || axis >= ndim {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                "Dimension {} out of range",
-                axis
-            )));
-        }
+        let axis = engine::ops::normalize_dim(dim, self.inner.ndim()).map_err(_convert_error)?;
 
-        let dim_size = self.inner.shape().dims()[axis as usize];
+        let dim_size = self.inner.shape().dims()[axis];
         if !dim_size.is_multiple_of(sections) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Tensor cannot be evenly split along the given axis",
@@ -113,7 +106,7 @@ impl PyTensor {
 
         let chunk_size = dim_size / sections;
         let section_vec = vec![chunk_size; sections];
-        self.split_with_sections(section_vec, axis as usize)
+        self.split_with_sections(section_vec, axis)
     }
 
     /// Split tensor by chunk size or explicit sections along an axis
@@ -124,15 +117,7 @@ impl PyTensor {
         dim: Option<isize>,
     ) -> PyResult<Vec<PyTensor>> {
         let dim = dim.unwrap_or(0);
-        let ndim = self.inner.ndim() as isize;
-        let dim = if dim < 0 { dim + ndim } else { dim };
-        if dim < 0 || dim >= ndim {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                "Dimension {} out of range",
-                dim
-            )));
-        }
-        let axis = dim as usize;
+        let axis = engine::ops::normalize_dim(dim, self.inner.ndim()).map_err(_convert_error)?;
         let dim_size = self.inner.shape().dims()[axis];
 
         let mut sections: Vec<usize> = Vec::new();

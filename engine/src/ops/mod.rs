@@ -38,3 +38,7 @@ pub use reduction::*;
 pub use selection::*;
 pub use shape_ops::*;
 pub use simd::*;
+
+// Exported so the Python bindings resolve `dim` arguments the same way the
+// engine does, and report a bad one with the same message.
+pub use util::{normalize_dim, normalize_dim_named};

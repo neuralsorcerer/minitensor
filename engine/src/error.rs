@@ -76,6 +76,22 @@ pub enum MinitensorError {
         context: Option<String>,
     },
 
+    /// A `dim`/`axis` argument that names no dimension of the tensor.
+    ///
+    /// Distinct from `IndexError`, which is about an element index within one
+    /// dimension. Reporting the two the same way produced messages like
+    /// "index 5 is out of bounds for dimension 0 with size 2" for `x.sum(5)`
+    /// on a 2-D tensor, where no dimension 0 is involved and 2 is the rank
+    /// rather than anyone's size -- and whose suggestion, "Index must be in
+    /// range [0, 2)", denied the negative dims that in fact work.
+    #[error("{}", Self::dim_range_message(*dim, *ndim))]
+    DimensionOutOfRange {
+        dim: isize,
+        ndim: usize,
+        suggestion: Option<String>,
+        context: Option<String>,
+    },
+
     #[error("Internal error: {message}")]
     InternalError {
         message: String,
@@ -375,6 +391,61 @@ impl MinitensorError {
         }
     }
 
+    /// Create an error for a `dim`/`axis` argument outside `[-ndim, ndim)`.
+    ///
+    /// `dim` must be **what the caller wrote**, not the value after adding
+    /// `ndim` to a negative one. Resolving first and reporting the result
+    /// turned `x.sum(-5)` on a 2-D tensor into a complaint about `-3`, which
+    /// sends the reader looking for a `-3` that appears nowhere in their code.
+    pub fn dim_out_of_range(dim: isize, ndim: usize) -> Self {
+        Self::DimensionOutOfRange {
+            dim,
+            ndim,
+            suggestion: Some(Self::generate_dim_suggestion(ndim)),
+            context: None,
+        }
+    }
+
+    /// Create a dimension-out-of-range error naming the argument or operation
+    /// at fault, for calls that take more than one dim.
+    pub fn dim_out_of_range_with_context(
+        dim: isize,
+        ndim: usize,
+        context: impl Into<String>,
+    ) -> Self {
+        Self::DimensionOutOfRange {
+            dim,
+            ndim,
+            suggestion: Some(Self::generate_dim_suggestion(ndim)),
+            context: Some(context.into()),
+        }
+    }
+
+    fn dim_range_message(dim: isize, ndim: usize) -> String {
+        if ndim == 0 {
+            format!(
+                "Dimension out of range (a 0-dimensional tensor has no dimensions to name, but got {dim})"
+            )
+        } else {
+            format!(
+                "Dimension out of range (expected to be in range of [-{ndim}, {}], but got {dim})",
+                ndim - 1
+            )
+        }
+    }
+
+    fn generate_dim_suggestion(ndim: usize) -> String {
+        if ndim == 0 {
+            "A 0-dimensional tensor holds a single value; call the operation without a dim"
+                .to_string()
+        } else {
+            format!(
+                "Dimensions are numbered from 0; negative values count back from the last, so -1 means {}",
+                ndim - 1
+            )
+        }
+    }
+
     /// Create a new internal error
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::InternalError {
@@ -589,6 +660,7 @@ impl MinitensorError {
             Self::InvalidOperation { suggestion, .. } => suggestion.as_deref(),
             Self::BackendError { suggestion, .. } => suggestion.as_deref(),
             Self::IndexError { suggestion, .. } => suggestion.as_deref(),
+            Self::DimensionOutOfRange { suggestion, .. } => suggestion.as_deref(),
             Self::InternalError { suggestion, .. } => suggestion.as_deref(),
             Self::NotImplemented { suggestion, .. } => suggestion.as_deref(),
             Self::InvalidArgument { suggestion, .. } => suggestion.as_deref(),
@@ -612,6 +684,7 @@ impl MinitensorError {
             Self::InvalidOperation { context, .. } => context.as_deref(),
             Self::BackendError { context, .. } => context.as_deref(),
             Self::IndexError { context, .. } => context.as_deref(),
+            Self::DimensionOutOfRange { context, .. } => context.as_deref(),
             Self::InternalError { context, .. } => context.as_deref(),
             Self::NotImplemented { context, .. } => context.as_deref(),
             Self::InvalidArgument { context, .. } => context.as_deref(),
@@ -676,6 +749,43 @@ mod tests {
                 .unwrap()
                 .contains("Check tensor dimensions")
         );
+    }
+
+    #[test]
+    fn test_dim_out_of_range_states_the_range_that_works() {
+        let err = MinitensorError::dim_out_of_range(5, 3);
+        assert_eq!(
+            err.to_string(),
+            "Dimension out of range (expected to be in range of [-3, 2], but got 5)"
+        );
+        // Both ends inclusive and both signs present: the message this
+        // replaced advertised "[0, 3)", which denied the negative dims that
+        // every one of these operations accepts.
+        assert!(err.suggestion().unwrap().contains("negative values"));
+
+        // What the caller wrote, not what it resolved to.
+        assert!(
+            MinitensorError::dim_out_of_range(-7, 3)
+                .to_string()
+                .contains("but got -7")
+        );
+    }
+
+    #[test]
+    fn test_dim_out_of_range_on_a_scalar_does_not_print_an_empty_range() {
+        let err = MinitensorError::dim_out_of_range(0, 0);
+        assert_eq!(
+            err.to_string(),
+            "Dimension out of range (a 0-dimensional tensor has no dimensions to name, but got 0)"
+        );
+        assert!(err.suggestion().unwrap().contains("without a dim"));
+    }
+
+    #[test]
+    fn test_dim_out_of_range_carries_the_argument_name() {
+        let err = MinitensorError::dim_out_of_range_with_context(9, 2, "transpose: dim1");
+        assert_eq!(err.context(), Some("transpose: dim1"));
+        assert!(err.detailed_message().contains("transpose: dim1"));
     }
 
     #[test]

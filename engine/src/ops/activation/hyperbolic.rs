@@ -102,7 +102,10 @@ pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Res
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let mut output_data =
@@ -231,7 +234,10 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let mut output_data =

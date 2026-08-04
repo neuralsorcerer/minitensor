@@ -143,7 +143,10 @@ macro_rules! sum_along_dim_kernel {
             }
             if tensor.ndim() == 1 {
                 if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                    return Err(MinitensorError::dim_out_of_range(
+                        dim as isize,
+                        tensor.ndim(),
+                    ));
                 }
                 result_slice[0] = $simd_sum(input_data);
             } else if tensor.ndim() == 2 {
@@ -161,7 +164,10 @@ macro_rules! sum_along_dim_kernel {
                             });
                     }
                     _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                        return Err(MinitensorError::dim_out_of_range(
+                            dim as isize,
+                            tensor.ndim(),
+                        ));
                     }
                 }
             } else {
@@ -217,7 +223,10 @@ macro_rules! nansum_along_dim_kernel {
             }
             if tensor.ndim() == 1 {
                 if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                    return Err(MinitensorError::dim_out_of_range(
+                        dim as isize,
+                        tensor.ndim(),
+                    ));
                 }
                 result_slice[0] = input_data.iter().filter(|v| !v.is_nan()).sum::<$ty>();
             } else if tensor.ndim() == 2 {
@@ -237,7 +246,10 @@ macro_rules! nansum_along_dim_kernel {
                             });
                     }
                     _ => {
-                        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                        return Err(MinitensorError::dim_out_of_range(
+                            dim as isize,
+                            tensor.ndim(),
+                        ));
                     }
                 }
             } else {
@@ -324,7 +336,10 @@ sum_along_dim_kernel!(
 #[inline]
 pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();

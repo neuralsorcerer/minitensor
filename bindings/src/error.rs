@@ -37,6 +37,12 @@ pub fn _convert_error(err: MinitensorError) -> PyErr {
         MinitensorError::IndexError { .. } => {
             PyErr::new::<pyo3::exceptions::PyIndexError, _>(detailed_msg)
         }
+        // IndexError, not ValueError: this is what NumPy and PyTorch both
+        // raise for a bad axis, so `except IndexError` around a dim keeps
+        // working for code moving between them.
+        MinitensorError::DimensionOutOfRange { .. } => {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(detailed_msg)
+        }
         MinitensorError::InternalError { .. } => {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(detailed_msg)
         }
@@ -146,6 +152,15 @@ mod tests {
                     index: -1,
                     dim: 0,
                     size: 2,
+                    suggestion: None,
+                    context: None,
+                },
+                "IndexError",
+            ),
+            (
+                MinitensorError::DimensionOutOfRange {
+                    dim: 5,
+                    ndim: 2,
                     suggestion: None,
                     context: None,
                 },

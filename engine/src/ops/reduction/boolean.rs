@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();
@@ -601,7 +604,7 @@ pub fn topk(
     let axis = if ndim == 0 {
         match dim {
             Some(d) if d == 0 || d == -1 => 0,
-            Some(d) => return Err(MinitensorError::index_error(d, 0, 1)),
+            Some(d) => return Err(MinitensorError::dim_out_of_range(d, 1)),
             None => 0,
         }
     } else {

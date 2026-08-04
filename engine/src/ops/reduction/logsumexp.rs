@@ -29,25 +29,8 @@ pub fn logsumexp(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Res
         }
     }
 
-    let ndim = tensor.ndim() as isize;
-    let dims = match dim {
-        Some(dims) => {
-            if dims.is_empty() {
-                Vec::new()
-            } else {
-                let mut normalized = Vec::with_capacity(dims.len());
-                for d in dims {
-                    let d = if d < 0 { d + ndim } else { d };
-                    if d < 0 || d >= ndim {
-                        return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-                    }
-                    normalized.push(d as usize);
-                }
-                normalized.sort_unstable();
-                normalized.dedup();
-                normalized
-            }
-        }
+    let dims = match normalize_reduction_dims(dim, tensor.ndim())? {
+        Some(dims) => dims,
         None => (0..tensor.ndim()).collect(),
     };
 
@@ -241,23 +224,7 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
 /// Product reduction along specified dimensions
 pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
-    let ndim = tensor.ndim() as isize;
-    let dim = match dim {
-        Some(dims) => {
-            let mut normalized = Vec::with_capacity(dims.len());
-            for d in dims {
-                let d = if d < 0 { d + ndim } else { d };
-                if d < 0 || d >= ndim {
-                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-                }
-                normalized.push(d as usize);
-            }
-            normalized.sort_unstable();
-            normalized.dedup();
-            Some(normalized)
-        }
-        None => None,
-    };
+    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();
 
     let result = match dim {
@@ -366,7 +333,10 @@ pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
 /// Backward helper for cumulative sum
 pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let mut result_data =
@@ -447,7 +417,10 @@ pub fn cumprod_backward(
     dim: usize,
 ) -> Result<Tensor> {
     if dim >= input.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            input.ndim(),
+        ));
     }
 
     let mut result_data = TensorData::zeros_on_device(input.numel(), input.dtype(), input.device());
@@ -474,23 +447,7 @@ pub fn cumprod_backward(
 /// Mean reduction along specified dimensions
 pub fn mean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
-    let ndim = tensor.ndim() as isize;
-    let normalized = match dim {
-        Some(dims) => {
-            let mut normalized = Vec::with_capacity(dims.len());
-            for d in dims {
-                let d = if d < 0 { d + ndim } else { d };
-                if d < 0 || d >= ndim {
-                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-                }
-                normalized.push(d as usize);
-            }
-            normalized.sort_unstable();
-            normalized.dedup();
-            Some(normalized)
-        }
-        None => None,
-    };
+    let normalized = normalize_reduction_dims(dim, tensor.ndim())?;
 
     let sum_result = sum(
         tensor,
@@ -812,7 +769,10 @@ fn any_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
 
 fn all_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();

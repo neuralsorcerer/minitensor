@@ -20,13 +20,29 @@ use std::sync::Arc;
 /// Resolve a possibly negative dimension index against `ndim`, erroring when
 /// it falls outside `[-ndim, ndim)`. Shared by the shape, linalg, and
 /// reduction clusters.
-pub(crate) fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
+pub fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     let resolved = if dim < 0 { dim + ndim as isize } else { dim };
     if resolved < 0 || resolved >= ndim as isize {
         // Report what the caller passed, not what it resolved to: `-4` on a
         // 3-D tensor is a mistake about `-4`, and being told that `-1` is out
         // of bounds sends the reader looking for a different bug.
-        Err(MinitensorError::index_error(dim, 0, ndim))
+        Err(MinitensorError::dim_out_of_range(dim, ndim))
+    } else {
+        Ok(resolved as usize)
+    }
+}
+
+/// [`normalize_dim`] for calls that take more than one dimension, naming the
+/// argument at fault.
+///
+/// `transpose(-5, 1)` used to report the *larger* of the two after resolving
+/// both, which named `1` -- the argument that was fine -- as the problem.
+pub fn normalize_dim_named(dim: isize, ndim: usize, argument: &'static str) -> Result<usize> {
+    let resolved = if dim < 0 { dim + ndim as isize } else { dim };
+    if resolved < 0 || resolved >= ndim as isize {
+        Err(MinitensorError::dim_out_of_range_with_context(
+            dim, ndim, argument,
+        ))
     } else {
         Ok(resolved as usize)
     }

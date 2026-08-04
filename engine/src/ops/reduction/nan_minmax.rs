@@ -29,7 +29,10 @@ pub(crate) fn reduction_layout(
     keepdim: bool,
 ) -> Result<DimReductionLayout> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();

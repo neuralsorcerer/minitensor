@@ -76,7 +76,7 @@ pub fn sort(
     let axis = if ndim == 0 {
         match dim {
             Some(d) if d == 0 || d == -1 => 0,
-            Some(d) => return Err(MinitensorError::index_error(d, 0, 1)),
+            Some(d) => return Err(MinitensorError::dim_out_of_range(d, 1)),
             None => 0,
         }
     } else {
@@ -376,23 +376,7 @@ pub fn var(
         ));
     }
 
-    let dims = match dim {
-        Some(dims) => {
-            let ndim = tensor.ndim() as isize;
-            let mut normalized = Vec::with_capacity(dims.len());
-            for d in dims {
-                let d = if d < 0 { d + ndim } else { d };
-                if d < 0 || d >= ndim {
-                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-                }
-                normalized.push(d as usize);
-            }
-            normalized.sort_unstable();
-            normalized.dedup();
-            Some(normalized)
-        }
-        None => None,
-    };
+    let dims = normalize_reduction_dims(dim, tensor.ndim())?;
 
     if matches!(dims, Some(ref dims) if dims.is_empty()) {
         return Ok(tensor.clone());
@@ -953,7 +937,10 @@ pub(crate) fn nanmean_from_sum_count(
 #[inline]
 pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();
@@ -991,7 +978,10 @@ pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Te
 #[inline]
 pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     if dim >= tensor.ndim() {
-        return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+        return Err(MinitensorError::dim_out_of_range(
+            dim as isize,
+            tensor.ndim(),
+        ));
     }
 
     let input_shape = tensor.shape().dims();

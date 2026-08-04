@@ -92,7 +92,10 @@ macro_rules! cumprod_forward {
             let shape = tensor.shape().dims();
 
             if dim >= tensor.ndim() {
-                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                return Err(MinitensorError::dim_out_of_range(
+                    dim as isize,
+                    tensor.ndim(),
+                ));
             }
 
             let dim_size = shape[dim];
@@ -138,7 +141,10 @@ macro_rules! cumprod_backward {
 
             if input.ndim() == 1 {
                 if dim != 0 {
-                    return Err(MinitensorError::index_error(dim as isize, 0, input.ndim()));
+                    return Err(MinitensorError::dim_out_of_range(
+                        dim as isize,
+                        input.ndim(),
+                    ));
                 }
                 let len = input_data.len();
                 // count zeros and index
@@ -295,7 +301,12 @@ macro_rules! cumprod_backward {
                             }
                         }
                     }
-                    _ => return Err(MinitensorError::index_error(dim as isize, 0, input.ndim())),
+                    _ => {
+                        return Err(MinitensorError::dim_out_of_range(
+                            dim as isize,
+                            input.ndim(),
+                        ));
+                    }
                 }
             } else {
                 let dim_size = shape[dim];
@@ -378,7 +389,10 @@ macro_rules! cumsum_forward {
             let shape = tensor.shape().dims();
 
             if dim >= tensor.ndim() {
-                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                return Err(MinitensorError::dim_out_of_range(
+                    dim as isize,
+                    tensor.ndim(),
+                ));
             }
 
             let dim_size = shape[dim];
@@ -413,7 +427,10 @@ macro_rules! cumsum_backward {
             let shape = tensor.shape().dims();
 
             if dim >= tensor.ndim() {
-                return Err(MinitensorError::index_error(dim as isize, 0, tensor.ndim()));
+                return Err(MinitensorError::dim_out_of_range(
+                    dim as isize,
+                    tensor.ndim(),
+                ));
             }
 
             let dim_size = shape[dim];

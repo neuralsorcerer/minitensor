@@ -383,23 +383,7 @@ pub(crate) use crate::ops::util::normalize_dim;
 /// Sum reduction along specified dimensions
 pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Normalise negative dimensions and deduplicate
-    let ndim = tensor.ndim() as isize;
-    let dim = match dim {
-        Some(dims) => {
-            let mut normalized = Vec::with_capacity(dims.len());
-            for d in dims {
-                let d = if d < 0 { d + ndim } else { d };
-                if d < 0 || d >= ndim {
-                    return Err(MinitensorError::index_error(d, 0, tensor.ndim()));
-                }
-                normalized.push(d as usize);
-            }
-            normalized.sort_unstable();
-            normalized.dedup();
-            Some(normalized)
-        }
-        None => None,
-    };
+    let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();
 
     let result = match dim {
