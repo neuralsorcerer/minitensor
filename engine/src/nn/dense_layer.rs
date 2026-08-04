@@ -8,6 +8,7 @@ use super::{
     Layer,
     init::{InitMethod, init_bias, init_parameter},
 };
+use crate::nn::layer::{FeatureAxis, check_feature_dim};
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
@@ -144,13 +145,13 @@ impl Layer for DenseLayer {
             ));
         }
 
-        let input_features = input.size(input.ndim() - 1)?;
-        if input_features != self.in_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![self.in_features],
-                vec![input_features],
-            ));
-        }
+        check_feature_dim(
+            "DenseLayer",
+            "in_features",
+            self.in_features,
+            input,
+            FeatureAxis::Last,
+        )?;
 
         // `input @ weight^T + bias`. The weight is stored `[out, in]` and the
         // product needs `[in, out]`, but `linear` takes it transposed by stride

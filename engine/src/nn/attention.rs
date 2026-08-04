@@ -8,6 +8,7 @@ use super::{
     Layer,
     init::{InitMethod, init_bias, init_parameter},
 };
+use crate::nn::layer::{FeatureAxis, check_feature_dim};
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
@@ -163,12 +164,13 @@ impl MultiheadAttention {
                 name, dims
             )));
         }
-        if dims[2] != self.embed_dim {
-            return Err(MinitensorError::shape_mismatch(
-                vec![self.embed_dim],
-                vec![dims[2]],
-            ));
-        }
+        check_feature_dim(
+            "MultiheadAttention",
+            "embed_dim",
+            self.embed_dim,
+            x,
+            FeatureAxis::Last,
+        )?;
         Ok((dims[0], dims[1]))
     }
 

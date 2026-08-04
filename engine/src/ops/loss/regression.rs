@@ -373,6 +373,61 @@ pub fn cross_entropy_loss(
 /// This wrapper permutes and flattens the input so that the core
 /// `cross_entropy_loss` implementation can operate on ``[N, C]`` shaped
 /// tensors entirely in Rust.
+/// Check the target against the input before anything reshapes either of them.
+///
+/// The forward below flattens both operands down to two dimensions and lets
+/// the reshape fail if they disagree, which reported a mismatch between two
+/// element *counts*: 4 predictions against 5 class indices came out as
+/// "Shape mismatch: expected [5], got [4]", naming the target count as the
+/// expectation and mentioning neither tensor's actual shape. With the class
+/// axis anywhere but last the numbers stop resembling the input at all --
+/// `(2, 3, 10)` against `(2, 4)` reported "expected [8], got [20]".
+fn check_cross_entropy_target(input: &Tensor, target: &Tensor, dim: usize) -> Result<()> {
+    let input_dims = input.shape().dims();
+    let target_dims = target.shape().dims();
+    let classes = input_dims[dim];
+
+    // Dense targets carry a score per class and match the input exactly.
+    if target.ndim() == input.ndim() {
+        if target_dims == input_dims {
+            return Ok(());
+        }
+        return Err(MinitensorError::invalid_argument_with_suggestion(
+            format!(
+                "cross_entropy: a target with the same rank as the input holds one \
+                 score per class and must match it exactly, but the input is \
+                 {input_dims:?} and the target is {target_dims:?}"
+            ),
+            format!(
+                "Give a target of shape {input_dims:?}, or one rank lower holding class indices"
+            ),
+        ));
+    }
+
+    // Class-index targets carry one entry per prediction, so they are the
+    // input's shape with the class axis taken out.
+    let expected: Vec<usize> = input_dims
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &d)| (i != dim).then_some(d))
+        .collect();
+    if target.ndim() + 1 == input.ndim() && target_dims == expected.as_slice() {
+        return Ok(());
+    }
+    Err(MinitensorError::invalid_argument_with_suggestion(
+        format!(
+            "cross_entropy: the input is {input_dims:?} with {classes} classes on \
+             dim {dim}, so class-index targets must have shape {expected:?}, but the \
+             target is {target_dims:?}"
+        ),
+        format!(
+            "Pass one class index per prediction (shape {expected:?}), or a full score \
+             per class (shape {input_dims:?}). `dim` selects the class axis and \
+             defaults to 1"
+        ),
+    ))
+}
+
 pub fn cross_entropy(
     input: &Tensor,
     target: &Tensor,
@@ -381,10 +436,13 @@ pub fn cross_entropy(
 ) -> Result<Tensor> {
     let ndim = input.ndim();
     if dim >= ndim {
-        return Err(MinitensorError::invalid_operation(
-            "dim out of range in cross_entropy",
+        return Err(MinitensorError::dim_out_of_range_with_context(
+            dim as isize,
+            ndim,
+            "cross_entropy: dim (the class axis)",
         ));
     }
+    check_cross_entropy_target(input, target, dim)?;
 
     // Move class dimension to the end using successive transposes
     let mut pred = input.clone();
@@ -1060,6 +1118,32 @@ fn validate_classification_inputs(
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Classification loss functions require floating point tensors",
+            ));
+        }
+    }
+
+    // Class-index targets carry one entry per prediction row, so their shape
+    // must be the predictions' shape without the class axis. Nothing checked
+    // this: a `[4, 10]` prediction against 5 targets got as far as the
+    // one-hot expansion and then failed a broadcast downstream, reporting
+    // "Shape mismatch: expected [5], got [4]" -- which names the *target*
+    // count as the expectation and never mentions either tensor's shape.
+    if targets.ndim() + 1 == predictions.ndim() {
+        let batch = &predictions.shape().dims()[..predictions.ndim() - 1];
+        if targets.shape().dims() != batch {
+            return Err(MinitensorError::invalid_argument_with_suggestion(
+                format!(
+                    "Classification loss: predictions have shape {:?} ({:?} rows over \
+                     {} classes), but the class-index targets have shape {:?}",
+                    predictions.shape().dims(),
+                    batch,
+                    predictions.shape().dims()[predictions.ndim() - 1],
+                    targets.shape().dims()
+                ),
+                format!(
+                    "Class-index targets need one entry per prediction row, so their \
+                     shape must be {batch:?}"
+                ),
             ));
         }
     }

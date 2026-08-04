@@ -4,8 +4,71 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::{error::Result, tensor::Tensor};
+use crate::{
+    error::{MinitensorError, Result},
+    tensor::Tensor,
+};
 use std::collections::HashMap;
+
+/// Which axis of the input a layer's width is read from.
+pub(crate) enum FeatureAxis {
+    /// The last axis, as `DenseLayer` and `MultiheadAttention` read it.
+    Last,
+    /// A fixed position, as the BatchNorm layers read their channel axis.
+    At(usize),
+}
+
+/// Reject an input whose feature axis disagrees with the width the layer was
+/// constructed for.
+///
+/// Built as `shape_mismatch(vec![expected], vec![got])`, this rendered as
+/// "Shape mismatch: expected [10], got [7]" -- two one-element shapes, neither
+/// of which the caller has. Their input is `[2, 7]` and their layer was built
+/// for 10 features; nothing in the message says which constructor argument
+/// `[10]` came from, which axis `7` was read off, or what the input's shape
+/// was. The recurrent layers next door already report this as "LSTM expects
+/// input feature size 8, got 3", so the library disagreed with itself about
+/// how to say the same thing.
+pub(crate) fn check_feature_dim(
+    layer: &str,
+    argument: &str,
+    expected: usize,
+    input: &Tensor,
+    axis: FeatureAxis,
+) -> Result<()> {
+    let dims = input.shape().dims();
+    // `subject` opens a clause ("the last dimension of the input is 7") and
+    // `possessive` closes one ("an input whose last dimension is 10"), so the
+    // two axis kinds need both forms rather than one shared noun phrase.
+    let (index, subject, possessive) = match axis {
+        FeatureAxis::Last => (
+            dims.len().saturating_sub(1),
+            "the last dimension".to_string(),
+            "last dimension".to_string(),
+        ),
+        FeatureAxis::At(index) => (
+            index,
+            format!("dimension {index}"),
+            format!("dimension {index}"),
+        ),
+    };
+    let Some(&actual) = dims.get(index) else {
+        return Ok(()); // rank is checked separately, with its own message
+    };
+    if actual == expected {
+        return Ok(());
+    }
+    Err(MinitensorError::invalid_argument_with_suggestion(
+        format!(
+            "{layer} was built with {argument}={expected}, but {subject} of the \
+             input is {actual} (input shape {dims:?})"
+        ),
+        format!(
+            "Either construct the layer with {argument}={actual}, or give it an input \
+             whose {possessive} is {expected}"
+        ),
+    ))
+}
 
 /// Trait for neural network layers
 pub trait Layer: Send + Sync {

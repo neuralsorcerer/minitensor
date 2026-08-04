@@ -8,6 +8,7 @@ use super::{
     Layer,
     init::{InitMethod, init_parameter},
 };
+use crate::nn::layer::{FeatureAxis, check_feature_dim};
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
@@ -172,13 +173,13 @@ impl Layer for BatchNorm1d {
         }
 
         // Validate number of features
-        let num_features = input.size(1)?;
-        if num_features != self.num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![self.num_features],
-                vec![num_features],
-            ));
-        }
+        check_feature_dim(
+            "BatchNorm1d",
+            "num_features",
+            self.num_features,
+            input,
+            FeatureAxis::At(1),
+        )?;
 
         // Delegate to the functional kernel rather than re-deriving the
         // statistics here. That kernel is rank-generic and — critically —
@@ -324,13 +325,13 @@ impl Layer for BatchNorm2d {
             ));
         }
 
-        let num_features = input.size(1)?;
-        if num_features != self.num_features {
-            return Err(MinitensorError::shape_mismatch(
-                vec![self.num_features],
-                vec![num_features],
-            ));
-        }
+        check_feature_dim(
+            "BatchNorm2d",
+            "num_features",
+            self.num_features,
+            input,
+            FeatureAxis::At(1),
+        )?;
 
         // See `BatchNorm1d::forward`: shared kernel, unbiased `running_var`.
         crate::ops::normalization::batch_norm(
@@ -383,10 +384,24 @@ fn check_normalized_suffix(input: &Tensor, normalized_shape: &[usize], layer: &s
             dims.len()
         )));
     }
-    if &dims[dims.len() - normalized_shape.len()..] != normalized_shape {
-        return Err(MinitensorError::shape_mismatch(
-            normalized_shape.to_vec(),
-            dims.to_vec(),
+    let suffix = &dims[dims.len() - normalized_shape.len()..];
+    if suffix != normalized_shape {
+        // `shape_mismatch(normalized_shape, dims)` compared a suffix against a
+        // whole shape, so `LayerNorm([512])` on a `[4, 256]` input read
+        // "expected [512], got [4, 256]" -- as if the input were meant to be
+        // one-dimensional. Only the trailing dimensions are in question.
+        let n = normalized_shape.len();
+        return Err(MinitensorError::invalid_argument_with_suggestion(
+            format!(
+                "{layer} normalizes over the last {n} dimension{} {normalized_shape:?}, \
+                 but the input's last {n} dimension{} {suffix:?} (input shape {dims:?})",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { " is" } else { "s are" },
+            ),
+            format!(
+                "Either construct the layer with normalized_shape={suffix:?}, or give it \
+                 an input ending in {normalized_shape:?}"
+            ),
         ));
     }
     Ok(())

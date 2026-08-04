@@ -44,7 +44,7 @@ use engine::ops::pooling::{
 };
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use pyo3::PyClassInitializer;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule as Pyo3Module, PyTuple};
@@ -327,16 +327,17 @@ fn cross_entropy(
     let input_tensor = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
 
-    let ndim = input_tensor.tensor().ndim() as isize;
-    let axis = if dim < 0 { ndim + dim } else { dim };
-    if axis < 0 || axis as usize >= ndim as usize {
-        return Err(PyIndexError::new_err("dim out of range"));
-    }
+    let axis = engine::ops::normalize_dim_named(
+        dim,
+        input_tensor.tensor().ndim(),
+        "cross_entropy: dim (the class axis)",
+    )
+    .map_err(_convert_error)?;
     let result = cross_entropy_op(
         input_tensor.tensor(),
         target_tensor.tensor(),
         reduction,
-        axis as usize,
+        axis,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
