@@ -343,12 +343,28 @@ macro_rules! float_unary_kernel_param {
 // `sin` and `cos` are the strongest remaining candidates at about 3.7x, and
 // they need an argument reduction none of the existing kernels provide.
 
-float_unary_kernel!(exp_f32, as_f32_slice, f32, Float32, "f32", f32::exp);
-
 float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);
 
 /// Vectorized. Bit-identical to `(x as f64).ln() as f32` on all 2^32 float32
 /// inputs, where the `f32::ln` it replaces misrounds 416,909 of them.
+pub(crate) fn exp_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `exp` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.exp(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
+
 pub(crate) fn log_f32(tensor: &Tensor) -> Result<TensorData> {
     let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")

@@ -732,6 +732,32 @@ fn gelu_tanh_backward_one<const FMA: bool>(x: f32, gout: f32) -> f32 {
 /// keep `2^n` inside an exponent field for absurd inputs.
 const EXP_FAMILY_LIMIT: f64 = 100.0;
 
+/// Clamp for `exp` itself, which needs a wider one than its relatives.
+///
+/// `exp(-100)` is 3.7e-44 -- a float32 subnormal, and a *different* one from
+/// `exp(-101)`, so clamping at 100 would round a range of distinct answers
+/// together. Float32 runs out below `exp(-104)`, so 110 is the first round
+/// number where everything discarded converts to zero anyway. On the positive
+/// side anything past 88.7 is already infinity.
+const EXP_LIMIT: f64 = 110.0;
+
+/// `exp` in float64.
+///
+/// The same reduction `expm1` uses, without its final `- 1`: with
+/// `x = n*ln2 + r`, `exp(x)` is `2^n * (1 + expm1_poly(r))`, and the `2^n`
+/// factors out of the fused multiply-add.
+#[inline(always)]
+fn exp_core<const FMA: bool>(xd: f64) -> f64 {
+    let (two_pow_n, r) = reduce_exp::<FMA>(xd.clamp(-EXP_LIMIT, EXP_LIMIT));
+    fma_or::<FMA>(two_pow_n, expm1_poly::<FMA>(r), two_pow_n)
+}
+
+/// `exp` for one float32.
+#[inline(always)]
+fn exp_one<const FMA: bool>(x: f32) -> f32 {
+    exp_core::<FMA>(x as f64) as f32
+}
+
 /// `expm1` in float64.
 #[inline(always)]
 fn expm1_core<const FMA: bool>(xd: f64) -> f64 {
@@ -1242,6 +1268,7 @@ block_kernel_param!(
     softplus_block_avx512,
     softplus_block_avx2
 );
+block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
 block_kernel!(cosh_block, cosh_one, cosh_block_avx512, cosh_block_avx2);
@@ -1448,6 +1475,19 @@ impl F32Kernel {
         )
     }
 
+    /// Write `exp(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn exp(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            exp_block,
+            exp_block_avx512,
+            exp_block_avx2
+        )
+    }
+
     /// Write `log(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn log(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1622,6 +1662,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum Op {
         Tanh,
+        Exp,
         Erf,
         GeluErf,
         GeluTanh,
@@ -1649,6 +1690,7 @@ mod tests {
             Op::Sinh => k.sinh(input, out),
             Op::Cosh => k.cosh(input, out),
             Op::Erfc => k.erfc(input, out),
+            Op::Exp => k.exp(input, out),
             Op::Log => k.log(input, out),
             Op::Log1p => k.log1p(input, out),
             Op::Sigmoid => k.sigmoid(input, out),
@@ -1705,6 +1747,7 @@ mod tests {
             Op::Sinh => xd.sinh() as f32,
             Op::Cosh => xd.cosh() as f32,
             Op::Erfc => libm::erfc(xd) as f32,
+            Op::Exp => xd.exp() as f32,
             Op::Log => xd.ln() as f32,
             Op::Log1p => xd.ln_1p() as f32,
             // Written the stable way: `1/(1 + exp(-x))` overflows for large
@@ -1732,9 +1775,10 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 8] {
+    fn bit_exact_ops() -> [Op; 9] {
         [
             Op::Tanh,
+            Op::Exp,
             Op::Expm1,
             Op::Sinh,
             Op::Cosh,
