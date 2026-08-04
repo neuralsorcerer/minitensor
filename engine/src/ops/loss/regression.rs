@@ -25,6 +25,24 @@ use std::sync::Arc;
 
 pub(crate) const CHUNK: usize = 1024;
 
+/// Whether a loss that carries its own analytical backward should attach one,
+/// given the tensors it differentiates with respect to.
+///
+/// Every loss in this file computes its forward from ordinary tensor ops and
+/// then replaces the resulting `grad_fn` with a single hand-written node. The
+/// ops must therefore run with autograd recording *off*: once the final
+/// `grad_fn` is replaced, the primitive nodes they would have recorded are no
+/// longer reachable from the loss, so a backward pass never walks them and
+/// `release_saved_subgraph` never releases them. They and every tensor they
+/// saved would then sit in the graph until something cleared the whole thing.
+///
+/// With recording off the loss no longer propagates `requires_grad` on its
+/// own, which is what this decides instead -- call it *before* opening the
+/// guard, then mark the finished loss with `requires_grad_(true)`.
+fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
+    crate::autograd::is_grad_enabled() && inputs.iter().any(|t| t.requires_grad())
+}
+
 /// Mean Squared Error (MSE) loss function
 ///
 /// Computes the mean squared error between predictions and targets:
@@ -41,38 +59,47 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute squared differences: (predictions - targets)²
-    // Also keep the difference for gradient computation
-    let diff = sub(predictions, targets)?;
-    let diff_for_grad = diff.clone().detach();
-    let squared_diff = mul(&diff, &diff)?;
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            // Compute mean of squared differences
-            let sum = sum_all_elements(&squared_diff)?;
-            let n = squared_diff.numel() as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => {
-            // Sum all squared differences
-            sum_all_elements(&squared_diff)?
-        }
-        "none" => {
-            // Return element-wise squared differences
-            squared_diff
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
+    // Analytical backward below, so the primitive subtract/multiply/reduce
+    // graph is not recorded as well -- see [`manual_backward_needed`].
+    let (loss, diff_for_grad) = {
+        let _guard = NoGradGuard::new();
+
+        // Compute squared differences: (predictions - targets)²
+        // Also keep the difference for gradient computation
+        let diff = sub(predictions, targets)?;
+        let diff_for_grad = diff.clone().detach();
+        let squared_diff = mul(&diff, &diff)?;
+
+        // Apply reduction
+        let loss = match reduction {
+            "mean" => {
+                // Compute mean of squared differences
+                let sum = sum_all_elements(&squared_diff)?;
+                let n = squared_diff.numel() as f64;
+                divide_by_scalar(&sum, n)?
+            }
+            "sum" => {
+                // Sum all squared differences
+                sum_all_elements(&squared_diff)?
+            }
+            "none" => {
+                // Return element-wise squared differences
+                squared_diff
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
+        };
+        (loss, diff_for_grad)
     };
 
     // Set up gradient function if needed
-    if loss.requires_grad() {
+    if needs_grad {
         let grad_fn = Arc::new(MSELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -82,7 +109,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
             diff: diff_for_grad,
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -110,43 +137,49 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute absolute differences: |predictions - targets|
-    // Also compute the sign for gradient computation
-    let diff = sub(predictions, targets)?;
-    let sign_diff = sign_tensor(&diff)?;
-    let sign_for_grad = sign_diff.clone().detach();
-    let abs_diff = activation_abs(&diff.detach())?;
+    // The forward is computed on detached data (the exact gradient is provided
+    // by MAELossBackward from the stored sign), so gate on the inputs and
+    // enable grad on the loss explicitly.
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            // Compute mean of absolute differences
-            let sum = sum_all_elements(&abs_diff)?;
-            let n = abs_diff.numel() as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => {
-            // Sum all absolute differences
-            sum_all_elements(&abs_diff)?
-        }
-        "none" => {
-            // Return element-wise absolute differences
-            abs_diff
-        }
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
+    let (loss, sign_for_grad) = {
+        let _guard = NoGradGuard::new();
+
+        // Compute absolute differences: |predictions - targets|
+        // Also compute the sign for gradient computation
+        let diff = sub(predictions, targets)?;
+        let sign_diff = sign_tensor(&diff)?;
+        let sign_for_grad = sign_diff.clone().detach();
+        let abs_diff = activation_abs(&diff.detach())?;
+
+        // Apply reduction
+        let loss = match reduction {
+            "mean" => {
+                // Compute mean of absolute differences
+                let sum = sum_all_elements(&abs_diff)?;
+                let n = abs_diff.numel() as f64;
+                divide_by_scalar(&sum, n)?
+            }
+            "sum" => {
+                // Sum all absolute differences
+                sum_all_elements(&abs_diff)?
+            }
+            "none" => {
+                // Return element-wise absolute differences
+                abs_diff
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
+        };
+        (loss, sign_for_grad)
     };
 
-    // Set up gradient function if needed. The forward is computed on detached
-    // data (the exact gradient is provided by MAELossBackward from the stored
-    // sign), so gate on the inputs and enable grad on the loss explicitly.
-    if (predictions.requires_grad() || targets.requires_grad())
-        && crate::autograd::is_grad_enabled()
-    {
+    // Set up gradient function if needed
+    if needs_grad {
         let grad_fn = Arc::new(MAELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -412,51 +445,59 @@ pub fn binary_cross_entropy_loss(
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
-    // PyTorch clamps the log outputs to >= -100 so a saturated prediction
-    // (exactly 0 or 1) yields a finite loss instead of +inf.
-    let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    let ones = Tensor::ones(
-        predictions.shape().clone(),
-        predictions.dtype(),
-        predictions.device(),
-        false,
-    );
-    let one_minus_targets = sub(&ones, targets)?;
-    let one_minus_predictions = sub(&ones, predictions)?;
-    let log_one_minus_predictions = log_tensor(&one_minus_predictions)?.clamp_min(-100.0)?;
+    // Analytical backward below, so the primitive graph is not recorded as
+    // well -- see [`manual_backward_needed`].
+    let loss = {
+        let _guard = NoGradGuard::new();
 
-    let term1 = mul(targets, &log_predictions)?;
-    let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
-    let combined = add(&term1, &term2)?;
-    let zeros = Tensor::zeros(
-        combined.shape().clone(),
-        combined.dtype(),
-        combined.device(),
-        combined.requires_grad(),
-    );
-    let negative_bce = sub(&zeros, &combined)?;
+        // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
+        // PyTorch clamps the log outputs to >= -100 so a saturated prediction
+        // (exactly 0 or 1) yields a finite loss instead of +inf.
+        let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
 
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&negative_bce)?;
-            let n = negative_bce.numel() as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => sum_all_elements(&negative_bce)?,
-        "none" => negative_bce,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
+        let ones = Tensor::ones(
+            predictions.shape().clone(),
+            predictions.dtype(),
+            predictions.device(),
+            false,
+        );
+        let one_minus_targets = sub(&ones, targets)?;
+        let one_minus_predictions = sub(&ones, predictions)?;
+        let log_one_minus_predictions = log_tensor(&one_minus_predictions)?.clamp_min(-100.0)?;
+
+        let term1 = mul(targets, &log_predictions)?;
+        let term2 = mul(&one_minus_targets, &log_one_minus_predictions)?;
+        let combined = add(&term1, &term2)?;
+        let zeros = Tensor::zeros(
+            combined.shape().clone(),
+            combined.dtype(),
+            combined.device(),
+            combined.requires_grad(),
+        );
+        let negative_bce = sub(&zeros, &combined)?;
+
+        // Apply reduction
+        match reduction {
+            "mean" => {
+                let sum = sum_all_elements(&negative_bce)?;
+                let n = negative_bce.numel() as f64;
+                divide_by_scalar(&sum, n)?
+            }
+            "sum" => sum_all_elements(&negative_bce)?,
+            "none" => negative_bce,
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
         }
     };
 
     // Set up gradient function if needed
-    if loss.requires_grad() {
+    if needs_grad {
         let grad_fn = Arc::new(BCELossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -467,7 +508,7 @@ pub fn binary_cross_entropy_loss(
             targets: targets.clone().detach(),
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -603,41 +644,49 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
     // Validate inputs
     validate_loss_inputs(predictions, targets)?;
 
-    // Compute elementwise targets * (log_tensor(targets) - log_tensor(predictions))
-    let log_targets = log_tensor(targets)?;
-    let log_predictions = log_tensor(predictions)?;
-    let diff = sub(&log_targets, &log_predictions)?;
-    let kld = mul(targets, &diff)?;
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    // Apply reduction.
-    //
-    // `mean` is the element-wise mean, as it is for every other loss here and
-    // as it is in PyTorch. It used to divide by the batch dimension instead --
-    // PyTorch's `batchmean` -- while [`KLDivLossBackward`] divided by the
-    // element count, so forward and backward disagreed by a factor of
-    // `numel / batch` (4x for a 3x4 input) whenever there was more than one
-    // column. `batchmean` is now spelled out, and scales its gradient to match.
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&kld)?;
-            divide_by_scalar(&sum, predictions.numel().max(1) as f64)?
-        }
-        "batchmean" => {
-            let sum = sum_all_elements(&kld)?;
-            divide_by_scalar(&sum, kl_div_batch_size(predictions))?
-        }
-        "sum" => sum_all_elements(&kld)?,
-        "none" => kld,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'batchmean', 'sum', or 'none'",
-                reduction
-            )));
+    // Analytical backward below, so the primitive graph is not recorded as
+    // well -- see [`manual_backward_needed`].
+    let loss = {
+        let _guard = NoGradGuard::new();
+
+        // Compute elementwise targets * (log_tensor(targets) - log_tensor(predictions))
+        let log_targets = log_tensor(targets)?;
+        let log_predictions = log_tensor(predictions)?;
+        let diff = sub(&log_targets, &log_predictions)?;
+        let kld = mul(targets, &diff)?;
+
+        // Apply reduction.
+        //
+        // `mean` is the element-wise mean, as it is for every other loss here and
+        // as it is in PyTorch. It used to divide by the batch dimension instead --
+        // PyTorch's `batchmean` -- while [`KLDivLossBackward`] divided by the
+        // element count, so forward and backward disagreed by a factor of
+        // `numel / batch` (4x for a 3x4 input) whenever there was more than one
+        // column. `batchmean` is now spelled out, and scales its gradient to match.
+        match reduction {
+            "mean" => {
+                let sum = sum_all_elements(&kld)?;
+                divide_by_scalar(&sum, predictions.numel().max(1) as f64)?
+            }
+            "batchmean" => {
+                let sum = sum_all_elements(&kld)?;
+                divide_by_scalar(&sum, kl_div_batch_size(predictions))?
+            }
+            "sum" => sum_all_elements(&kld)?,
+            "none" => kld,
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'batchmean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
         }
     };
 
     // Set up gradient function if needed
-    if loss.requires_grad() {
+    if needs_grad {
         let grad_fn = Arc::new(KLDivLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),
@@ -648,7 +697,7 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
             targets: targets.clone().detach(),
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -699,50 +748,59 @@ pub fn focal_loss(
         ));
     }
 
-    // Apply log-softmax to predictions for numerical stability
-    let log_predictions = log_softmax(predictions, None)?;
-    let softmax_predictions = exp(&log_predictions)?;
-    let softmax_for_grad = softmax_predictions.clone().detach();
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    // Compute focal loss components
-    let ones = Tensor::ones(
-        softmax_predictions.shape().clone(),
-        softmax_predictions.dtype(),
-        softmax_predictions.device(),
-        false,
-    );
-    let one_minus_p = sub(&ones, &softmax_predictions)?;
-    let focal_weight = power(&one_minus_p, gamma)?;
+    // Analytical backward below, so the primitive graph is not recorded as
+    // well -- see [`manual_backward_needed`].
+    let (loss, softmax_for_grad) = {
+        let _guard = NoGradGuard::new();
 
-    // Compute negative log likelihood with focal weighting
-    let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
-    let alpha_tensor = create_scalar_tensor(alpha, predictions.dtype(), predictions.device())?;
-    let weighted_nll = mul(&nll, &focal_weight)?;
-    let focal_values = mul(&weighted_nll, &alpha_tensor)?;
+        // Apply log-softmax to predictions for numerical stability
+        let log_predictions = log_softmax(predictions, None)?;
+        let softmax_predictions = exp(&log_predictions)?;
+        let softmax_for_grad = softmax_predictions.clone().detach();
 
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&focal_values)?;
-            // Average over samples, matching cross_entropy: only the true-class
-            // term per sample is non-zero, so the denominator is the number of
-            // samples (numel / num_classes), not the total element count.
-            let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
-            let n = (focal_values.numel() / num_classes) as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => sum_all_elements(&focal_values)?,
-        "none" => focal_values,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
+        // Compute focal loss components
+        let ones = Tensor::ones(
+            softmax_predictions.shape().clone(),
+            softmax_predictions.dtype(),
+            softmax_predictions.device(),
+            false,
+        );
+        let one_minus_p = sub(&ones, &softmax_predictions)?;
+        let focal_weight = power(&one_minus_p, gamma)?;
+
+        // Compute negative log likelihood with focal weighting
+        let nll = negative_log_likelihood(&log_predictions, &targets_one_hot)?;
+        let alpha_tensor = create_scalar_tensor(alpha, predictions.dtype(), predictions.device())?;
+        let weighted_nll = mul(&nll, &focal_weight)?;
+        let focal_values = mul(&weighted_nll, &alpha_tensor)?;
+
+        // Apply reduction
+        let loss = match reduction {
+            "mean" => {
+                let sum = sum_all_elements(&focal_values)?;
+                // Average over samples, matching cross_entropy: only the true-class
+                // term per sample is non-zero, so the denominator is the number of
+                // samples (numel / num_classes), not the total element count.
+                let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
+                let n = (focal_values.numel() / num_classes) as f64;
+                divide_by_scalar(&sum, n)?
+            }
+            "sum" => sum_all_elements(&focal_values)?,
+            "none" => focal_values,
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
+        };
+        (loss, softmax_for_grad)
     };
 
     // Set up gradient function if needed
-    if loss.requires_grad() {
+    if needs_grad {
         let grad_fn = Arc::new(FocalLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets_one_hot.shape().dims().to_vec(),
@@ -755,7 +813,7 @@ pub fn focal_loss(
             targets: targets_one_hot.clone().detach(),
         });
 
-        let mut loss_with_grad = loss;
+        let mut loss_with_grad = loss.requires_grad_(true);
         loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
 
         // Add to computation graph
@@ -798,40 +856,46 @@ pub fn huber_loss(
         ));
     }
 
-    // Compute absolute differences: |predictions - targets|
-    let diff = sub(predictions, targets)?;
-    let diff_for_grad = diff.clone().detach();
-    let abs_diff = activation_abs(&diff.detach())?;
+    // The forward is computed on detached data (the exact gradient is provided
+    // by HuberLossBackward from the stored diff), so gate on the inputs and
+    // enable grad on the loss explicitly.
+    let needs_grad = manual_backward_needed(&[predictions, targets]);
 
-    // Create delta tensor for comparison
-    let delta_tensor = create_scalar_tensor(delta, predictions.dtype(), predictions.device())?;
+    let (loss, diff_for_grad) = {
+        let _guard = NoGradGuard::new();
 
-    // Compute Huber loss element-wise
-    let huber_values = compute_huber_elementwise(&abs_diff, &diff, &delta_tensor, delta)?;
+        // Compute absolute differences: |predictions - targets|
+        let diff = sub(predictions, targets)?;
+        let diff_for_grad = diff.clone().detach();
+        let abs_diff = activation_abs(&diff.detach())?;
 
-    // Apply reduction
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&huber_values)?;
-            let n = huber_values.numel() as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => sum_all_elements(&huber_values)?,
-        "none" => huber_values,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
+        // Create delta tensor for comparison
+        let delta_tensor = create_scalar_tensor(delta, predictions.dtype(), predictions.device())?;
+
+        // Compute Huber loss element-wise
+        let huber_values = compute_huber_elementwise(&abs_diff, &diff, &delta_tensor, delta)?;
+
+        // Apply reduction
+        let loss = match reduction {
+            "mean" => {
+                let sum = sum_all_elements(&huber_values)?;
+                let n = huber_values.numel() as f64;
+                divide_by_scalar(&sum, n)?
+            }
+            "sum" => sum_all_elements(&huber_values)?,
+            "none" => huber_values,
+            _ => {
+                return Err(MinitensorError::invalid_operation(format!(
+                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
+                    reduction
+                )));
+            }
+        };
+        (loss, diff_for_grad)
     };
 
-    // Set up gradient function if needed. The forward is computed on detached
-    // data (the exact gradient is provided by HuberLossBackward from the stored
-    // diff), so gate on the inputs and enable grad on the loss explicitly.
-    if (predictions.requires_grad() || targets.requires_grad())
-        && crate::autograd::is_grad_enabled()
-    {
+    // Set up gradient function if needed
+    if needs_grad {
         let grad_fn = Arc::new(HuberLossBackward {
             predictions_shape: predictions.shape().dims().to_vec(),
             targets_shape: targets.shape().dims().to_vec(),

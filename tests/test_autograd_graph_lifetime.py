@@ -144,3 +144,84 @@ def test_no_grad_forward_retains_nothing():
 
     assert mt.get_gradient(interior) is None
     assert not interior.requires_grad
+
+
+# --- losses with hand-written backwards --------------------------------------
+#
+# Each of these composes its forward from ordinary tensor ops and then replaces
+# the resulting `grad_fn` with a single analytical node. If the composed ops
+# record their own nodes, those nodes are unreachable from the loss the moment
+# the grad_fn is replaced: no backward pass ever walks them, so nothing ever
+# releases them or the activations they saved. The forward therefore has to run
+# with recording off. `binary_cross_entropy` and `focal_loss` were the worst,
+# stranding twelve nodes per call.
+#
+# `log_cosh_loss` is absent on purpose: it has no analytical backward, so its
+# whole graph is reachable from the loss and its own backward releases it. It
+# does still grow, by a different mechanism -- it builds scalar constants per
+# call, and a fresh constant becomes a leaf node that no release removes. That
+# affects any op with a scalar operand (`x * 2.0` and friends), not losses, and
+# costs a small map entry rather than a retained activation.
+
+
+def _loss_cases():
+    p = mt.Tensor(np.random.rand(8, 4).astype(np.float32) * 0.8 + 0.1).requires_grad_(True)
+    t = mt.Tensor(np.random.rand(8, 4).astype(np.float32) * 0.8 + 0.1)
+    onehot = mt.Tensor(np.eye(4, dtype=np.float32)[np.random.randint(0, 4, 8)])
+    idx = mt.Tensor(np.random.randint(0, 4, (8,)).astype(np.int64), dtype="int64")
+    logits = mt.Tensor(np.random.randn(8, 4).astype(np.float32)).requires_grad_(True)
+    probs = mt.softmax(logits, -1)
+    return [
+        ("mse_loss", lambda: mt.nn.mse_loss(p, t)),
+        ("l1_loss", lambda: mt.nn.l1_loss(p, t)),
+        ("huber_loss", lambda: mt.nn.huber_loss(p, t)),
+        ("smooth_l1_loss", lambda: mt.nn.smooth_l1_loss(p, t)),
+        ("cross_entropy", lambda: mt.nn.cross_entropy(logits, idx)),
+        ("binary_cross_entropy", lambda: mt.nn.binary_cross_entropy(p, t)),
+        ("bce_with_logits", lambda: mt.nn.binary_cross_entropy_with_logits(p, t)),
+        ("focal_loss", lambda: mt.nn.focal_loss(p, onehot)),
+        ("kl_div", lambda: mt.nn.kl_div(probs, probs)),
+    ]
+
+
+@pytest.mark.parametrize("name,build", _loss_cases(), ids=lambda v: v if isinstance(v, str) else "")
+def test_loss_backward_leaves_nothing_stranded_in_the_graph(name, build):
+    np.random.seed(0)
+    mt.clear_autograd_graph()
+
+    sizes = []
+    for _ in range(6):
+        build().backward()
+        sizes.append(mt.autograd_graph_size()[0])
+
+    # From the second pass on the node count must not move: everything a pass
+    # records is reachable from its loss, so its own backward releases it.
+    assert sizes[1:] == sizes[1:2] * 5, f"{name} strands nodes: {sizes}"
+
+
+def test_a_loss_still_produces_gradients_after_the_forward_stops_recording():
+    # The forward runs with autograd off, so `requires_grad` no longer
+    # propagates through it on its own and has to be set on the loss
+    # explicitly. If that were missed the graph would be clean but empty.
+    p = mt.Tensor(np.full((4, 3), 0.6, dtype=np.float64), dtype="float64").requires_grad_(True)
+    t = mt.Tensor(np.full((4, 3), 0.25, dtype=np.float64), dtype="float64")
+
+    loss = mt.nn.mse_loss(p, t)
+    assert loss.requires_grad
+    loss.backward()
+
+    grad = mt.get_gradient(p)
+    assert grad is not None
+    np.testing.assert_allclose(grad.numpy(), np.full((4, 3), 2 * (0.6 - 0.25) / 12))
+
+
+def test_a_loss_under_no_grad_stays_free_of_the_graph():
+    p = mt.Tensor(np.full((4, 3), 0.6, dtype=np.float32)).requires_grad_(True)
+    t = mt.Tensor(np.full((4, 3), 0.25, dtype=np.float32))
+
+    mt.clear_autograd_graph()
+    with mt.no_grad():
+        loss = mt.nn.mse_loss(p, t)
+
+    assert not loss.requires_grad
+    assert mt.autograd_graph_size() == (0, 0)

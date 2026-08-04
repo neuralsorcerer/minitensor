@@ -71,6 +71,7 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<GradMode>()?;
     m.add_function(wrap_pyfunction!(get_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(clear_autograd_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(autograd_graph_size, m)?)?;
     m.add_function(wrap_pyfunction!(is_autograd_graph_consumed, m)?)?;
     m.add_function(wrap_pyfunction!(mark_autograd_graph_consumed, m)?)?;
     m.add_function(wrap_pyfunction!(no_grad, m)?)?;
@@ -157,6 +158,19 @@ fn clear_autograd_graph() -> PyResult<()> {
     engine::autograd::clear_graph().map_err(_convert_error)
 }
 
+/// `(nodes, gradients)` currently held by the autograd graph.
+///
+/// A graph is released when something asks for it to be: a `backward()`
+/// without `retain_graph` frees the subgraph it walked, and
+/// `clear_autograd_graph()` frees everything. A forward pass that records
+/// nodes and is never backpropagated -- an evaluation loop missing `no_grad`,
+/// most often -- leaves its nodes in place, holding every activation they
+/// saved. A node count that climbs across iterations is what that looks like.
+#[pyfunction]
+fn autograd_graph_size() -> PyResult<(usize, usize)> {
+    Ok(engine::autograd::graph_size())
+}
+
 #[pyfunction]
 fn is_autograd_graph_consumed() -> PyResult<bool> {
     Ok(engine::autograd::is_graph_consumed())
@@ -210,6 +224,7 @@ mod tests {
             for function in [
                 "get_gradient",
                 "clear_autograd_graph",
+                "autograd_graph_size",
                 "is_autograd_graph_consumed",
                 "mark_autograd_graph_consumed",
                 "no_grad",

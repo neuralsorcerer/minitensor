@@ -258,16 +258,33 @@ pub fn clear_graph() -> Result<()> {
     Ok(())
 }
 
+/// How many nodes the global graph currently holds, and how many gradients it
+/// has stored.
+///
+/// This is the only way to see how much the autograd graph is holding. It
+/// matters because a graph is only released when something asks for it to be:
+/// a non-retaining `backward()` frees the subgraph it walked, and
+/// [`clear_graph`] frees everything. A forward pass that records nodes and is
+/// never backpropagated -- an evaluation loop that forgot `no_grad`, say --
+/// leaves its nodes in place, holding every activation they saved. Reading a
+/// node count that climbs across iterations is how that shows up.
+pub fn graph_size() -> (usize, usize) {
+    GLOBAL_GRAPH.with(|graph| {
+        let graph = graph.borrow();
+        (graph.num_nodes(), graph.num_gradients())
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn graph_node_count() -> usize {
-    GLOBAL_GRAPH.with(|graph| graph.borrow().num_nodes())
+    graph_size().0
 }
 
 /// How many gradients the graph currently stores. Used by the test that holds
 /// the line on repeated backward passes not growing it without bound.
 #[cfg(test)]
 pub(crate) fn graph_gradient_count() -> usize {
-    GLOBAL_GRAPH.with(|graph| graph.borrow().gradients_snapshot().len())
+    graph_size().1
 }
 
 /// Mark the computation graph as consumed after a backward pass completes.

@@ -409,6 +409,11 @@ impl ComputationGraph {
         self.gradients.get(&tensor_id)
     }
 
+    /// How many gradients are currently stored.
+    pub fn num_gradients(&self) -> usize {
+        self.gradients.len()
+    }
+
     /// Clear all gradients
     pub fn zero_grad(&mut self) {
         self.gradients.clear();

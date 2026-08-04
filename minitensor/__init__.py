@@ -126,6 +126,7 @@ set_default_dtype = _C.set_default_dtype
 manual_seed = _C.manual_seed
 get_gradient = _C.get_gradient
 clear_autograd_graph = _C.clear_autograd_graph
+autograd_graph_size = _C.autograd_graph_size
 is_autograd_graph_consumed = _C.is_autograd_graph_consumed
 mark_autograd_graph_consumed = _C.mark_autograd_graph_consumed
 no_grad = _C.no_grad
@@ -287,6 +288,7 @@ _BASE_EXPORTS = (
     "help",
     "get_gradient",
     "clear_autograd_graph",
+    "autograd_graph_size",
     "is_autograd_graph_consumed",
     "mark_autograd_graph_consumed",
     "no_grad",

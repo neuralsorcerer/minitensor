@@ -247,6 +247,7 @@ def _load_stubbed_module(monkeypatch: pytest.MonkeyPatch):
     core.manual_seed = lambda _seed: None
     core.get_gradient = lambda: None
     core.clear_autograd_graph = lambda: None
+    core.autograd_graph_size = lambda: (0, 0)
     core.is_autograd_graph_consumed = lambda: False
     core.mark_autograd_graph_consumed = lambda: None
     core.no_grad = lambda: None
