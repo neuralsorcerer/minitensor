@@ -366,79 +366,78 @@ fn plan_gemm(m: usize, k: usize, n: usize) -> GemmSplit {
 /// address a band of the original matrices without copying anything.
 #[cfg(not(feature = "blas"))]
 macro_rules! split_gemm {
-    ($name:ident, $serial:ident, $ty:ty, $kernel:path) => {
-        /// The whole product on the calling thread.
+    ($name:ident, $serial:ident, $nt:ident, $tn:ident, $ty:ty, $kernel:path) => {
+        /// `c = a * b` with explicit operand strides, on the calling thread.
         ///
-        /// Use this when the caller is already running one GEMM per rayon task
-        /// — a batched matmul with more batch elements than threads, say — so
-        /// that the pool is not asked to subdivide work it has already spread.
+        /// Row/column strides are given per operand so that an operand already
+        /// stored transposed can be consumed in place: a logical `(p, q)` matrix
+        /// held as `(q, p)` row-major is just `rs = 1, cs = p`. `matrixmultiply`
+        /// packs its operands regardless, so the transpose costs nothing extra
+        /// there -- whereas materialising it costs a full copy of the matrix.
         ///
         /// # Safety
         ///
-        /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
-        /// readable (writable, for `c`) elements.
+        /// The strides must address only readable elements of `a` and `b`, and
+        /// `c` must be writable at `rsc` per row with unit column stride. A
+        /// column band of a wider output keeps the *full* width as `rsc`, which
+        /// is why it is passed rather than derived from `n`.
         #[inline]
-        pub(crate) unsafe fn $serial(
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $serial(
             m: usize,
             k: usize,
             n: usize,
             a: *const $ty,
+            rsa: usize,
+            csa: usize,
             b: *const $ty,
+            rsb: usize,
+            csb: usize,
             c: *mut $ty,
+            rsc: usize,
         ) {
             unsafe {
                 $kernel(
-                    m, k, n, 1.0, a, k as isize, 1, b, n as isize, 1, 0.0, c, n as isize, 1,
+                    m,
+                    k,
+                    n,
+                    1.0,
+                    a,
+                    rsa as isize,
+                    csa as isize,
+                    b,
+                    rsb as isize,
+                    csb as isize,
+                    0.0,
+                    c,
+                    rsc as isize,
+                    1,
                 )
             }
         }
 
+        /// As [`$serial`], but spread across rayon when the product is large
+        /// enough to be worth dividing.
+        ///
         /// # Safety
         ///
-        /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
-        /// readable (writable, for `c`) elements.
+        /// As [`$serial`].
         #[inline]
-        pub(crate) unsafe fn $name(
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $name(
             m: usize,
             k: usize,
             n: usize,
             a: *const $ty,
+            rsa: usize,
+            csa: usize,
             b: *const $ty,
+            rsb: usize,
+            csb: usize,
             c: *mut $ty,
         ) {
-            #[inline]
-            unsafe fn run(
-                m: usize,
-                k: usize,
-                n: usize,
-                a: *const $ty,
-                b: *const $ty,
-                rsb: usize,
-                c: *mut $ty,
-                rsc: usize,
-            ) {
-                unsafe {
-                    $kernel(
-                        m,
-                        k,
-                        n,
-                        1.0,
-                        a,
-                        k as isize,
-                        1,
-                        b,
-                        rsb as isize,
-                        1,
-                        0.0,
-                        c,
-                        rsc as isize,
-                        1,
-                    )
-                }
-            }
-
             match plan_gemm(m, k, n) {
-                GemmSplit::Whole => unsafe { run(m, k, n, a, b, n, c, n) },
+                GemmSplit::Whole => unsafe { $serial(m, k, n, a, rsa, csa, b, rsb, csb, c, n) },
                 GemmSplit::Cols(tasks) => {
                     let width = n.div_ceil(tasks);
                     let (a, b, c) = (SendPtr(a), SendPtr(b), SendPtr(c));
@@ -448,17 +447,22 @@ macro_rules! split_gemm {
                             return;
                         }
                         let cols = width.min(n - start);
-                        // `b` and `c` keep their full row stride, so offsetting
-                        // by `start` selects a column band in place.
+                        // A column band of `b` starts one column stride in;
+                        // `c` is contiguous output, so it starts `start` in.
                         unsafe {
-                            run(
+                            $serial(
                                 m,
                                 k,
                                 cols,
                                 a.get(),
-                                b.get().add(start),
-                                n,
+                                rsa,
+                                csa,
+                                b.get().add(start * csb),
+                                rsb,
+                                csb,
                                 c.get().add(start),
+                                // The band is part of a wider output: its rows
+                                // are still `n` apart.
                                 n,
                             )
                         }
@@ -473,16 +477,19 @@ macro_rules! split_gemm {
                             return;
                         }
                         let band = rows.min(m - start);
-                        // Output rows are contiguous, so a row band is a
-                        // contiguous slice of both `a` and `c`.
+                        // A row band of `a` starts one row stride in; output
+                        // rows are contiguous.
                         unsafe {
-                            run(
+                            $serial(
                                 band,
                                 k,
                                 n,
-                                a.get().add(start * k),
+                                a.get().add(start * rsa),
+                                rsa,
+                                csa,
                                 b.get(),
-                                n,
+                                rsb,
+                                csb,
                                 c.get().add(start * n),
                                 n,
                             )
@@ -491,13 +498,138 @@ macro_rules! split_gemm {
                 }
             }
         }
+
+        /// `c = a * b`, both operands row-major and contiguous.
+        ///
+        /// # Safety
+        ///
+        /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+        /// readable (writable, for `c`) elements.
+        #[inline]
+        pub(crate) unsafe fn $nt(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            // `b` holds the logical `(k, n)` operand as `(n, k)` row-major.
+            unsafe { $name(m, k, n, a, k, 1, b, 1, k, c) }
+        }
+
+        /// `c = a^T * b`, where `a` holds the logical `(m, k)` operand as
+        /// `(k, m)` row-major.
+        ///
+        /// # Safety
+        ///
+        /// As [`$nt`], with `a` read as `k * m` elements.
+        #[inline]
+        pub(crate) unsafe fn $tn(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            unsafe { $name(m, k, n, a, 1, m, b, n, 1, c) }
+        }
     };
 }
 
 #[cfg(not(feature = "blas"))]
-split_gemm!(gemm_f32, gemm_serial_f32, f32, matrixmultiply::sgemm);
+split_gemm!(
+    gemm_strided_f32,
+    gemm_strided_serial_f32,
+    gemm_nt_f32,
+    gemm_tn_f32,
+    f32,
+    matrixmultiply::sgemm
+);
 #[cfg(not(feature = "blas"))]
-split_gemm!(gemm_f64, gemm_serial_f64, f64, matrixmultiply::dgemm);
+split_gemm!(
+    gemm_strided_f64,
+    gemm_strided_serial_f64,
+    gemm_nt_f64,
+    gemm_tn_f64,
+    f64,
+    matrixmultiply::dgemm
+);
+
+/// `c = a * b`, everything row-major and contiguous. The common case.
+///
+/// # Safety
+///
+/// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+/// readable (writable, for `c`) elements.
+#[cfg(not(feature = "blas"))]
+#[inline]
+pub(crate) unsafe fn gemm_f32(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b: *const f32,
+    c: *mut f32,
+) {
+    unsafe { gemm_strided_f32(m, k, n, a, k, 1, b, n, 1, c) }
+}
+
+/// See [`gemm_f32`].
+///
+/// # Safety
+///
+/// As [`gemm_f32`].
+#[cfg(not(feature = "blas"))]
+#[inline]
+pub(crate) unsafe fn gemm_f64(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f64,
+    b: *const f64,
+    c: *mut f64,
+) {
+    unsafe { gemm_strided_f64(m, k, n, a, k, 1, b, n, 1, c) }
+}
+
+/// The whole product on the calling thread; see the module note on why a
+/// batched matmul that already fills the pool uses this.
+///
+/// # Safety
+///
+/// As [`gemm_f32`].
+#[cfg(not(feature = "blas"))]
+#[inline]
+pub(crate) unsafe fn gemm_serial_f32(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b: *const f32,
+    c: *mut f32,
+) {
+    unsafe { gemm_strided_serial_f32(m, k, n, a, k, 1, b, n, 1, c, n) }
+}
+
+/// See [`gemm_serial_f32`].
+///
+/// # Safety
+///
+/// As [`gemm_f64`].
+#[cfg(not(feature = "blas"))]
+#[inline]
+pub(crate) unsafe fn gemm_serial_f64(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f64,
+    b: *const f64,
+    c: *mut f64,
+) {
+    unsafe { gemm_strided_serial_f64(m, k, n, a, k, 1, b, n, 1, c, n) }
+}
 
 /// With a BLAS underneath there is no splitting to opt out of: a BLAS threads
 /// its own GEMM, and dividing the call first would only fight it. So the
@@ -1382,6 +1514,49 @@ mod split_gemm_tests {
                 differing, 0,
                 "({m}, {k}, {n}) differs in {differing} element(s)"
             );
+        }
+    }
+
+    /// Consuming an operand that is already stored transposed must give the
+    /// same answer as materialising the transpose and multiplying normally --
+    /// that equivalence is the whole point of the stride form, and it is what
+    /// lets `linear` skip a full copy of its weight on every call.
+    #[test]
+    fn transposed_operands_match_a_materialised_transpose() {
+        fn transpose_of(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+            let mut out = vec![0f32; rows * cols];
+            for i in 0..rows {
+                for j in 0..cols {
+                    out[j * rows + i] = src[i * cols + j];
+                }
+            }
+            out
+        }
+
+        for (m, k, n) in cases() {
+            let a: Vec<f32> = fill(m * k, 0x1234).iter().map(|&x| x as f32).collect();
+            let b: Vec<f32> = fill(k * n, 0x9abc).iter().map(|&x| x as f32).collect();
+
+            // `a * b` with `b` supplied as its (n, k) transpose.
+            let bt = transpose_of(&b, k, n);
+            let mut viaic_strides = vec![0f32; m * n];
+            let mut materialised = vec![0f32; m * n];
+            unsafe {
+                gemm_nt_f32(m, k, n, a.as_ptr(), bt.as_ptr(), viaic_strides.as_mut_ptr());
+                gemm_f32(m, k, n, a.as_ptr(), b.as_ptr(), materialised.as_mut_ptr());
+            }
+            assert_eq!(
+                viaic_strides, materialised,
+                "nt disagrees at ({m}, {k}, {n})"
+            );
+
+            // `a * b` with `a` supplied as its (k, m) transpose.
+            let at = transpose_of(&a, m, k);
+            let mut via_strides = vec![0f32; m * n];
+            unsafe {
+                gemm_tn_f32(m, k, n, at.as_ptr(), b.as_ptr(), via_strides.as_mut_ptr());
+            }
+            assert_eq!(via_strides, materialised, "tn disagrees at ({m}, {k}, {n})");
         }
     }
 

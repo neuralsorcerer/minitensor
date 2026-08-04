@@ -6,11 +6,14 @@
 
 #[path = "linalg/diagonal.rs"]
 mod diagonal_impl;
+#[path = "linalg/linear.rs"]
+mod linear_impl;
 #[path = "linalg/matmul.rs"]
 mod matmul_impl;
 #[path = "linalg/triangular.rs"]
 mod triangular_impl;
 
 pub use self::diagonal_impl::*;
+pub use self::linear_impl::*;
 pub use self::matmul_impl::*;
 pub(crate) use self::triangular_impl::*;

@@ -11,7 +11,7 @@ use super::{
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    ops::linalg::matmul,
+    ops::linalg::linear,
     tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
@@ -152,19 +152,12 @@ impl Layer for DenseLayer {
             ));
         }
 
-        // Perform matrix multiplication: input @ weight.T
-        // Note: We need to transpose the weight matrix since it's stored as [out_features, in_features]
-        // but we need [in_features, out_features] for the multiplication
-        let weight_t = self.weight.transpose(0, 1)?;
-        let mut output = matmul(input, &weight_t)?;
-
-        // Add bias if present
-        if let Some(ref bias) = self.bias {
-            // Broadcast bias across all batch dimensions
-            output = output.add(bias)?;
-        }
-
-        Ok(output)
+        // `input @ weight^T + bias`. The weight is stored `[out, in]` and the
+        // product needs `[in, out]`, but `linear` takes it transposed by stride
+        // rather than materialising the transpose -- which, composed the old
+        // way, copied the whole weight matrix on every forward and twice more
+        // in the backward.
+        linear(input, &self.weight, self.bias.as_ref())
     }
 
     fn parameters(&self) -> Vec<&Tensor> {

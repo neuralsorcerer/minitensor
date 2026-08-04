@@ -33,7 +33,6 @@ use engine::nn::{
 use engine::ops::batch_norm as batch_norm_op;
 use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
-use engine::ops::linalg::matmul as matmul_op;
 use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::ops::loss::{
     focal_loss as focal_loss_op, huber_loss as huber_loss_op, kl_div_loss as kl_div_loss_op,
@@ -100,16 +99,13 @@ fn dense_layer(
         return Err(PyValueError::new_err("weight tensor must be 2-dimensional"));
     }
 
-    let weight_t = weight_tensor
-        .tensor()
-        .transpose(0, 1)
-        .map_err(_convert_error)?;
-    let mut output = matmul_op(input_tensor.tensor(), &weight_t).map_err(_convert_error)?;
-
     let bias_tensor = borrow_optional_tensor(bias)?;
-    if let Some(bias_ref) = bias_tensor {
-        output = output.add(bias_ref.tensor()).map_err(_convert_error)?;
-    }
+    let output = engine::ops::linalg::linear(
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
+    )
+    .map_err(_convert_error)?;
 
     Ok(PyTensor::from_tensor(output))
 }
