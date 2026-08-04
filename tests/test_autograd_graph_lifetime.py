@@ -93,12 +93,12 @@ def test_repeated_backward_keeps_only_the_latest_interior_gradients():
         loss.backward()
         interiors.append(interior)
 
-    assert mt.get_gradient(interiors[-1]) is not None, (
-        "the pass that just ran must still expose its interior gradients"
-    )
-    assert all(mt.get_gradient(t) is None for t in interiors[:-1]), (
-        "earlier passes' interior gradients must have been released"
-    )
+    assert (
+        mt.get_gradient(interiors[-1]) is not None
+    ), "the pass that just ran must still expose its interior gradients"
+    assert all(
+        mt.get_gradient(t) is None for t in interiors[:-1]
+    ), "earlier passes' interior gradients must have been released"
 
     mt.clear_autograd_graph()
 
@@ -156,16 +156,16 @@ def test_no_grad_forward_retains_nothing():
 # with recording off. `binary_cross_entropy` and `focal_loss` were the worst,
 # stranding twelve nodes per call.
 #
-# `log_cosh_loss` is absent on purpose: it has no analytical backward, so its
-# whole graph is reachable from the loss and its own backward releases it. It
-# does still grow, by a different mechanism -- it builds scalar constants per
-# call, and a fresh constant becomes a leaf node that no release removes. That
-# affects any op with a scalar operand (`x * 2.0` and friends), not losses, and
-# costs a small map entry rather than a retained activation.
+# `log_cosh_loss` is here despite having no analytical backward: its whole graph
+# is reachable from the loss, so its own backward always released it. It used to
+# grow anyway, through the scalar constants it builds per call -- the separate
+# mechanism the tests further down cover.
 
 
 def _loss_cases():
-    p = mt.Tensor(np.random.rand(8, 4).astype(np.float32) * 0.8 + 0.1).requires_grad_(True)
+    p = mt.Tensor(np.random.rand(8, 4).astype(np.float32) * 0.8 + 0.1).requires_grad_(
+        True
+    )
     t = mt.Tensor(np.random.rand(8, 4).astype(np.float32) * 0.8 + 0.1)
     onehot = mt.Tensor(np.eye(4, dtype=np.float32)[np.random.randint(0, 4, 8)])
     idx = mt.Tensor(np.random.randint(0, 4, (8,)).astype(np.int64), dtype="int64")
@@ -181,10 +181,13 @@ def _loss_cases():
         ("bce_with_logits", lambda: mt.nn.binary_cross_entropy_with_logits(p, t)),
         ("focal_loss", lambda: mt.nn.focal_loss(p, onehot)),
         ("kl_div", lambda: mt.nn.kl_div(probs, probs)),
+        ("log_cosh_loss", lambda: mt.nn.log_cosh_loss(p, t)),
     ]
 
 
-@pytest.mark.parametrize("name,build", _loss_cases(), ids=lambda v: v if isinstance(v, str) else "")
+@pytest.mark.parametrize(
+    "name,build", _loss_cases(), ids=lambda v: v if isinstance(v, str) else ""
+)
 def test_loss_backward_leaves_nothing_stranded_in_the_graph(name, build):
     np.random.seed(0)
     mt.clear_autograd_graph()
@@ -203,7 +206,9 @@ def test_a_loss_still_produces_gradients_after_the_forward_stops_recording():
     # The forward runs with autograd off, so `requires_grad` no longer
     # propagates through it on its own and has to be set on the loss
     # explicitly. If that were missed the graph would be clean but empty.
-    p = mt.Tensor(np.full((4, 3), 0.6, dtype=np.float64), dtype="float64").requires_grad_(True)
+    p = mt.Tensor(
+        np.full((4, 3), 0.6, dtype=np.float64), dtype="float64"
+    ).requires_grad_(True)
     t = mt.Tensor(np.full((4, 3), 0.25, dtype=np.float64), dtype="float64")
 
     loss = mt.nn.mse_loss(p, t)
@@ -225,3 +230,85 @@ def test_a_loss_under_no_grad_stays_free_of_the_graph():
 
     assert not loss.requires_grad
     assert mt.autograd_graph_size() == (0, 0)
+
+
+# --- constant operands ------------------------------------------------------
+#
+# `x * 2.0` wraps the `2.0` in a tensor, which gets a fresh id every call and
+# enters the graph as a placeholder in that operation's input list. Placeholders
+# carry no gradient function, so releasing the subgraph left them behind: one
+# node per call, forever, for every op with a scalar operand. Small next to a
+# retained activation, but unbounded, and enough to make a rising
+# `autograd_graph_size()` ambiguous -- which is the number to watch for the
+# forward-without-backward case above.
+
+
+@pytest.mark.parametrize(
+    "name,build",
+    [
+        ("mul_scalar", lambda t: t * 2.0),
+        ("add_scalar", lambda t: t + 1.0),
+        ("sub_scalar", lambda t: t - 0.5),
+        ("div_scalar", lambda t: t / 3.0),
+        ("power", lambda t: t**3),
+        ("clamp", lambda t: t.clamp(-1.0, 1.0)),
+        ("chained", lambda t: (t * 2.0 + 1.0) / 3.0),
+    ],
+)
+def test_a_scalar_operand_does_not_leave_a_node_behind(name, build):
+    weight = mt.Tensor(np.ones((3, 4), dtype=np.float32)).requires_grad_(True)
+
+    sizes = []
+    for _ in range(6):
+        mt.sum(build(weight)).backward()
+        sizes.append(mt.autograd_graph_size()[0])
+
+    # One node, the parameter itself, on every pass.
+    assert sizes == [sizes[0]] * 6, f"{name} leaves nodes behind: {sizes}"
+
+
+def test_gradients_still_accumulate_through_scalar_operands():
+    # The leaves being released must be the constants, not the parameters.
+    weight = mt.Tensor(
+        np.ones((3, 4), dtype=np.float64), dtype="float64"
+    ).requires_grad_(True)
+
+    for pass_number in range(1, 6):
+        mt.sum(weight * 2.0 + 1.0).backward()
+        np.testing.assert_allclose(
+            mt.get_gradient(weight).numpy(), np.full((3, 4), 2.0 * pass_number)
+        )
+
+
+def test_a_parameter_missed_by_one_pass_still_works_in_the_next():
+    # Its placeholder is dropped along with the constants, since a pass that
+    # never reached it stored no gradient. The next forward puts it back.
+    used = mt.Tensor(np.ones((2, 2), dtype=np.float64), dtype="float64").requires_grad_(
+        True
+    )
+    skipped = mt.Tensor(
+        np.ones((2, 2), dtype=np.float64), dtype="float64"
+    ).requires_grad_(True)
+
+    mt.sum(used * 3.0).backward()
+    assert mt.get_gradient(skipped) is None
+
+    mt.clear_autograd_graph()
+    mt.sum(skipped * 5.0).backward()
+    np.testing.assert_allclose(mt.get_gradient(skipped).numpy(), np.full((2, 2), 5.0))
+
+
+def test_a_forward_without_backward_still_shows_up_as_growth():
+    # The diagnostic the docs point at has to stay specific: constants no longer
+    # inflate it, but the case it exists to catch must still register.
+    model = mt.nn.Sequential(
+        [mt.nn.DenseLayer(4, 8), mt.nn.ReLU(), mt.nn.DenseLayer(8, 2)]
+    )
+    batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
+
+    sizes = []
+    for _ in range(5):
+        model(batch)
+        sizes.append(mt.autograd_graph_size()[0])
+
+    assert sizes == sorted(sizes) and sizes[-1] > sizes[0], sizes

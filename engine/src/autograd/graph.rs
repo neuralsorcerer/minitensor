@@ -322,10 +322,13 @@ impl ComputationGraph {
     /// preserved so `get_gradient` keeps working.
     pub fn release_saved_subgraph(&mut self, start: TensorId) {
         let mut interior = FxHashSet::default();
+        let mut spent_leaves = Vec::new();
         // Ignore cycle errors here: releasing is best-effort cleanup.
         let _ = self.visit_reachable_reverse_topo(start, |node| {
             if node.grad_fn.is_some() {
                 interior.insert(node.tensor_id);
+            } else {
+                spent_leaves.push(node.tensor_id);
             }
         });
 
@@ -350,6 +353,23 @@ impl ComputationGraph {
 
         for id in &self.retained_interior {
             self.nodes.remove(id);
+        }
+
+        // A leaf that the pass produced no gradient for is not a parameter --
+        // it is a constant, or an input that does not require one. Every
+        // scalar operand is one of these: `x * 2.0` wraps the `2.0` in a fresh
+        // tensor with a fresh id, which enters the graph only as a placeholder
+        // for that grad_fn's input list, and nothing removed it. One node per
+        // call, forever, for every op with a scalar operand.
+        //
+        // Parameters keep theirs, because a backward that reached them stored
+        // a gradient. One that did not reach them loses the placeholder and
+        // regains it on the next forward, which is where placeholders come
+        // from in the first place.
+        for id in spent_leaves {
+            if !self.gradients.contains_key(&id) {
+                self.nodes.remove(&id);
+            }
         }
     }
 
