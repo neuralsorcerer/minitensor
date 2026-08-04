@@ -11,7 +11,7 @@ use super::{
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    ops::{attention::scaled_dot_product_attention, linalg::matmul, shape_ops::reshape},
+    ops::{attention::scaled_dot_product_attention, linalg::linear, shape_ops::reshape},
     tensor::{DataType, Shape, Tensor},
 };
 use std::collections::HashMap;
@@ -131,13 +131,12 @@ impl MultiheadAttention {
     }
 
     /// Apply one `[embed_dim, embed_dim]` projection: `x @ W^T + b`.
+    ///
+    /// Four of these run per forward pass, so taking the weight transposed by
+    /// stride rather than by copy saves four full projection matrices on the
+    /// way in and their gradients' worth again on the way back.
     fn project(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-        let w_t = weight.transpose(0, 1)?;
-        let projected = matmul(x, &w_t)?;
-        match bias {
-            Some(b) => projected.add(b),
-            None => Ok(projected),
-        }
+        linear(x, weight, bias)
     }
 
     /// `(batch, seq, embed_dim)` -> `(batch, heads, seq, head_dim)`.
