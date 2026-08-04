@@ -38,7 +38,9 @@ def _reference(x, weight=None, bias=None, eps=1e-5, axes=1):
     return out
 
 
-@pytest.mark.parametrize("shape,norm", [((4, 8), [8]), ((3, 5, 16), [16]), ((2, 3, 4, 7), [7])])
+@pytest.mark.parametrize(
+    "shape,norm", [((4, 8), [8]), ((3, 5, 16), [16]), ((2, 3, 4, 7), [7])]
+)
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_layer_norm_matches_the_float64_reference(shape, norm, dtype):
     rng = np.random.default_rng(sum(shape) + len(dtype))
@@ -46,7 +48,9 @@ def test_layer_norm_matches_the_float64_reference(shape, norm, dtype):
     w = rng.standard_normal(norm).astype(dtype)
     b = rng.standard_normal(norm).astype(dtype)
 
-    got = mt.layer_norm(mt.from_numpy(x), norm, mt.from_numpy(w), mt.from_numpy(b)).numpy()
+    got = mt.layer_norm(
+        mt.from_numpy(x), norm, mt.from_numpy(w), mt.from_numpy(b)
+    ).numpy()
     want = _reference(x, w, b)
     tolerance = 3e-6 if dtype == "float32" else 1e-12
     np.testing.assert_allclose(got, want.astype(dtype), rtol=tolerance, atol=tolerance)
@@ -92,7 +96,9 @@ def test_layer_norm_gradients_still_flow():
 
     # d/db of sum(y) is 1 per feature, summed over rows; d/dw is sum of the
     # normalized values. Both are exact enough to pin without finite differences.
-    np.testing.assert_allclose(b.grad.numpy(), np.full(9, 5.0, dtype=np.float32), rtol=1e-6)
+    np.testing.assert_allclose(
+        b.grad.numpy(), np.full(9, 5.0, dtype=np.float32), rtol=1e-6
+    )
     normalized = _reference(xv)
     np.testing.assert_allclose(w.grad.numpy(), normalized.sum(0), rtol=1e-4, atol=1e-5)
     mt.clear_autograd_graph()
@@ -108,7 +114,11 @@ def test_layer_norm_input_gradient_vanishes_without_a_weight():
     invariance does not hold, which is why it is tested separately.
     """
     rng = np.random.default_rng(6)
-    x = mt.Tensor(rng.standard_normal((5, 9)).astype(np.float32), dtype="float32", requires_grad=True)
+    x = mt.Tensor(
+        rng.standard_normal((5, 9)).astype(np.float32),
+        dtype="float32",
+        requires_grad=True,
+    )
     mt.layer_norm(x, [9]).sum().backward()
     assert np.abs(x.grad.numpy()).max() < 1e-5, x.grad.numpy()
     mt.clear_autograd_graph()
@@ -116,7 +126,9 @@ def test_layer_norm_input_gradient_vanishes_without_a_weight():
 
 def test_layer_norm_keeps_shape_over_an_empty_axis():
     for shape in [(0, 4), (3, 0)]:
-        out = mt.layer_norm(mt.from_numpy(np.zeros(shape, dtype=np.float32)), [shape[-1]])
+        out = mt.layer_norm(
+            mt.from_numpy(np.zeros(shape, dtype=np.float32)), [shape[-1]]
+        )
         assert out.shape == shape
 
 
@@ -139,7 +151,9 @@ def _rms_reference(x, weight=None, eps=1e-5, axes=1):
     return out
 
 
-@pytest.mark.parametrize("shape,norm", [((4, 8), [8]), ((3, 5, 16), [16]), ((2, 3, 4, 7), [7])])
+@pytest.mark.parametrize(
+    "shape,norm", [((4, 8), [8]), ((3, 5, 16), [16]), ((2, 3, 4, 7), [7])]
+)
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_rms_norm_matches_the_float64_reference(shape, norm, dtype):
     rng = np.random.default_rng(sum(shape) * 7 + len(dtype))
@@ -209,3 +223,73 @@ def test_rms_norm_keeps_shape_over_an_empty_axis():
     for shape in [(0, 4), (3, 0)]:
         out = mt.rms_norm(mt.from_numpy(np.zeros(shape, dtype=np.float32)), [shape[-1]])
         assert out.shape == shape
+
+
+# --- what an inference forward does not have to build ------------------------
+#
+# The normalized values LayerNorm computes exist only to be saved for the
+# backward. The forward built them unconditionally -- a second full-size buffer,
+# filled and then dropped -- because `requires_grad` was not consulted until
+# after the kernel had run. Under `no_grad` that is a whole extra pass over the
+# tensor and, at (4096, 1024) float32, 16 MB allocated to be thrown away.
+
+
+@pytest.mark.parametrize(
+    "shape,normalized_shape",
+    [
+        ((3, 5), [5]),
+        ((8, 64, 256), [256]),
+        ((2, 3, 4, 6), [4, 6]),
+        ((1, 1), [1]),
+    ],
+)
+def test_layer_norm_inference_matches_training_bit_for_bit(shape, normalized_shape):
+    # Skipping the saved buffer must not change a single output bit: it is the
+    # same arithmetic with one store removed.
+    rng = np.random.default_rng(17)
+    values = rng.standard_normal(shape).astype(np.float32)
+    layer = mt.nn.LayerNorm(normalized_shape)
+
+    trained = layer(mt.Tensor(values).requires_grad_(True)).numpy()
+    with mt.no_grad():
+        inferred = layer(mt.Tensor(values)).numpy()
+
+    assert np.array_equal(trained, inferred)
+
+
+def test_layer_norm_still_differentiates_after_the_forward_skips_the_buffer():
+    rng = np.random.default_rng(18)
+    values = rng.standard_normal((6, 8))
+    layer = mt.nn.LayerNorm([8], dtype="float64")
+    weight, bias = layer.parameters()[0].numpy(), layer.parameters()[1].numpy()
+
+    tensor = mt.Tensor(values, dtype="float64").requires_grad_(True)
+    out = layer(tensor)
+    upstream = rng.standard_normal((6, 8))
+    mt.sum(out * mt.Tensor(upstream, dtype="float64")).backward()
+    analytic = mt.get_gradient(tensor).numpy()
+
+    def forward(sample):
+        mean = sample.mean(-1, keepdims=True)
+        var = sample.var(-1, keepdims=True)
+        return (sample - mean) / np.sqrt(var + 1e-5) * weight + bias
+
+    eps = 1e-6
+    for index in np.ndindex(*values.shape):
+        plus, minus = values.copy(), values.copy()
+        plus[index] += eps
+        minus[index] -= eps
+        numeric = ((forward(plus) - forward(minus)) * upstream).sum() / (2 * eps)
+        assert abs(numeric - analytic[index]) < 1e-6 * max(1.0, abs(numeric)), index
+
+
+def test_layer_norm_under_no_grad_produces_no_graph():
+    layer = mt.nn.LayerNorm([16])
+    x = mt.Tensor(np.zeros((4, 16), dtype=np.float32)).requires_grad_(True)
+
+    mt.clear_autograd_graph()
+    with mt.no_grad():
+        out = layer(x)
+
+    assert not out.requires_grad
+    assert mt.autograd_graph_size() == (0, 0)

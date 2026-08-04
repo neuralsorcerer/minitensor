@@ -228,7 +228,7 @@ macro_rules! layer_norm_rows {
             bias: Option<&[$ty]>,
             eps: f64,
             out: &mut [$ty],
-            normalized: &mut [$ty],
+            normalized: Option<&mut [$ty]>,
             inv_std: &mut [$ty],
         ) {
             // Normalizing over an empty axis: every buffer is empty and
@@ -238,40 +238,75 @@ macro_rules! layer_norm_rows {
                 return;
             }
             let recip = 1.0 / norm as f64;
-            out.par_chunks_mut(norm)
-                .zip(normalized.par_chunks_mut(norm))
-                .zip(inv_std.par_iter_mut())
-                .zip(input.par_chunks(norm))
-                .for_each(|(((o, n), is), row)| {
-                    // Two reduction passes rather than one. `E[x^2] - E[x]^2`
-                    // would halve the traffic and lose every significant digit
-                    // when the mean dominates the spread, which is exactly the
-                    // regime a normalization layer sits in.
-                    let mut sum = 0.0f64;
-                    for &v in row {
-                        sum += v as f64;
-                    }
-                    let mean = sum * recip;
-                    let mut sq = 0.0f64;
-                    for &v in row {
-                        let d = v as f64 - mean;
-                        sq += d * d;
-                    }
-                    let scale = 1.0 / (sq * recip + eps).sqrt();
-                    *is = scale as $ty;
-                    for i in 0..norm {
-                        let z = (row[i] as f64 - mean) * scale;
-                        n[i] = z as $ty;
-                        let mut y = z;
-                        if let Some(w) = weight {
-                            y *= w[i] as f64;
-                        }
-                        if let Some(b) = bias {
-                            y += b[i] as f64;
-                        }
-                        o[i] = y as $ty;
-                    }
-                });
+
+            /// Mean and `1/sqrt(var + eps)` for one row.
+            ///
+            /// Two reduction passes rather than one. `E[x^2] - E[x]^2` would
+            /// halve the traffic and lose every significant digit when the mean
+            /// dominates the spread, which is exactly the regime a
+            /// normalization layer sits in.
+            #[inline(always)]
+            fn stats(row: &[$ty], recip: f64, eps: f64) -> (f64, f64) {
+                let mut sum = 0.0f64;
+                for &v in row {
+                    sum += v as f64;
+                }
+                let mean = sum * recip;
+                let mut sq = 0.0f64;
+                for &v in row {
+                    let d = v as f64 - mean;
+                    sq += d * d;
+                }
+                (mean, 1.0 / (sq * recip + eps).sqrt())
+            }
+
+            // The normalized values are saved for the backward, so a forward
+            // that will not be differentiated should not pay to write them --
+            // a second full-size buffer, filled and then dropped.
+            match normalized {
+                Some(normalized) => {
+                    out.par_chunks_mut(norm)
+                        .zip(normalized.par_chunks_mut(norm))
+                        .zip(inv_std.par_iter_mut())
+                        .zip(input.par_chunks(norm))
+                        .for_each(|(((o, n), is), row)| {
+                            let (mean, scale) = stats(row, recip, eps);
+                            *is = scale as $ty;
+                            for i in 0..norm {
+                                let z = (row[i] as f64 - mean) * scale;
+                                n[i] = z as $ty;
+                                let mut y = z;
+                                if let Some(w) = weight {
+                                    y *= w[i] as f64;
+                                }
+                                if let Some(b) = bias {
+                                    y += b[i] as f64;
+                                }
+                                o[i] = y as $ty;
+                            }
+                        });
+                }
+                None => {
+                    out.par_chunks_mut(norm)
+                        .zip(inv_std.par_iter_mut())
+                        .zip(input.par_chunks(norm))
+                        .for_each(|((o, is), row)| {
+                            let (mean, scale) = stats(row, recip, eps);
+                            *is = scale as $ty;
+                            for i in 0..norm {
+                                let z = (row[i] as f64 - mean) * scale;
+                                let mut y = z;
+                                if let Some(w) = weight {
+                                    y *= w[i] as f64;
+                                }
+                                if let Some(b) = bias {
+                                    y += b[i] as f64;
+                                }
+                                o[i] = y as $ty;
+                            }
+                        });
+                }
+            }
         }
     };
 }
@@ -372,6 +407,14 @@ pub fn layer_norm(
     }
     let stat_shape = Shape::new(stat_dims);
 
+    // Decided before the kernel runs, not after: the normalized values exist
+    // only to be saved for the backward, so an inference forward should not
+    // allocate and fill a second full-size buffer to drop it.
+    let requires_grad = crate::autograd::is_grad_enabled()
+        && (input.requires_grad()
+            || weight.map(|w| w.requires_grad()).unwrap_or(false)
+            || bias.map(|b| b.requires_grad()).unwrap_or(false));
+
     let (output_data, normalized_data, inv_std_data) = match input.dtype() {
         DataType::Float32 => {
             let src = input.data().as_f32_slice().ok_or_else(|| {
@@ -380,9 +423,22 @@ pub fn layer_norm(
             let w = weight.and_then(|t| t.data().as_f32_slice());
             let b = bias.and_then(|t| t.data().as_f32_slice());
             let mut o = vec![0f32; total];
-            let mut n = vec![0f32; total];
+            let mut n = if requires_grad {
+                vec![0f32; total]
+            } else {
+                Vec::new()
+            };
             let mut s = vec![0f32; rows];
-            layer_norm_rows_f32(src, norm, w, b, eps, &mut o, &mut n, &mut s);
+            layer_norm_rows_f32(
+                src,
+                norm,
+                w,
+                b,
+                eps,
+                &mut o,
+                requires_grad.then_some(n.as_mut_slice()),
+                &mut s,
+            );
             (
                 TensorData::from_vec::<f32>(o, DataType::Float32, input.device()),
                 TensorData::from_vec::<f32>(n, DataType::Float32, input.device()),
@@ -396,9 +452,22 @@ pub fn layer_norm(
             let w = weight.and_then(|t| t.data().as_f64_slice());
             let b = bias.and_then(|t| t.data().as_f64_slice());
             let mut o = vec![0f64; total];
-            let mut n = vec![0f64; total];
+            let mut n = if requires_grad {
+                vec![0f64; total]
+            } else {
+                Vec::new()
+            };
             let mut s = vec![0f64; rows];
-            layer_norm_rows_f64(src, norm, w, b, eps, &mut o, &mut n, &mut s);
+            layer_norm_rows_f64(
+                src,
+                norm,
+                w,
+                b,
+                eps,
+                &mut o,
+                requires_grad.then_some(n.as_mut_slice()),
+                &mut s,
+            );
             (
                 TensorData::from_vec::<f64>(o, DataType::Float64, input.device()),
                 TensorData::from_vec::<f64>(n, DataType::Float64, input.device()),
@@ -407,10 +476,6 @@ pub fn layer_norm(
         }
     };
 
-    let requires_grad = input.requires_grad()
-        || weight.map(|w| w.requires_grad()).unwrap_or(false)
-        || bias.map(|b| b.requires_grad()).unwrap_or(false);
-
     let output = Tensor::new(
         Arc::new(output_data),
         input.shape().clone(),
@@ -418,6 +483,12 @@ pub fn layer_norm(
         input.device(),
         requires_grad,
     );
+    if !requires_grad {
+        // `normalized_data` is empty here and `inv_std` unused; building
+        // tensors around them would claim a shape the buffers do not have.
+        return Ok(output);
+    }
+
     let normalized = Tensor::new(
         Arc::new(normalized_data),
         input.shape().clone(),
@@ -440,10 +511,6 @@ pub fn layer_norm(
             view = view.unsqueeze(0)?;
         }
         weight_broadcast = Some(view.detach());
-    }
-
-    if !requires_grad {
-        return Ok(output);
     }
 
     let mut input_ids: SmallVec<[TensorId; 3]> = SmallVec::new();
