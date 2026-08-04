@@ -729,3 +729,100 @@ def test_scalar_tensor_setitem_raises_cleanly():
     t = mt.Tensor(np.array(1.0, dtype=np.float32))
     with pytest.raises(IndexError):
         t[0] = 2.0
+
+
+# --- basic-indexing copy plan ------------------------------------------------
+#
+# `x[a:b]` is copied by growing a contiguous run inwards from the last axis and
+# walking whatever is left with an odometer. The cases below are chosen to land
+# on each branch of that: a whole-tensor selection (one run), whole trailing
+# rows (run = the row), a partial innermost axis (run shorter than the row), a
+# strided innermost axis (run of one element), an integer index that drops an
+# axis, and an empty selection. Previously every element's source index was
+# recomputed with a division and a modulo per axis, which made these 10-30x
+# slower than the `narrow` producing the identical tensor.
+
+_INDEX_KEYS = [
+    ("whole", (slice(None),)),
+    ("row_band", (slice(100, 300),)),
+    ("row_band_offset0", (slice(0, 200),)),
+    ("partial_innermost", (slice(None), slice(0, 7))),
+    ("both_partial", (slice(5, 60), slice(2, 11))),
+    ("strided_outer", (slice(None, None, 3),)),
+    ("strided_innermost", (slice(None), slice(None, None, 2))),
+    ("strided_both", (slice(None, None, 4), slice(None, None, 3))),
+    ("offset_strided", (slice(7, 300, 11), slice(3, 15, 4))),
+    ("integer_first", (17,)),
+    ("integer_last", (slice(None), 5)),
+    ("integer_both", (17, 5)),
+    ("negative", (-1,)),
+    ("empty", (slice(9, 4),)),
+    ("empty_inner", (slice(None), slice(9, 4))),
+]
+
+
+@pytest.mark.parametrize("name,key", _INDEX_KEYS, ids=[n for n, _ in _INDEX_KEYS])
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+def test_basic_indexing_matches_numpy_exactly(name, key, dtype):
+    rng = np.random.default_rng(4)
+    source = (rng.standard_normal((331, 17)) * 100).astype(dtype)
+    got = mt.Tensor(source, dtype=dtype)[key]
+    expected = source[key]
+
+    assert tuple(got.shape) == expected.shape
+    assert np.array_equal(got.numpy(), expected)
+
+
+@pytest.mark.parametrize("name,key", _INDEX_KEYS, ids=[n for n, _ in _INDEX_KEYS])
+def test_basic_indexing_matches_numpy_on_a_third_axis(name, key):
+    # A trailing axis the key never mentions is the case where the contiguous
+    # run spans more than one axis, so the run-growing logic has to stop at the
+    # right place rather than swallowing a partially selected one.
+    rng = np.random.default_rng(5)
+    source = rng.standard_normal((41, 17, 9)).astype(np.float32)
+    got = mt.Tensor(source)[key]
+    expected = source[key]
+
+    assert tuple(got.shape) == expected.shape
+    assert np.array_equal(got.numpy(), expected)
+
+
+def test_basic_indexing_matches_numpy_past_the_parallel_threshold():
+    # Large enough that the copy is split across the pool, so a band whose
+    # odometer is seeded wrongly shows up as a wrong row rather than a crash.
+    rng = np.random.default_rng(6)
+    source = rng.standard_normal((4096, 256)).astype(np.float32)
+    tensor = mt.Tensor(source)
+
+    for key in [
+        (slice(100, 2100),),
+        (slice(None), slice(0, 128)),
+        (slice(None, None, 2), slice(None, None, 2)),
+        (slice(7, 4000, 11), slice(3, 250, 7)),
+    ]:
+        assert np.array_equal(tensor[key].numpy(), source[key]), key
+
+
+def test_a_slice_matches_the_narrow_that_produces_it():
+    rng = np.random.default_rng(7)
+    source = rng.standard_normal((512, 64)).astype(np.float32)
+    tensor = mt.Tensor(source)
+
+    assert np.array_equal(tensor[100:400].numpy(), mt.narrow(tensor, 0, 100, 300).numpy())
+
+
+def test_gradients_flow_through_a_slice():
+    source = np.arange(24, dtype=np.float32).reshape(4, 6)
+
+    tensor = mt.Tensor(source).requires_grad_(True)
+    mt.sum(tensor[1:3, 2:5]).backward()
+    expected = np.zeros((4, 6), dtype=np.float32)
+    expected[1:3, 2:5] = 1.0
+    assert np.array_equal(mt.get_gradient(tensor).numpy(), expected)
+
+    mt.clear_autograd_graph()
+    strided = mt.Tensor(source).requires_grad_(True)
+    mt.sum(strided[::2, ::3]).backward()
+    expected = np.zeros((4, 6), dtype=np.float32)
+    expected[::2, ::3] = 1.0
+    assert np.array_equal(mt.get_gradient(strided).numpy(), expected)

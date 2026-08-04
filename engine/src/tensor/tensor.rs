@@ -22,6 +22,11 @@ use crate::{
     ops::{arithmetic::add, reduction::QuantileInterpolation},
 };
 use rayon::prelude::*;
+
+/// Output elements above which a selection copy is worth spreading across the
+/// pool. Matches the elementwise map threshold: the work per element is a copy
+/// either way.
+const INDEX_PAR_THRESHOLD: usize = 1 << 14;
 use std::{borrow::Cow, sync::Arc};
 
 // ===== core: struct definition, constructors, autograd storage =====
@@ -73,6 +78,158 @@ pub enum TensorIndex {
         end: usize,
         step: usize,
     },
+}
+
+/// How to copy a basic-indexing selection out of a contiguous tensor.
+///
+/// A selection's trailing dimensions are very often contiguous in the source --
+/// a row slice `x[a:b]` takes whole rows, `x[:, :k]` takes a prefix of each --
+/// so the copy runs in blocks of `contig` elements and only the leading
+/// dimensions need walking. Those are walked with an odometer, advanced by
+/// addition.
+///
+/// The previous form recomputed every element's source index from scratch, with
+/// a division and a modulo per dimension. For a 2000x256 row slice that is two
+/// million integer divisions to move two megabytes, and it made `x[a:b]` 14x
+/// slower than the `narrow` that produces exactly the same tensor.
+struct SelectionPlan {
+    /// Elements per contiguous run.
+    contig: usize,
+    /// Number of runs, i.e. the product of the leading (walked) dimensions.
+    runs: usize,
+    /// Sizes of the walked dimensions, outermost first.
+    outer_dims: Vec<usize>,
+    /// Source-index increment for one step along each walked dimension.
+    outer_steps: Vec<usize>,
+    /// Source index of the first run.
+    base: usize,
+}
+
+impl SelectionPlan {
+    fn new(
+        shape_dims: &[usize],
+        strides: &[usize],
+        offset: usize,
+        out_dims: &[usize],
+        orig_dim_map: &[usize],
+        starts: &[usize],
+        steps: &[usize],
+    ) -> Self {
+        let ndim_out = out_dims.len();
+
+        // Grow the contiguous run from the innermost output dimension outwards.
+        // A dimension joins it if it is unit-step and sits immediately inside
+        // the dimension already taken, `expected_orig` tracking the latter --
+        // an integer-indexed dimension in between breaks adjacency, so the run
+        // always covers a suffix of the original dimensions.
+        //
+        // A partially selected dimension can still join, but ends the run. It
+        // is safe to include because everything already in the run is selected
+        // whole (that is what the trailing break enforces), so the dimension's
+        // slabs are the entire inner extent and therefore adjacent in memory:
+        // a contiguous range of them is one block. This is what turns a row
+        // slice like `x[100:2100]` into a single copy rather than one per row.
+        // A *second* partial dimension would not be contiguous, and the break
+        // is what stops the run before reaching one.
+        let mut contig = 1usize;
+        let mut run_dims = 0usize;
+        let mut expected_orig = shape_dims.len();
+        for j in (0..ndim_out).rev() {
+            let od = orig_dim_map[j];
+            if steps[j] != 1 || od + 1 != expected_orig {
+                break;
+            }
+            contig *= out_dims[j];
+            expected_orig = od;
+            run_dims += 1;
+            if out_dims[j] != shape_dims[od] {
+                break;
+            }
+        }
+
+        // Every selection's start contributes a fixed offset; only the walked
+        // dimensions then move.
+        let mut base = offset;
+        for j in 0..ndim_out {
+            base += starts[j] * strides[orig_dim_map[j]];
+        }
+
+        let walked = ndim_out - run_dims;
+        let outer_dims = out_dims[..walked].to_vec();
+        let outer_steps = (0..walked)
+            .map(|j| steps[j] * strides[orig_dim_map[j]])
+            .collect();
+        let runs = outer_dims.iter().product();
+
+        Self {
+            contig,
+            runs,
+            outer_dims,
+            outer_steps,
+            base,
+        }
+    }
+
+    /// Source index of the run at position `run`, plus the odometer reading
+    /// that produced it, so a walk can continue from there by addition alone.
+    ///
+    /// This is the only place a division happens, and it runs once per parallel
+    /// band rather than once per run.
+    fn seek(&self, run: usize) -> (usize, Vec<usize>) {
+        let mut coord = vec![0usize; self.outer_dims.len()];
+        let mut rem = run;
+        let mut src = self.base;
+        for j in (0..self.outer_dims.len()).rev() {
+            let size = self.outer_dims[j];
+            coord[j] = rem % size;
+            rem /= size;
+            src += coord[j] * self.outer_steps[j];
+        }
+        (src, coord)
+    }
+
+    /// Copy `runs` contiguous blocks starting from run index `first`.
+    #[inline]
+    fn copy_runs<T: Copy>(&self, input: &[T], output: &mut [T], first: usize) {
+        let (mut src, mut coord) = self.seek(first);
+        for dst in output.chunks_mut(self.contig) {
+            dst.copy_from_slice(&input[src..src + self.contig]);
+            for j in (0..coord.len()).rev() {
+                coord[j] += 1;
+                src += self.outer_steps[j];
+                if coord[j] < self.outer_dims[j] {
+                    break;
+                }
+                src -= coord[j] * self.outer_steps[j];
+                coord[j] = 0;
+            }
+        }
+    }
+
+    fn gather<T: Copy + Send + Sync>(&self, input: &[T], output: &mut [T]) {
+        if self.contig == 0 || self.runs == 0 {
+            return;
+        }
+        // One run means the whole selection is a single contiguous block.
+        if self.runs == 1 {
+            output.copy_from_slice(&input[self.base..self.base + self.contig]);
+            return;
+        }
+
+        if output.len() < INDEX_PAR_THRESHOLD {
+            self.copy_runs(input, output, 0);
+            return;
+        }
+
+        // Hand each task a band of whole runs. Seeding its odometer costs one
+        // decomposition; every run after that is reached by addition.
+        let bands = rayon::current_num_threads().max(1);
+        let per_band = self.runs.div_ceil(bands).max(1);
+        output
+            .par_chunks_mut(per_band * self.contig)
+            .enumerate()
+            .for_each(|(band, dst)| self.copy_runs(input, dst, band * per_band));
+    }
 }
 
 impl Tensor {
@@ -1499,106 +1656,35 @@ impl Tensor {
         }
 
         let out_shape = Shape::new(out_dims.clone());
-        let out_strides = Strides::from_shape(&out_shape);
         let mut result_data =
             TensorData::zeros_on_device(out_shape.numel(), self.dtype, self.device);
 
+        let plan = SelectionPlan::new(
+            shape_dims,
+            strides,
+            offset,
+            &out_dims,
+            &orig_dim_map,
+            &starts,
+            &steps,
+        );
+
+        macro_rules! gather_arm {
+            ($accessor:ident, $mut_accessor:ident, $tyname:literal) => {{
+                let input = self.data.$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error(concat!("Expected ", $tyname, " data"))
+                })?;
+                let output = result_data.$mut_accessor().unwrap();
+                plan.gather(input, output);
+            }};
+        }
+
         match self.dtype {
-            DataType::Float32 => {
-                let input = self
-                    .data
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
-                let output = result_data.as_f32_slice_mut().unwrap();
-                for (idx, out_elem) in output.iter_mut().enumerate() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                    }
-                    *out_elem = input[src_idx];
-                }
-            }
-            DataType::Float64 => {
-                let input = self
-                    .data
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
-                let output = result_data.as_f64_slice_mut().unwrap();
-                for (idx, out_elem) in output.iter_mut().enumerate() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                    }
-                    *out_elem = input[src_idx];
-                }
-            }
-            DataType::Int32 => {
-                let input = self
-                    .data
-                    .as_i32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected i32 data"))?;
-                let output = result_data.as_i32_slice_mut().unwrap();
-                for (idx, out_elem) in output.iter_mut().enumerate() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                    }
-                    *out_elem = input[src_idx];
-                }
-            }
-            DataType::Int64 => {
-                let input = self
-                    .data
-                    .as_i64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected i64 data"))?;
-                let output = result_data.as_i64_slice_mut().unwrap();
-                for (idx, out_elem) in output.iter_mut().enumerate() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                    }
-                    *out_elem = input[src_idx];
-                }
-            }
-            DataType::Bool => {
-                let input = self
-                    .data
-                    .as_bool_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected bool data"))?;
-                let output = result_data.as_bool_slice_mut().unwrap();
-                for (idx, out_elem) in output.iter_mut().enumerate() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                    }
-                    *out_elem = input[src_idx];
-                }
-            }
+            DataType::Float32 => gather_arm!(as_f32_slice, as_f32_slice_mut, "f32"),
+            DataType::Float64 => gather_arm!(as_f64_slice, as_f64_slice_mut, "f64"),
+            DataType::Int32 => gather_arm!(as_i32_slice, as_i32_slice_mut, "i32"),
+            DataType::Int64 => gather_arm!(as_i64_slice, as_i64_slice_mut, "i64"),
+            DataType::Bool => gather_arm!(as_bool_slice, as_bool_slice_mut, "bool"),
         }
 
         let output = Tensor::new(
