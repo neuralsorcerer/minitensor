@@ -328,21 +328,19 @@ impl Conv2dBackward {
             let in_stride = in_channels * in_h * in_w;
             let mut grad_input = vec![T::default(); batch * in_stride];
             if n_ohw > 0 {
-                let mut weight_t = vec![T::default(); k_dim * out_channels];
-                for oc in 0..out_channels {
-                    for k in 0..k_dim {
-                        weight_t[k * out_channels + oc] = weight[oc * k_dim + k];
-                    }
-                }
                 let mut grad_cols = vec![T::default(); k_dim * n_ohw];
-                // SAFETY: weight_t is [K, C_out], go_mat is [C_out, N*OH*OW], and
-                // grad_cols is [K, N*OH*OW]; all contiguous row-major, dims match.
+                // SAFETY: the logical `[K, C_out]` operand is `weight`, stored
+                // `[C_out, K]`, so the GEMM reads it transposed by stride --
+                // this used to materialise it with a serial strided-write copy,
+                // which for a 512-channel layer is 9 MB moved per backward.
+                // `go_mat` is [C_out, N*OH*OW] and `grad_cols` [K, N*OH*OW],
+                // both contiguous row-major.
                 unsafe {
-                    T::gemm(
+                    T::gemm_tn(
                         k_dim,
                         out_channels,
                         n_ohw,
-                        weight_t.as_ptr(),
+                        weight.as_ptr(),
                         go_mat.as_ptr(),
                         grad_cols.as_mut_ptr(),
                     );

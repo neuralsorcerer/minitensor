@@ -194,3 +194,77 @@ def test_linear_handles_a_zero_length_batch():
     x = mt.Tensor(np.zeros((0, 6), dtype=np.float32))
     w = mt.Tensor(np.zeros((3, 6), dtype=np.float32))
     assert tuple(nn.dense_layer(x, w).shape) == (0, 3)
+
+
+# --- conv2d's weight, read transposed --------------------------------------
+#
+# `grad_input = weight^T @ grad_cols` needs the weight as `[K, C_out]` while it
+# is stored `[C_out, K]`. Materialising that transpose wrote with a stride of
+# `C_out` floats across the whole output, which for a 512-channel layer is
+# 9 MB touched a cache line at a time -- 17 ms of a 17 ms backward. The GEMM
+# reads it transposed by stride instead.
+#
+# This path only runs when the *input* requires a gradient, i.e. for every conv
+# but the first in a network, which is why these tests set that explicitly.
+
+
+def _conv2d_reference(x, w, b, padding, stride):
+    n, _, height, width = x.shape
+    out_channels, _, kh, kw = w.shape
+    padded = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    out_h = (height + 2 * padding - kh) // stride + 1
+    out_w = (width + 2 * padding - kw) // stride + 1
+    out = np.zeros((n, out_channels, out_h, out_w))
+    for i in range(n):
+        for o in range(out_channels):
+            for r in range(out_h):
+                for c in range(out_w):
+                    patch = padded[i, :, r * stride : r * stride + kh, c * stride : c * stride + kw]
+                    out[i, o, r, c] = (patch * w[o]).sum() + b[o]
+    return out
+
+
+@pytest.mark.parametrize(
+    "n,in_ch,size,out_ch,kernel,padding,stride",
+    [
+        (2, 3, 8, 4, 3, 1, 1),
+        (1, 2, 6, 3, 2, 0, 1),
+        (2, 4, 7, 5, 3, 1, 2),
+        (1, 5, 5, 2, 5, 2, 1),
+        # more output channels than input, and the reverse: the transposed
+        # operand's two extents differ, so a swapped pair would show here
+        (1, 9, 5, 2, 3, 1, 1),
+        (1, 2, 5, 9, 3, 1, 1),
+    ],
+)
+def test_conv2d_input_gradient_matches_finite_differences(
+    n, in_ch, size, out_ch, kernel, padding, stride
+):
+    rng = np.random.default_rng(11)
+    x = rng.standard_normal((n, in_ch, size, size))
+    w = rng.standard_normal((out_ch, in_ch, kernel, kernel))
+    b = rng.standard_normal(out_ch)
+
+    tx = mt.Tensor(x, dtype="float64").requires_grad_(True)
+    tw = mt.Tensor(w, dtype="float64").requires_grad_(True)
+    tb = mt.Tensor(b, dtype="float64").requires_grad_(True)
+
+    out = nn.conv2d(tx, tw, tb, stride=stride, padding=padding)
+    expected = _conv2d_reference(x, w, b, padding, stride)
+    np.testing.assert_allclose(out.numpy(), expected, atol=1e-11)
+
+    upstream = rng.standard_normal(expected.shape)
+    mt.sum(out * mt.Tensor(upstream, dtype="float64")).backward()
+    grad_x = mt.get_gradient(tx).numpy()
+
+    eps = 1e-6
+    for _ in range(8):
+        idx = tuple(int(rng.integers(0, dim)) for dim in x.shape)
+        plus, minus = x.copy(), x.copy()
+        plus[idx] += eps
+        minus[idx] -= eps
+        numeric = (
+            (_conv2d_reference(plus, w, b, padding, stride) * upstream).sum()
+            - (_conv2d_reference(minus, w, b, padding, stride) * upstream).sum()
+        ) / (2 * eps)
+        assert abs(numeric - grad_x[idx]) < 1e-5 * max(1.0, abs(numeric)), idx

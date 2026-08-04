@@ -31,6 +31,16 @@ pub(crate) trait ConvScalar: Copy + Default + Send + Sync + std::ops::AddAssign 
     /// `a`, `b` and `c` must point to contiguous row-major buffers of at least
     /// `m * k`, `k * n` and `m * n` elements; see [`crate::ops::linalg::gemm_f32`].
     unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
+    /// Row-major `C[m, n] = A[m, k]^T @ B[k, n]`, with `a` holding the logical
+    /// `(m, k)` operand as `(k, m)`.
+    ///
+    /// The weight gradient path needs the weight as `[K, C_out]` while it is
+    /// stored `[C_out, K]`. Reading it transposed by stride costs nothing;
+    /// materialising it was a serial strided-write copy of the whole weight.
+    ///
+    /// # Safety
+    /// As [`Self::gemm`], with `a` read as `k * m` elements.
+    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
 }
 
 impl ConvScalar for f32 {
@@ -47,6 +57,10 @@ impl ConvScalar for f32 {
     unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_f32(m, k, n, a, b, c) }
     }
+    #[inline]
+    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_tn_f32(m, k, n, a, b, c) }
+    }
 }
 
 impl ConvScalar for f64 {
@@ -62,6 +76,10 @@ impl ConvScalar for f64 {
     #[inline]
     unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
         unsafe { crate::ops::linalg::gemm_f64(m, k, n, a, b, c) }
+    }
+    #[inline]
+    unsafe fn gemm_tn(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self) {
+        unsafe { crate::ops::linalg::gemm_tn_f64(m, k, n, a, b, c) }
     }
 }
 
