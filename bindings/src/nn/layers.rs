@@ -1756,6 +1756,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     // (`torch.nn.utils.clip_grad_norm_`), and because `nn` is already this
     // library's home for free functions.
     crate::grad_utils::register(&nn_module)?;
+    super::init::register(py, &nn_module)?;
 
     parent_module.add_submodule(&nn_module)?;
     Ok(())

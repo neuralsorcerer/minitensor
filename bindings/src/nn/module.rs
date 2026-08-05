@@ -8,6 +8,8 @@
 // It is a child of this module so its `impl PyReLU`/`impl PyDenseLayer`
 // blocks and its `wrap_pyfunction!` calls can reach the pyclass structs and
 // `#[pyfunction]`s defined here.
+#[path = "init.rs"]
+pub mod init;
 #[path = "layers.rs"]
 mod layers;
 pub use self::layers::*;

@@ -436,8 +436,15 @@ pub fn lecun_normal_init(
     init_normal(shape, 0.0, std, dtype, device, requires_grad)
 }
 
-/// Calculate fan_in and fan_out for a tensor shape
-fn calculate_fan_in_fan_out(shape: &Shape) -> Result<(usize, usize)> {
+/// Calculate fan_in and fan_out for a tensor shape.
+///
+/// Follows the same convention as the layers here and as PyTorch: a weight is
+/// stored `[out_features, in_features]`, so `fan_in` is the *trailing*
+/// dimension, and a convolution weight's fans are scaled by its receptive
+/// field. Public because a caller writing their own scheme needs the same
+/// numbers the built-in initializers use -- deriving them independently is how
+/// a hand-rolled initializer ends up transposed.
+pub fn calculate_fan_in_fan_out(shape: &Shape) -> Result<(usize, usize)> {
     let dims = shape.dims();
 
     match dims.len() {

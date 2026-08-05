@@ -20,6 +20,7 @@ of convenience aliases.
 | `cpu`, `cuda` | Convenience constructors for CPU/GPU devices. |
 | `functional` | Functional API module (stateless ops). |
 | `nn` | Neural network modules and losses. |
+| `nn.init` | Weight initialization schemes. |
 | `optim` | Optimizers. |
 | `numpy_compat` | NumPy-style helpers (if built). |
 | `plugins` | Plugin registry and utilities (if built). |
@@ -1284,6 +1285,57 @@ print(output.shape, h_n.shape, bi.output_size)
 Shape([5, 2, 4]) Shape([2, 2, 4]) Shape([2, 2, 4])
 Shape([2, 5, 4])
 Shape([5, 2, 8]) Shape([2, 2, 4]) 8
+```
+
+### Weight initialization (`minitensor.nn.init`)
+
+The built-in layers initialize their own weights. These are for parameters you
+create yourself -- a `plugins.CustomLayer`, or a tensor you drive through the
+functional API.
+
+They are **factories**, not PyTorch's in-place `xavier_uniform_(tensor)`: each
+takes a shape and returns a new tensor, which is also how every layer in `nn`
+builds its parameters. To re-initialize an existing parameter, build a new
+tensor and assign it.
+
+| Function | Distribution |
+| --- | --- |
+| `zeros(shape)` / `ones(shape)` / `constant(shape, value)` | Fixed value. |
+| `uniform(shape, a=0.0, b=1.0)` | Uniform over `[a, b)`. |
+| `normal(shape, mean=0.0, std=1.0)` | Normal. |
+| `truncated_normal(shape, mean=0.0, std=1.0, lower=None, upper=None)` | Normal confined to `[lower, upper]`, defaulting to two deviations either side. |
+| `xavier_uniform(shape)` / `xavier_normal(shape)` | Glorot & Bengio (2010); scale from `fan_in + fan_out`. |
+| `he_uniform(shape)` / `he_normal(shape)` | He et al. (2015); scale from `fan_in`. For ReLU networks. |
+| `lecun_uniform(shape)` / `lecun_normal(shape)` | LeCun et al. (1998); scale from `fan_in`. |
+| `calculate_fan_in_and_fan_out(shape)` | The `(fan_in, fan_out)` the schemes above derive their scale from. |
+
+`kaiming_uniform`/`kaiming_normal` and `glorot_uniform`/`glorot_normal` are the
+same functions under the other spelling of each name.
+
+All of them take `dtype="float32"`, `device=None` and `requires_grad=True`.
+Everything but `constant` (and its `zeros`/`ones` shorthands) draws from a
+continuous distribution and so requires a float dtype.
+
+A weight is stored `[out_features, in_features]`, so `fan_in` is the **trailing**
+dimension; a convolution weight `[out_channels, in_channels, kh, kw]` scales
+both fans by the receptive field. Reading those the wrong way round is the
+usual way a hand-rolled initializer goes wrong, which is what
+`calculate_fan_in_and_fan_out` is exposed for:
+
+```python
+from minitensor.nn import init
+
+print(init.calculate_fan_in_and_fan_out([512, 256]))
+print(init.calculate_fan_in_and_fan_out([32, 3, 5, 5]))
+
+weight = init.he_normal([8, 4])
+print(tuple(weight.shape), weight.dtype, weight.requires_grad)
+```
+
+```text
+(256, 512)
+(75, 800)
+(8, 4) float32 True
 ```
 
 ### Common utilities
