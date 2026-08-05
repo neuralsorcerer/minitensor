@@ -25,9 +25,9 @@ use engine::optim::{
 };
 use pyo3::Py;
 use pyo3::PyClassInitializer;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule as Pyo3Module;
+use pyo3::types::{PyDict, PyModule as Pyo3Module};
 
 /// Base class for learning-rate schedulers.
 #[pyclass(name = "LRScheduler", subclass)]
@@ -74,6 +74,59 @@ impl PyLRScheduler {
     #[getter]
     fn last_epoch(&self) -> usize {
         self.last_epoch
+    }
+
+    /// Snapshot the schedule's position, so a resumed run continues it.
+    ///
+    /// Every schedule here is a pure function of `(last_epoch, base_lr)` --
+    /// none of them accumulate -- so those two numbers are the whole of the
+    /// mutable state. A plain dict, as PyTorch returns, because there are no
+    /// tensors to write and the caller can put it wherever the rest of their
+    /// checkpoint goes.
+    ///
+    /// Without it, restoring a checkpoint restarted the schedule: a run that
+    /// had decayed to a tenth of its base rate resumed at the base rate, and
+    /// stayed a full schedule ahead of where it should have been for the rest
+    /// of training.
+    fn state_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let state = PyDict::new(py);
+        state.set_item("base_lr", self.base_lr)?;
+        state.set_item("last_epoch", self.last_epoch)?;
+        Ok(state)
+    }
+
+    /// Restore a snapshot from [`Self::state_dict`] and write the schedule's
+    /// learning rate to the optimizer immediately.
+    ///
+    /// Applying on load matters: the optimizer this scheduler was constructed
+    /// over has whatever rate it was built with, and without this the restored
+    /// schedule would not take effect until the next `step()` -- one step of
+    /// training at the wrong rate.
+    fn load_state_dict(&mut self, py: Python<'_>, state: &Bound<'_, PyDict>) -> PyResult<()> {
+        let base_lr = state
+            .get_item("base_lr")?
+            .ok_or_else(|| PyKeyError::new_err("scheduler state is missing 'base_lr'"))?
+            .extract::<f64>()?;
+        // Extracted as a signed integer so a negative one is rejected with a
+        // message about the schedule rather than pyo3's OverflowError from the
+        // `usize` conversion, which reads as an internal detail.
+        let last_epoch = state
+            .get_item("last_epoch")?
+            .ok_or_else(|| PyKeyError::new_err("scheduler state is missing 'last_epoch'"))?
+            .extract::<i64>()?;
+        if last_epoch < 0 {
+            return Err(PyValueError::new_err(format!(
+                "last_epoch must not be negative, got {last_epoch}"
+            )));
+        }
+        let last_epoch = last_epoch as usize;
+        if !base_lr.is_finite() {
+            return Err(PyValueError::new_err("base_lr must be finite"));
+        }
+        self.base_lr = base_lr;
+        self.last_epoch = last_epoch;
+        self.apply(py)?;
+        Ok(())
     }
 
     fn __repr__(&self) -> String {

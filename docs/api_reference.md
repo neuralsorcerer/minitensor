@@ -1489,6 +1489,39 @@ print(resumed.step_count)
 10
 ```
 
+If the run uses a learning-rate scheduler, that has a position too. Every
+schedule here is a pure function of `(last_epoch, base_lr)`, so its whole state
+is those two numbers, and `scheduler.state_dict()` returns them as a plain
+dict -- JSON-serialisable, to go wherever the rest of the checkpoint goes.
+`load_state_dict` writes the restored rate to the optimizer immediately, so
+the step right after a resume runs at the right rate rather than the next one:
+
+```python
+import minitensor as mt
+from minitensor import nn, optim
+
+model = nn.DenseLayer(4, 2)
+optimizer = optim.Adam(model.parameters(), lr=1.0)
+scheduler = optim.StepLR(optimizer, step_size=2, gamma=0.5)
+for _ in range(5):
+    scheduler.step()
+
+saved = scheduler.state_dict()
+print(saved, round(optimizer.lr, 6))
+
+resumed_optimizer = optim.Adam(model.parameters(), lr=1.0)
+resumed = optim.StepLR(resumed_optimizer, step_size=2, gamma=0.5)
+print(round(resumed_optimizer.lr, 6))      # a fresh schedule starts over
+resumed.load_state_dict(saved)
+print(round(resumed_optimizer.lr, 6))      # ... and now it does not
+```
+
+```text
+{'base_lr': 1.0, 'last_epoch': 5} 0.25
+1.0
+0.25
+```
+
 Per-parameter state is matched by **position**, so the optimizer has to be
 constructed over the same parameters in the same order as when it was saved.
 Loading a state saved by a different algorithm, for a different number of
