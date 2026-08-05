@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::utils::{load_param_buffers, save_param_buffers};
+use crate::serialization::OptimizerState;
 use crate::{
     autograd::{self, TensorId},
     error::Result,
@@ -338,6 +340,19 @@ impl SGD {
 }
 
 impl Optimizer for SGD {
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let mut state = OptimizerState::new("SGD", self.step_count, parameters.len());
+        save_param_buffers(&mut state, "momentum_buffer", &self.velocity, parameters)?;
+        Ok(state)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        state.check_compatible("SGD", parameters.len())?;
+        load_param_buffers(state, "momentum_buffer", &mut self.velocity, parameters)?;
+        self.step_count = state.step_count;
+        Ok(())
+    }
+
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
         // Apply gradient clipping if configured
         self.clip_gradients(parameters, &self.gradient_clipping)?;

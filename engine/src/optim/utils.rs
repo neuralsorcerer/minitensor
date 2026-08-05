@@ -5,8 +5,14 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::LearningRateScheduler;
-use crate::{autograd, error::Result, tensor::Tensor};
+use crate::{
+    autograd::{self, TensorId},
+    error::{MinitensorError, Result},
+    serialization::OptimizerState,
+    tensor::Tensor,
+};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 /// Utility functions for gradient operations.
 ///
@@ -322,6 +328,62 @@ impl LearningRateScheduler for CompositeScheduler {
 
         current_lr
     }
+}
+
+/// Copy a per-parameter buffer map into an [`OptimizerState`], converting the
+/// [`TensorId`] keys into the positions the state is keyed by.
+///
+/// A parameter with no entry is skipped rather than written as zeros: every
+/// optimizer here allocates its buffers on a parameter's first step, so a
+/// parameter that has not been stepped yet genuinely has no state, and writing
+/// zeros would make a resumed run start from a "first step already taken"
+/// position it was never in.
+pub(crate) fn save_param_buffers(
+    state: &mut OptimizerState,
+    name: &str,
+    buffers: &FxHashMap<TensorId, Tensor>,
+    parameters: &[&Tensor],
+) -> Result<()> {
+    for (slot, param) in parameters.iter().enumerate() {
+        if let Some(tensor) = buffers.get(&param.id()) {
+            state.insert_buffer(slot, name, tensor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Inverse of [`save_param_buffers`], rekeying by the ids the *current*
+/// parameters carry.
+///
+/// The map is cleared first. Leaving stale entries would keep the state of
+/// whatever parameters the optimizer had stepped before the load, which for a
+/// reused optimizer is state from a different run.
+pub(crate) fn load_param_buffers(
+    state: &OptimizerState,
+    name: &str,
+    buffers: &mut FxHashMap<TensorId, Tensor>,
+    parameters: &[&Tensor],
+) -> Result<()> {
+    buffers.clear();
+    for (slot, param) in parameters.iter().enumerate() {
+        if let Some(tensor) = state.take_buffer(slot, name, Some(param.device()))? {
+            if tensor.shape().dims() != param.shape().dims() {
+                return Err(MinitensorError::invalid_argument_with_suggestion(
+                    format!(
+                        "optimizer state for parameter {slot} has shape {:?}, but that \
+                         parameter is {:?}",
+                        tensor.shape().dims(),
+                        param.shape().dims()
+                    ),
+                    "Per-parameter state is matched by position, so the optimizer must \
+                     be constructed over the same parameters in the same order as when \
+                     it was saved",
+                ));
+            }
+            buffers.insert(param.id(), tensor);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

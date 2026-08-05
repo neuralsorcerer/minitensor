@@ -7,6 +7,7 @@
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::optim::{Adagrad, Adam, AdamW, Lion, NAdam, Optimizer, RMSprop, SGD};
+use engine::serialization::{OptimizerState, SerializationFormat};
 use engine::{autograd, tensor::Tensor};
 use pyo3::Py;
 use pyo3::PyClassInitializer;
@@ -40,6 +41,59 @@ enum OptimizerType {
 
 #[pymethods]
 impl PyOptimizer {
+    /// Snapshot the optimizer's state so training can be resumed exactly.
+    ///
+    /// Restoring only the model's weights restores only half of a training
+    /// run: a fresh optimizer starts from zeroed moment estimates and
+    /// `step_count = 0`, so Adam's bias correction restarts and the first
+    /// step after the resume is an outsized one.
+    fn state_dict(&self, py: Python<'_>) -> PyResult<PyOptimizerState> {
+        let borrowed = self.borrow_all(py)?;
+        let refs: Vec<&Tensor> = borrowed.iter().map(|t| t.tensor()).collect();
+        let state = self
+            .as_optimizer()
+            .state_dict(refs.as_slice())
+            .map_err(_convert_error)?;
+        Ok(PyOptimizerState { inner: state })
+    }
+
+    /// Restore a snapshot from [`state_dict`].
+    fn load_state_dict(&mut self, py: Python<'_>, state: &PyOptimizerState) -> PyResult<()> {
+        // The parameters are borrowed immutably and released before the
+        // optimizer is touched: `as_optimizer_mut` borrows `self` mutably, and
+        // holding parameter borrows across that is not the borrow the checker
+        // objects to, but it is the one that would deadlock if a parameter and
+        // the optimizer were ever the same object.
+        let ids_and_shapes = {
+            let borrowed = self.borrow_all(py)?;
+            borrowed
+                .iter()
+                .map(|t| t.tensor().clone())
+                .collect::<Vec<Tensor>>()
+        };
+        let refs: Vec<&Tensor> = ids_and_shapes.iter().collect();
+        self.as_optimizer_mut()
+            .load_state_dict(refs.as_slice(), &state.inner)
+            .map_err(_convert_error)
+    }
+
+    /// Write the optimizer's state to `path`.
+    fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.state_dict(py)?.save(path)
+    }
+
+    /// Read a state written by [`save`] and load it into this optimizer.
+    fn load(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        let state = PyOptimizerState::load(path)?;
+        self.load_state_dict(py, &state)
+    }
+
+    /// Number of steps taken so far.
+    #[getter]
+    fn step_count(&self) -> usize {
+        self.as_optimizer().step_count()
+    }
+
     /// Perform a single optimization step using the tracked parameters.
     fn step(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.parameters.is_empty() {
@@ -215,6 +269,118 @@ impl PyOptimizer {
                 optimizer.weight_decay()
             ),
         }
+    }
+}
+
+impl PyOptimizer {
+    fn as_optimizer(&self) -> &dyn Optimizer {
+        match &self.inner {
+            OptimizerType::Sgd(o) => o,
+            OptimizerType::Adam(o) => o,
+            OptimizerType::AdamW(o) => o,
+            OptimizerType::RMSprop(o) => o,
+            OptimizerType::Adagrad(o) => o,
+            OptimizerType::NAdam(o) => o,
+            OptimizerType::Lion(o) => o,
+        }
+    }
+
+    fn as_optimizer_mut(&mut self) -> &mut dyn Optimizer {
+        match &mut self.inner {
+            OptimizerType::Sgd(o) => o,
+            OptimizerType::Adam(o) => o,
+            OptimizerType::AdamW(o) => o,
+            OptimizerType::RMSprop(o) => o,
+            OptimizerType::Adagrad(o) => o,
+            OptimizerType::NAdam(o) => o,
+            OptimizerType::Lion(o) => o,
+        }
+    }
+
+    /// Borrow every tracked parameter, in the order they were registered.
+    ///
+    /// Order is load-bearing: per-parameter optimizer state is keyed by
+    /// position, because the tensor ids it is keyed by internally are minted
+    /// per tensor and a reloaded model's parameters are different tensors.
+    fn borrow_all<'py>(&'py self, py: Python<'py>) -> PyResult<Vec<PyRef<'py, PyTensor>>> {
+        if self.parameters.is_empty() {
+            return Err(PyValueError::new_err("No parameters to optimize."));
+        }
+        let mut borrowed = Vec::with_capacity(self.parameters.len());
+        for value in &self.parameters {
+            borrowed.push(borrow_tensor(py, value)?);
+        }
+        Ok(borrowed)
+    }
+}
+
+fn borrow_tensor<'py>(py: Python<'py>, value: &'py Py<PyAny>) -> PyResult<PyRef<'py, PyTensor>> {
+    let bound = value.bind(py);
+    if let Ok(tensor) = bound.extract::<PyRef<PyTensor>>() {
+        return Ok(tensor);
+    }
+    let inner = bound
+        .getattr(intern!(py, "_tensor"))
+        .map_err(|_| PyTypeError::new_err("optimizer parameters must be Tensor instances"))?;
+    Ok(inner.extract::<PyRef<PyTensor>>()?)
+}
+
+/// A saved optimizer state, as returned by `Optimizer.state_dict()`.
+#[pyclass(name = "OptimizerState")]
+pub struct PyOptimizerState {
+    inner: OptimizerState,
+}
+
+#[pymethods]
+impl PyOptimizerState {
+    /// Which optimizer wrote this state.
+    #[getter]
+    fn algorithm(&self) -> &str {
+        &self.inner.algorithm
+    }
+
+    /// How many steps the optimizer had taken.
+    #[getter]
+    fn step_count(&self) -> usize {
+        self.inner.step_count
+    }
+
+    /// How many parameters it was tracking.
+    #[getter]
+    fn num_parameters(&self) -> usize {
+        self.inner.num_parameters
+    }
+
+    /// Names of the stored per-parameter buffers, as `"{slot}.{name}"`.
+    fn buffer_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.inner.buffers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Write this state to `path`, in the binary format `Module.save` uses.
+    fn save(&self, path: &str) -> PyResult<()> {
+        self.inner
+            .save(path, SerializationFormat::Binary)
+            .map_err(_convert_error)
+    }
+
+    /// Read a state written by `save`.
+    #[staticmethod]
+    fn load(path: &str) -> PyResult<Self> {
+        let inner =
+            OptimizerState::load(path, SerializationFormat::Binary).map_err(_convert_error)?;
+        Ok(Self { inner })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OptimizerState(algorithm={:?}, step_count={}, num_parameters={}, buffers={})",
+            self.inner.algorithm,
+            self.inner.step_count,
+            self.inner.num_parameters,
+            self.inner.buffers.len()
+        )
     }
 }
 
@@ -1089,6 +1255,7 @@ pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> P
 
     // Add optimizer classes
     optim_module.add_class::<PyOptimizer>()?;
+    optim_module.add_class::<PyOptimizerState>()?;
     optim_module.add_class::<PySGD>()?;
     optim_module.add_class::<PyAdam>()?;
     optim_module.add_class::<PyAdamW>()?;

@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::utils::{load_param_buffers, save_param_buffers};
+use crate::serialization::OptimizerState;
 use crate::{
     autograd::{self, TensorId},
     error::Result,
@@ -343,6 +345,33 @@ impl RMSprop {
 }
 
 impl Optimizer for RMSprop {
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let mut state = OptimizerState::new("RMSprop", self.step_count, parameters.len());
+        save_param_buffers(&mut state, "square_avg", &self.square_avg, parameters)?;
+        save_param_buffers(
+            &mut state,
+            "momentum_buffer",
+            &self.momentum_buffer,
+            parameters,
+        )?;
+        save_param_buffers(&mut state, "grad_avg", &self.grad_avg, parameters)?;
+        Ok(state)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        state.check_compatible("RMSprop", parameters.len())?;
+        load_param_buffers(state, "square_avg", &mut self.square_avg, parameters)?;
+        load_param_buffers(
+            state,
+            "momentum_buffer",
+            &mut self.momentum_buffer,
+            parameters,
+        )?;
+        load_param_buffers(state, "grad_avg", &mut self.grad_avg, parameters)?;
+        self.step_count = state.step_count;
+        Ok(())
+    }
+
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
         // Apply gradient clipping if configured
         self.clip_gradients(parameters, &self.gradient_clipping)?;

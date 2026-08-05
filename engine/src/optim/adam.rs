@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::utils::{load_param_buffers, save_param_buffers};
+use crate::serialization::OptimizerState;
 use crate::{
     autograd::{self, TensorId},
     error::Result,
@@ -123,6 +125,20 @@ impl Adam {
     pub fn with_gradient_clipping(mut self, clipping: GradientClipping) -> Self {
         self.gradient_clipping = clipping;
         self
+    }
+
+    /// Which algorithm a checkpoint written by this optimizer belongs to.
+    ///
+    /// AdamW shares Adam's buffer layout but not its update rule -- decoupled
+    /// weight decay is applied to the parameter rather than folded into the
+    /// gradient -- so resuming one from the other's checkpoint would silently
+    /// continue a different optimisation.
+    fn algorithm_name(&self) -> &'static str {
+        if self.decoupled_weight_decay {
+            "AdamW"
+        } else {
+            "Adam"
+        }
     }
 
     /// Enable or disable decoupled weight decay (AdamW)
@@ -470,6 +486,14 @@ impl Optimizer for AdamW {
         self.inner.step_count()
     }
 
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        self.inner.state_dict(parameters)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        self.inner.load_state_dict(parameters, state)
+    }
+
     fn clip_gradients(
         &self,
         parameters: &mut [&mut Tensor],
@@ -480,6 +504,27 @@ impl Optimizer for AdamW {
 }
 
 impl Optimizer for Adam {
+    /// Buffer names follow PyTorch's (`exp_avg`, `exp_avg_sq`,
+    /// `max_exp_avg_sq`) so a checkpoint is readable by anyone who has seen
+    /// one before.
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let mut state =
+            OptimizerState::new(self.algorithm_name(), self.step_count, parameters.len());
+        save_param_buffers(&mut state, "exp_avg", &self.m, parameters)?;
+        save_param_buffers(&mut state, "exp_avg_sq", &self.v, parameters)?;
+        save_param_buffers(&mut state, "max_exp_avg_sq", &self.v_hat, parameters)?;
+        Ok(state)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        state.check_compatible(self.algorithm_name(), parameters.len())?;
+        load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
+        load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
+        load_param_buffers(state, "max_exp_avg_sq", &mut self.v_hat, parameters)?;
+        self.step_count = state.step_count;
+        Ok(())
+    }
+
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
         // Apply gradient clipping if configured
         self.clip_gradients(parameters, &self.gradient_clipping)?;

@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::utils::GradientUtils;
-use crate::{autograd::TensorId, error::Result, tensor::Tensor};
+use crate::{autograd::TensorId, error::Result, serialization::OptimizerState, tensor::Tensor};
 use rustc_hash::FxHashMap;
 
 /// Parameter group for managing different learning rates and settings
@@ -188,6 +188,26 @@ pub trait Optimizer: Send + Sync {
     /// Get the current step count
     fn step_count(&self) -> usize {
         0
+    }
+
+    /// Snapshot everything needed to resume training exactly where it stopped.
+    ///
+    /// `parameters` must be the same list, in the same order, that `step` is
+    /// called with: per-parameter buffers are keyed by position, because the
+    /// [`TensorId`]s they are keyed by internally do not survive a reload.
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let _ = parameters;
+        Err(crate::error::MinitensorError::not_implemented(
+            "this optimizer does not implement state_dict",
+        ))
+    }
+
+    /// Restore a snapshot from [`Self::state_dict`].
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        let _ = (parameters, state);
+        Err(crate::error::MinitensorError::not_implemented(
+            "this optimizer does not implement load_state_dict",
+        ))
     }
 
     /// Apply gradient clipping to parameters

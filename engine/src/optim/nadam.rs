@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::utils::{load_param_buffers, save_param_buffers};
+use crate::serialization::OptimizerState;
 use crate::{
     autograd::{self, TensorId},
     error::Result,
@@ -293,6 +295,29 @@ impl NAdam {
 }
 
 impl Optimizer for NAdam {
+    /// `mu_product` is the running product of the momentum schedule. It is not
+    /// derivable from `step_count` alone -- the schedule depends on
+    /// `momentum_decay`, which a resumed optimizer may have been constructed
+    /// with differently -- so it is saved rather than recomputed.
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let mut state = OptimizerState::new("NAdam", self.step_count, parameters.len());
+        save_param_buffers(&mut state, "exp_avg", &self.m, parameters)?;
+        save_param_buffers(&mut state, "exp_avg_sq", &self.v, parameters)?;
+        state
+            .scalars
+            .insert("mu_product".to_string(), self.mu_product);
+        Ok(state)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        state.check_compatible("NAdam", parameters.len())?;
+        load_param_buffers(state, "exp_avg", &mut self.m, parameters)?;
+        load_param_buffers(state, "exp_avg_sq", &mut self.v, parameters)?;
+        self.mu_product = state.scalars.get("mu_product").copied().unwrap_or(1.0);
+        self.step_count = state.step_count;
+        Ok(())
+    }
+
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
         self.clip_gradients(parameters, &self.gradient_clipping)?;
 

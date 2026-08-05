@@ -1432,6 +1432,69 @@ All optimizer classes share a common interface:
   alone, so several optimizers can step off one backward pass.
 - `zero_grad(set_to_none: bool = False)` -- reset gradients.
 - `lr` property -- read/write learning rate.
+- `step_count` property -- how many steps have been applied.
+- `state_dict()` / `load_state_dict(state)` -- snapshot and restore the
+  optimizer's own state.
+- `save(path)` / `load(path)` -- the same, through a file.
+
+### Checkpointing a training run
+
+Saving the model saves the weights. It does not save the optimizer, and for
+every optimizer here except plain SGD that is only half the run: momentum
+buffers, squared-gradient averages and the step count all live in the
+optimizer. Reconstructing one from scratch restarts Adam's bias correction
+from `t = 0`, so the first step after the resume is an outsized one -- on a
+small regression it moved the parameters 2.05x as far as the step it was
+supposed to be continuing.
+
+Save both, and the resumed run is bit-identical to the uninterrupted one:
+
+```python
+import os
+import tempfile
+
+import minitensor as mt
+from minitensor import nn, optim
+
+
+def build():
+    return nn.Sequential([nn.DenseLayer(4, 8), nn.ReLU(), nn.DenseLayer(8, 2)])
+
+
+model = build()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+inputs, targets = mt.randn(16, 4), mt.randn(16, 2)
+for _ in range(10):
+    optimizer.zero_grad()
+    nn.mse_loss(model(inputs), targets).backward()
+    optimizer.step()
+
+with tempfile.TemporaryDirectory() as folder:
+    weights = os.path.join(folder, "model.bin")
+    state = os.path.join(folder, "optimizer.bin")
+    model.save(weights)
+    optimizer.save(state)
+
+    # ... later, in a new process ...
+    restored = build()
+    restored.load_state_dict(type(restored).load_state_from(weights))
+    resumed = optim.Adam(restored.parameters(), lr=0.01)
+    resumed.load(state)
+
+print(resumed.step_count)
+```
+
+```text
+10
+```
+
+Per-parameter state is matched by **position**, so the optimizer has to be
+constructed over the same parameters in the same order as when it was saved.
+Loading a state saved by a different algorithm, for a different number of
+parameters, or for differently shaped ones is refused rather than silently
+partially applied -- including Adam into AdamW, which share a buffer layout
+but not an update rule.
 
 Every optimizer takes an iterable of parameter tensors, which is what
 `model.parameters()` returns. A training step is always the same four calls:

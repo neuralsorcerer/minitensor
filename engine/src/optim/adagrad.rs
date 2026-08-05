@@ -5,6 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::utils::{load_param_buffers, save_param_buffers};
+use crate::serialization::OptimizerState;
 use crate::{
     autograd::{self, TensorId},
     error::Result,
@@ -282,6 +284,19 @@ fn fill_with(mut tensor: Tensor, value: f64) -> Tensor {
 }
 
 impl Optimizer for Adagrad {
+    fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
+        let mut state = OptimizerState::new("Adagrad", self.step_count, parameters.len());
+        save_param_buffers(&mut state, "sum", &self.state_sum, parameters)?;
+        Ok(state)
+    }
+
+    fn load_state_dict(&mut self, parameters: &[&Tensor], state: &OptimizerState) -> Result<()> {
+        state.check_compatible("Adagrad", parameters.len())?;
+        load_param_buffers(state, "sum", &mut self.state_sum, parameters)?;
+        self.step_count = state.step_count;
+        Ok(())
+    }
+
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()> {
         self.clip_gradients(parameters, &self.gradient_clipping)?;
 
