@@ -2780,8 +2780,17 @@ impl Tensor {
             return false;
         }
 
-        // Fast path for contiguous CPU tensors using raw bytes comparison
-        if self.device.is_cpu()
+        // Byte comparison, but only for the dtypes whose bytes and values agree.
+        //
+        // Floats are not among them, in *both* directions: two NaNs share a bit
+        // pattern and are not equal, and `+0.0` and `-0.0` differ in bits and
+        // are. Running floats through here made `array_equal` disagree with the
+        // library's own `eq`, which says exactly the opposite of both -- and
+        // with NumPy and PyTorch, which agree with `eq`.
+        //
+        // `allclose_with_equal_nan` above already guards its byte path this way.
+        if !self.dtype.is_float()
+            && self.device.is_cpu()
             && other.device.is_cpu()
             && self.is_contiguous()
             && other.is_contiguous()
