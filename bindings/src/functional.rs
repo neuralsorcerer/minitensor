@@ -275,6 +275,7 @@ fn make_bincount_tensor(
     }
 }
 
+/// Collapse dimensions `start_dim` through `end_dim` into one.
 #[pyfunction]
 #[pyo3(signature = (input, start_dim=None, end_dim=None))]
 pub fn flatten(
@@ -288,6 +289,7 @@ pub fn flatten(
     tensor.flatten(start, end)
 }
 
+/// A tensor with the same elements in a new shape. One dimension may be -1 to be inferred.
 #[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn reshape(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
@@ -295,12 +297,14 @@ pub fn reshape(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTenso
     tensor.reshape(shape)
 }
 
+/// Alias of `reshape`.
 #[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn view(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
     reshape(input, shape)
 }
 
+/// A slice of `length` entries along `dim`, starting at `start`.
 #[pyfunction]
 #[pyo3(signature = (input, dim, start, length))]
 pub fn narrow(input: &Bound<PyAny>, dim: isize, start: usize, length: usize) -> PyResult<PyTensor> {
@@ -308,6 +312,7 @@ pub fn narrow(input: &Bound<PyAny>, dim: isize, start: usize, length: usize) -> 
     tensor.narrow(dim, start, length)
 }
 
+/// Drop dimensions of size 1, or just the one named by `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
 pub fn squeeze(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
@@ -315,6 +320,7 @@ pub fn squeeze(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     tensor.squeeze(dim)
 }
 
+/// Insert a dimension of size 1 at `dim`, which may be one past the last axis.
 #[pyfunction]
 #[pyo3(signature = (input, dim))]
 pub fn unsqueeze(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
@@ -322,6 +328,7 @@ pub fn unsqueeze(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     tensor.unsqueeze(dim)
 }
 
+/// Swap two dimensions.
 #[pyfunction]
 #[pyo3(signature = (input, dim0=0, dim1=1))]
 pub fn transpose(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyTensor> {
@@ -329,18 +336,21 @@ pub fn transpose(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyT
     tensor.transpose(Some(dim0), Some(dim1))
 }
 
+/// Alias of `transpose`, for NumPy's spelling.
 #[pyfunction]
 #[pyo3(signature = (input, axis0, axis1))]
 pub fn swapaxes(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<PyTensor> {
     transpose(input, axis0, axis1)
 }
 
+/// Alias of `transpose`.
 #[pyfunction]
 #[pyo3(signature = (input, axis0, axis1))]
 pub fn swapdims(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<PyTensor> {
     swapaxes(input, axis0, axis1)
 }
 
+/// Reorder the dimensions; `dims` must be a permutation of all of them.
 #[pyfunction]
 #[pyo3(signature = (input, *dims))]
 pub fn permute(input: &Bound<PyAny>, dims: &Bound<PyTuple>) -> PyResult<PyTensor> {
@@ -348,6 +358,7 @@ pub fn permute(input: &Bound<PyAny>, dims: &Bound<PyTuple>) -> PyResult<PyTensor
     tensor.permute(dims)
 }
 
+/// Move dimensions to new positions, keeping the relative order of the rest.
 #[pyfunction]
 #[pyo3(signature = (input, source, destination))]
 pub fn movedim(
@@ -359,6 +370,7 @@ pub fn movedim(
     tensor.movedim(source, destination)
 }
 
+/// Alias of `movedim`, for NumPy's spelling.
 #[pyfunction]
 #[pyo3(signature = (input, source, destination))]
 pub fn moveaxis(
@@ -369,6 +381,7 @@ pub fn moveaxis(
     movedim(input, source, destination)
 }
 
+/// Repeat size-1 dimensions out to the given shape.
 #[pyfunction]
 #[pyo3(signature = (input, *shape))]
 pub fn expand(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor> {
@@ -376,6 +389,7 @@ pub fn expand(input: &Bound<PyAny>, shape: &Bound<PyTuple>) -> PyResult<PyTensor
     tensor.expand(shape)
 }
 
+/// Tile the tensor the given number of times along each dimension.
 #[pyfunction]
 #[pyo3(signature = (input, *repeats))]
 pub fn repeat(input: &Bound<PyAny>, repeats: &Bound<PyTuple>) -> PyResult<PyTensor> {
@@ -383,6 +397,7 @@ pub fn repeat(input: &Bound<PyAny>, repeats: &Bound<PyTuple>) -> PyResult<PyTens
     tensor.repeat(repeats)
 }
 
+/// Repeat each element in place `repeats` times along `dim`, rather than tiling the whole tensor.
 #[pyfunction]
 #[pyo3(signature = (input, repeats, dim=None, output_size=None))]
 pub fn repeat_interleave(
@@ -395,6 +410,7 @@ pub fn repeat_interleave(
     tensor.repeat_interleave(repeats, dim, output_size)
 }
 
+/// Reverse the order of elements along the given dimensions.
 #[pyfunction]
 #[pyo3(signature = (input, dims))]
 pub fn flip(input: &Bound<PyAny>, dims: &Bound<PyAny>) -> PyResult<PyTensor> {
@@ -402,6 +418,7 @@ pub fn flip(input: &Bound<PyAny>, dims: &Bound<PyAny>) -> PyResult<PyTensor> {
     tensor.flip(dims)
 }
 
+/// Shift elements along `dims`, wrapping the ones that fall off the end back to the start.
 #[pyfunction]
 #[pyo3(signature = (input, shifts, dims=None))]
 pub fn roll(
@@ -413,6 +430,7 @@ pub fn roll(
     tensor.roll(shifts, dims)
 }
 
+/// Alias of `clamp`, for NumPy's spelling.
 #[pyfunction]
 #[pyo3(signature = (input, min=None, max=None))]
 pub fn clip(
@@ -424,6 +442,7 @@ pub fn clip(
     tensor.clip(min, max)
 }
 
+/// Limit every element to `[min, max]`. Either bound may be omitted.
 #[pyfunction]
 #[pyo3(signature = (input, min=None, max=None))]
 pub fn clamp(
@@ -440,9 +459,14 @@ pub fn clamp(
 // rather than written out 34 times, which is also what kept `abs`, `sqrt`,
 // `exp` and `log` missing while `log1p`, `log2`, `log10`, `expm1` and `rsqrt`
 // were all present.
+// Each forwarder carries the same one-line description as the method it calls.
+// The two are written out separately because one is a `#[pymethods]` block and
+// the other is generated here, and `test_forwarders_and_methods_describe
+// _themselves_identically` fails if they ever drift apart.
 macro_rules! unary_forwarders {
-    ($($name:ident),* $(,)?) => {
+    ($($name:ident => $doc:literal),* $(,)?) => {
         $(
+            #[doc = $doc]
             #[pyfunction]
             pub fn $name(input: &Bound<PyAny>) -> PyResult<PyTensor> {
                 let tensor = borrow_tensor(input)?;
@@ -453,8 +477,9 @@ macro_rules! unary_forwarders {
 }
 
 macro_rules! binary_forwarders {
-    ($($name:ident),* $(,)?) => {
+    ($($name:ident => $doc:literal),* $(,)?) => {
         $(
+            #[doc = $doc]
             #[pyfunction]
             pub fn $name(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
                 let tensor = borrow_tensor(input)?;
@@ -464,72 +489,75 @@ macro_rules! binary_forwarders {
     };
 }
 unary_forwarders!(
-    abs,
-    acos,
-    acosh,
-    asin,
-    asinh,
-    atan,
-    atanh,
-    bitwise_not,
-    ceil,
-    cos,
-    cosh,
-    erf,
-    erfc,
-    exp,
-    expm1,
-    floor,
-    log,
-    log10,
-    log1p,
-    log2,
-    ravel,
-    reciprocal,
-    relu,
-    rsqrt,
-    selu,
-    sigmoid,
-    sign,
-    silu,
-    sin,
-    sinh,
-    softsign,
-    sqrt,
-    tan,
-    tanh,
+    abs => "Element-wise absolute value.",
+    acos => "Element-wise inverse cosine, returning radians in `[0, pi]`. Inputs outside `[-1, 1]` give NaN.",
+    acosh => "Element-wise inverse hyperbolic cosine. Inputs below 1 give NaN.",
+    asin => "Element-wise inverse sine, returning radians in `[-pi/2, pi/2]`. Inputs outside `[-1, 1]` give NaN.",
+    asinh => "Element-wise inverse hyperbolic sine.",
+    atan => "Element-wise inverse tangent, returning radians in `(-pi/2, pi/2)`.",
+    atanh => "Element-wise inverse hyperbolic tangent. Inputs outside `(-1, 1)` give NaN or infinity.",
+    bitwise_not => "Element-wise bitwise complement, and logical NOT for booleans.",
+    ceil => "Round towards positive infinity.",
+    cos => "Element-wise cosine, taking radians.",
+    cosh => "Element-wise hyperbolic cosine.",
+    erf => "Element-wise error function.",
+    erfc => "Element-wise complementary error function, `1 - erf(x)`, accurate in the tails where that subtraction would cancel.",
+    exp => "Element-wise `e ** x`.",
+    expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
+    floor => "Round towards negative infinity.",
+    log => "Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.",
+    log10 => "Element-wise base-10 logarithm.",
+    log1p => "Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.",
+    log2 => "Element-wise base-2 logarithm.",
+    ravel => "A contiguous 1-D view of every element, in row-major order.",
+    reciprocal => "Element-wise `1 / x`.",
+    relu => "Element-wise `max(x, 0)`.",
+    rsqrt => "Element-wise `1 / sqrt(x)`, computed without the intermediate root.",
+    selu => "Scaled Exponential Linear Unit, with the fixed constants that make it self-normalizing.",
+    sigmoid => "Element-wise `1 / (1 + exp(-x))`, evaluated so that large-magnitude inputs saturate instead of producing NaN.",
+    sign => "-1, 0 or 1 according to each element's sign. NaN gives NaN.",
+    silu => "Sigmoid Linear Unit (Swish), `x * sigmoid(x)`.",
+    sin => "Element-wise sine, taking radians.",
+    sinh => "Element-wise hyperbolic sine.",
+    softsign => "Element-wise `x / (1 + abs(x))`.",
+    sqrt => "Element-wise square root. Negative inputs give NaN.",
+    tan => "Element-wise tangent, taking radians.",
+    tanh => "Element-wise hyperbolic tangent.",
 );
 
 binary_forwarders!(
-    bmm,
-    dot,
-    eq,
-    floor_divide,
-    ge,
-    gt,
-    le,
-    logaddexp,
-    lt,
-    matmul,
-    maximum,
-    minimum,
-    ne,
-    pow,
-    remainder,
+    bmm => "Batched matrix product of two 3-D tensors with matching batch sizes.",
+    dot => "Inner product of two 1-D tensors.",
+    eq => "Element-wise equality, giving a boolean tensor.",
+    floor_divide => "Element-wise division rounded towards negative infinity, matching Python's `//`.",
+    ge => "Element-wise `>=`, giving a boolean tensor.",
+    gt => "Element-wise `>`, giving a boolean tensor.",
+    le => "Element-wise `<=`, giving a boolean tensor.",
+    logaddexp => "`log(exp(a) + exp(b))`, shifted so neither term overflows.",
+    lt => "Element-wise `<`, giving a boolean tensor.",
+    matmul => "Matrix product, broadcasting over leading batch dimensions.",
+    maximum => "Element-wise larger of two tensors.",
+    minimum => "Element-wise smaller of two tensors.",
+    ne => "Element-wise inequality, giving a boolean tensor.",
+    pow => "Raise each element of the first tensor to the matching power from the second.",
+    remainder => "Element-wise modulo taking the sign of the divisor, matching Python's `%`.",
 );
 
+/// Raise every element below `min` up to it.
 #[pyfunction]
 pub fn clamp_min(input: &Bound<PyAny>, min: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.clamp_min(min)
 }
 
+/// Lower every element above `max` down to it.
 #[pyfunction]
 pub fn clamp_max(input: &Bound<PyAny>, max: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.clamp_max(max)
 }
 
+/// Round to the nearest integer, halves to even.
 #[pyfunction]
 #[pyo3(signature = (input, decimals=0))]
 pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
@@ -537,6 +565,7 @@ pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
     tensor.round(decimals)
 }
 
+/// Split into `sections` equal parts along `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, chunks, dim=0))]
 pub fn chunk(input: &Bound<PyAny>, chunks: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
@@ -544,6 +573,7 @@ pub fn chunk(input: &Bound<PyAny>, chunks: usize, dim: isize) -> PyResult<Vec<Py
     tensor.chunk(chunks, dim)
 }
 
+/// Split along `dim` into pieces of the given size, or into the given explicit sizes.
 #[pyfunction]
 #[pyo3(signature = (input, split_size_or_sections, dim=0))]
 pub fn split(
@@ -555,6 +585,7 @@ pub fn split(
     tensor.split(split_size_or_sections, Some(dim))
 }
 
+/// Take the entries `index` names along `dim`, in the order given.
 #[pyfunction]
 #[pyo3(signature = (input, dim, indices))]
 pub fn index_select(
@@ -566,6 +597,7 @@ pub fn index_select(
     tensor.index_select(dim, indices)
 }
 
+/// Take one element per position, choosing its `dim` coordinate from `index`.
 #[pyfunction]
 #[pyo3(signature = (input, dim, index))]
 pub fn gather(input: &Bound<PyAny>, dim: isize, index: &Bound<PyAny>) -> PyResult<PyTensor> {
@@ -574,6 +606,7 @@ pub fn gather(input: &Bound<PyAny>, dim: isize, index: &Bound<PyAny>) -> PyResul
     tensor.gather(dim, &index_tensor)
 }
 
+/// Write `src` into a copy of `input` at the positions `index` names along `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim, index, src))]
 pub fn scatter(
@@ -588,6 +621,7 @@ pub fn scatter(
     tensor.scatter(dim, &index_tensor, &src_tensor)
 }
 
+/// Like `scatter`, but adds into the target instead of overwriting, so repeated indices accumulate.
 #[pyfunction]
 #[pyo3(signature = (input, dim, index, src))]
 pub fn scatter_add(
@@ -602,6 +636,7 @@ pub fn scatter_add(
     tensor.scatter_add(dim, &index_tensor, &src_tensor)
 }
 
+/// Pick from `input` where `condition` is true and from `other` where it is false.
 #[pyfunction(name = "where")]
 #[pyo3(signature = (condition, input, other))]
 pub fn where_function(
@@ -618,6 +653,7 @@ pub fn where_function(
     }
 }
 
+/// Count occurrences of each non-negative integer value.
 #[pyfunction]
 #[pyo3(signature = (input, weights=None, minlength=0))]
 pub fn bincount(
@@ -647,6 +683,7 @@ pub fn bincount(
     Ok(PyTensor::from_tensor(output))
 }
 
+/// Expand class indices into a trailing axis of `num_classes` indicators.
 #[pyfunction]
 #[pyo3(signature = (input, num_classes=None, dtype="float32"))]
 pub fn one_hot(
@@ -695,6 +732,7 @@ pub fn one_hot(
     Ok(PyTensor::from_tensor(output))
 }
 
+/// Replace the positions `mask` selects with `value`.
 #[pyfunction]
 #[pyo3(signature = (input, mask, value))]
 pub fn masked_fill(
@@ -706,6 +744,7 @@ pub fn masked_fill(
     tensor.masked_fill(mask, value)
 }
 
+/// Normalize along `dim` so the values are positive and sum to 1. Shifted by the row maximum, so large inputs do not overflow.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
 pub fn softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
@@ -713,6 +752,7 @@ pub fn softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     tensor.softmax(dim)
 }
 
+/// Logarithm of `softmax`, computed directly rather than as `log(softmax(x))`, which underflows for confident rows.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None))]
 pub fn log_softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
@@ -720,6 +760,7 @@ pub fn log_softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTenso
     tensor.log_softmax(dim)
 }
 
+/// `softmax` over the positions `mask` selects, with the rest excluded from the normalization rather than zeroed after it.
 #[pyfunction]
 #[pyo3(signature = (input, mask, dim=None))]
 pub fn masked_softmax(
@@ -731,6 +772,7 @@ pub fn masked_softmax(
     tensor.masked_softmax(mask, dim)
 }
 
+/// `log_softmax` over the positions `mask` selects. See `masked_softmax`.
 #[pyfunction]
 #[pyo3(signature = (input, mask, dim=None))]
 pub fn masked_log_softmax(
@@ -742,6 +784,7 @@ pub fn masked_log_softmax(
     tensor.masked_log_softmax(mask, dim)
 }
 
+/// Sum over `dim`, or over every element when `dim` is omitted.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn sum(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
@@ -749,6 +792,7 @@ pub fn sum(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> P
     tensor.sum(dim, Some(keepdim))
 }
 
+/// Product over `dim`, or over every element when `dim` is omitted.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn prod(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
@@ -756,6 +800,7 @@ pub fn prod(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> 
     tensor.prod(dim, Some(keepdim))
 }
 
+/// Arithmetic mean over `dim`, or over every element when `dim` is omitted.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn mean(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> PyResult<PyTensor> {
@@ -763,6 +808,7 @@ pub fn mean(input: &Bound<PyAny>, dim: Option<&Bound<PyAny>>, keepdim: bool) -> 
     tensor.mean(dim, Some(keepdim))
 }
 
+/// Whether every element is true (or non-zero) over `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn all(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
@@ -770,6 +816,7 @@ pub fn all(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     tensor.all(dim, Some(keepdim))
 }
 
+/// Whether any element is true (or non-zero) over `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
@@ -777,6 +824,7 @@ pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     tensor.any(dim, Some(keepdim))
 }
 
+/// Largest element over `dim`; with a `dim` it returns the values and their indices.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn max(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
@@ -798,6 +846,7 @@ pub fn max(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     }
 }
 
+/// Smallest element over `dim`; with a `dim` it returns the values and their indices.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn min(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
@@ -819,6 +868,7 @@ pub fn min(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     }
 }
 
+/// Index of the largest element over `dim`. Ties go to the first occurrence.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn argmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
@@ -826,6 +876,7 @@ pub fn argmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     tensor.argmax(dim, Some(keepdim))
 }
 
+/// Index of the smallest element over `dim`. Ties go to the first occurrence.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn argmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
@@ -833,6 +884,7 @@ pub fn argmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     tensor.argmin(dim, Some(keepdim))
 }
 
+/// Running sum along `dim`, keeping the input's shape.
 #[pyfunction]
 #[pyo3(signature = (input, dim))]
 pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
@@ -840,6 +892,7 @@ pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     tensor.cumsum(dim)
 }
 
+/// Running product along `dim`, keeping the input's shape.
 #[pyfunction]
 #[pyo3(signature = (input, dim))]
 pub fn cumprod(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
@@ -847,6 +900,7 @@ pub fn cumprod(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     tensor.cumprod(dim)
 }
 
+/// Standard deviation over `dim`. `unbiased` applies Bessel's correction.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 #[pyo3(name = "std")]
@@ -860,6 +914,7 @@ pub fn std_fn(
     tensor.std(dim, Some(unbiased), Some(keepdim))
 }
 
+/// Variance over `dim`. `unbiased` applies Bessel's correction.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
 pub fn var(
@@ -872,6 +927,7 @@ pub fn var(
     tensor.var(dim, Some(unbiased), Some(keepdim))
 }
 
+/// Vector `p`-norm over `dim`, or over every element when `dim` is omitted.
 #[pyfunction]
 #[pyo3(signature = (input, p=None, dim=None, keepdim=false))]
 pub fn norm(
@@ -884,6 +940,7 @@ pub fn norm(
     tensor.norm(p, dim, Some(keepdim))
 }
 
+/// `log(sum(exp(x)))` over `dim`, shifted by the maximum so large values do not overflow.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn logsumexp(
@@ -895,6 +952,7 @@ pub fn logsumexp(
     tensor.logsumexp(dim, Some(keepdim))
 }
 
+/// Like `sum`, treating NaN as zero. An all-NaN slice sums to 0.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nansum(
@@ -906,6 +964,7 @@ pub fn nansum(
     tensor.nansum(dim, Some(keepdim))
 }
 
+/// Like `mean`, ignoring NaN. A slice that is entirely NaN gives NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nanmean(
@@ -917,6 +976,7 @@ pub fn nanmean(
     tensor.nanmean(dim, Some(keepdim))
 }
 
+/// Like `max`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nanmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
@@ -938,6 +998,7 @@ pub fn nanmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     }
 }
 
+/// Like `min`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nanmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
@@ -969,21 +1030,25 @@ fn finite_predicate(
         .map_err(_convert_error)
 }
 
+/// Element-wise test for NaN.
 #[pyfunction]
 pub fn isnan(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     finite_predicate(input, Tensor::isnan)
 }
 
+/// Element-wise test for positive or negative infinity.
 #[pyfunction]
 pub fn isinf(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     finite_predicate(input, Tensor::isinf)
 }
 
+/// Element-wise test for a value that is neither NaN nor infinite.
 #[pyfunction]
 pub fn isfinite(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     finite_predicate(input, Tensor::isfinite)
 }
 
+/// Replace NaN with `nan` and the infinities with `posinf`/`neginf`, defaulting to the dtype's finite extremes.
 #[pyfunction]
 #[pyo3(signature = (input, nan=0.0, posinf=None, neginf=None))]
 pub fn nan_to_num(
@@ -996,6 +1061,7 @@ pub fn nan_to_num(
     tensor.nan_to_num(nan, posinf, neginf)
 }
 
+/// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
 #[pyfunction]
 #[pyo3(signature = (input, lambd=0.5))]
 pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
@@ -1003,6 +1069,7 @@ pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
     tensor.hardshrink(Some(lambd))
 }
 
+/// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
 #[pyfunction]
 #[pyo3(signature = (input, beta=1.0, threshold=20.0))]
 pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: f64) -> PyResult<PyTensor> {
@@ -1010,6 +1077,7 @@ pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: f64) -> PyResult<PyT
     tensor.softplus(Some(beta), Some(threshold))
 }
 
+/// Gaussian Error Linear Unit, `x * Phi(x)`. Pass `approximate=\"tanh\"` for the tanh approximation.
 #[pyfunction]
 #[pyo3(signature = (input, approximate="none"))]
 pub fn gelu(input: &Bound<PyAny>, approximate: &str) -> PyResult<PyTensor> {
@@ -1017,6 +1085,7 @@ pub fn gelu(input: &Bound<PyAny>, approximate: &str) -> PyResult<PyTensor> {
     tensor.gelu(Some(approximate))
 }
 
+/// Exponential Linear Unit: `x` where positive, `alpha * (exp(x) - 1)` elsewhere.
 #[pyfunction]
 #[pyo3(signature = (input, alpha=1.0))]
 pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
@@ -1024,6 +1093,8 @@ pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
     tensor.elu(Some(alpha))
 }
 
+/// `x` where positive, `negative_slope * x` elsewhere.
+///
 /// The one activation that had no functional form: `relu`, `elu`, `selu`,
 /// `silu`, `gelu`, `softplus`, `hardshrink` and `softsign` all did, and
 /// `nn.LeakyReLU` existed as a layer, but `F.leaky_relu` did not.
@@ -1034,6 +1105,7 @@ pub fn leaky_relu(input: &Bound<PyAny>, negative_slope: f64) -> PyResult<PyTenso
     tensor.leaky_relu(Some(negative_slope))
 }
 
+/// Zero everything below the `diagonal`-th diagonal.
 #[pyfunction]
 #[pyo3(signature = (input, diagonal=0))]
 pub fn triu(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
@@ -1041,6 +1113,7 @@ pub fn triu(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
     tensor.triu(diagonal)
 }
 
+/// Zero everything above the `diagonal`-th diagonal.
 #[pyfunction]
 #[pyo3(signature = (input, diagonal=0))]
 pub fn tril(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
@@ -1048,6 +1121,7 @@ pub fn tril(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
     tensor.tril(diagonal)
 }
 
+/// The requested diagonal of the last two dimensions, as a new trailing axis.
 #[pyfunction]
 #[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
 pub fn diagonal(
@@ -1060,6 +1134,7 @@ pub fn diagonal(
     tensor.diagonal(offset, dim1, dim2)
 }
 
+/// Sum of the main diagonal.
 #[pyfunction]
 #[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
 pub fn trace(input: &Bound<PyAny>, offset: isize, dim1: isize, dim2: isize) -> PyResult<PyTensor> {
@@ -1067,12 +1142,14 @@ pub fn trace(input: &Bound<PyAny>, offset: isize, dim1: isize, dim2: isize) -> P
     tensor.trace(offset, dim1, dim2)
 }
 
+/// Solve the linear system `A x = b` for `x`.
 #[pyfunction]
 pub fn solve(lhs: &Bound<PyAny>, rhs: &Bound<PyAny>) -> PyResult<PyTensor> {
     let lhs_tensor = borrow_tensor(lhs)?;
     lhs_tensor.solve(rhs)
 }
 
+/// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
 #[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
 pub fn topk(
@@ -1089,6 +1166,7 @@ pub fn topk(
     tensor.topk(k as usize, dim, Some(largest), Some(sorted))
 }
 
+/// Sort along `dim`, returning the sorted values and the indices that produced them.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, descending=false, stable=false))]
 pub fn sort(
@@ -1101,6 +1179,7 @@ pub fn sort(
     tensor.sort(dim, Some(descending), Some(stable))
 }
 
+/// The indices that would sort along `dim`.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, descending=false, stable=false))]
 pub fn argsort(
@@ -1113,6 +1192,7 @@ pub fn argsort(
     tensor.argsort(dim, Some(descending), Some(stable))
 }
 
+/// Middle element over `dim`. For an even count this is the lower of the two, not their average -- use `quantile(0.5)` for the interpolated definition.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<Py<PyAny>> {
@@ -1134,6 +1214,7 @@ pub fn median(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     }
 }
 
+/// Like `median`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
 pub fn nanmedian(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
@@ -1141,6 +1222,7 @@ pub fn nanmedian(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyR
     tensor.nanmedian(dim, Some(keepdim))
 }
 
+/// The `q`-th quantile over `dim`, interpolating between neighbouring elements.
 #[pyfunction]
 #[pyo3(signature = (input, q, dim=None, keepdim=false, interpolation="linear"))]
 pub fn quantile(
@@ -1154,6 +1236,7 @@ pub fn quantile(
     tensor.quantile(q, dim, Some(keepdim), Some(interpolation))
 }
 
+/// Like `quantile`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, q, dim=None, keepdim=false, interpolation="linear"))]
 pub fn nanquantile(
@@ -1167,6 +1250,7 @@ pub fn nanquantile(
     tensor.nanquantile(q, dim, Some(keepdim), Some(interpolation))
 }
 
+/// Normalize over the trailing `normalized_shape` dimensions using that slice's own mean and variance, then scale and shift.
 #[pyfunction]
 #[pyo3(signature = (input, normalized_shape, weight=None, bias=None, eps=1e-5))]
 pub fn layer_norm(
@@ -1266,18 +1350,21 @@ pub fn glu(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Join tensors along an existing dimension. Every other dimension must match.
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
     PyTensor::concatenate(tensors, Some(dim))
 }
 
+/// Join tensors along a new dimension, which all of them must be shaped alike for.
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn stack(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, Some(dim))
 }
 
+/// Element-wise test for being within `rtol`/`atol`.
 #[pyfunction]
 #[pyo3(signature = (input, other, rtol=None, atol=None, equal_nan=false))]
 pub fn isclose(
@@ -1291,6 +1378,7 @@ pub fn isclose(
     lhs.isclose(other, rtol, atol, equal_nan)
 }
 
+/// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
 #[pyfunction]
 pub fn array_equal(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<bool> {
     let lhs = PyTensor::from_python_value(input)?;
@@ -1298,6 +1386,7 @@ pub fn array_equal(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<bool>
     lhs.array_equal(&rhs)
 }
 
+/// Whether every pair of elements is within `rtol`/`atol`.
 #[pyfunction]
 #[pyo3(signature = (input, other, rtol=None, atol=None, equal_nan=false))]
 pub fn allclose(

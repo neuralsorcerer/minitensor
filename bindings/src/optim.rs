@@ -16,13 +16,16 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
 
-/// Base class for optimizers
 /// Python spells its booleans `True`/`False`; Rust's `Display` gives
 /// `true`/`false`, which is not valid Python in a `__repr__`.
 fn py_bool(value: bool) -> &'static str {
     if value { "True" } else { "False" }
 }
 
+/// Base class for optimizers.
+///
+/// Every optimizer subclasses this, so `isinstance(opt, optim.Optimizer)`
+/// identifies any of them. See `step`, `zero_grad`, `state_dict` and `lr`.
 #[pyclass(name = "Optimizer", subclass)]
 pub struct PyOptimizer {
     inner: OptimizerType,
@@ -1252,6 +1255,7 @@ impl PyLion {
 /// Register optimizer module with Python
 pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyResult<()> {
     let optim_module = Pyo3Module::new(py, "optim")?;
+    optim_module.setattr("__doc__", "Optimizers and learning-rate schedulers.")?;
 
     // Add optimizer classes
     optim_module.add_class::<PyOptimizer>()?;

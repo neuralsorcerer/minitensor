@@ -87,6 +87,7 @@ fn borrow_optional_tensor_mut<'py>(
     value.map(borrow_tensor_mut).transpose()
 }
 
+/// Affine map `input @ weight.T + bias`, with the weight stored `[out_features, in_features]`.
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None))]
 fn dense_layer(
@@ -155,6 +156,7 @@ fn parse_pair_arg(
     }
 }
 
+/// 2-D cross-correlation of `input` with `weight`, with optional stride and zero padding.
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None, stride=None, padding=None))]
 fn conv2d(
@@ -180,6 +182,7 @@ fn conv2d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// 1-D cross-correlation of `input` with `weight`, with optional stride and zero padding.
 #[pyfunction]
 #[pyo3(signature = (input, weight, bias=None, stride=1, padding=0))]
 fn conv1d(
@@ -203,6 +206,7 @@ fn conv1d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Largest value in each window along the last dimension. Stride defaults to the window, unlike convolution.
 #[pyfunction]
 #[pyo3(signature = (input, kernel_size, stride=None, padding=0))]
 fn max_pool1d(
@@ -219,6 +223,7 @@ fn max_pool1d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Mean of each window along the last dimension. Stride defaults to the window.
 #[pyfunction]
 #[pyo3(signature = (input, kernel_size, stride=None, padding=0, count_include_pad=true))]
 fn avg_pool1d(
@@ -241,6 +246,7 @@ fn avg_pool1d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Largest value in each 2-D window. Stride defaults to the window, unlike convolution.
 #[pyfunction]
 #[pyo3(signature = (input, kernel_size, stride=None, padding=None))]
 fn max_pool2d(
@@ -259,6 +265,7 @@ fn max_pool2d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Mean of each 2-D window. Stride defaults to the window.
 #[pyfunction]
 #[pyo3(signature = (input, kernel_size, stride=None, padding=None, count_include_pad=true))]
 fn avg_pool2d(
@@ -283,6 +290,7 @@ fn avg_pool2d(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Normalize each channel over the batch. In training mode it uses the batch statistics and updates the running ones; in evaluation mode it uses the running ones.
 #[pyfunction]
 #[pyo3(signature = (input, running_mean=None, running_var=None, weight=None, bias=None, training=true, momentum=0.1, eps=1e-5))]
 #[allow(clippy::too_many_arguments)]
@@ -318,6 +326,7 @@ fn batch_norm(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Softmax cross-entropy. The target is either one class index per prediction, or a full score per class. `dim` selects the class axis and defaults to 1.
 #[pyfunction]
 #[pyo3(signature = (input, target, reduction="mean", dim=1))]
 fn cross_entropy(
@@ -345,6 +354,7 @@ fn cross_entropy(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Zero each element independently with probability `p` and rescale the rest by `1/(1-p)`, so the mean is unchanged. A no-op when `training` is false.
 #[pyfunction(name = "dropout")]
 #[pyo3(signature = (input, p=0.5, training=true))]
 fn dropout_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResult<PyTensor> {
@@ -359,6 +369,7 @@ fn dropout_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResult<
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Like `dropout`, but zeroes whole channels rather than individual elements.
 #[pyfunction(name = "dropout2d")]
 #[pyo3(signature = (input, p=0.5, training=true))]
 fn dropout2d_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResult<PyTensor> {
@@ -373,6 +384,7 @@ fn dropout2d_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResul
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Mean squared error between predictions and targets.
 #[pyfunction(name = "mse_loss")]
 #[pyo3(signature = (input, target, reduction=None))]
 fn mse_loss_functional(
@@ -390,8 +402,7 @@ fn mse_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// `beta` was previously fixed at 1.0 -- `SmoothL1Loss` had no field for it.
-/// The default is unchanged.
+/// `beta` was previously fixed at 1.0 -- `SmoothL1Loss` had no field for it. The default is unchanged.
 #[pyfunction(name = "smooth_l1_loss")]
 #[pyo3(signature = (input, target, reduction=None, beta=1.0))]
 fn smooth_l1_loss_functional(
@@ -410,6 +421,7 @@ fn smooth_l1_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Squared error within `delta` of the target and linear beyond it, so outliers pull less than under `mse_loss`.
 #[pyfunction(name = "huber_loss")]
 #[pyo3(signature = (input, target, reduction=None, delta=1.0))]
 fn huber_loss_functional(
@@ -431,6 +443,7 @@ fn huber_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Mean absolute error between predictions and targets.
 #[pyfunction(name = "l1_loss")]
 #[pyo3(signature = (input, target, reduction=None))]
 fn l1_loss_functional(
@@ -446,6 +459,7 @@ fn l1_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Kullback-Leibler divergence from `target` to `input`, with `input` given as log-probabilities.
 #[pyfunction(name = "kl_div")]
 #[pyo3(signature = (input, target, reduction=None))]
 fn kl_div_functional(
@@ -461,6 +475,7 @@ fn kl_div_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Cross-entropy down-weighted on well-classified examples by `(1 - p) ** gamma`, for imbalanced classes.
 #[pyfunction(name = "focal_loss")]
 #[pyo3(signature = (input, target, alpha=0.25, gamma=2.0, reduction=None))]
 fn focal_loss_functional(
@@ -484,6 +499,7 @@ fn focal_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// `log(cosh(prediction - target))`: smooth everywhere, and asymptotically linear like `l1_loss`.
 #[pyfunction(name = "log_cosh_loss")]
 #[pyo3(signature = (input, target, reduction=None))]
 fn log_cosh_loss_functional(
@@ -501,6 +517,7 @@ fn log_cosh_loss_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Binary cross-entropy, taking probabilities. Use the `_with_logits` form for raw scores.
 #[pyfunction(name = "binary_cross_entropy")]
 #[pyo3(signature = (input, target, reduction="mean"))]
 fn binary_cross_entropy_functional(
@@ -517,6 +534,7 @@ fn binary_cross_entropy_functional(
     Ok(PyTensor::from_tensor(result))
 }
 
+/// Binary cross-entropy taking raw scores, fusing the sigmoid so large-magnitude logits do not saturate.
 #[pyfunction(name = "binary_cross_entropy_with_logits")]
 #[pyo3(signature = (input, target, pos_weight=None, reduction="mean"))]
 fn binary_cross_entropy_with_logits_functional(
@@ -1058,9 +1076,7 @@ impl PyModule {
         }
     }
 
-    /// Clone the inner layer into a boxed trait object. Written out per variant
-    /// rather than derived from `module_types!` because `Sequential` is not
-    /// `Clone` and is rejected outright.
+    /// Clone the inner layer into a boxed trait object. Written out per variant rather than derived from `module_types!` because `Sequential` is not `Clone` and is rejected outright.
     pub fn to_layer(&self) -> PyResult<Box<dyn Layer>> {
         let layer: Box<dyn Layer> = match &self.inner {
             ModuleType::DenseLayer(layer) => layer.clone(),

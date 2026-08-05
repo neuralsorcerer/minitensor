@@ -235,8 +235,9 @@ impl PyExponentialLR {
     }
 }
 
-/// Anneals the learning rate from its base value down to `eta_min` following a
-/// half cosine over `t_max` steps, then holds it there.
+/// Follows a half cosine from the base learning rate down to `eta_min`.
+///
+/// Reaches `eta_min` after `t_max` steps and holds it there.
 #[pyclass(name = "CosineAnnealingLR", extends = PyLRScheduler)]
 pub struct PyCosineAnnealingLR;
 

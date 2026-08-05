@@ -201,7 +201,7 @@ impl PyDropout2d {
     }
 }
 
-/// Conv1d layer
+/// 1-D convolution over the last dimension, learning `out_channels` filters.
 #[pyclass(name = "Conv1d", extends = PyModule)]
 pub struct PyConv1d;
 
@@ -478,7 +478,7 @@ impl PyAvgPool2d {
     }
 }
 
-/// Conv2d layer
+/// 2-D convolution over the last two dimensions, learning `out_channels` filters.
 #[pyclass(name = "Conv2d", extends = PyModule)]
 pub struct PyConv2d;
 
@@ -1026,6 +1026,11 @@ recurrent_class!(
     false
 );
 
+/// Scaled dot-product attention over `num_heads` heads.
+///
+/// Called with one tensor it is self-attention; called with separate query,
+/// key and value sequences it is cross-attention. `embed_dim` must divide
+/// evenly by `num_heads`.
 #[pyclass(name = "MultiheadAttention", extends = PyModule)]
 pub struct PyMultiheadAttention;
 
@@ -1684,6 +1689,10 @@ impl PyFocalLoss {
 /// Register neural network module with Python
 pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyResult<()> {
     let nn_module = Pyo3Module::new(py, "nn")?;
+    nn_module.setattr(
+        "__doc__",
+        "Neural network layers, losses and the functional forms of both.",
+    )?;
 
     // Add layer classes
     nn_module.add_class::<PyModule>()?;

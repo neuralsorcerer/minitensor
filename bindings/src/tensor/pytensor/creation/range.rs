@@ -7,6 +7,7 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
+    /// Evenly spaced values over `[start, end)` with the given step.
     #[staticmethod]
     #[pyo3(signature = (start, end=None, step=1.0, dtype=None, device=None, requires_grad=false))]
     fn arange(
@@ -30,6 +31,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// `steps` values evenly spaced over `[start, end]`, inclusive of both.
     #[staticmethod]
     #[pyo3(signature = (start, end, steps, dtype=None, device=None, requires_grad=false))]
     fn linspace(
@@ -52,6 +54,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// `steps` values evenly spaced on a log scale between `base ** start` and `base ** end`.
     #[staticmethod]
     #[pyo3(signature = (start, end, steps, base=None, dtype=None, device=None, requires_grad=false))]
     fn logspace(
@@ -76,6 +79,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A tensor holding a copy of a NumPy array's data.
     #[staticmethod]
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {

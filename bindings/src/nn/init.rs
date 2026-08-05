@@ -253,6 +253,10 @@ fn calculate_fan_in_and_fan_out(shape: Vec<isize>) -> PyResult<(usize, usize)> {
 
 pub fn register(py: Python, parent: &Bound<Pyo3Module>) -> PyResult<()> {
     let module = Pyo3Module::new(py, "init")?;
+    module.setattr(
+        "__doc__",
+        "Weight initialization schemes for parameters you create yourself.",
+    )?;
     module.add_function(wrap_pyfunction!(zeros, &module)?)?;
     module.add_function(wrap_pyfunction!(ones, &module)?)?;
     module.add_function(wrap_pyfunction!(constant, &module)?)?;

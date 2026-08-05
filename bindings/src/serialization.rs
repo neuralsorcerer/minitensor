@@ -15,7 +15,7 @@ use engine::{
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
-/// Python wrapper for ModelVersion
+/// The format version a checkpoint was written with, and whether a given reader can load it.
 #[pyclass(name = "ModelVersion", from_py_object)]
 #[derive(Clone)]
 pub struct PyModelVersion {
@@ -81,7 +81,7 @@ impl PyModelVersion {
     }
 }
 
-/// Python wrapper for ModelMetadata
+/// Name, description, architecture and shapes recorded alongside a saved model. Carried through save and load but not used by either.
 #[pyclass(name = "ModelMetadata", from_py_object)]
 #[derive(Clone)]
 pub struct PyModelMetadata {
@@ -176,7 +176,7 @@ impl PyModelMetadata {
     }
 }
 
-/// Python wrapper for SerializationFormat
+/// How a checkpoint is encoded: `json` (readable, large), `binary` (compact) or `msgpack` (compact, cross-language).
 #[pyclass(name = "SerializationFormat", from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PySerializationFormat {
@@ -235,7 +235,7 @@ impl PySerializationFormat {
     }
 }
 
-/// Python wrapper for ModelSerializer
+/// Reads and writes `SerializedModel` files in any of the `SerializationFormat`s.
 #[pyclass(name = "ModelSerializer")]
 pub struct PyModelSerializer;
 
@@ -283,7 +283,7 @@ impl PyModelSerializer {
     }
 }
 
-/// Python wrapper for SerializedModel
+/// A model's metadata and state dictionary together, as written to a file.
 #[pyclass(name = "SerializedModel", from_py_object)]
 #[derive(Clone)]
 pub struct PySerializedModel {
@@ -339,7 +339,7 @@ impl PySerializedModel {
     }
 }
 
-/// Python wrapper for StateDict
+/// A model's parameters and buffers by name, as returned by `module.state_dict()`. Buffers are the non-trainable tensors a layer needs to reproduce its behaviour, such as BatchNorm's running statistics.
 #[pyclass(name = "StateDict", from_py_object)]
 #[derive(Clone)]
 pub struct PyStateDict {
@@ -390,7 +390,7 @@ impl PyStateDict {
     }
 }
 
-/// Python wrapper for DeploymentModel
+/// A saved model packaged with inference configuration, for loading without the training-time layer definitions.
 #[pyclass(name = "DeploymentModel", from_py_object)]
 #[derive(Clone)]
 pub struct PyDeploymentModel {
@@ -480,6 +480,7 @@ fn save_model(model: &PySerializedModel, path: &str, format: Option<&str>) -> Py
     PyModelSerializer::save(model, path, format.as_ref())
 }
 
+/// Read a model saved by `save_model`, inferring the format from the file extension.
 #[pyfunction]
 #[pyo3(signature = (path, format=None))]
 fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
@@ -493,6 +494,7 @@ fn load_model(path: &str, format: Option<&str>) -> PyResult<PySerializedModel> {
 
 pub fn register_serialization_module(py: Python, parent_module: &Bound<PyModule>) -> PyResult<()> {
     let serialization_module = PyModule::new(py, "serialization")?;
+    serialization_module.setattr("__doc__", "Reading and writing model checkpoints.")?;
 
     // Add classes
     serialization_module.add_class::<PyModelVersion>()?;

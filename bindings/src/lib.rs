@@ -43,16 +43,25 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     optim::register_optim_module(py, m)?;
 
     let functional_module = PyModule::new(py, "functional")?;
+    functional_module.setattr(
+        "__doc__",
+        "Stateless tensor operations, as free functions taking the tensor as their first argument.",
+    )?;
     functional::register_functional_module(py, &functional_module)?;
     m.add_submodule(&functional_module)?;
 
     // Add debugging utilities
     let debug_module = PyModule::new(py, "debug")?;
+    debug_module.setattr("__doc__", "Timers and tensor inspection helpers.")?;
     debug::init_debug_module(py, &debug_module)?;
     m.add_submodule(&debug_module)?;
 
     // Add NumPy compatibility functions
     let numpy_module = PyModule::new(py, "numpy_compat")?;
+    numpy_module.setattr(
+        "__doc__",
+        "NumPy-compatible spellings of tensor creation and conversion.",
+    )?;
     numpy_compat::numpy_compat(py, &numpy_module)?;
     m.add_submodule(&numpy_module)?;
 
@@ -61,6 +70,10 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
 
     // Add plugin system
     let plugins_module = PyModule::new(py, "plugins")?;
+    plugins_module.setattr(
+        "__doc__",
+        "Registry for loading custom operations and layers written outside the engine.",
+    )?;
     plugins::register_plugin_module(py, &plugins_module)?;
     m.add_submodule(&plugins_module)?;
 
@@ -126,8 +139,7 @@ fn no_grad() -> GradMode {
     }
 }
 
-/// Return a context manager that re-enables gradient recording, e.g. inside
-/// an outer `no_grad()` block.
+/// Return a context manager that re-enables gradient recording, e.g. inside an outer `no_grad()` block.
 #[pyfunction]
 fn enable_grad() -> GradMode {
     GradMode {
@@ -148,11 +160,13 @@ fn set_grad_enabled(enabled: bool) -> bool {
     engine::autograd::set_grad_enabled(enabled)
 }
 
+/// The gradient stored for `tensor` by the last backward pass, or None.
 #[pyfunction]
 fn get_gradient(tensor: &PyTensor) -> PyResult<Option<PyTensor>> {
     Ok(engine::autograd::get_gradient(tensor.tensor()).map(PyTensor::from_tensor))
 }
 
+/// Drop every recorded node and gradient. Bounds memory in a loop that only runs forward passes -- though `no_grad()` is the better fix, since it records nothing in the first place.
 #[pyfunction]
 fn clear_autograd_graph() -> PyResult<()> {
     engine::autograd::clear_graph().map_err(_convert_error)
@@ -171,27 +185,32 @@ fn autograd_graph_size() -> PyResult<(usize, usize)> {
     Ok(engine::autograd::graph_size())
 }
 
+/// Whether a backward pass has run since the graph was last added to.
 #[pyfunction]
 fn is_autograd_graph_consumed() -> PyResult<bool> {
     Ok(engine::autograd::is_graph_consumed())
 }
 
+/// Mark the graph as consumed without running a backward pass.
 #[pyfunction]
 fn mark_autograd_graph_consumed() -> PyResult<()> {
     engine::autograd::mark_graph_consumed();
     Ok(())
 }
 
+/// The dtype new tensors get when none is given.
 #[pyfunction]
 fn get_default_dtype() -> PyResult<String> {
     Ok(dtype::get_default_dtype())
 }
 
+/// Set the dtype new tensors get when none is given.
 #[pyfunction]
 fn set_default_dtype(dtype: &str) -> PyResult<()> {
     dtype::set_default_dtype(dtype)
 }
 
+/// Seed the global random number generator, making `randn` and friends reproducible.
 #[pyfunction]
 fn manual_seed(seed: u64) -> PyResult<()> {
     engine::manual_seed(seed);

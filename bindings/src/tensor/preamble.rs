@@ -309,7 +309,11 @@ impl ShapeSequence {
     }
 }
 
-/// Python wrapper for Tensor
+/// An n-dimensional array with optional gradient tracking.
+///
+/// Construct from a NumPy array or nested sequence, or with one of the
+/// creation functions (`zeros`, `randn`, `arange`, ...). Operations record
+/// onto the autograd graph when any operand has `requires_grad`.
 #[pyclass(name = "Tensor", module = "minitensor._core", from_py_object)]
 #[derive(Clone)]
 pub struct PyTensor {

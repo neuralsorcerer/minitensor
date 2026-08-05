@@ -7,27 +7,33 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
+    /// Element-wise equality, giving a boolean tensor.
     // Comparison operations
     pub fn eq(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.eq_from_py(other)
     }
 
+    /// Element-wise inequality, giving a boolean tensor.
     pub fn ne(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.ne_from_py(other)
     }
 
+    /// Element-wise `<`, giving a boolean tensor.
     pub fn lt(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.lt_from_py(other)
     }
 
+    /// Element-wise `<=`, giving a boolean tensor.
     pub fn le(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.le_from_py(other)
     }
 
+    /// Element-wise `>`, giving a boolean tensor.
     pub fn gt(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.gt_from_py(other)
     }
 
+    /// Element-wise `>=`, giving a boolean tensor.
     pub fn ge(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.ge_from_py(other)
     }
@@ -74,6 +80,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
     pub fn array_equal(&self, other: &PyTensor) -> PyResult<bool> {
         if self.inner.shape() != other.inner.shape() {
             return Ok(false);
@@ -83,6 +90,7 @@ impl PyTensor {
         Ok(lhs.array_equal(&rhs))
     }
 
+    /// Whether every pair of elements is within `rtol`/`atol`.
     #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
     pub fn allclose(
         &self,

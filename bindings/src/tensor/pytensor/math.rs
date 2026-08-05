@@ -8,21 +8,25 @@ use super::*;
 #[pymethods]
 impl PyTensor {
     // Mathematical functions
+    /// Element-wise absolute value.
     pub fn abs(&self) -> PyResult<Self> {
         let result = self.inner.abs().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise square root. Negative inputs give NaN.
     pub fn sqrt(&self) -> PyResult<Self> {
         let result = self.inner.sqrt().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `1 / sqrt(x)`, computed without the intermediate root.
     pub fn rsqrt(&self) -> PyResult<Self> {
         let result = self.inner.rsqrt().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.
     pub fn pow(&self, exponent: &Bound<PyAny>) -> PyResult<Self> {
         if let Ok(exp_tensor) = exponent.extract::<PyTensor>() {
             let result = self.inner.pow(&exp_tensor.inner).map_err(_convert_error)?;
@@ -39,101 +43,121 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `e ** x`.
     pub fn exp(&self) -> PyResult<Self> {
         let result = self.inner.exp().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.
     pub fn log(&self) -> PyResult<Self> {
         let result = self.inner.log().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise base-2 logarithm.
     pub fn log2(&self) -> PyResult<Self> {
         let result = self.inner.log2().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise base-10 logarithm.
     pub fn log10(&self) -> PyResult<Self> {
         let result = self.inner.log10().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise error function.
     pub fn erf(&self) -> PyResult<Self> {
         let result = self.inner.erf().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise complementary error function, `1 - erf(x)`, accurate in the tails where that subtraction would cancel.
     pub fn erfc(&self) -> PyResult<Self> {
         let result = self.inner.erfc().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.
     pub fn expm1(&self) -> PyResult<Self> {
         let result = self.inner.expm1().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise sine, taking radians.
     pub fn sin(&self) -> PyResult<Self> {
         let result = self.inner.sin().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise cosine, taking radians.
     pub fn cos(&self) -> PyResult<Self> {
         let result = self.inner.cos().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise tangent, taking radians.
     pub fn tan(&self) -> PyResult<Self> {
         let result = self.inner.tan().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse sine, returning radians in `[-pi/2, pi/2]`. Inputs outside `[-1, 1]` give NaN.
     pub fn asin(&self) -> PyResult<Self> {
         let result = self.inner.asin().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse cosine, returning radians in `[0, pi]`. Inputs outside `[-1, 1]` give NaN.
     pub fn acos(&self) -> PyResult<Self> {
         let result = self.inner.acos().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse tangent, returning radians in `(-pi/2, pi/2)`.
     pub fn atan(&self) -> PyResult<Self> {
         let result = self.inner.atan().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise hyperbolic sine.
     pub fn sinh(&self) -> PyResult<Self> {
         let result = self.inner.sinh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise hyperbolic cosine.
     pub fn cosh(&self) -> PyResult<Self> {
         let result = self.inner.cosh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse hyperbolic sine.
     pub fn asinh(&self) -> PyResult<Self> {
         let result = self.inner.asinh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse hyperbolic cosine. Inputs below 1 give NaN.
     pub fn acosh(&self) -> PyResult<Self> {
         let result = self.inner.acosh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse hyperbolic tangent. Inputs outside `(-1, 1)` give NaN or infinity.
     pub fn atanh(&self) -> PyResult<Self> {
         let result = self.inner.atanh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Replace NaN with `nan` and the infinities with `posinf`/`neginf`, defaulting to the dtype's finite extremes.
     #[pyo3(signature = (nan=0.0, posinf=None, neginf=None))]
     pub fn nan_to_num(&self, nan: f64, posinf: Option<f64>, neginf: Option<f64>) -> PyResult<Self> {
         let result = self
@@ -168,11 +192,13 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `max(x, 0)`.
     pub fn relu(&self) -> PyResult<Self> {
         let result = self.inner.relu().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
     #[pyo3(signature = (lambd=None))]
     pub fn hardshrink(&self, lambd: Option<f64>) -> PyResult<Self> {
         let result = self
@@ -182,6 +208,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Normalize along `dim` so the values are positive and sum to 1. Shifted by the row maximum, so large inputs do not overflow.
     #[pyo3(signature = (dim=None))]
     pub fn softmax(&self, dim: Option<isize>) -> PyResult<Self> {
         let resolved_dim = dim
@@ -193,6 +220,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Logarithm of `softmax`, computed directly rather than as `log(softmax(x))`, which underflows for confident rows.
     #[pyo3(signature = (dim=None))]
     pub fn log_softmax(&self, dim: Option<isize>) -> PyResult<Self> {
         let resolved_dim = dim
@@ -207,6 +235,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `softmax` over the positions `mask` selects, with the rest excluded from the normalization rather than zeroed after it.
     #[pyo3(signature = (mask, dim=None))]
     pub fn masked_softmax(&self, mask: &Bound<PyAny>, dim: Option<isize>) -> PyResult<Self> {
         let mask_tensor = tensor_from_py_value(&self.inner, mask)?;
@@ -222,6 +251,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `log_softmax` over the positions `mask` selects. See `masked_softmax`.
     #[pyo3(signature = (mask, dim=None))]
     pub fn masked_log_softmax(&self, mask: &Bound<PyAny>, dim: Option<isize>) -> PyResult<Self> {
         let mask_tensor = tensor_from_py_value(&self.inner, mask)?;
@@ -237,6 +267,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Normalize over the trailing `normalized_shape` dimensions using that slice's own mean and variance, then scale and shift.
     #[pyo3(signature = (normalized_shape, weight=None, bias=None, eps=1e-5))]
     pub fn layer_norm(
         &self,
@@ -285,6 +316,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Gaussian Error Linear Unit, `x * Phi(x)`. Pass `approximate="tanh"` for the tanh approximation.
     #[pyo3(signature = (approximate=None))]
     pub fn gelu(&self, approximate: Option<&str>) -> PyResult<Self> {
         let approx_mode = approximate.unwrap_or("none");
@@ -302,11 +334,13 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `1 / (1 + exp(-x))`, evaluated so that large-magnitude inputs saturate instead of producing NaN.
     pub fn sigmoid(&self) -> PyResult<Self> {
         let result = self.inner.sigmoid().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
     #[pyo3(signature = (beta=None, threshold=None))]
     pub fn softplus(&self, beta: Option<f64>, threshold: Option<f64>) -> PyResult<Self> {
         let result = self
@@ -316,6 +350,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Exponential Linear Unit: `x` where positive, `alpha * (exp(x) - 1)` elsewhere.
     #[pyo3(signature = (alpha=None))]
     pub fn elu(&self, alpha: Option<f64>) -> PyResult<Self> {
         let result = self
@@ -325,6 +360,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `x` where positive, `negative_slope * x` elsewhere.
     #[pyo3(signature = (negative_slope=None))]
     pub fn leaky_relu(&self, negative_slope: Option<f64>) -> PyResult<Self> {
         let result = self
@@ -334,21 +370,25 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Scaled Exponential Linear Unit, with the fixed constants that make it self-normalizing.
     pub fn selu(&self) -> PyResult<Self> {
         let result = self.inner.selu().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Sigmoid Linear Unit (Swish), `x * sigmoid(x)`.
     pub fn silu(&self) -> PyResult<Self> {
         let result = self.inner.silu().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `x / (1 + abs(x))`.
     pub fn softsign(&self) -> PyResult<Self> {
         let result = self.inner.softsign().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise hyperbolic tangent.
     pub fn tanh(&self) -> PyResult<Self> {
         let result = self.inner.tanh().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

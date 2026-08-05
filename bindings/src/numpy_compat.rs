@@ -93,6 +93,8 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Convert a NumPy array, sequence or scalar into a tensor, without copying
+/// when the input is already one.
 #[pyfunction]
 #[pyo3(signature = (data, dtype=None, requires_grad=false))]
 fn asarray(data: &Bound<PyAny>, dtype: Option<&str>, requires_grad: bool) -> PyResult<PyTensor> {

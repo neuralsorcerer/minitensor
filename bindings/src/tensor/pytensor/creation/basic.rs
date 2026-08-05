@@ -8,6 +8,7 @@ use super::*;
 #[pymethods]
 impl PyTensor {
     // Static tensor creation methods
+    /// A tensor of the requested shape whose contents are unspecified.
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn empty(
@@ -26,6 +27,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A tensor of zeros.
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn zeros(
@@ -44,6 +46,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A tensor of ones.
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     pub fn ones(
@@ -62,6 +65,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Uniform samples over `[a, b)`.
     #[staticmethod]
     #[pyo3(signature = (*shape, low=0.0, high=1.0, dtype=None, device=None, requires_grad=false))]
     fn uniform(
@@ -81,6 +85,8 @@ impl PyTensor {
         let tensor = create_uniform_tensor(shape, dtype, device, requires_grad, low, high)?;
         Ok(Self::from_tensor(tensor))
     }
+
+    /// Uniform samples from `[0, 1)`.
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     fn rand(
@@ -99,6 +105,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Samples from the standard normal distribution.
     #[staticmethod]
     #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
     fn randn(
@@ -117,6 +124,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Normal samples confined to `[lower, upper]`.
     #[staticmethod]
     #[pyo3(signature = (*shape, mean=0.0, std=1.0, lower=None, upper=None, dtype=None, device=None, requires_grad=false))]
     #[allow(clippy::too_many_arguments)]
@@ -150,6 +158,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Uniform samples shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, low=0.0, high=1.0, dtype=None, device=None, requires_grad=None))]
     fn uniform_like(
@@ -185,10 +194,11 @@ impl PyTensor {
 /// methods: pyo3's attribute macro reads the impl block's tokens, so a
 /// `macro_rules!` call sitting *inside* one would never be expanded in time.
 macro_rules! fan_init_constructors {
-    ($(($name:ident, $like:ident, $kind:ident)),* $(,)?) => {
+    ($(($name:ident, $like:ident, $kind:ident, $doc:literal)),* $(,)?) => {
         #[pymethods]
         impl PyTensor {
             $(
+                #[doc = $doc]
                 #[staticmethod]
                 #[pyo3(signature = (*shape, dtype=None, device=None, requires_grad=false))]
                 fn $name(
@@ -211,6 +221,9 @@ macro_rules! fan_init_constructors {
                     Ok(Self::from_tensor(tensor))
                 }
 
+                #[doc = $doc]
+                #[doc = ""]
+                #[doc = "Shape, dtype and device are taken from `input`."]
                 #[staticmethod]
                 #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
                 fn $like(
@@ -244,10 +257,40 @@ macro_rules! fan_init_constructors {
 }
 
 fan_init_constructors!(
-    (xavier_uniform, xavier_uniform_like, XavierUniform),
-    (xavier_normal, xavier_normal_like, XavierNormal),
-    (he_uniform, he_uniform_like, HeUniform),
-    (he_normal, he_normal_like, HeNormal),
-    (lecun_uniform, lecun_uniform_like, LecunUniform),
-    (lecun_normal, lecun_normal_like, LecunNormal),
+    (
+        xavier_uniform,
+        xavier_uniform_like,
+        XavierUniform,
+        "Uniform over +/- sqrt(6 / (fan_in + fan_out)). Glorot & Bengio (2010)."
+    ),
+    (
+        xavier_normal,
+        xavier_normal_like,
+        XavierNormal,
+        "Normal with std sqrt(2 / (fan_in + fan_out)). Glorot & Bengio (2010)."
+    ),
+    (
+        he_uniform,
+        he_uniform_like,
+        HeUniform,
+        "Uniform over +/- sqrt(6 / fan_in). He et al. (2015); for ReLU networks."
+    ),
+    (
+        he_normal,
+        he_normal_like,
+        HeNormal,
+        "Normal with std sqrt(2 / fan_in). He et al. (2015); for ReLU networks."
+    ),
+    (
+        lecun_uniform,
+        lecun_uniform_like,
+        LecunUniform,
+        "Uniform over +/- sqrt(3 / fan_in). LeCun et al. (1998)."
+    ),
+    (
+        lecun_normal,
+        lecun_normal_like,
+        LecunNormal,
+        "Normal with std sqrt(1 / fan_in). LeCun et al. (1998); for SELU networks."
+    ),
 );

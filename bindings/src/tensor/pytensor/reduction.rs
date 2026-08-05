@@ -7,6 +7,7 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
+    /// Sum over `dim`, or over every element when `dim` is omitted.
     // Reduction operations
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn sum(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
@@ -16,6 +17,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Like `sum`, treating NaN as zero. An all-NaN slice sums to 0.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nansum(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -24,6 +26,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Vector `p`-norm over `dim`, or over every element when `dim` is omitted.
     #[pyo3(signature = (p=None, dim=None, keepdim=false))]
     pub fn norm(
         &self,
@@ -41,6 +44,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `log(sum(exp(x)))` over `dim`, shifted by the maximum so large values do not overflow.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn logsumexp(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -54,6 +58,7 @@ impl PyTensor {
         }
     }
 
+    /// Product over `dim`, or over every element when `dim` is omitted.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn prod(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -62,6 +67,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Arithmetic mean over `dim`, or over every element when `dim` is omitted.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn mean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -70,6 +76,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Like `mean`, ignoring NaN. A slice that is entirely NaN gives NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nanmean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -78,6 +85,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Whether every element is true (or non-zero) over `dim`.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn all(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -85,6 +93,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Whether any element is true (or non-zero) over `dim`.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn any(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -92,18 +101,21 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Running sum along `dim`, keeping the input's shape.
     #[pyo3(signature = (dim))]
     pub fn cumsum(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumsum(dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Running product along `dim`, keeping the input's shape.
     #[pyo3(signature = (dim))]
     pub fn cumprod(&self, dim: isize) -> PyResult<Self> {
         let result = self.inner.cumprod(dim).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Largest element over `dim`; with a `dim` it returns the values and their indices.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn max<'py>(
         &self,
@@ -126,6 +138,7 @@ impl PyTensor {
         }
     }
 
+    /// Like `max`, ignoring NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nanmax<'py>(
         &self,
@@ -148,6 +161,7 @@ impl PyTensor {
         }
     }
 
+    /// Smallest element over `dim`; with a `dim` it returns the values and their indices.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn min<'py>(
         &self,
@@ -170,6 +184,7 @@ impl PyTensor {
         }
     }
 
+    /// Like `min`, ignoring NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nanmin<'py>(
         &self,
@@ -192,6 +207,7 @@ impl PyTensor {
         }
     }
 
+    /// Middle element over `dim`. For an even count this is the lower of the two, not their average -- use `quantile(0.5)` for the interpolated definition.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn median<'py>(
         &self,
@@ -214,6 +230,7 @@ impl PyTensor {
         }
     }
 
+    /// Like `median`, ignoring NaN.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn nanmedian(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -221,6 +238,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The `q`-th quantile over `dim`, interpolating between neighbouring elements.
     #[pyo3(signature = (q, dim=None, keepdim=false, interpolation="linear"))]
     pub fn quantile(
         &self,
@@ -249,6 +267,7 @@ impl PyTensor {
         }
     }
 
+    /// Like `quantile`, ignoring NaN.
     #[pyo3(signature = (q, dim=None, keepdim=false, interpolation="linear"))]
     pub fn nanquantile(
         &self,
@@ -277,6 +296,7 @@ impl PyTensor {
         }
     }
 
+    /// Index of the largest element over `dim`. Ties go to the first occurrence.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn argmax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -284,6 +304,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Index of the smallest element over `dim`. Ties go to the first occurrence.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn argmin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
         let keepdim = keepdim.unwrap_or(false);
@@ -291,6 +312,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
     #[pyo3(signature = (k, dim=None, largest=true, sorted=true))]
     pub fn topk(
         &self,
@@ -310,6 +332,7 @@ impl PyTensor {
         }
     }
 
+    /// Sort along `dim`, returning the sorted values and the indices that produced them.
     #[pyo3(signature = (dim=None, descending=false, stable=false))]
     pub fn sort(
         &self,
@@ -328,6 +351,7 @@ impl PyTensor {
         }
     }
 
+    /// The indices that would sort along `dim`.
     #[pyo3(signature = (dim=None, descending=false, stable=false))]
     pub fn argsort(
         &self,
@@ -346,6 +370,7 @@ impl PyTensor {
         }
     }
 
+    /// Standard deviation over `dim`. `unbiased` applies Bessel's correction.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn std(
         &self,
@@ -363,6 +388,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Variance over `dim`. `unbiased` applies Bessel's correction.
     #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
     pub fn var(
         &self,

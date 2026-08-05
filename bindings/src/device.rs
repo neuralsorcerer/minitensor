@@ -42,7 +42,7 @@ pub(crate) fn resolve_device(device: Option<&PyDevice>) -> PyResult<Device> {
     resolve_device_or(device, Device::cpu())
 }
 
-/// Python wrapper for Device
+/// Where a tensor's data lives. `cpu()` and `cuda(index)` construct one.
 #[pyclass(name = "Device", from_py_object)]
 #[derive(Clone)]
 pub struct PyDevice {

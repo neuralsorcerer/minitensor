@@ -7,27 +7,32 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
+    /// A copy that shares no storage with this tensor but keeps its place in the autograd graph.
     // Tensor operations
     fn clone(&self) -> PyResult<Self> {
         let result = self.inner.deep_clone().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// A view of the same data with gradient tracking switched off.
     fn detach(&self) -> Self {
         Self {
             inner: self.inner.detach(),
         }
     }
 
+    /// Switch gradient tracking off in place.
     fn detach_(&mut self) {
         self.inner.detach_inplace();
     }
 
+    /// This tensor if its memory is already contiguous, otherwise a contiguous copy.
     fn contiguous(&self) -> PyResult<Self> {
         let result = self.inner.contiguous().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Move or cast: give a device, a dtype, or both.
     #[pyo3(signature = (*args, **kwargs))]
     fn to(&self, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDict>>) -> PyResult<Self> {
         let mut dtype_spec: Option<DataType> = None;
@@ -133,6 +138,7 @@ impl PyTensor {
         }
     }
 
+    /// Alias of `clamp`, for NumPy's spelling.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clip(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
         let min_val = parse_clip_bound(min, "min")?;
@@ -141,6 +147,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Limit every element to `[min, max]`. Either bound may be omitted.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clamp(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
         let min_val = parse_clip_bound(min, "min")?;
@@ -149,47 +156,56 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Raise every element below `min` up to it.
     pub fn clamp_min(&self, min: f64) -> PyResult<Self> {
         let result = self.inner.clamp_min(min).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Lower every element above `max` down to it.
     pub fn clamp_max(&self, max: f64) -> PyResult<Self> {
         let result = self.inner.clamp_max(max).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Round to the nearest integer, halves to even.
     #[pyo3(signature = (decimals=0))]
     pub fn round(&self, decimals: i32) -> PyResult<Self> {
         let result = self.inner.round(decimals).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Round towards negative infinity.
     pub fn floor(&self) -> PyResult<Self> {
         let result = self.inner.floor().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Round towards positive infinity.
     pub fn ceil(&self) -> PyResult<Self> {
         let result = self.inner.ceil().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// -1, 0 or 1 according to each element's sign. NaN gives NaN.
     pub fn sign(&self) -> PyResult<Self> {
         let result = self.inner.sign().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise `1 / x`.
     pub fn reciprocal(&self) -> PyResult<Self> {
         let result = self.inner.reciprocal().map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// This tensor on the CPU device.
     fn cpu(&self) -> PyResult<Self> {
         let result = self.inner.to(Device::cpu()).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// A copy converted to `dtype`.
     pub fn astype(&self, dtype: &str) -> PyResult<Self> {
         let dtype = dtype::parse_dtype(dtype)?;
         let result = self.inner.astype(dtype).map_err(_convert_error)?;

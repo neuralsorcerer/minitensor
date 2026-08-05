@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::collections::HashMap;
 
-/// Python wrapper for VersionInfo
+/// A plugin's semantic version, and whether it is compatible with another.
 #[pyclass(name = "VersionInfo", from_py_object)]
 #[derive(Clone)]
 pub struct PyVersionInfo {
@@ -75,7 +75,7 @@ impl PyVersionInfo {
     }
 }
 
-/// Python wrapper for PluginInfo
+/// A plugin's name, version, author and description, as reported by the plugin itself.
 #[pyclass(name = "PluginInfo", from_py_object)]
 #[derive(Clone)]
 pub struct PyPluginInfo {
@@ -226,12 +226,14 @@ fn load_plugin(path: &str) -> PyResult<()> {
     }
 }
 
+/// Unload a plugin by name.
 #[pyfunction]
 fn unload_plugin(name: &str) -> PyResult<()> {
     engine_unload_plugin(name).map_err(_convert_error)?;
     Ok(())
 }
 
+/// Names of every loaded plugin.
 #[pyfunction]
 fn list_plugins() -> PyResult<Vec<PyPluginInfo>> {
     let plugins = engine_list_plugins().map_err(_convert_error)?;
@@ -242,6 +244,7 @@ fn list_plugins() -> PyResult<Vec<PyPluginInfo>> {
         .collect())
 }
 
+/// Metadata for a loaded plugin, or None if it is not loaded.
 #[pyfunction]
 fn get_plugin_info(name: &str) -> PyResult<PyPluginInfo> {
     let info = engine_get_plugin_info(name).map_err(_convert_error)?;
@@ -249,6 +252,7 @@ fn get_plugin_info(name: &str) -> PyResult<PyPluginInfo> {
     Ok(PyPluginInfo { inner: info })
 }
 
+/// Whether a plugin with this name is currently loaded.
 #[pyfunction]
 fn is_plugin_loaded(name: &str) -> PyResult<bool> {
     engine_is_plugin_loaded(name).map_err(_convert_error)
@@ -294,6 +298,7 @@ impl PyPluginRegistry {
         Ok(())
     }
 
+    /// Names of every loaded plugin.
     fn list_plugins(&self) -> Vec<PyPluginInfo> {
         self.plugins
             .values()

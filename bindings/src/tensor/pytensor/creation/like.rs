@@ -7,6 +7,7 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
+    /// Uniform samples shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
     fn rand_like(
@@ -42,6 +43,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Standard normal samples shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
     fn randn_like(
@@ -77,6 +79,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Truncated normal samples shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, mean=0.0, std=1.0, lower=None, upper=None, dtype=None, device=None, requires_grad=None))]
     #[allow(clippy::too_many_arguments)]
@@ -118,6 +121,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// An unspecified-contents tensor shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
     fn empty_like(
@@ -140,6 +144,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Zeros with the same shape, dtype and device as `input`.
     #[staticmethod]
     #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
     fn zeros_like(
@@ -162,6 +167,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Ones with the same shape, dtype and device as `input`.
     #[staticmethod]
     #[pyo3(signature = (input, dtype=None, device=None, requires_grad=None))]
     fn ones_like(
@@ -184,6 +190,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A tensor shaped like `input`, filled with `fill_value`.
     #[staticmethod]
     #[pyo3(signature = (input, fill_value, dtype=None, device=None, requires_grad=None))]
     fn full_like(
@@ -318,6 +325,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Uniform integer samples shaped like `input`.
     #[staticmethod]
     #[pyo3(signature = (input, low, high=None, dtype=None, device=None, requires_grad=None))]
     fn randint_like(
@@ -367,6 +375,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Uniform integer samples from `[low, high)`.
     #[staticmethod]
     #[pyo3(signature = (low, high=None, *shape, dtype=None, device=None, requires_grad=false))]
     fn randint(
@@ -409,6 +418,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A random permutation of `0..n`.
     #[staticmethod]
     #[pyo3(signature = (n, dtype=None, device=None, requires_grad=false))]
     fn randperm(
@@ -438,6 +448,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A 2-D tensor with ones on the main diagonal and zeros elsewhere.
     #[staticmethod]
     #[pyo3(signature = (n, m=None, dtype=None, device=None, requires_grad=false))]
     fn eye(
@@ -456,6 +467,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// A tensor filled with `fill_value`.
     #[staticmethod]
     #[pyo3(signature = (shape, fill_value, dtype=None, device=None, requires_grad=false))]
     pub fn full(
@@ -474,6 +486,7 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
+    /// Convert to a tensor, returning the input unchanged when it already is one of the right dtype and device.
     #[staticmethod]
     #[pyo3(signature = (data, dtype=None, device=None, requires_grad=None, copy=false))]
     fn as_tensor(

@@ -114,17 +114,17 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Floor division (Python `//` semantics; integer operands stay integral)
+    /// Element-wise division rounded towards negative infinity, matching Python's `//`.
     pub fn floor_divide(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.__floordiv__(other)
     }
 
-    /// Python-style remainder (`%`; the result has the divisor's sign)
+    /// Element-wise modulo taking the sign of the divisor, matching Python's `%`.
     pub fn remainder(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.__mod__(other)
     }
 
-    /// Bitwise NOT (`~`): logical NOT for bool, two's complement NOT for ints
+    /// Element-wise bitwise complement, and logical NOT for booleans.
     pub fn bitwise_not(&self) -> PyResult<Self> {
         self.__invert__()
     }
