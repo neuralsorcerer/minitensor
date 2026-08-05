@@ -6,10 +6,14 @@
 
 """Weight initialization.
 
-The engine implemented eleven schemes -- Xavier/Glorot, He/Kaiming and LeCun in
-both uniform and normal forms, plus constant, uniform, normal and truncated
-normal -- and none had a binding. The built-in layers used them; a Python user
-writing their own layer could not, and had to hand-roll the bounds in NumPy.
+Six of these already existed as tensor constructors -- `mt.xavier_uniform`,
+`mt.he_normal` and so on. What `nn.init` adds is the namespace a PyTorch user
+looks in, `calculate_fan_in_and_fan_out`, the Kaiming/Glorot spellings, and a
+`requires_grad` default suited to building parameters.
+
+That last one is a difference between two spellings of the same scheme, so it
+is pinned here rather than left to be discovered:
+`test_the_two_spellings_differ_only_in_their_requires_grad_default`.
 
 Each scheme is checked against its closed form rather than a recorded trace: a
 uniform one by the bound it must not exceed and the standard deviation that
@@ -235,3 +239,67 @@ def test_a_custom_layer_can_be_initialized_with_these():
 
     mt.sum(out).backward()
     assert weight.grad is not None
+
+
+# --- relationship to the top-level constructors ---------------------------
+#
+# `mt.xavier_uniform(shape)` and `nn.init.xavier_uniform(shape)` are the same
+# scheme reached two ways, and they do NOT agree on `requires_grad`. The
+# top-level one sits beside `mt.zeros` and `mt.randn` as a way to make a
+# tensor and defaults to False like they do; this one exists to make a
+# *parameter*, and a parameter created without `requires_grad` does not train,
+# silently. Both take the argument explicitly.
+
+SHARED_WITH_TOP_LEVEL = [
+    "xavier_uniform",
+    "xavier_normal",
+    "he_uniform",
+    "he_normal",
+    "lecun_uniform",
+    "lecun_normal",
+    "uniform",
+    "truncated_normal",
+    "zeros",
+    "ones",
+]
+
+
+@pytest.mark.parametrize("name", SHARED_WITH_TOP_LEVEL)
+def test_the_two_spellings_differ_only_in_their_requires_grad_default(name):
+    assert hasattr(mt, name), f"mt.{name} is the older spelling and must keep working"
+
+    from_init = getattr(init, name)([4, 3])
+    from_top = getattr(mt, name)([4, 3])
+
+    assert from_init.requires_grad is True, "nn.init builds parameters"
+    assert from_top.requires_grad is False, "the tensor constructors build tensors"
+
+    # Everything else about them agrees.
+    assert tuple(from_init.shape) == tuple(from_top.shape)
+    assert from_init.dtype == from_top.dtype
+
+    # ... and each can be asked for the other behaviour.
+    assert getattr(init, name)([4, 3], requires_grad=False).requires_grad is False
+    assert getattr(mt, name)([4, 3], requires_grad=True).requires_grad is True
+
+
+@pytest.mark.parametrize("name", ["xavier_uniform", "he_normal", "lecun_uniform"])
+def test_both_spellings_draw_from_the_same_distribution(name):
+    """Not just the same name -- the same scheme.
+
+    If these ever diverge, one of them is wrong and nothing else would say so.
+    """
+    mt.manual_seed(0)
+    left = getattr(init, name)(SHAPE).numpy()
+    mt.manual_seed(0)
+    right = getattr(mt, name)(SHAPE).numpy()
+    np.testing.assert_array_equal(left, right)
+
+
+def test_the_like_variants_stay_on_the_top_level_constructors():
+    """`nn.init` takes shapes only. The `_like` forms, which read shape, dtype
+    and device off a reference tensor, have no equivalent here and are not
+    duplicated."""
+    reference = mt.randn(6, 4)
+    assert tuple(mt.he_normal_like(reference).shape) == (6, 4)
+    assert not hasattr(init, "he_normal_like")

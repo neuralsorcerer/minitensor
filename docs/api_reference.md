@@ -1298,6 +1298,16 @@ takes a shape and returns a new tensor, which is also how every layer in `nn`
 builds its parameters. To re-initialize an existing parameter, build a new
 tensor and assign it.
 
+Six of the fan-based schemes are also available as top-level tensor
+constructors -- `mt.xavier_uniform(shape)`, `mt.he_normal(shape)` and so on,
+each with a `_like` variant that takes a reference tensor instead of a shape.
+Those are the same schemes drawing from the same code, with **one deliberate
+difference**: they default to `requires_grad=False`, because they sit beside
+`mt.zeros` and `mt.randn` as ways to make a tensor. The `nn.init` spelling
+defaults to `requires_grad=True`, because it exists to make a *parameter*, and
+a parameter created without it does not train and says nothing. Both accept the
+argument explicitly, so pass it when it matters.
+
 | Function | Distribution |
 | --- | --- |
 | `zeros(shape)` / `ones(shape)` / `constant(shape, value)` | Fixed value. |

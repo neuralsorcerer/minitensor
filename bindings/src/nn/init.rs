@@ -6,20 +6,29 @@
 
 //! Weight initialization.
 //!
-//! The engine has implemented eleven schemes since the start -- Xavier/Glorot,
-//! He/Kaiming and LeCun in both uniform and normal forms, plus constant,
-//! uniform, normal and truncated normal -- and none had a binding. The built-in
-//! layers use them; a Python user writing their own layer could not, and had to
-//! hand-roll the bounds in NumPy. Getting `fan_in` and `fan_out` the wrong way
-//! round is the usual result, because a weight here is stored
-//! `[out_features, in_features]` and the fan the formulas want is the trailing
-//! dimension.
+//! Six of these already existed as tensor constructors -- `mt.xavier_uniform`,
+//! `mt.he_normal` and so on, each with a `_like` variant taking a reference
+//! tensor instead of a shape. What was missing was the namespace a PyTorch user
+//! looks in, `calculate_fan_in_and_fan_out`, and the Kaiming/Glorot spellings
+//! of names this library had picked a side on.
 //!
-//! These are **factories**, not the in-place `xavier_uniform_(tensor)` that
-//! PyTorch spells with a trailing underscore: the engine's initializers build a
-//! tensor from a shape, which is also how every layer in `nn` creates its
-//! parameters. To re-initialize an existing parameter, build a new tensor and
-//! assign it.
+//! **The `requires_grad` default differs from the top-level constructors, on
+//! purpose.** `mt.xavier_uniform(shape)` sits beside `mt.zeros` and `mt.randn`
+//! as a way to make a tensor, and defaults to `false` like they do.
+//! `nn.init.xavier_uniform(shape)` exists to make a *parameter* -- the reason
+//! it was added was `plugins.CustomLayer`, whose parameters are plain tensors
+//! -- and a parameter created without `requires_grad` does not train, silently.
+//! So this namespace defaults to `true`. Both take the argument explicitly.
+//!
+//! These are factories, not PyTorch's in-place `xavier_uniform_(tensor)`: the
+//! engine's initializers build a tensor from a shape, which is also how every
+//! layer in `nn` creates its parameters, and there is no in-place fill to wrap.
+//! To re-initialize an existing parameter, build a new tensor and assign it.
+//!
+//! Getting `fan_in` and `fan_out` the wrong way round is the usual way a
+//! hand-rolled scheme goes wrong, because a weight here is stored
+//! `[out_features, in_features]` and the fan the formulas want is the trailing
+//! dimension. That is what `calculate_fan_in_and_fan_out` is exposed for.
 
 use crate::device::{PyDevice, resolve_device};
 use crate::dtype::parse_dtype;
