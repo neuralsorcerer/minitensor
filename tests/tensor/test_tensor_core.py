@@ -109,7 +109,9 @@ def _truncated_normal_cdf(
     divides by zero).
     """
     z = lambda v: (v - mean) / std  # noqa: E731
-    phi = lambda v: 0.5 * math.erfc(-v / math.sqrt(2.0))  # noqa: E731  accurate for v << 0
+    phi = lambda v: 0.5 * math.erfc(
+        -v / math.sqrt(2.0)
+    )  # noqa: E731  accurate for v << 0
     q = lambda v: 0.5 * math.erfc(v / math.sqrt(2.0))  # noqa: E731  accurate for v >> 0
 
     if z(lower) + z(upper) > 0:

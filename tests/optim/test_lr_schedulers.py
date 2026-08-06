@@ -87,9 +87,11 @@ def test_polynomial_decay_matches_its_closed_form(optimizer):
         optimizer, mt.optim.PolynomialDecayLR(optimizer, decay_steps, end_lr, power), 10
     )
     expected = [
-        end_lr
-        if t >= decay_steps
-        else (1.0 - end_lr) * (1.0 - t / decay_steps) ** power + end_lr
+        (
+            end_lr
+            if t >= decay_steps
+            else (1.0 - end_lr) * (1.0 - t / decay_steps) ** power + end_lr
+        )
         for t in range(11)
     ]
     np.testing.assert_allclose(seen, expected, atol=1e-12)

@@ -348,7 +348,9 @@ def test_a_row_with_nothing_to_attend_to_is_zero_not_nan():
     mask[1, :] = False  # query 1 may attend to nothing
 
     out = mt.scaled_dot_product_attention(
-        mt.from_numpy(q), mt.from_numpy(k), mt.from_numpy(v),
+        mt.from_numpy(q),
+        mt.from_numpy(k),
+        mt.from_numpy(v),
         attn_mask=mt.from_numpy(mask),
     ).numpy()
 

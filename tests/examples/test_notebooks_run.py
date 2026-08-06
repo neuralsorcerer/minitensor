@@ -136,6 +136,6 @@ def test_notebook_outputs_are_not_stale_errors(name):
     document = json.loads((NOTEBOOKS / name).read_text())
     for number, cell in enumerate(document["cells"], 1):
         for output in cell.get("outputs", []):
-            assert output.get("output_type") != "error", (
-                f"{name} cell {number} has a stored {output.get('ename')}"
-            )
+            assert (
+                output.get("output_type") != "error"
+            ), f"{name} cell {number} has a stored {output.get('ename')}"

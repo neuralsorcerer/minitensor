@@ -114,7 +114,9 @@ def test_the_reference_problem_actually_trains(problem):
     assert np.all(np.isfinite(losses))
 
 
-@pytest.mark.parametrize("optimizer_name", ["Adam", "AdamW", "RMSprop", "Lion", "NAdam"])
+@pytest.mark.parametrize(
+    "optimizer_name", ["Adam", "AdamW", "RMSprop", "Lion", "NAdam"]
+)
 def test_the_same_model_trains_under_every_optimizer(problem, optimizer_name):
     # Wider coverage of the optimizer surface against the same graph, checking
     # that each one reduces the loss and none produces a non-finite parameter.

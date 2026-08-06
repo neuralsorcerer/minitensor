@@ -119,9 +119,9 @@ def test_reading_the_wrong_fan_would_be_visible(name):
     if name.startswith("xavier"):
         assert swapped == scale, "Xavier is symmetric in the two fans"
     else:
-        assert abs(swapped / scale - 1) > 0.25, (
-            f"{name} would look the same with the fans swapped"
-        )
+        assert (
+            abs(swapped / scale - 1) > 0.25
+        ), f"{name} would look the same with the fans swapped"
 
 
 @pytest.mark.parametrize("name", sorted(SCHEMES))

@@ -15,10 +15,9 @@ single script.
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 from random import Random
-
-import sys
 
 # Running a script by path puts *its* directory on `sys.path`, not the working
 # directory, so `python examples/iris_classification.py` from a source checkout cannot see the

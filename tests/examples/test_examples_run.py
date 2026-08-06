@@ -64,9 +64,9 @@ def test_there_are_examples_to_check():
 @pytest.mark.parametrize("name", [n for n in SCRIPTS if n not in SLOW])
 def test_example_runs_to_completion(name):
     result = _run(name, timeout=600)
-    assert result.returncode == 0, (
-        f"{name} exited {result.returncode}\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"{name} exited {result.returncode}\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
 
 
 @pytest.mark.parametrize("name", SCRIPTS)
@@ -85,9 +85,9 @@ def test_example_actually_imports_the_library(name):
         # they printed before that must still show the import succeeded.
         output = (expired.stdout or b"").decode() + (expired.stderr or b"").decode()
 
-    assert "No module named 'minitensor'" not in output, (
-        f"{name} could not import the library it demonstrates:\n{output[-2000:]}"
-    )
+    assert (
+        "No module named 'minitensor'" not in output
+    ), f"{name} could not import the library it demonstrates:\n{output[-2000:]}"
 
 
 @pytest.mark.parametrize("name", SCRIPTS)
@@ -101,6 +101,6 @@ def test_example_does_not_point_at_the_wrong_fix(name):
     # If it still suggests rebuilding, that must not be reachable when the
     # package is importable -- which it is, here.
     result = _run(name, timeout=600)
-    assert "maturin develop" not in result.stdout, (
-        f"{name} advises rebuilding the extension even though it imported fine"
-    )
+    assert (
+        "maturin develop" not in result.stdout
+    ), f"{name} advises rebuilding the extension even though it imported fine"

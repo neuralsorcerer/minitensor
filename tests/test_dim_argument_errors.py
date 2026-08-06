@@ -127,9 +127,9 @@ def test_stated_range_is_the_range_that_works(name):
     assert match is not None, str(excinfo.value)
     low, high = int(match.group(1)), int(match.group(2))
 
-    assert accepted == list(range(low, high + 1)), (
-        f"{name} advertises [{low}, {high}] but accepts {accepted}"
-    )
+    assert accepted == list(
+        range(low, high + 1)
+    ), f"{name} advertises [{low}, {high}] but accepts {accepted}"
 
 
 @pytest.mark.parametrize("name", sorted(INSERTING_OPS))

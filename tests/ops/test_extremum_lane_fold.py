@@ -118,8 +118,8 @@ def test_integer_extremes_are_representable_winners(dtype):
 # first winner, and a NaN must still take the first NaN's position.
 BLOCKED_SHAPES = [
     (2048, 1024),  # wide: takes the memory-order path
-    (5, 257),      # just over the threshold, with a remainder band
-    (2048, 64),    # narrow: stays on the strided path
+    (5, 257),  # just over the threshold, with a remainder band
+    (2048, 64),  # narrow: stays on the strided path
     (131072, 16),  # narrow and tall
     (64, 32, 128),  # rank 3, so `inner` differs per dim
 ]
@@ -128,13 +128,17 @@ BLOCKED_SHAPES = [
 @pytest.mark.parametrize("shape", BLOCKED_SHAPES)
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES + INT_DTYPES)
 def test_dim_reduction_matches_numpy_values_and_indices(shape, dtype):
-    values = _sample(int(np.prod(shape)), dtype, np.random.default_rng(4)).reshape(shape)
+    values = _sample(int(np.prod(shape)), dtype, np.random.default_rng(4)).reshape(
+        shape
+    )
     tensor = mt.from_numpy(values)
     for dim in range(len(shape)):
         got_values, got_indices = tensor.max(dim, False)
         np.testing.assert_array_equal(got_values.numpy(), np.max(values, axis=dim))
         np.testing.assert_array_equal(got_indices.numpy(), np.argmax(values, axis=dim))
-        np.testing.assert_array_equal(tensor.argmax(dim).numpy(), np.argmax(values, axis=dim))
+        np.testing.assert_array_equal(
+            tensor.argmax(dim).numpy(), np.argmax(values, axis=dim)
+        )
 
 
 @pytest.mark.parametrize("shape", [(2048, 1024), (5, 257), (131072, 16)])
@@ -182,7 +186,11 @@ def test_indices_do_not_depend_on_the_thread_count():
     def run(threads):
         env = dict(os.environ, RAYON_NUM_THREADS=threads, PYTHONPATH=root)
         return subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
         ).stdout.strip()
 
     assert run("1") == run("2") == run("8")

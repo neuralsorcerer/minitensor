@@ -30,7 +30,9 @@ def _with_grads(*gradients):
     params = []
     for gradient in gradients:
         gradient = np.asarray(gradient, dtype=np.float64)
-        parameter = mt.Tensor(np.ones_like(gradient), dtype="float64").requires_grad_(True)
+        parameter = mt.Tensor(np.ones_like(gradient), dtype="float64").requires_grad_(
+            True
+        )
         (parameter * mt.as_tensor(gradient)).sum().backward()
         params.append(parameter)
     return params
@@ -88,7 +90,9 @@ def test_clip_grad_value_clamps_elementwise():
 
 def test_clipping_works_on_float32_gradients():
     parameter = mt.Tensor(np.ones(3, dtype=np.float32)).requires_grad_(True)
-    (parameter * mt.as_tensor(np.array([3.0, 4.0, 0.0], dtype=np.float32))).sum().backward()
+    (
+        parameter * mt.as_tensor(np.array([3.0, 4.0, 0.0], dtype=np.float32))
+    ).sum().backward()
 
     assert nn.clip_grad_norm_([parameter], 1.0) == pytest.approx(5.0, rel=1e-6)
     np.testing.assert_allclose(parameter.grad.numpy(), [0.6, 0.8, 0.0], atol=1e-6)

@@ -57,7 +57,11 @@ def test_linear_matches_the_transpose_and_matmul_it_replaces(
     rng = np.random.default_rng(1)
     x = mt.Tensor(rng.standard_normal(shape).astype(np.float32))
     w = mt.Tensor(rng.standard_normal((out_features, in_features)).astype(np.float32))
-    b = mt.Tensor(rng.standard_normal(out_features).astype(np.float32)) if with_bias else None
+    b = (
+        mt.Tensor(rng.standard_normal(out_features).astype(np.float32))
+        if with_bias
+        else None
+    )
 
     got = nn.dense_layer(x, w, b) if with_bias else nn.dense_layer(x, w)
     reference = mt.matmul(x, w.transpose(0, 1))
@@ -70,7 +74,9 @@ def test_linear_matches_the_transpose_and_matmul_it_replaces(
 
 @pytest.mark.parametrize("shape,in_features,out_features", _SHAPES)
 @pytest.mark.parametrize("with_bias", [True, False])
-def test_linear_gradients_match_their_closed_forms(shape, in_features, out_features, with_bias):
+def test_linear_gradients_match_their_closed_forms(
+    shape, in_features, out_features, with_bias
+):
     rng = np.random.default_rng(2)
     x = rng.standard_normal(shape)
     w = rng.standard_normal((out_features, in_features))
@@ -81,7 +87,9 @@ def test_linear_gradients_match_their_closed_forms(shape, in_features, out_featu
     tb = mt.Tensor(b, dtype="float64").requires_grad_(True) if with_bias else None
 
     out = nn.dense_layer(tx, tw, tb) if with_bias else nn.dense_layer(tx, tw)
-    np.testing.assert_allclose(out.numpy(), x @ w.T + (b if with_bias else 0), atol=1e-12)
+    np.testing.assert_allclose(
+        out.numpy(), x @ w.T + (b if with_bias else 0), atol=1e-12
+    )
 
     # A non-uniform upstream gradient: `sum(out)` would hide a transposed or
     # mis-strided weight gradient behind its symmetry.
@@ -219,7 +227,9 @@ def _conv2d_reference(x, w, b, padding, stride):
         for o in range(out_channels):
             for r in range(out_h):
                 for c in range(out_w):
-                    patch = padded[i, :, r * stride : r * stride + kh, c * stride : c * stride + kw]
+                    patch = padded[
+                        i, :, r * stride : r * stride + kh, c * stride : c * stride + kw
+                    ]
                     out[i, o, r, c] = (patch * w[o]).sum() + b[o]
     return out
 

@@ -16,10 +16,9 @@ This script demonstrates the custom operations system by:
 
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
-
-from pathlib import Path
 
 # Running a script by path puts *its* directory on `sys.path`, not the working
 # directory, so `python examples/custom_operations_demo.py` from a source checkout cannot see the

@@ -72,8 +72,7 @@ def test_gradient_norm_is_stable():
     assert len(norms) == 1, f"grad_norm produced {len(norms)} distinct results"
 
 
-_CHILD = textwrap.dedent(
-    """
+_CHILD = textwrap.dedent("""
     import numpy as np, minitensor as mt
     rng = np.random.default_rng(2)
     a = rng.standard_normal(1 << 20).astype(np.float32)
@@ -87,8 +86,7 @@ _CHILD = textwrap.dedent(
         float(t.nanmean().numpy()).hex(),
         float((b * c).sum().numpy()).hex(),
     )
-    """
-)
+    """)
 
 
 @pytest.mark.parametrize("threads", ["1", "2", "4", "8"])

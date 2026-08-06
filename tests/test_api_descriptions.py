@@ -52,9 +52,9 @@ def _description(symbol: str) -> str:
 @pytest.mark.parametrize("symbol", sorted(_public_symbols()))
 def test_every_public_symbol_has_a_description(symbol):
     description = _description(symbol)
-    assert description not in PLACEHOLDERS, (
-        f"{symbol} has no docstring, so describe_api prints its type instead"
-    )
+    assert (
+        description not in PLACEHOLDERS
+    ), f"{symbol} has no docstring, so describe_api prints its type instead"
     assert not description.startswith("Python wrapper for"), (
         f"{symbol} describes itself by naming the Rust type it wraps, which "
         "tells a Python caller nothing"
@@ -127,9 +127,9 @@ def test_forwarders_and_methods_describe_themselves_identically(name):
 
     assert forwarder is not None, f"mt.{name} has no docstring"
     assert method is not None, f"Tensor.{name} has no docstring"
-    assert forwarder.strip() == method.strip(), (
-        f"mt.{name} and Tensor.{name} describe the same operation differently"
-    )
+    assert (
+        forwarder.strip() == method.strip()
+    ), f"mt.{name} and Tensor.{name} describe the same operation differently"
 
 
 def test_search_api_matches_names_not_descriptions():

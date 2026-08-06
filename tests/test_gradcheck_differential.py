@@ -705,7 +705,7 @@ def test_the_gradcheck_list_covers_every_differentiable_no_arg_op():
     # accepts the wrong things -- "nan_to_num" would vouch for a method named
     # "nan". The source is unambiguous about which methods are exercised.
     block = pathlib.Path(__file__).read_text()
-    block = block[block.index("_GRADCHECK_OPS = ["): block.index("_GRADCHECK_EXEMPT")]
+    block = block[block.index("_GRADCHECK_OPS = [") : block.index("_GRADCHECK_EXEMPT")]
     listed = set(re.findall(r"\.([a-z_0-9]+)\(", block))
 
     sample = np.abs(np.random.default_rng(3).standard_normal(9)) + 0.4

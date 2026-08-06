@@ -134,6 +134,6 @@ def test_every_export_is_covered():
     covered |= {"allclose", "array_equal", "empty_like"}
 
     missing = sorted(exported - covered)
-    assert not missing, (
-        "numpy_compat exports with no comparison against NumPy: " + ", ".join(missing)
-    )
+    assert (
+        not missing
+    ), "numpy_compat exports with no comparison against NumPy: " + ", ".join(missing)

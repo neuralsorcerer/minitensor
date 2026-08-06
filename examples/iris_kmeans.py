@@ -9,12 +9,11 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 from random import Random
 
 import numpy as np
-
-import sys
 
 # Running a script by path puts *its* directory on `sys.path`, not the working
 # directory, so `python examples/iris_kmeans.py` from a source checkout cannot see the

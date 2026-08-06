@@ -199,9 +199,7 @@ def test_no_tensor_method_can_corrupt_a_pending_backward():
                 continue  # wrong arity; try the next shape
             except Exception:
                 pass  # raised for another reason, but the arity is right
-            attempt(
-                f".{name}", lambda t, n=name, a=args: getattr(t, n)(*a)
-            )
+            attempt(f".{name}", lambda t, n=name, a=args: getattr(t, n)(*a))
             break
 
     assert not corrupted, (

@@ -808,7 +808,9 @@ def test_a_slice_matches_the_narrow_that_produces_it():
     source = rng.standard_normal((512, 64)).astype(np.float32)
     tensor = mt.Tensor(source)
 
-    assert np.array_equal(tensor[100:400].numpy(), mt.narrow(tensor, 0, 100, 300).numpy())
+    assert np.array_equal(
+        tensor[100:400].numpy(), mt.narrow(tensor, 0, 100, 300).numpy()
+    )
 
 
 def test_gradients_flow_through_a_slice():

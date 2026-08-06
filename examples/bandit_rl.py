@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from random import Random
-
 import sys
 from pathlib import Path
+from random import Random
 
 # Running a script by path puts *its* directory on `sys.path`, not the working
 # directory, so `python examples/bandit_rl.py` from a source checkout cannot see the

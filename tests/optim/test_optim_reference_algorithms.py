@@ -83,7 +83,9 @@ def _ref_adam(
     return out
 
 
-def _ref_adagrad(lr, eps=1e-10, weight_decay=0.0, lr_decay=0.0, initial_accumulator=0.0):
+def _ref_adagrad(
+    lr, eps=1e-10, weight_decay=0.0, lr_decay=0.0, initial_accumulator=0.0
+):
     p, state, out = INIT.copy(), np.full(4, initial_accumulator), []
     for t, g in enumerate(GRADS, start=1):
         g = g + weight_decay * p
@@ -303,9 +305,7 @@ def test_every_optimizer_hyperparameter_is_exercised_against_the_reference():
     """
     import inspect
 
-    configured = " ".join(
-        inspect.getsource(make) for _, make, _ in CASES
-    )
+    configured = " ".join(inspect.getsource(make) for _, make, _ in CASES)
 
     missing = []
     for name in ("SGD", "Adam", "AdamW", "Adagrad", "RMSprop", "NAdam", "Lion"):

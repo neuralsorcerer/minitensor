@@ -47,7 +47,9 @@ PROMOTED = [
 ]
 
 
-@pytest.mark.parametrize("name,op,reference,sample", PROMOTED, ids=[c[0] for c in PROMOTED])
+@pytest.mark.parametrize(
+    "name,op,reference,sample", PROMOTED, ids=[c[0] for c in PROMOTED]
+)
 def test_stays_within_half_an_ulp_of_the_float64_result(name, op, reference, sample):
     tensor = mt.from_numpy(sample)
     exact = reference(sample.astype(np.float64))
@@ -55,7 +57,9 @@ def test_stays_within_half_an_ulp_of_the_float64_result(name, op, reference, sam
     assert error < _HALF_ULP_BUDGET, f"{name}: worst relative error {error:.3e}"
 
 
-@pytest.mark.parametrize("name,op,reference,sample", PROMOTED, ids=[c[0] for c in PROMOTED])
+@pytest.mark.parametrize(
+    "name,op,reference,sample", PROMOTED, ids=[c[0] for c in PROMOTED]
+)
 def test_at_least_as_accurate_as_numpy(name, op, reference, sample):
     # NumPy uses vectorised f32 kernels here, which are faster and less precise.
     # This is the comparison that motivated the change, so it is the one pinned.
@@ -192,9 +196,13 @@ _EXP_FAMILY = [
 ]
 
 
-@pytest.mark.parametrize("name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY])
+@pytest.mark.parametrize(
+    "name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY]
+)
 @pytest.mark.parametrize("length", [1, 7, 8, 17, 1023, 1024, 16383, 16384, 40000])
-def test_exp_family_is_bit_identical_to_the_float64_reference(name, op, reference, length):
+def test_exp_family_is_bit_identical_to_the_float64_reference(
+    name, op, reference, length
+):
     rng = np.random.default_rng(777 + length)
     # Across the whole useful range: near zero where `expm1` must not lose the
     # leading term, the mid range that steps through every `n`, and out past
@@ -217,7 +225,9 @@ def test_exp_family_is_bit_identical_to_the_float64_reference(name, op, referenc
     )
 
 
-@pytest.mark.parametrize("name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY])
+@pytest.mark.parametrize(
+    "name,op,reference", _EXP_FAMILY, ids=[c[0] for c in _EXP_FAMILY]
+)
 def test_exp_family_handles_the_saturating_ends(name, op, reference):
     """Overflow to infinity, and the underflow that `sinh` used to get wrong.
 
@@ -226,14 +236,29 @@ def test_exp_family_handles_the_saturating_ends(name, op, reference):
     was made to work on `|x|` and restore the sign afterwards.
     """
     sample = np.array(
-        [0.0, -0.0, 1e-30, -1e-30, 88.0, -88.0, 89.0, -89.0, 100.0, -100.0, 1e30, -1e30],
+        [
+            0.0,
+            -0.0,
+            1e-30,
+            -1e-30,
+            88.0,
+            -88.0,
+            89.0,
+            -89.0,
+            100.0,
+            -100.0,
+            1e30,
+            -1e30,
+        ],
         dtype=np.float32,
     )
     got = op(mt.from_numpy(sample)).numpy()
     with np.errstate(over="ignore"):  # the reference overflows here on purpose
         want = reference(sample.astype(np.float64)).astype(np.float32)
     np.testing.assert_array_equal(got, want, err_msg=f"{name} at the saturating ends")
-    assert np.all(np.isfinite(got) | np.isinf(want)), f"{name} produced a spurious infinity"
+    assert np.all(
+        np.isfinite(got) | np.isinf(want)
+    ), f"{name} produced a spurious infinity"
 
 
 @pytest.mark.parametrize("length", _TANH_LENGTHS)
@@ -265,7 +290,9 @@ def test_vectorized_tanh_agrees_across_the_parallel_threshold():
     # back the same: block splitting must not be observable in the output.
     rng = np.random.default_rng(99)
     head = (rng.standard_normal(16_000) * 3).astype(np.float32)
-    padded = np.concatenate([head, (rng.standard_normal(20_000) * 3).astype(np.float32)])
+    padded = np.concatenate(
+        [head, (rng.standard_normal(20_000) * 3).astype(np.float32)]
+    )
 
     sequential = mt.from_numpy(head).tanh().numpy()
     parallel = mt.from_numpy(padded).tanh().numpy()[: head.size]
@@ -307,16 +334,16 @@ def _ulps_apart(got, want):
 def _erf_reference(sample):
     from math import erf
 
-    return np.array([erf(float(v)) for v in sample.astype(np.float64)], dtype=np.float32)
+    return np.array(
+        [erf(float(v)) for v in sample.astype(np.float64)], dtype=np.float32
+    )
 
 
 def _gelu_erf_reference(sample):
     from math import erfc
 
     x = sample.astype(np.float64)
-    return np.array(
-        [0.5 * v * erfc(-v * _SQRT1_2) for v in x], dtype=np.float32
-    )
+    return np.array([0.5 * v * erfc(-v * _SQRT1_2) for v in x], dtype=np.float32)
 
 
 def _gelu_tanh_reference(sample):
@@ -333,7 +360,9 @@ _VECTORIZED = [
 ]
 
 
-@pytest.mark.parametrize("name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED])
+@pytest.mark.parametrize(
+    "name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED]
+)
 @pytest.mark.parametrize("length", [1, 7, 8, 17, 1023, 1024, 16383, 16384, 40000])
 def test_vectorized_erf_and_gelu_stay_within_one_ulp(name, op, reference, length):
     rng = np.random.default_rng(4242 + length)
@@ -355,7 +384,9 @@ def test_vectorized_erf_and_gelu_stay_within_one_ulp(name, op, reference, length
     )
 
 
-@pytest.mark.parametrize("name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED])
+@pytest.mark.parametrize(
+    "name,op,reference", _VECTORIZED, ids=[c[0] for c in _VECTORIZED]
+)
 def test_vectorized_erf_and_gelu_handle_the_edge_cases(name, op, reference):
     sample = np.array(
         [0.0, -0.0, 1e-30, -1e-30, 2.0, -2.0, 4.0, -4.0, 11.0, -11.0, 1e30, -1e30],
@@ -379,10 +410,12 @@ def test_gelu_negative_tail_does_not_bottom_out():
         got = op(mt.from_numpy(xs)).numpy()
         want = reference(xs)
         assert np.all(np.abs(got) <= np.abs(want) * 1.5 + 1e-45), f"{name}: {got}"
-        assert np.all(np.diff(np.abs(got.astype(np.float64))) <= 0), (
-            f"{name} stopped decaying: {got}"
-        )
-        assert got[-1] == 0.0, f"{name}: gelu(-50) should underflow to zero, got {got[-1]}"
+        assert np.all(
+            np.diff(np.abs(got.astype(np.float64))) <= 0
+        ), f"{name} stopped decaying: {got}"
+        assert (
+            got[-1] == 0.0
+        ), f"{name}: gelu(-50) should underflow to zero, got {got[-1]}"
 
 
 # The float32 GELU *gradient* is vectorized too, and was the most expensive
@@ -415,9 +448,13 @@ _GELU_GRADS = [
 ]
 
 
-@pytest.mark.parametrize("name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS])
+@pytest.mark.parametrize(
+    "name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS]
+)
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
-def test_gelu_gradient_matches_the_analytic_derivative(name, approximate, reference, dtype):
+def test_gelu_gradient_matches_the_analytic_derivative(
+    name, approximate, reference, dtype
+):
     sample = np.concatenate(
         [
             np.random.default_rng(5).standard_normal(5000) * 3,
@@ -435,7 +472,9 @@ def test_gelu_gradient_matches_the_analytic_derivative(name, approximate, refere
     np.testing.assert_allclose(got, expected.astype(dtype), rtol=tolerance, atol=1e-45)
 
 
-@pytest.mark.parametrize("name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS])
+@pytest.mark.parametrize(
+    "name,approximate,reference", _GELU_GRADS, ids=[c[0] for c in _GELU_GRADS]
+)
 def test_gelu_gradient_tail_does_not_bottom_out(name, approximate, reference):
     """Same failure mode as the forward pass, reached through the derivative.
 
@@ -475,9 +514,9 @@ def test_vectorized_erfc_stays_within_one_ulp(length):
         dtype=np.float32,
     )
     bad = _ulps_apart(got, want) > 1
-    assert not bad.any(), (
-        f"length {length}: {int(bad.sum())} off by >1 ulp, first at x={sample[bad][0]!r}"
-    )
+    assert (
+        not bad.any()
+    ), f"length {length}: {int(bad.sum())} off by >1 ulp, first at x={sample[bad][0]!r}"
 
 
 def test_erfc_keeps_the_tail_erf_cannot():
@@ -497,9 +536,9 @@ def test_erfc_keeps_the_tail_erf_cannot():
     # Compared in ulps, not rtol: erfc(10) is 2.09e-45, which lands between
     # float32 subnormals spaced 1.4e-45 apart, so no relative tolerance is
     # meaningful there -- but the correctly rounded value still is.
-    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
-        f"got {got}, want {want}"
-    )
+    assert np.all(
+        _ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1
+    ), f"got {got}, want {want}"
     # And the identity that motivates the separate routine really does fail:
     assert np.all(1.0 - mt.from_numpy(xs).erf().numpy()[3:] == 0.0)
 
@@ -512,12 +551,24 @@ def test_erfc_keeps_the_tail_erf_cannot():
 # `log(1 + x)` keeps about six digits at `x = 1e-10`. The kernel passes the
 # exact residual of that sum through to the log, which restores them.
 _LOG_FAMILY = [
-    ("log", lambda t: t.log(), np.log, lambda n, rng: np.abs(rng.standard_normal(n)) + 1e-3),
-    ("log1p", lambda t: t.log1p(), np.log1p, lambda n, rng: rng.uniform(-0.999, 5.0, n)),
+    (
+        "log",
+        lambda t: t.log(),
+        np.log,
+        lambda n, rng: np.abs(rng.standard_normal(n)) + 1e-3,
+    ),
+    (
+        "log1p",
+        lambda t: t.log1p(),
+        np.log1p,
+        lambda n, rng: rng.uniform(-0.999, 5.0, n),
+    ),
 ]
 
 
-@pytest.mark.parametrize("name,op,reference,gen", _LOG_FAMILY, ids=[c[0] for c in _LOG_FAMILY])
+@pytest.mark.parametrize(
+    "name,op,reference,gen", _LOG_FAMILY, ids=[c[0] for c in _LOG_FAMILY]
+)
 @pytest.mark.parametrize("length", [1, 7, 17, 1023, 1024, 16383, 16384, 40000])
 def test_log_family_stays_within_one_ulp(name, op, reference, gen, length):
     rng = np.random.default_rng(8080 + length)
@@ -541,13 +592,17 @@ def test_log1p_keeps_the_digits_that_one_plus_x_would_round_away():
     xs = np.array([1e-3, 1e-5, 1e-7, 1e-9, 1e-20, -1e-9, -1e-20], dtype=np.float32)
     got = mt.from_numpy(xs).log1p().numpy()
     want = np.log1p(xs.astype(np.float64)).astype(np.float32)
-    np.testing.assert_array_equal(_ulps_apart(got, want) <= 1, True, err_msg=f"{got} vs {want}")
+    np.testing.assert_array_equal(
+        _ulps_apart(got, want) <= 1, True, err_msg=f"{got} vs {want}"
+    )
     # Naive float32 reconstruction really does fail here, which is the point:
     # from 1e-9 down, `1 + x` in float32 is exactly 1 and the value is gone.
     assert np.all((1.0 + xs.astype(np.float32))[3:] == 1.0)
 
 
-@pytest.mark.parametrize("value,expected", [(-1.0, -np.inf), (-1.5, np.nan), (0.0, 0.0)])
+@pytest.mark.parametrize(
+    "value,expected", [(-1.0, -np.inf), (-1.5, np.nan), (0.0, 0.0)]
+)
 def test_log1p_domain_edges(value, expected):
     got = mt.from_numpy(np.array([value], dtype=np.float32)).log1p().numpy()[0]
     if np.isnan(expected):
@@ -565,7 +620,10 @@ def test_softplus_matches_the_stable_reference():
     # softplus(x) = log1p(exp(x)); the reference is written as the max form so
     # the large-x side does not overflow before the comparison.
     sample = np.concatenate(
-        [np.random.default_rng(11).standard_normal(20_000) * 8, np.linspace(-60, 60, 2000)]
+        [
+            np.random.default_rng(11).standard_normal(20_000) * 8,
+            np.linspace(-60, 60, 2000),
+        ]
     ).astype(np.float32)
     got = mt.from_numpy(sample).softplus().numpy()
     x = sample.astype(np.float64)
@@ -608,7 +666,11 @@ def _stable_logistic(x):
 
 _LOGISTIC = [
     ("sigmoid", lambda t: t.sigmoid(), _stable_logistic),
-    ("silu", lambda t: t.silu(), lambda x: np.asarray(x, dtype=np.float64) * _stable_logistic(x)),
+    (
+        "silu",
+        lambda t: t.silu(),
+        lambda x: np.asarray(x, dtype=np.float64) * _stable_logistic(x),
+    ),
 ]
 
 
@@ -636,9 +698,9 @@ def test_silu_keeps_its_negative_tail():
     assert np.all(got != 0.0), f"silu truncated its tail: {got}"
     # In ulps, not rtol: these land in the float32 subnormals, where the spacing
     # is 1.4e-45 and no relative tolerance below ~4e-4 is achievable.
-    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
-        f"got {got}, want {want}"
-    )
+    assert np.all(
+        _ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1
+    ), f"got {got}, want {want}"
 
 
 def test_softplus_gradient_keeps_its_tail():
@@ -650,15 +712,18 @@ def test_softplus_gradient_keeps_its_tail():
     mt.clear_autograd_graph()
     assert np.all(got > 0.0), f"softplus gradient truncated: {got}"
     want = _stable_logistic(xs)
-    assert np.all(_ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1), (
-        f"got {got}, want {want}"
-    )
+    assert np.all(
+        _ulps_apart(got.astype(np.float32), want.astype(np.float32)) <= 1
+    ), f"got {got}, want {want}"
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_silu_gradient_matches_the_analytic_derivative(dtype):
     sample = np.concatenate(
-        [np.random.default_rng(7).standard_normal(20_000) * 6, np.linspace(-100.0, -20.0, 500)]
+        [
+            np.random.default_rng(7).standard_normal(20_000) * 6,
+            np.linspace(-100.0, -20.0, 500),
+        ]
     ).astype(dtype)
     tensor = mt.Tensor(sample, dtype=dtype, requires_grad=True)
     tensor.silu().sum().backward()
@@ -727,7 +792,9 @@ def test_trig_special_values():
         got = op(mt.from_numpy(sample)).numpy()
         with np.errstate(invalid="ignore"):  # the reference warns on sin(inf)
             want = reference(sample.astype(np.float64)).astype(np.float32)
-        assert np.isnan(got[2]) and np.isnan(got[3]) and np.isnan(got[4]), f"{name}: {got}"
+        assert (
+            np.isnan(got[2]) and np.isnan(got[3]) and np.isnan(got[4])
+        ), f"{name}: {got}"
         # sin and tan are odd, so they keep the sign of zero; cos(±0) is 1.
         np.testing.assert_array_equal(
             got[:2].view(np.uint32), want[:2].view(np.uint32), err_msg=f"{name} at zero"

@@ -399,7 +399,9 @@ def test_binary_comparison_and_integer_division_have_free_function_forms(
     tx, ty = mt.as_tensor(x), mt.as_tensor(y)
 
     got = getattr(mt, name)(tx, ty).numpy()
-    np.testing.assert_allclose(got.astype(np.float64), reference(x, y).astype(np.float64))
+    np.testing.assert_allclose(
+        got.astype(np.float64), reference(x, y).astype(np.float64)
+    )
     np.testing.assert_array_equal(got, getattr(tx, name)(ty).numpy())
 
 
@@ -836,7 +838,9 @@ def test_sequence_conversion_values_survive_the_numpy_round_trip():
     assert np.isposinf(result[3])
 
 
-@pytest.mark.parametrize("shape", [(100,), (10, 10), (4, 5, 6), (2, 3, 4, 5), (0,), (3, 0, 2)])
+@pytest.mark.parametrize(
+    "shape", [(100,), (10, 10), (4, 5, 6), (2, 3, 4, 5), (0,), (3, 0, 2)]
+)
 @pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
 def test_numpy_export_matches_the_source_array(shape, dtype):
     count = int(np.prod(shape)) if shape else 1
@@ -989,9 +993,15 @@ def test_every_numpy_entry_point_respects_layout(label, make):
     source = make(square)
     tensor = mt.as_tensor(np.ascontiguousarray(square))
 
-    np.testing.assert_array_equal(np.asarray(mt.as_tensor(source)), source, err_msg=label)
-    np.testing.assert_array_equal((tensor + source).numpy(), square + source, err_msg=label)
-    np.testing.assert_array_equal(np.add(tensor, source).numpy(), square + source, err_msg=label)
+    np.testing.assert_array_equal(
+        np.asarray(mt.as_tensor(source)), source, err_msg=label
+    )
+    np.testing.assert_array_equal(
+        (tensor + source).numpy(), square + source, err_msg=label
+    )
+    np.testing.assert_array_equal(
+        np.add(tensor, source).numpy(), square + source, err_msg=label
+    )
     np.testing.assert_array_equal(
         mt.maximum(tensor, mt.as_tensor(source)).numpy(),
         np.maximum(square, source),

@@ -118,4 +118,6 @@ def test_gradients_keep_their_tensor_dtype(name, op, dtype):
     x = mt.Tensor(values, dtype=dtype, requires_grad=True)
     op(x).sum().backward()
     assert x.grad is not None
-    assert x.grad.dtype == dtype, f"{name}: {dtype} tensor got a {x.grad.dtype} gradient"
+    assert (
+        x.grad.dtype == dtype
+    ), f"{name}: {dtype} tensor got a {x.grad.dtype} gradient"

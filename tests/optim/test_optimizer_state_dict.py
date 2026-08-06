@@ -125,9 +125,9 @@ def test_without_the_optimizer_state_the_run_diverges(name, tmp_path):
         weights_only.append(float(loss.numpy()))
 
     assert weights_only[:20] == straight[:20], "divergence must start at the resume"
-    assert weights_only[20:] != straight[20:], (
-        f"{name} carries no state across a step, so this file proves nothing for it"
-    )
+    assert (
+        weights_only[20:] != straight[20:]
+    ), f"{name} carries no state across a step, so this file proves nothing for it"
 
 
 @pytest.mark.parametrize("name", sorted(OPTIMIZERS))

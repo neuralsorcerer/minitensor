@@ -14,9 +14,8 @@ corresponding benchmarks are skipped.
 
 from __future__ import annotations
 
-import timeit
-
 import sys
+import timeit
 from pathlib import Path
 
 # Running a script by path puts *its* directory on `sys.path`, not the working

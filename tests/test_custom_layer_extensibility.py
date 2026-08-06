@@ -32,9 +32,7 @@ from minitensor.plugins import CustomLayer
 
 def _scale_layer(gain_value, size=3):
     layer = CustomLayer("scale")
-    gain = mt.Tensor(
-        np.full(size, gain_value), dtype="float64", requires_grad=True
-    )
+    gain = mt.Tensor(np.full(size, gain_value), dtype="float64", requires_grad=True)
     layer.add_parameter("gain", gain)
     layer.set_forward(lambda inputs: [inputs[0] * layer.get_parameter("gain")])
     return layer, gain

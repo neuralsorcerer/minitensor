@@ -175,7 +175,8 @@ def test_no_op_under_no_grad_records_a_graph_node():
                     offenders.append(name)
             break
 
-    assert not offenders, (
-        "these ops built a live backward edge despite no_grad: "
-        + ", ".join(sorted(set(offenders)))
+    assert (
+        not offenders
+    ), "these ops built a live backward edge despite no_grad: " + ", ".join(
+        sorted(set(offenders))
     )

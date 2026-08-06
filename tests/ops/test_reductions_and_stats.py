@@ -216,7 +216,9 @@ def test_max_min_reject_an_empty_int_axis_rather_than_returning_int_min():
     with pytest.raises(Exception, match="does not support empty tensors"):
         t.min(dim=0)
 
-    populated = mt.Tensor(np.array([[np.iinfo(np.int32).min]], dtype=np.int32), dtype="int32")
+    populated = mt.Tensor(
+        np.array([[np.iinfo(np.int32).min]], dtype=np.int32), dtype="int32"
+    )
     assert populated.max(dim=0)[0].numpy().tolist() == [np.iinfo(np.int32).min]
 
 

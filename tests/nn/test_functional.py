@@ -1374,8 +1374,12 @@ def test_relu_and_leaky_relu_agree_on_which_side_zero_belongs_to():
 # The backward takes the indices directly too: `softmax - one_hot` needs no
 # one-hot, since subtracting 1 at one column per row is a scatter.
 @pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
-@pytest.mark.parametrize("dtype,index_dtype", [("float32", np.int64), ("float64", np.int32)])
-def test_cross_entropy_index_targets_match_the_dense_formula(reduction, dtype, index_dtype):
+@pytest.mark.parametrize(
+    "dtype,index_dtype", [("float32", np.int64), ("float64", np.int32)]
+)
+def test_cross_entropy_index_targets_match_the_dense_formula(
+    reduction, dtype, index_dtype
+):
     rng = np.random.default_rng(hash((reduction, dtype)) % 2**31)
     rows, classes = 64, 40
     logits = rng.standard_normal((rows, classes)).astype(dtype)
@@ -1392,7 +1396,9 @@ def test_cross_entropy_index_targets_match_the_dense_formula(reduction, dtype, i
     z = a - a.max(-1, keepdims=True)
     log_p = z - np.log(np.exp(z).sum(-1, keepdims=True))
     per_sample = -log_p[np.arange(rows), idx]
-    expected = {"mean": per_sample.mean(), "sum": per_sample.sum(), "none": per_sample}[reduction]
+    expected = {"mean": per_sample.mean(), "sum": per_sample.sum(), "none": per_sample}[
+        reduction
+    ]
     np.testing.assert_allclose(value, expected, rtol=1e-5, atol=1e-6)
 
     probabilities = np.exp(log_p)

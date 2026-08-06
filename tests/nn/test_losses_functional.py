@@ -39,7 +39,9 @@ def _numeric_grad(fn, src, eps=1e-6):
         plus, minus = flat.copy(), flat.copy()
         plus[i] += eps
         minus[i] -= eps
-        out[i] = (fn(plus.reshape(src.shape)) - fn(minus.reshape(src.shape))) / (2 * eps)
+        out[i] = (fn(plus.reshape(src.shape)) - fn(minus.reshape(src.shape))) / (
+            2 * eps
+        )
     return out.reshape(src.shape)
 
 
@@ -75,7 +77,9 @@ def test_huber_matches_its_definition_and_scales_smooth_l1(pair, delta):
     # huber(x, d) == d * smooth_l1(x, beta=d); they coincide only at 1.0, which
     # is why routing smooth-l1 straight to huber was right for the default and
     # wrong for every other beta.
-    assert np.isclose(got, delta * F.smooth_l1_loss(tx, ty, "mean", delta).item(), rtol=1e-12)
+    assert np.isclose(
+        got, delta * F.smooth_l1_loss(tx, ty, "mean", delta).item(), rtol=1e-12
+    )
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
