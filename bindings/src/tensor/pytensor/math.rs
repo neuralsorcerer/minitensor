@@ -8,6 +8,21 @@ use super::*;
 #[pymethods]
 impl PyTensor {
     // Mathematical functions
+    /// Whether any element is NaN, stopping at the first one found.
+    ///
+    /// `isnan(x).any()` answers the same question but builds an N-element
+    /// boolean tensor to do it, and reads every element even when the first is
+    /// already NaN. Integer and boolean tensors are always False.
+    pub fn has_nan(&self) -> bool {
+        self.inner.has_nan()
+    }
+
+    /// Whether any element is positive or negative infinity, stopping at the
+    /// first one found. See [`Self::has_nan`].
+    pub fn has_inf(&self) -> bool {
+        self.inner.has_inf()
+    }
+
     /// Element-wise absolute value.
     pub fn abs(&self) -> PyResult<Self> {
         let result = self.inner.abs().map_err(_convert_error)?;
