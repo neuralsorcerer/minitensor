@@ -11,6 +11,7 @@ use crate::{
     },
     device::Device,
     error::{MinitensorError, Result},
+    ops::map::PAR_THRESHOLD,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -819,6 +820,10 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
     let count = output_shape_obj.dims()[dim];
+    let outer_stride = dims[dim] * inner;
+    // One output block per position in the dimensions ahead of `dim`. Every
+    // block is exactly this long because the output has the same leading dims.
+    let block = count * inner;
 
     macro_rules! slice_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -826,17 +831,35 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
                 MinitensorError::invalid_operation("Tensor data access failed for slice")
             })?;
             let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            out.par_chunks_mut(count * inner)
-                .enumerate()
-                .for_each(|(o, out_chunk)| {
+            let fill = |o: usize, out_chunk: &mut [$ty]| {
+                let block_start = o * outer_stride;
+                if step == 1 {
+                    // A unit step selects a run that is contiguous with
+                    // everything beneath it, so a whole block is a single copy.
+                    // Copying it as `count` runs of `inner` instead cost an
+                    // order of magnitude whenever `inner` was 1 -- which is
+                    // every slice along the last dimension, and every slice of
+                    // a 1-D tensor.
+                    let src_start = block_start + start * inner;
+                    out_chunk.copy_from_slice(&src[src_start..src_start + out_chunk.len()]);
+                } else {
                     for i in 0..count {
-                        let src_idx = start + i * step;
-                        let src_start = o * dims[dim] * inner + src_idx * inner;
+                        let src_start = block_start + (start + i * step) * inner;
                         let dst_start = i * inner;
                         out_chunk[dst_start..dst_start + inner]
                             .copy_from_slice(&src[src_start..src_start + inner]);
                     }
-                });
+                }
+            };
+            if out.len() < PAR_THRESHOLD {
+                out.chunks_mut(block)
+                    .enumerate()
+                    .for_each(|(o, out_chunk)| fill(o, out_chunk));
+            } else {
+                out.par_chunks_mut(block)
+                    .enumerate()
+                    .for_each(|(o, out_chunk)| fill(o, out_chunk));
+            }
             TensorData::$from_vec(out, device)
         }};
     }
@@ -961,6 +984,106 @@ pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result
     Ok(output)
 }
 
+/// Copy `tensor` with every rolled dimension applied in a single pass.
+///
+/// `shifts[d]` is the shift already reduced into `0..dims[d]`, and the shape is
+/// unchanged, so the output buffer can be filled directly. Rolling one
+/// dimension at a time meant a whole intermediate tensor per dimension, each
+/// built as slice + slice + concatenate -- three allocations and three passes
+/// apiece. A roll is only an index remapping, so all of the dimensions can be
+/// resolved while copying once.
+///
+/// The copy goes a row at a time, a row being the last dimension and therefore
+/// contiguous: the innermost dimension costs two `memcpy`s per row (one when it
+/// is not rolled, since the wrapped part is then empty) and the rest cost only
+/// the arithmetic that locates the source row.
+fn roll_rows(tensor: &Tensor, shifts: &[usize]) -> Result<Tensor> {
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "roll currently supports only CPU tensors",
+        ));
+    }
+
+    let dims = tensor.shape().dims();
+    let last = dims.len() - 1;
+    let row_len = dims[last];
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+
+    // Strides of the dimensions ahead of the last, counted in rows.
+    let mut row_strides = vec![0usize; last];
+    let mut acc = 1usize;
+    for d in (0..last).rev() {
+        row_strides[d] = acc;
+        acc *= dims[d];
+    }
+    let leading_rolled = shifts[..last].iter().any(|&k| k != 0);
+
+    // Within a row the element at `split` becomes the first. An unrolled last
+    // dimension gives `split == row_len`, which makes the wrapped part empty
+    // and leaves a single whole-row copy.
+    let split = row_len - shifts[last];
+    let head = row_len - split;
+
+    // Output row `r` decodes to leading indices `i_d`; it copies from the row
+    // at the same indices stepped back by their own shifts.
+    let source_row = |r: usize| -> usize {
+        if !leading_rolled {
+            return r;
+        }
+        let mut source = 0;
+        let mut rest = r;
+        for d in 0..last {
+            let stride = row_strides[d];
+            let i = rest / stride;
+            rest %= stride;
+            let k = shifts[d];
+            source += if i >= k { i - k } else { i + dims[d] - k } * stride;
+        }
+        source
+    };
+
+    macro_rules! roll_impl {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::invalid_operation("Tensor data access failed for roll")
+            })?;
+            let mut out = vec![<$ty>::default(); src.len()];
+            let copy_row = |r: usize, dst: &mut [$ty]| {
+                let base = source_row(r) * row_len;
+                dst[..head].copy_from_slice(&src[base + split..base + row_len]);
+                dst[head..].copy_from_slice(&src[base..base + split]);
+            };
+            if out.len() < PAR_THRESHOLD {
+                out.chunks_mut(row_len)
+                    .enumerate()
+                    .for_each(|(r, dst)| copy_row(r, dst));
+            } else {
+                out.par_chunks_mut(row_len)
+                    .enumerate()
+                    .for_each(|(r, dst)| copy_row(r, dst));
+            }
+            TensorData::$from_vec(out, device)
+        }};
+    }
+
+    let data = match dtype {
+        DataType::Float32 => roll_impl!(f32, as_f32_slice, from_vec_f32),
+        DataType::Float64 => roll_impl!(f64, as_f64_slice, from_vec_f64),
+        DataType::Int32 => roll_impl!(i32, as_i32_slice, from_vec_i32),
+        DataType::Int64 => roll_impl!(i64, as_i64_slice, from_vec_i64),
+        DataType::Bool => roll_impl!(bool, as_bool_slice, from_vec_bool),
+    };
+
+    Ok(Tensor::new(
+        Arc::new(data),
+        tensor.shape().clone(),
+        dtype,
+        device,
+        tensor.requires_grad(),
+    ))
+}
+
 fn roll_forward(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result<Tensor> {
     if let Some(dims) = dims {
         if shifts.len() != dims.len() {
@@ -968,23 +1091,29 @@ fn roll_forward(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Re
                 "shifts and dims must have the same length".to_string(),
             ));
         }
-        let mut result = tensor.clone();
+
+        // Reduce every shift into its own dimension first, so that one pass can
+        // apply all of them. Repeating a dimension accumulates, which is what
+        // rolling it twice in succession did.
+        let mut by_dim = vec![0usize; tensor.ndim()];
+        let mut any = false;
         for (&shift, &dim) in shifts.iter().zip(dims.iter()) {
-            let dim = normalize_dim(dim, result.ndim())?;
-            let size = result.shape().dims()[dim] as isize;
+            let dim = normalize_dim(dim, tensor.ndim())?;
+            let size = tensor.shape().dims()[dim] as isize;
             if size == 0 {
                 continue;
             }
-            let k = ((shift % size) + size) % size;
-            if k == 0 {
-                continue;
-            }
-            let split_point = (size - k) as usize;
-            let first = slice(&result, dim as isize, 0, split_point, 1)?;
-            let second = slice(&result, dim as isize, split_point, size as usize, 1)?;
-            result = concatenate(&[&second, &first], dim as isize)?;
+            let k = (((shift % size) + size) % size) as usize;
+            by_dim[dim] = (by_dim[dim] + k) % size as usize;
+            any |= by_dim[dim] != 0;
         }
-        Ok(result)
+
+        // Nothing to move: no shift survived reduction, or there is no data to
+        // move in the first place.
+        if !any || tensor.numel() == 0 {
+            return Ok(tensor.clone());
+        }
+        roll_rows(tensor, &by_dim)
     } else {
         if shifts.len() != 1 {
             return Err(MinitensorError::invalid_operation(
@@ -1001,11 +1130,8 @@ fn roll_forward(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Re
         if k == 0 {
             return flat.reshape(tensor.shape().clone());
         }
-        let split_point = (size - k) as usize;
-        let first = slice(&flat, 0, 0, split_point, 1)?;
-        let second = slice(&flat, 0, split_point, size as usize, 1)?;
-        let rolled = concatenate(&[&second, &first], 0)?;
-        rolled.reshape(tensor.shape().clone())
+        // A flat roll is a roll of the one dimension the buffer already has.
+        roll_rows(&flat, &[k as usize])?.reshape(tensor.shape().clone())
     }
 }
 
