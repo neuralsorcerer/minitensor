@@ -15,13 +15,26 @@ use crate::{
 use rayon::prelude::*;
 use std::sync::Arc;
 
+/// Below this many elements a single slice is not worth handing to rayon: the
+/// split-and-merge overhead outweighs sorting it on one core.
+///
+/// Deliberately conservative. Measured on four cores the crossover is somewhere
+/// between 4k and 8k elements and the two paths are within noise of each other
+/// across that range, where the whole sort costs well under a millisecond
+/// either way. Setting it here gives up a little between 8k and 16k in exchange
+/// for never regressing the small-slice path, which is the one that runs inside
+/// a training loop.
+const PAR_SORT_MIN_LEN: usize = 1 << 14;
+
 /// Sort each 1-D slice along a dimension, parallelizing over the outer index.
 ///
 /// `values`/`indices` are partitioned into one disjoint chunk per outer
 /// position (`par_chunks_mut`), so the parallel writes never overlap and this
 /// stays safe. Each slice gathers `(original_index, value)` pairs, sorts them
 /// with `cmp` (so `indices` becomes the argsort), and scatters the result back.
-/// `dim`-0 sorts (`outer == 1`) simply run on a single chunk.
+///
+/// Only worth calling when there are enough slices to fill the thread pool --
+/// see [`sort_rows_with_parallel_sort`] for the other case.
 #[allow(clippy::too_many_arguments)]
 fn sort_along_dim_par<T, C>(
     input: &[T],
@@ -63,6 +76,98 @@ fn sort_along_dim_par<T, C>(
                 }
             }
         });
+}
+
+/// The same sort, but parallel *within* each slice rather than across them.
+///
+/// `sort_along_dim_par` splits the work by outer position, which leaves most
+/// of the machine idle when there are fewer slices than threads -- and a 1-D
+/// tensor has exactly one, so sorting one ran entirely on a single core. The
+/// same 2M elements cost 134 ns each as one slice and 16 ns each as 2048 of
+/// them, a 8.3x spread on four cores that was pure scheduling.
+#[allow(clippy::too_many_arguments)]
+fn sort_rows_with_parallel_sort<T, C>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    outer: usize,
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    stable: bool,
+    cmp: C,
+) where
+    T: Copy + Send + Sync,
+    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+{
+    let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+    for o in 0..outer {
+        for r in 0..inner {
+            entries.clear();
+            let base = o * outer_stride + r;
+            for d in 0..dim_size {
+                entries.push((d, input[base + d * inner]));
+            }
+            if stable {
+                entries.par_sort_by(cmp);
+            } else {
+                entries.par_sort_unstable_by(cmp);
+            }
+            for (j, (index, value)) in entries.iter().enumerate() {
+                let off = base + j * inner;
+                values[off] = *value;
+                indices[off] = *index as i64;
+            }
+        }
+    }
+}
+
+/// Pick whichever of the two has parallelism to exploit.
+///
+/// Splitting across slices is cheaper per element when there are enough of
+/// them, because each sort stays on one core with no merge step. It only wins
+/// when the pool is actually filled, which is what this decides.
+#[allow(clippy::too_many_arguments)]
+fn sort_along_dim<T, C>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    outer: usize,
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    stable: bool,
+    cmp: C,
+) where
+    T: Copy + Send + Sync,
+    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+{
+    let slices = outer.saturating_mul(inner);
+    if slices < rayon::current_num_threads() && dim_size >= PAR_SORT_MIN_LEN {
+        sort_rows_with_parallel_sort(
+            input,
+            values,
+            indices,
+            outer,
+            inner,
+            dim_size,
+            outer_stride,
+            stable,
+            cmp,
+        );
+    } else {
+        sort_along_dim_par(
+            input,
+            values,
+            indices,
+            outer,
+            inner,
+            dim_size,
+            outer_stride,
+            stable,
+            cmp,
+        );
+    }
 }
 
 pub fn sort(
@@ -221,7 +326,7 @@ pub fn sort(
     macro_rules! run_sort {
         ($input:expr, $values:expr, $indices:expr, $asc:expr, $desc:expr) => {
             if descending {
-                sort_along_dim_par(
+                sort_along_dim(
                     $input,
                     $values,
                     $indices,
@@ -233,7 +338,7 @@ pub fn sort(
                     $desc,
                 );
             } else {
-                sort_along_dim_par(
+                sort_along_dim(
                     $input,
                     $values,
                     $indices,
