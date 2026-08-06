@@ -11,6 +11,17 @@ This example demonstrates how to create a simple neural network using
 the Minitensor library's Python bindings.
 """
 
+import sys
+from pathlib import Path
+
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/example_neural_network.py` from a source checkout cannot see the
+# package next to it unless the repository root is added.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
+
 
 def create_simple_network():
     """Create a simple feedforward neural network."""
@@ -229,13 +240,13 @@ def main():
     if success_count == len(examples):
         print("All examples completed successfully!")
         print("\nNext steps:")
-        print("- Build the Rust extension with: maturin develop")
-        print("- Run this example to test the actual implementation")
-        print("- Implement the remaining tasks for full functionality")
+        print("- examples/linear_regression.py for a full training loop")
+        print("- examples/digits_cnn.py for convolutions and pooling")
+        print("- docs/api_reference.md for the rest of the API")
     else:
-        print(
-            "Some examples failed - this is expected until the Rust extension is built"
-        )
+        print("Some examples failed - see the messages above.")
+        print("If the failure is an import error, build the extension with:")
+        print("    maturin develop --release")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,17 @@ from __future__ import annotations
 
 import timeit
 
+import sys
+from pathlib import Path
+
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/performance_benchmark.py` from a source checkout cannot see the
+# package next to it unless the repository root is added.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
+
 
 def _benchmark(lib_name: str, setup: str, stmt: str, number: int = 10):
     """Utility helper to run a benchmark with ``timeit``.

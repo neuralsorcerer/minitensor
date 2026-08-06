@@ -8,8 +8,23 @@
 
 from __future__ import annotations
 
-from sklearn.datasets import load_digits
-from sklearn.model_selection import train_test_split
+try:
+    from sklearn.datasets import load_digits
+    from sklearn.model_selection import train_test_split
+except ImportError:  # pragma: no cover - optional dependency
+    load_digits = train_test_split = None
+
+import sys
+from pathlib import Path
+
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/digits_cnn.py` from a source checkout cannot see the
+# package next to it unless the repository root is added.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
+
 
 import minitensor as mt
 from minitensor import nn, optim
@@ -74,6 +89,12 @@ def train(epochs: int = 20) -> float:
 
 
 def main() -> None:  # pragma: no cover - example script
+    if load_digits is None:
+        print(
+            "Skipping: this example uses scikit-learn for the digits dataset.\n"
+            "Install it with `pip install scikit-learn` to run it."
+        )
+        return
     train()
 
 

@@ -11,10 +11,18 @@ This example shows how to create, register, and use custom plugins
 with the minitensor library.
 """
 
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "minitensor"))
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/plugin_system_demo.py` from a source checkout
+# cannot see the package next to it. This pointed one level too deep -- at the
+# package directory rather than the directory containing it -- so the import it
+# was meant to enable still failed.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
 
 import numpy as np
 

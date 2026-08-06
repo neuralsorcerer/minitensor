@@ -19,6 +19,17 @@ import time
 
 import numpy as np
 
+from pathlib import Path
+
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/custom_operations_demo.py` from a source checkout cannot see the
+# package next to it unless the repository root is added.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
+
+
 import minitensor as mt
 
 if not hasattr(mt, "register_example_custom_ops") or not hasattr(

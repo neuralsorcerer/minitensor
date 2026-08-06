@@ -14,6 +14,17 @@ from random import Random
 
 import numpy as np
 
+import sys
+
+# Running a script by path puts *its* directory on `sys.path`, not the working
+# directory, so `python examples/iris_kmeans.py` from a source checkout cannot see the
+# package next to it unless the repository root is added.
+if __package__ in (None, "") and "minitensor" not in sys.modules:
+    _root = Path(__file__).resolve().parent.parent
+    if (_root / "minitensor" / "__init__.py").exists():
+        sys.path.insert(0, str(_root))
+
+
 import minitensor as mt
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "iris.csv"
