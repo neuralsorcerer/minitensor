@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::error::_convert_error;
+use crate::tensor::PyTensor;
 use engine::{
     serialization::{
         DeploymentModel, ModelMetadata, ModelSerializer, ModelVersion, SerializationFormat,
@@ -361,6 +362,81 @@ impl PyStateDict {
 
     fn buffer_names(&self) -> Vec<String> {
         self.inner.buffer_names().into_iter().cloned().collect()
+    }
+
+    /// The parameter stored under `name`.
+    ///
+    /// The engine has had `StateDict::load_parameter` since the start; without
+    /// a binding for it a Python caller could list a checkpoint's contents and
+    /// not read them, so `state_dict()` could only be handed straight back to
+    /// `load_state_dict` and never inspected.
+    fn get_parameter(&self, name: &str) -> PyResult<PyTensor> {
+        let tensor = self
+            .inner
+            .load_parameter(name, None)
+            .map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(tensor))
+    }
+
+    /// The buffer stored under `name` -- a layer's non-trainable state, such as
+    /// BatchNorm's running mean and variance.
+    fn get_buffer(&self, name: &str) -> PyResult<PyTensor> {
+        let tensor = self.inner.load_buffer(name, None).map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(tensor))
+    }
+
+    /// Record a parameter under `name`, replacing any already there.
+    fn add_parameter(&mut self, name: &str, tensor: &PyTensor) -> PyResult<()> {
+        self.inner
+            .add_parameter(name.to_string(), tensor.tensor())
+            .map_err(_convert_error)
+    }
+
+    /// Record a buffer under `name`, replacing any already there.
+    fn add_buffer(&mut self, name: &str, tensor: &PyTensor) -> PyResult<()> {
+        self.inner
+            .add_buffer(name.to_string(), tensor.tensor())
+            .map_err(_convert_error)
+    }
+
+    /// Every parameter, by name.
+    fn parameters(&self) -> PyResult<HashMap<String, PyTensor>> {
+        self.inner
+            .parameters
+            .keys()
+            .map(|name| Ok((name.clone(), self.get_parameter(name)?)))
+            .collect()
+    }
+
+    /// Every buffer, by name.
+    fn buffers(&self) -> PyResult<HashMap<String, PyTensor>> {
+        self.inner
+            .buffers
+            .keys()
+            .map(|name| Ok((name.clone(), self.get_buffer(name)?)))
+            .collect()
+    }
+
+    /// `state["weight"]`, checking parameters before buffers.
+    ///
+    /// The two namespaces are separate in the file format but a caller reading
+    /// a checkpoint rarely knows or cares which side a name is on; `__contains__`
+    /// already spans both, so subscripting matches it.
+    fn __getitem__(&self, name: &str) -> PyResult<PyTensor> {
+        if self.inner.parameters.contains_key(name) {
+            self.get_parameter(name)
+        } else if self.inner.buffers.contains_key(name) {
+            self.get_buffer(name)
+        } else {
+            Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "no parameter or buffer named {name:?}; this state dict holds {:?}",
+                self.inner
+                    .parameter_names()
+                    .into_iter()
+                    .chain(self.inner.buffer_names())
+                    .collect::<Vec<_>>()
+            )))
+        }
     }
 
     fn __len__(&self) -> usize {

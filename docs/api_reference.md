@@ -1701,7 +1701,7 @@ ddof=2 rejected: True
 - `ModelMetadata` -- name, description, architecture, shapes, custom metadata.
 - `SerializationFormat` -- `json()`, `binary()`, `messagepack()`.
 - `SerializedModel` -- metadata + state dict.
-- `StateDict` -- tensor parameters/buffers.
+- `StateDict` -- tensor parameters/buffers, readable and writable by name.
 - `DeploymentModel` -- compact model format for inference.
 - `ModelSerializer` -- `save()` / `load()` helpers.
 
@@ -1727,6 +1727,44 @@ nested layer keeps its own names.
 A custom `Layer` that does not override `named_parameters` falls back to
 positional keys (`param_0`, `param_1`, ...), which still load correctly but
 cannot be inspected or reordered.
+
+### Reading and building a `StateDict`
+
+Beyond `parameter_names()`, `buffer_names()`, `len()` and `in`, a state dict
+gives up its tensors:
+
+- `state[name]` -- the tensor under `name`, checking parameters then buffers.
+- `get_parameter(name)` / `get_buffer(name)` -- the same, one namespace at a
+  time. The two are distinct in the file format, so a name may appear in both.
+- `parameters()` / `buffers()` -- every entry, as a plain dict of tensors.
+- `add_parameter(name, tensor)` / `add_buffer(name, tensor)` -- record one,
+  replacing any already under that name.
+
+Together those let a checkpoint be inspected rather than only replayed --
+reading a saved weight, copying one model's weights into another, or assembling
+a state dict from tensors you already hold.
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+mt.manual_seed(0)
+model = nn.Sequential([nn.DenseLayer(4, 3), nn.BatchNorm1d(3)])
+state = model.state_dict()
+
+print(state["0.weight"].shape)
+print(sorted(state.buffers()))
+
+built = mt.serialization.StateDict()
+built.add_parameter("weight", mt.zeros(2, 2))
+print(len(built), "weight" in built)
+```
+
+```text
+Shape([3, 4])
+['1.running_mean', '1.running_var']
+1 True
+```
 
 ```python
 import os
