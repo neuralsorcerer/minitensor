@@ -412,6 +412,67 @@ arg_extremum_all_exact!(argmin_all_i32, as_i32_slice, i32, "i32", |a, b| a < b);
 arg_extremum_all_exact!(argmin_all_i64, as_i64_slice, i64, "i64", |a, b| a < b);
 arg_extremum_all_bool!(argmin_all_bool, false);
 
+/// Fold one contiguous float row to its extremum, propagating NaN.
+///
+/// This is [`super::sum_prod`]'s `float_extremum_all!` applied a row at a time.
+/// That macro exists because a single accumulator makes the compare-and-select
+/// a serial dependency chain that cannot vectorize, and splitting it across
+/// `$lanes` independent accumulators measured 6.2x faster on f32 -- but it only
+/// ever covered the whole-tensor reduction. The along-a-dimension fold kept the
+/// scalar walk, with a NaN test and a `break` on every element, so `max` along
+/// the last axis of a 4096x1024 f32 tensor took 2.86 ms where `sum` over the
+/// same axis took 0.23 ms.
+///
+/// NaN is tracked as a separate flag so the value loop stays a bare comparison:
+/// `v > best` is false for a NaN, so a NaN never displaces a real value, and the
+/// flag decides the result at the end. `f32::max` would be wrong here -- it
+/// returns the *non*-NaN operand, the opposite of propagation.
+///
+/// The lane count is fixed rather than taken from the hardware, so the fold
+/// groups the same way on every machine.
+macro_rules! float_extremum_row {
+    ($name:ident, $ty:ty, $identity:expr, $better:tt, $lanes:expr) => {
+        #[inline]
+        fn $name(row: &[$ty]) -> $ty {
+            const LANES: usize = $lanes;
+            let mut bests = [$identity; LANES];
+            let mut nans = [0u32; LANES];
+            let mut blocks = row.chunks_exact(LANES);
+            for block in &mut blocks {
+                for lane in 0..LANES {
+                    let v = block[lane];
+                    if v $better bests[lane] {
+                        bests[lane] = v;
+                    }
+                    // `as u32` rather than a bool `|=`: keeps the lane update
+                    // branch-free so it vectorizes with the comparison above.
+                    nans[lane] |= (v != v) as u32;
+                }
+            }
+            let mut best: $ty = $identity;
+            let mut nan = 0u32;
+            for lane in 0..LANES {
+                if bests[lane] $better best {
+                    best = bests[lane];
+                }
+                nan |= nans[lane];
+            }
+            for &v in blocks.remainder() {
+                if v $better best {
+                    best = v;
+                }
+                nan |= (v != v) as u32;
+            }
+            if nan != 0 { <$ty>::NAN } else { best }
+        }
+    };
+}
+
+float_extremum_row!(max_row_f32, f32, f32::NEG_INFINITY, >, 8);
+float_extremum_row!(min_row_f32, f32, f32::INFINITY, <, 8);
+float_extremum_row!(max_row_f64, f64, f64::NEG_INFINITY, >, 4);
+float_extremum_row!(min_row_f64, f64, f64::INFINITY, <, 4);
+
 /// Reduce `dim` to its extremum, without reporting where it was found.
 ///
 /// The value-only forms of `min` and `max` differed only in their seed and
@@ -431,7 +492,7 @@ fn extremum_along_dim(
     let is_max = which == Extremum::Max;
 
     macro_rules! float_arm {
-        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal) => {{
+        ($accessor:ident, $mut_accessor:ident, $ty:ty, $tyname:literal, $row_max:ident, $row_min:ident) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
@@ -447,27 +508,38 @@ fn extremum_along_dim(
             } else {
                 <$ty>::INFINITY
             };
-            reduce_along_dim_par(
-                input,
-                output,
-                &layout,
-                seed,
-                // NaN-propagating on its own rather than relying on the
-                // short-circuit below: the blocked path in
-                // `reduce_along_dim_par` walks memory in order and has no
-                // per-element early exit to lean on. `a.max(v)` would be wrong
-                // here -- it returns the *non*-NaN operand.
-                move |a: $ty, v: $ty| {
-                    if a != a || v != v {
-                        <$ty>::NAN
-                    } else if (v > a) == is_max && v != a {
-                        v
-                    } else {
-                        a
-                    }
-                },
-                |v: $ty| if v.is_nan() { Some(<$ty>::NAN) } else { None },
-            );
+            // The reduced axis is the last one, so each output's column is a
+            // contiguous run and can go through the vectorized row fold rather
+            // than the general strided walk.
+            if layout.inner == 1 {
+                let dim_size = layout.dim_size;
+                output.par_iter_mut().enumerate().for_each(|(o, out)| {
+                    let row = &input[o * dim_size..][..dim_size];
+                    *out = if is_max { $row_max(row) } else { $row_min(row) };
+                });
+            } else {
+                reduce_along_dim_par(
+                    input,
+                    output,
+                    &layout,
+                    seed,
+                    // NaN-propagating on its own rather than relying on the
+                    // short-circuit below: the blocked path in
+                    // `reduce_along_dim_par` walks memory in order and has no
+                    // per-element early exit to lean on. `a.max(v)` would be
+                    // wrong here -- it returns the *non*-NaN operand.
+                    move |a: $ty, v: $ty| {
+                        if a != a || v != v {
+                            <$ty>::NAN
+                        } else if (v > a) == is_max && v != a {
+                            v
+                        } else {
+                            a
+                        }
+                    },
+                    |v: $ty| if v.is_nan() { Some(<$ty>::NAN) } else { None },
+                );
+            }
         }};
     }
 
@@ -496,8 +568,22 @@ fn extremum_along_dim(
     }
 
     match tensor.dtype() {
-        DataType::Float32 => float_arm!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
-        DataType::Float64 => float_arm!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
+        DataType::Float32 => float_arm!(
+            as_f32_slice,
+            as_f32_slice_mut,
+            f32,
+            "f32",
+            max_row_f32,
+            min_row_f32
+        ),
+        DataType::Float64 => float_arm!(
+            as_f64_slice,
+            as_f64_slice_mut,
+            f64,
+            "f64",
+            max_row_f64,
+            min_row_f64
+        ),
         DataType::Int32 => int_arm!(as_i32_slice, as_i32_slice_mut, i32, "i32"),
         DataType::Int64 => int_arm!(as_i64_slice, as_i64_slice_mut, i64, "i64"),
         DataType::Bool => {
