@@ -7,9 +7,14 @@
 use crate::{
     autograd::{NormBackward, add_to_graph},
     error::{MinitensorError, Result},
-    ops::{activation, arithmetic, map::unary_map, reduction},
+    ops::{
+        activation, arithmetic,
+        map::{EXPENSIVE_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, unary_map},
+        reduction,
+    },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Normalise `dim` into a sorted, deduplicated list of axes. `None` means every
@@ -46,7 +51,21 @@ fn keepdim_shape(shape: &Shape, dims: &[usize]) -> Shape {
 /// Reduce `tensor` over every axis in `dims` with `max` (or `min`), keeping the
 /// rank. Applying one axis at a time keeps the remaining axis indices valid,
 /// which a rank-shrinking reduction would not.
+///
+/// Covering every axis is the exception: that is the whole-tensor reduction,
+/// which reads the buffer once instead of once per axis and has its own
+/// lane-folded kernel. Going axis by axis meant the first step was a reduction
+/// over dimension 0, the most expensive layout there is -- 1.56 ms against
+/// 0.28 ms for the global fold on a 4096x1024 f32 tensor.
 fn reduce_extremum(tensor: &Tensor, dims: &[usize], is_max: bool) -> Result<Tensor> {
+    if dims.len() == tensor.ndim() {
+        return if is_max {
+            reduction::max(tensor, None, true)
+        } else {
+            reduction::min(tensor, None, true)
+        };
+    }
+
     let mut acc = tensor.clone();
     for &d in dims {
         acc = if is_max {
@@ -118,6 +137,150 @@ fn unusable_scales_to_ones(tensor: &Tensor) -> Result<Tensor> {
         tensor.device(),
         false,
     ))
+}
+
+/// The largest magnitude along `dims`, without materialising `|x|`.
+///
+/// `max|x|` is `max(max(x), -min(x))`, and both reductions read the input
+/// directly where taking the maximum of `abs(x)` needed a full-size copy of it
+/// first. The two agree on every input: a NaN anywhere makes both reductions
+/// NaN, an infinity of either sign reaches the maximum through one side or the
+/// other, and negating an already-reduced tensor is exact.
+fn abs_max_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
+    let highest = reduce_extremum(tensor, dims, true)?;
+    let lowest = reduce_extremum(tensor, dims, false)?;
+    crate::ops::minmax::maximum(&highest, &arithmetic::neg(&lowest)?)
+}
+
+/// How `scale` broadcasts back over the input it was reduced from.
+enum ScaleLayout {
+    /// Every axis reduced, so the scale is one value for the whole tensor.
+    Scalar,
+    /// One axis reduced: input position `(o, i, r)` divides by `scale[o, r]`.
+    Axis { dim_size: usize, inner: usize },
+}
+
+/// Build `|x / scale|^p` in one pass and one allocation.
+///
+/// This is `abs` -> `div` -> `powf` collapsed into a single kernel. Those were
+/// three full-size temporaries, and on a 4096x1024 f32 tensor the allocations
+/// cost more than the arithmetic they carried: `norm(2, dim=1)` took 8.88 ms,
+/// and the identical code took 3.63 ms with glibc told to keep large blocks
+/// resident instead of returning their pages. One buffer per call is recycled
+/// between calls; three overlapping ones are not.
+///
+/// Only the two layouts whose index arithmetic is cheap are handled here, which
+/// between them cover `norm(x)` and `norm(x, dim)`; [`norm`] keeps the general
+/// composition for a reduction over some other subset of the axes.
+///
+/// The small-integer exponents match the fast paths in
+/// [`crate::ops::activation::pow`] exactly -- repeated multiplication, not
+/// `powf` -- so which route a norm takes cannot change the value it returns.
+fn scaled_powers(input: &Tensor, scale: &Tensor, p: f64, dims: &[usize]) -> Result<Option<Tensor>> {
+    let shape = input.shape().dims();
+    let layout = if dims.len() == shape.len() {
+        ScaleLayout::Scalar
+    } else if dims.len() == 1 {
+        let d = dims[0];
+        ScaleLayout::Axis {
+            dim_size: shape[d],
+            inner: shape[d + 1..].iter().product::<usize>(),
+        }
+    } else {
+        return Ok(None);
+    };
+
+    macro_rules! build {
+        ($ty:ty, $slice:ident, $from_vec:ident) => {{
+            let src = input.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get input slice for norm")
+            })?;
+            let scales = scale.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get scale slice for norm")
+            })?;
+            let mut out = vec![<$ty>::default(); src.len()];
+
+            // `$power` is chosen once, outside the loops, so the exponent never
+            // costs a branch per element.
+            macro_rules! fill {
+                ($power:expr, $threshold:expr) => {{
+                    let power = $power;
+                    match layout {
+                        ScaleLayout::Scalar => {
+                            let s = scales[0];
+                            let run = |base: usize, chunk: &mut [$ty]| {
+                                for (k, slot) in chunk.iter_mut().enumerate() {
+                                    *slot = power(src[base + k].abs() / s);
+                                }
+                            };
+                            if src.len() < $threshold {
+                                run(0, &mut out);
+                            } else {
+                                let grain = PAR_CHUNK.max(1);
+                                out.par_chunks_mut(grain)
+                                    .enumerate()
+                                    .for_each(|(c, chunk)| run(c * grain, chunk));
+                            }
+                        }
+                        ScaleLayout::Axis { dim_size, inner } => {
+                            let block = dim_size * inner;
+                            let run = |o: usize, chunk: &mut [$ty]| {
+                                let base = o * block;
+                                for i in 0..dim_size {
+                                    let row = i * inner;
+                                    for r in 0..inner {
+                                        let s = scales[o * inner + r];
+                                        chunk[row + r] = power(src[base + row + r].abs() / s);
+                                    }
+                                }
+                            };
+                            if src.len() < $threshold {
+                                out.chunks_mut(block)
+                                    .enumerate()
+                                    .for_each(|(o, chunk)| run(o, chunk));
+                            } else {
+                                out.par_chunks_mut(block)
+                                    .enumerate()
+                                    .for_each(|(o, chunk)| run(o, chunk));
+                            }
+                        }
+                    }
+                }};
+            }
+
+            let exponent = p as $ty;
+            if exponent == 2.0 {
+                fill!(|v: $ty| v * v, PAR_THRESHOLD)
+            } else if exponent == 1.0 {
+                fill!(|v: $ty| v, PAR_THRESHOLD)
+            } else if exponent == 3.0 {
+                fill!(|v: $ty| v * v * v, PAR_THRESHOLD)
+            } else {
+                // `powf` is a transcendental, so it repays parallelism far
+                // sooner than the multiply-only exponents do.
+                fill!(move |v: $ty| v.powf(exponent), EXPENSIVE_PAR_THRESHOLD)
+            }
+            TensorData::$from_vec(out, input.device())
+        }};
+    }
+
+    let data = match input.dtype() {
+        DataType::Float32 => build!(f32, as_f32_slice, from_vec_f32),
+        DataType::Float64 => build!(f64, as_f64_slice, from_vec_f64),
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "norm requires floating point tensors",
+            ));
+        }
+    };
+
+    Ok(Some(Tensor::new(
+        Arc::new(data),
+        input.shape().clone(),
+        input.dtype(),
+        input.device(),
+        false,
+    )))
 }
 
 /// Count the non-zero entries along `dims`, as a float tensor of the same dtype.
@@ -208,17 +371,25 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
             false,
         )
     } else {
-        let abs_x = activation::abs(&input)?;
         if p == f64::INFINITY {
-            reduce_extremum(&abs_x, &dims, true)?
+            abs_max_over(&input, &dims)?
         } else if p == f64::NEG_INFINITY {
-            reduce_extremum(&abs_x, &dims, false)?
+            // The *smallest* magnitude is not recoverable from the reductions of
+            // `x` alone -- a slice straddling zero has neither endpoint nearest
+            // it -- so this order still materialises `|x|`.
+            reduce_extremum(&activation::abs(&input)?, &dims, false)?
         } else if p == 0.0 {
             count_nonzero_over(&input, &dims)?
         } else {
-            let scale = unusable_scales_to_ones(&reduce_extremum(&abs_x, &dims, true)?)?;
-            let scaled = arithmetic::div(&abs_x, &scale)?;
-            let powered = activation::powf(&scaled, p)?;
+            let scale = unusable_scales_to_ones(&abs_max_over(&input, &dims)?)?;
+            let powered = match scaled_powers(&input, &scale, p, &dims)? {
+                Some(fused) => fused,
+                None => {
+                    let abs_x = activation::abs(&input)?;
+                    let scaled = arithmetic::div(&abs_x, &scale)?;
+                    activation::powf(&scaled, p)?
+                }
+            };
             let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
             let summed = reduction::sum(&powered, Some(dims_isize), true)?;
             let rooted = activation::powf(&summed, 1.0 / p)?;

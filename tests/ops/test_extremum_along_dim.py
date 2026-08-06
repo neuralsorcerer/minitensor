@@ -15,9 +15,17 @@ for NaN and breaking out of the loop on one -- a data-dependent branch. So on a
 
     max along the last axis    2.86 ms      sum along the same axis   0.21 ms
 
-for the same single pass. Folding each contiguous column in lanes brings it to
-0.236 ms, level with `sum`. `norm(inf)` along a dim, which is exactly this
-reduction, went from 3.52 ms to 1.11 ms and from 1.4x NumPy to 0.34x.
+for the same single pass. The wide-axis fold had it too, from the same closure:
+`max` along dimension 0 cost 3.60 ms against `sum`'s 0.41 ms. On this machine,
+after giving both the lane treatment:
+
+                                    before     after     sum, for scale
+    max along the last axis        2.863 ms   0.377 ms   0.244 ms
+    max along dimension 0          3.596 ms   0.727 ms   0.414 ms
+    max, middle axis of a 3-D      1.539 ms   0.742 ms
+
+`norm(inf, dim)` is exactly this reduction: 3.52 ms to 0.67 ms along the last
+axis, and from 1.4x NumPy to 0.29x.
 
 The lane split is what these tests are really about. NaN is now tracked as a
 separate flag so the value loop can stay a bare comparison -- `v > best` is
@@ -26,6 +34,12 @@ result at the end -- and a fold that gets that wrong loses NaN propagation
 entirely. So the lengths below straddle the lane counts (8 for f32, 4 for f64)
 and the special values are placed in a full block *and* in the ragged tail,
 which a separate remainder loop handles.
+
+Three layouts reach three different kernels, and the shapes below cover all of
+them: a contiguous column (`inner == 1`), a wide axis split into row bands and
+merged, and a wide axis with several slabs to hand out. The merge is the one
+place a NaN can be dropped after being found correctly, so a NaN has to land in
+every band position, not just the first.
 
 Reached from Python through `norm(+/-inf, dim)`, which is `max|x|` and `min|x|`
 along the dim, and through `logsumexp`, which takes the column max for stability.
@@ -43,9 +57,23 @@ DTYPES = ["float32", "float64"]
 # Straddles both lane counts and their remainders: 8 for f32, 4 for f64.
 LENGTHS = [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 1000]
 
-# Shapes chosen so that some dims reduce with a contiguous column (the lane
-# path, `inner == 1`) and others with a strided one.
-SHAPES = [(7,), (8,), (9,), (4, 8), (4, 9), (3, 4, 5), (2, 3, 4, 5), (64, 64), (3, 300)]
+# Chosen so that between them the dims reach all three kernels: a contiguous
+# column (`inner == 1`), a narrow strided one, and a wide axis (`inner >= 256`)
+# both as a single slab and as several.
+SHAPES = [
+    (7,),
+    (8,),
+    (9,),
+    (4, 8),
+    (4, 9),
+    (3, 4, 5),
+    (2, 3, 4, 5),
+    (64, 64),
+    (3, 300),  # dim 0: wide axis, one slab
+    (300, 3),  # dim 0: narrow, strided
+    (2, 3, 400),  # dim 1: wide axis, two slabs
+    (5, 600),  # dim 0: wide axis, one slab, more rows than threads
+]
 
 
 def _base(shape, dtype, seed=0):
@@ -127,6 +155,40 @@ def test_only_the_column_holding_the_nan_goes_nan(shape, where, dtype):
         np.testing.assert_array_equal(np.isnan(got), np.isnan(expected))
         finite = ~np.isnan(expected)
         np.testing.assert_allclose(got[finite], expected[finite], rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("row", [0, 1, 7, 31, 63, 99])
+def test_a_nan_survives_the_band_merge_from_any_row(row, dtype):
+    """A wide axis with one slab is folded in row bands and the partials are
+    merged afterwards. The merge is the one place a NaN can be found correctly
+    and then dropped -- a bare comparison against a NaN partial is false -- and
+    only a NaN outside the first band exercises it."""
+    rows, cols = 100, 400  # cols >= 256 puts this on the wide-axis path
+    values = _base((rows, cols), dtype)
+    values[row, 5] = np.nan
+
+    got = mt.Tensor(values, dtype=dtype).norm(float("inf"), 0).numpy()
+
+    expected = np.abs(values.astype(np.float64)).max(axis=0)
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(expected))
+    assert np.isnan(got[5]), "the NaN column did not come back NaN"
+    finite = ~np.isnan(expected)
+    np.testing.assert_allclose(got[finite], expected[finite], rtol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_the_band_merge_keeps_the_true_extremum(dtype):
+    """The winner has to be found across bands, not within one. Placing it in
+    each row in turn puts it in every band."""
+    rows, cols = 100, 400
+    for row in (0, 1, 50, 98, 99):
+        values = np.zeros((rows, cols), dtype=dtype)
+        values[row, :] = 7.5
+
+        got = mt.Tensor(values, dtype=dtype).norm(float("inf"), 0).numpy()
+
+        np.testing.assert_allclose(got, np.full(cols, 7.5), rtol=1e-6)
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
