@@ -58,19 +58,35 @@ fn reduce_extremum(tensor: &Tensor, dims: &[usize], is_max: bool) -> Result<Tens
     Ok(acc)
 }
 
-/// Replace exact zeros with ones.
+/// Replace scale factors that cannot be divided by with ones.
 ///
-/// Used on the scale factor: a slice whose maximum magnitude is zero is a slice
-/// of all zeros, so dividing it by one instead leaves `0 / 1 = 0` and the norm
-/// still comes out zero — without the `0 / 0` the raw scale would produce.
-fn zeros_to_ones(tensor: &Tensor) -> Result<Tensor> {
+/// The scale is the largest magnitude in a slice, and it is used both to divide
+/// the slice and to multiply the result back up. Two values leave it unusable:
+///
+/// * Zero, meaning a slice of all zeros. Dividing by one instead leaves
+///   `0 / 1 = 0` and the norm still comes out zero, without the `0 / 0` the raw
+///   scale would produce.
+/// * Infinity, meaning the slice contains one. Dividing by it gave `inf / inf`
+///   for that element and `finite / inf = 0` for the rest, so the norm of a
+///   slice holding an infinity came back NaN where NumPy and PyTorch both
+///   report `inf`. With a scale of one the accumulation runs unscaled, `inf`
+///   survives the sum and the root, and the final multiply by one keeps it --
+///   while a NaN elsewhere in the slice still poisons the sum and wins, which
+///   is also what NumPy does.
+///
+/// Neither substitution weakens the overflow guard, which only ever mattered
+/// for a finite scale: every `|x| <= m` gives `|x / m| <= 1`.
+fn unusable_scales_to_ones(tensor: &Tensor) -> Result<Tensor> {
     let data = match tensor.dtype() {
         DataType::Float32 => {
             let src = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from scale")
             })?;
             TensorData::from_vec::<f32>(
-                unary_map(src, |v: f32| if v == 0.0 { 1.0 } else { v }),
+                unary_map(
+                    src,
+                    |v: f32| if v == 0.0 || v.is_infinite() { 1.0 } else { v },
+                ),
                 DataType::Float32,
                 tensor.device(),
             )
@@ -80,7 +96,10 @@ fn zeros_to_ones(tensor: &Tensor) -> Result<Tensor> {
                 MinitensorError::internal_error("Failed to get f64 slice from scale")
             })?;
             TensorData::from_vec::<f64>(
-                unary_map(src, |v: f64| if v == 0.0 { 1.0 } else { v }),
+                unary_map(
+                    src,
+                    |v: f64| if v == 0.0 || v.is_infinite() { 1.0 } else { v },
+                ),
                 DataType::Float64,
                 tensor.device(),
             )
@@ -155,7 +174,9 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// passes about 1.8e19, so the direct form reports `inf` for a norm that is
 /// perfectly representable — and `norm` is exactly what you call to *detect*
 /// a blow-up, so saturating right at that point defeats the purpose. Scaling by
-/// the largest magnitude keeps every intermediate inside the range.
+/// the largest magnitude keeps every intermediate inside the range. When that
+/// magnitude is itself zero or infinite there is nothing to scale by, and
+/// [`unusable_scales_to_ones`] stands one in for it.
 pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
@@ -195,7 +216,7 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
         } else if p == 0.0 {
             count_nonzero_over(&input, &dims)?
         } else {
-            let scale = zeros_to_ones(&reduce_extremum(&abs_x, &dims, true)?)?;
+            let scale = unusable_scales_to_ones(&reduce_extremum(&abs_x, &dims, true)?)?;
             let scaled = arithmetic::div(&abs_x, &scale)?;
             let powered = activation::powf(&scaled, p)?;
             let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
