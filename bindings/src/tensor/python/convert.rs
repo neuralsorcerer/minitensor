@@ -859,8 +859,27 @@ fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<Te
             .try_into()
             .map_err(|_| PyValueError::new_err("dim_size too large"))?;
         let indices = slice.indices(dim_size_isize)?;
-        if indices.step <= 0 {
-            return Err(PyIndexError::new_err("slice step must be positive"));
+        if indices.step < 0 {
+            // Reversing by subscript is not supported (PyTorch declines it
+            // too), but "slice step must be positive" stated the rule and left
+            // the caller to find the remedy. `flip` is the remedy, and a step
+            // other than -1 needs the positive stride afterwards -- applied to
+            // the *same* axis, so the leading colons have to be there.
+            let stride = -indices.step;
+            let follow_up = if stride == 1 {
+                String::new()
+            } else {
+                format!("[{}::{stride}]", ":, ".repeat(axis))
+            };
+            return Err(PyIndexError::new_err(format!(
+                "negative slice step is not supported: axis {axis} was indexed with a step of \
+                 {step}. Reverse that axis instead -- `x.flip({axis}){follow_up}` selects the \
+                 same elements in the same order.",
+                step = indices.step
+            )));
+        }
+        if indices.step == 0 {
+            return Err(PyIndexError::new_err("slice step cannot be zero"));
         }
         Ok(TensorIndex::Slice {
             start: indices.start.max(0) as usize,

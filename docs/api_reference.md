@@ -505,6 +505,22 @@ scalar or anything broadcastable to the selection shape
 place. Masks inside mixed index tuples (e.g. `t[0, mask]`) are not
 supported and raise.
 
+A **negative slice step** is rejected, as it is in PyTorch — `t[::-1]` raises
+rather than reversing. Use `flip`, which reverses every requested axis in one
+pass, and follow it with a positive stride if the step was not `-1`:
+
+```python
+import minitensor as mt
+
+t = mt.Tensor([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]])
+
+print(t.flip(1).tolist())        # what t[:, ::-1] would give
+print(t.flip(1)[:, ::2].tolist())  # what t[:, ::-2] would give
+```
+
+The error names the axis and spells out the equivalent call, so the
+substitution does not have to be worked out from the rule.
+
 ### Linear algebra & matrix ops
 
 - `dot`, `bmm`
