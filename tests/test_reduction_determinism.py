@@ -88,24 +88,68 @@ _CHILD = textwrap.dedent("""
     )
     """)
 
+# The reductions that go along a dimension rather than over the whole tensor.
+# They reach different kernels: a contiguous column is folded in lanes, and a
+# wide one is split into bands of rows whose *count comes from the thread pool*.
+# That split is only safe because an extremum is exactly associative, so the
+# grouping cannot move the answer -- which is a property of the fold, not of the
+# partition, and would stop holding the moment the fold carried anything that
+# accumulates. Shapes below put `norm`/`max`/`logsumexp` on each kernel: a last
+# axis (contiguous), a wide leading axis as one slab, and a wide middle axis as
+# several.
+_CHILD_ALONG_DIM = textwrap.dedent("""
+    import numpy as np, minitensor as mt
+    rng = np.random.default_rng(3)
+    digests = []
+    for shape in [(4096, 1024), (5, 600), (2, 3, 400), (300, 3)]:
+        values = (rng.standard_normal(shape) * 10).astype(np.float32)
+        poisoned = values.copy()
+        poisoned.reshape(-1)[::997] = np.nan
+        clean, dirty = mt.from_numpy(values), mt.from_numpy(poisoned)
+        for dim in range(len(shape)):
+            for tensor in (clean, dirty):
+                digests.append(tensor.norm(float("inf"), dim).numpy().tobytes())
+                digests.append(tensor.norm(float("-inf"), dim).numpy().tobytes())
+                digests.append(tensor.max(dim)[0].numpy().tobytes())
+                digests.append(tensor.argmax(dim).numpy().tobytes())
+            digests.append(clean.norm(2, dim).numpy().tobytes())
+            digests.append(clean.logsumexp(dim).numpy().tobytes())
+    import hashlib
+    print(hashlib.sha256(b"".join(digests)).hexdigest())
+    """)
+
+
+def _run_at(program, n):
+    env = dict(os.environ, RAYON_NUM_THREADS=n)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return out.stdout.strip()
+
 
 @pytest.mark.parametrize("threads", ["1", "2", "4", "8"])
 def test_reductions_are_invariant_across_thread_counts(threads):
     # The decisive check: a result that depends on rayon's split-and-steal
     # decisions cannot survive being run at a different thread count.
-    def run(n):
-        env = dict(os.environ, RAYON_NUM_THREADS=n)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
-            + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
-        )
-        out = subprocess.run(
-            [sys.executable, "-c", _CHILD],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=True,
-        )
-        return out.stdout.strip()
+    assert _run_at(_CHILD, threads) == _run_at(_CHILD, "1")
 
-    assert run(threads) == run("1")
+
+@pytest.mark.parametrize("threads", ["1", "2", "3", "4", "8"])
+def test_reductions_along_a_dim_are_invariant_across_thread_counts(threads):
+    """The whole-tensor reductions above were the ones that had drifted; these
+    take different kernels, and one of them derives its partition from the
+    thread pool outright.
+
+    Three is in the list on purpose: a band count that divides the axis evenly
+    at 2, 4 and 8 need not at 3, which is where an off-by-one in the tail band
+    would first show.
+    """
+    assert _run_at(_CHILD_ALONG_DIM, threads) == _run_at(_CHILD_ALONG_DIM, "1")
