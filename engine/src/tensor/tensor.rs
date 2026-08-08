@@ -2453,13 +2453,39 @@ impl Tensor {
                 }
             };
 
-        Ok(Tensor::new(
+        // A cast is the identity on values, so it is differentiable -- but only
+        // between float dtypes. An integer or bool result cannot carry a
+        // gradient, so it is marked as not requiring one; propagating the flag
+        // regardless produced a tensor that reported `requires_grad = true` and
+        // then had nothing behind it.
+        //
+        // That gap was not confined to callers writing `astype` themselves.
+        // Binary operands are coerced to a common dtype through here, so an
+        // `f32` parameter added to an `f64` constant was promoted and silently
+        // lost its gradient entirely -- the whole point of the promotion being
+        // that the caller did not have to think about it.
+        let track = self.requires_grad
+            && self.dtype.is_float()
+            && dtype.is_float()
+            && autograd::is_grad_enabled();
+
+        let mut output = Tensor::new(
             Arc::new(new_data),
             self.shape.clone(),
             dtype,
             self.device,
-            self.requires_grad,
-        ))
+            track,
+        );
+
+        if track {
+            let grad_fn = Arc::new(autograd::AstypeBackward {
+                input_id: self.id(),
+                input_dtype: self.dtype,
+            });
+            output.set_grad_fn(Some(grad_fn.clone()));
+            autograd::add_to_graph(&output, Some(grad_fn))?;
+        }
+        Ok(output)
     }
 }
 

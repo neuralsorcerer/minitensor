@@ -5,7 +5,36 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+
+/// Build a tensor from a Python object, then mark it trainable.
+///
+/// The order matters. Several of the paths below reach the requested dtype by
+/// converting at some other one and casting, and a cast between float dtypes is
+/// a differentiable operation. Carrying `requires_grad` into the conversion
+/// therefore made the tensor handed back to the caller an *interior* node of a
+/// graph whose input was a throwaway temporary -- so it was no longer a leaf,
+/// and the first backward pass released its stored gradient along with the rest
+/// of the subgraph. `mt.Tensor([1.0, 2.0], requires_grad=True)` accumulated
+/// correctly once and then reported no gradient at all.
+///
+/// Marking it afterwards makes what a caller constructs a leaf every time,
+/// whatever conversions it took to get there. The flag still respects
+/// `no_grad`, matching what `Tensor::new` would have done with it.
 pub(crate) fn convert_python_data_to_tensor(
+    data: &Bound<PyAny>,
+    dtype: DataType,
+    device: Device,
+    requires_grad: bool,
+) -> PyResult<Tensor> {
+    let tensor = build_tensor_from_python(data, dtype, device, false)?;
+    if requires_grad && engine::autograd::is_grad_enabled() {
+        Ok(tensor.requires_grad_(true))
+    } else {
+        Ok(tensor)
+    }
+}
+
+fn build_tensor_from_python(
     data: &Bound<PyAny>,
     dtype: DataType,
     device: Device,
@@ -65,7 +94,7 @@ pub(crate) fn convert_python_data_to_tensor(
 
     if let Ok(tuple) = data.cast::<PyTuple>() {
         let list = tuple.to_list();
-        return convert_python_data_to_tensor(list.as_any(), dtype, device, requires_grad);
+        return build_tensor_from_python(list.as_any(), dtype, device, requires_grad);
     }
 
     // Handle scalars

@@ -677,6 +677,34 @@ impl GradientFunction for ReshapeBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+/// Gradient function for a dtype conversion between two float types.
+///
+/// A cast is the identity on values, so its gradient is the identity too --
+/// carried back to whatever precision the input was held in. Only float-to-float
+/// conversions get one: an integer or bool result cannot carry a gradient at
+/// all, and [`Tensor::astype`] marks those as not requiring one rather than
+/// producing a tensor that claims to and then delivers nothing.
+pub struct AstypeBackward {
+    pub input_id: TensorId,
+    pub input_dtype: DataType,
+}
+impl GradientFunction for AstypeBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        accumulate_grad(
+            &mut gradients,
+            self.input_id,
+            grad_output.astype(self.input_dtype)?,
+        )?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for repeat_interleave operation
 pub struct RepeatInterleaveBackward {
     pub input_shape: Vec<usize>,
