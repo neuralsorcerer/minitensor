@@ -226,6 +226,22 @@ The custom-ops system is exposed at the top level:
 Every creation helper is available as either `mt.<name>(...)` or
 `Tensor.<name>(...)`.
 
+Each `*_like` form copies the source tensor's shape, dtype, device *and*
+`requires_grad` — so `zeros_like(parameter)` is itself trainable, which differs
+from `torch.zeros_like`, where the flag defaults to `False`. Pass
+`requires_grad=` explicitly to say otherwise:
+
+```python
+import minitensor as mt
+
+parameter = mt.zeros(3, requires_grad=True)
+print(mt.zeros_like(parameter).requires_grad)                      # True
+print(mt.zeros_like(parameter, requires_grad=False).requires_grad)  # False
+```
+
+The result is a leaf either way: it is built from the source's *metadata*, not
+its values, so nothing flows back to the source through it.
+
 ### Random + distribution-based
 
 - `rand`, `rand_like`
@@ -353,6 +369,30 @@ Conversion helpers:
 - `tensor.astype(dtype)` → dtype conversion
 - `float(tensor)` / `int(tensor)` → Python scalar (one-element tensors only;
   `int` truncates, bool converts to 1/0)
+
+`astype` between two float dtypes is differentiable: a cast is the identity on
+values, so the gradient passes straight through and comes back at whatever
+precision the input was held in. That is what lets a parameter be kept in one
+precision and used in another:
+
+```python
+import minitensor as mt
+
+weights = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float64", requires_grad=True)
+batch = mt.Tensor([[1.0], [1.0]], dtype="float32")
+
+weights.astype("float32").matmul(batch).sum().backward()
+print(mt.get_gradient(weights).dtype)   # float64 -- the parameter's own precision
+```
+
+It is also the route mixed-dtype arithmetic takes: operands are promoted to a
+common dtype through the same conversion, so `float32_tensor * float64_tensor`
+back-propagates to both sides.
+
+Casting to `int32`, `int64` or `bool` returns a tensor with
+`requires_grad=False`. Those dtypes cannot carry a gradient, and reporting
+`True` for one would describe a tensor that looks tracked and then contributes
+nothing to a backward pass.
 
 Python numeric protocol: tensors support `+`, `-`, `*`, `/`, `//`, `%`, `@`,
 `**`, unary `-`/`+`, `abs()`, `~` (bool/int only), the comparison operators,
