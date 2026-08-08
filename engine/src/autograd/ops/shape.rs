@@ -303,6 +303,30 @@ impl GradientFunction for RollBackward {
     }
 }
 
+/// Gradient function for `flip`.
+///
+/// Reversing an axis is its own inverse, so the gradient is the same flip
+/// applied to the incoming one. Carried as a single node because `flip` fills
+/// its output directly; going through one `index_select` per dimension, as it
+/// used to, left a gradient edge per dimension as well.
+pub struct FlipBackward {
+    pub input_id: TensorId,
+    pub dims: Vec<isize>,
+}
+
+impl GradientFunction for FlipBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let grad_input = crate::ops::shape_ops::flip(grad_output, &self.dims)?;
+        let mut gradients = FxHashMap::default();
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for `repeat` (tiling): sum the gradient over the tiled copies.
 pub struct RepeatBackward {
     pub input_id: TensorId,
