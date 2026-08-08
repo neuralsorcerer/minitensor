@@ -113,6 +113,24 @@ macro_rules! cumprod_forward {
     };
 }
 
+/// Gradient of `cumprod` along a dimension.
+///
+/// With no zero in the run, `d/dx_i` is the running sum of `grad_j * y_j`
+/// divided by `x_i`. A zero breaks that division, so the run is split at the
+/// first zero `z`:
+///
+/// * before `z`, only outputs before `z` contribute -- every later one carries
+///   the factor `x_z = 0` -- so the same running sum works, stopped at `z`;
+/// * at `z` itself, the term is assembled from the prefix and a running suffix
+///   product instead of by dividing;
+/// * after `z`, every term carries `x_z` and the gradient is zero.
+///
+/// None of that reasoning depends on `z` being the *only* zero. A second zero
+/// at `z2` simply drives the suffix product to zero once it is reached, so the
+/// terms beyond it drop out on their own. There used to be a separate branch
+/// for two or more zeros that zeroed the whole run, which discarded the
+/// gradients before and at the first zero: `cumprod` of `[2, 0, 3, 0]` reported
+/// `[0, 0, 0, 0]` where the true gradient is `[1, 8, 0, 0]`.
 macro_rules! cumprod_backward {
     ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
         pub(crate) fn $name(
@@ -164,7 +182,7 @@ macro_rules! cumprod_backward {
                         s += grad_data[i] * out_data[i];
                         output[i] = s / input_data[i];
                     }
-                } else if zero_count == 1 {
+                } else {
                     let mut s: $t = 0 as $t;
                     for i in (0..zero_idx).rev() {
                         s += grad_data[i] * out_data[i];
@@ -184,10 +202,6 @@ macro_rules! cumprod_backward {
                     }
                     output[zero_idx] = grad_zero * prefix;
                     for i in zero_idx + 1..len {
-                        output[i] = 0 as $t;
-                    }
-                } else {
-                    for i in 0..len {
                         output[i] = 0 as $t;
                     }
                 }
@@ -215,7 +229,7 @@ macro_rules! cumprod_backward {
                                     s += grad_data[idx] * out_data[idx];
                                     output[idx] = s / input_data[idx];
                                 }
-                            } else if zero_count == 1 {
+                            } else {
                                 let mut s: $t = 0 as $t;
                                 for r in (0..zero_idx).rev() {
                                     let idx = r * cols + c;
@@ -238,11 +252,6 @@ macro_rules! cumprod_backward {
                                 let zero_index = zero_idx * cols + c;
                                 output[zero_index] = grad_zero * prefix;
                                 for r in zero_idx + 1..rows {
-                                    let idx = r * cols + c;
-                                    output[idx] = 0 as $t;
-                                }
-                            } else {
-                                for r in 0..rows {
                                     let idx = r * cols + c;
                                     output[idx] = 0 as $t;
                                 }
@@ -270,7 +279,7 @@ macro_rules! cumprod_backward {
                                     s += grad_data[idx] * out_data[idx];
                                     output[idx] = s / input_data[idx];
                                 }
-                            } else if zero_count == 1 {
+                            } else {
                                 let mut s: $t = 0 as $t;
                                 for c in (0..zero_idx).rev() {
                                     let idx = base + c;
@@ -292,10 +301,6 @@ macro_rules! cumprod_backward {
                                 }
                                 output[base + zero_idx] = grad_zero * prefix;
                                 for c in zero_idx + 1..cols {
-                                    output[base + c] = 0 as $t;
-                                }
-                            } else {
-                                for c in 0..cols {
                                     output[base + c] = 0 as $t;
                                 }
                             }
@@ -335,7 +340,7 @@ macro_rules! cumprod_backward {
                             s += grad_data[i] * out_data[i];
                             output[i] = s / input_data[i];
                         }
-                    } else if zero_count == 1 {
+                    } else {
                         let mut s: $t = 0 as $t;
                         for d in (0..zero_idx).rev() {
                             let i = base + d * inner;
@@ -358,10 +363,6 @@ macro_rules! cumprod_backward {
                         let zero_index = base + zero_idx * inner;
                         output[zero_index] = grad_zero * prefix;
                         for d in zero_idx + 1..dim_size {
-                            output[base + d * inner] = 0 as $t;
-                        }
-                    } else {
-                        for d in 0..dim_size {
                             output[base + d * inner] = 0 as $t;
                         }
                     }

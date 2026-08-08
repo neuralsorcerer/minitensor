@@ -516,51 +516,47 @@ pub fn var(
         .product::<usize>();
 
     if unbiased {
-        if sample_count <= 1 {
-            let nan_count = variance.numel();
-            let nan_data = match variance.dtype() {
-                DataType::Float32 => {
-                    TensorData::from_vec_f32(vec![f32::NAN; nan_count], variance.device())
-                }
-                DataType::Float64 => {
-                    TensorData::from_vec_f64(vec![f64::NAN; nan_count], variance.device())
-                }
-                _ => unreachable!("variance is only defined for floating point tensors"),
-            };
-            variance = Tensor::new(
-                Arc::new(nan_data),
-                variance.shape().clone(),
-                variance.dtype(),
-                variance.device(),
-                variance.requires_grad(),
-            );
+        // A single sample makes Bessel's correction `n / (n - 1)` undefined, and
+        // the biased variance it scales is exactly zero, so the product is NaN
+        // -- the answer NumPy and PyTorch both give.
+        //
+        // That case goes through the same multiply as any other correction
+        // rather than substituting a freshly built NaN tensor. A replacement
+        // carries a new tensor id, no `grad_fn` and no graph node, so while it
+        // inherited `requires_grad` it had nothing behind it: `x.var(1)` on a
+        // width-1 axis reported `requires_grad = true` and then left `x` with no
+        // gradient at all after `backward()`. A missing gradient reads as "this
+        // parameter was not used" and an optimizer skips it silently, where the
+        // NaN this now produces says plainly that something is undefined.
+        let correction = if sample_count <= 1 {
+            f64::NAN
         } else {
-            let correction = sample_count as f64 / (sample_count - 1) as f64;
-            let correction_tensor = match variance.dtype() {
-                DataType::Float32 => Tensor::new(
-                    Arc::new(TensorData::from_vec_f32(
-                        vec![correction as f32],
-                        variance.device(),
-                    )),
-                    Shape::scalar(),
-                    DataType::Float32,
+            sample_count as f64 / (sample_count - 1) as f64
+        };
+        let correction_tensor = match variance.dtype() {
+            DataType::Float32 => Tensor::new(
+                Arc::new(TensorData::from_vec_f32(
+                    vec![correction as f32],
                     variance.device(),
-                    false,
-                ),
-                DataType::Float64 => Tensor::new(
-                    Arc::new(TensorData::from_vec_f64(
-                        vec![correction],
-                        variance.device(),
-                    )),
-                    Shape::scalar(),
-                    DataType::Float64,
+                )),
+                Shape::scalar(),
+                DataType::Float32,
+                variance.device(),
+                false,
+            ),
+            DataType::Float64 => Tensor::new(
+                Arc::new(TensorData::from_vec_f64(
+                    vec![correction],
                     variance.device(),
-                    false,
-                ),
-                _ => unreachable!("variance is only defined for floating point tensors"),
-            };
-            variance = crate::ops::arithmetic::mul(&variance, &correction_tensor)?;
-        }
+                )),
+                Shape::scalar(),
+                DataType::Float64,
+                variance.device(),
+                false,
+            ),
+            _ => unreachable!("variance is only defined for floating point tensors"),
+        };
+        variance = crate::ops::arithmetic::mul(&variance, &correction_tensor)?;
     }
 
     if keepdim {
