@@ -215,3 +215,66 @@ def test_the_module_still_trains_after_a_rejected_load():
     out = target(mt.Tensor(np.ones((2, 4), np.float32)))
     out.sum().backward()
     assert all(p.grad is not None for p in target.parameters())
+
+
+# --- the whole layer catalogue, now that a bad load is detectable ------------
+
+# `state_dict` names parameters and buffers from `named_parameters` /
+# `named_buffers` when a layer provides them and falls back to `param_{i}` /
+# `buffer_{i}` when it does not -- and the two halves of a layer can disagree,
+# as BatchNorm does, naming its parameters and indexing its buffers. While a
+# load accepted anything, a layer whose save and load disagreed on names
+# round-tripped to silence. It now raises, which turns this into a real check
+# that the fallback is symmetric for every layer rather than a formality.
+
+CATALOGUE = {
+    "DenseLayer": lambda: nn.DenseLayer(4, 3),
+    "Conv1d": lambda: nn.Conv1d(3, 4, 3),
+    "Conv2d": lambda: nn.Conv2d(3, 4, 3),
+    "BatchNorm1d": lambda: nn.BatchNorm1d(4),
+    "BatchNorm2d": lambda: nn.BatchNorm2d(3),
+    "LayerNorm": lambda: nn.LayerNorm([4]),
+    "RMSNorm": lambda: nn.RMSNorm([4]),
+    "Embedding": lambda: nn.Embedding(10, 4),
+    "MultiheadAttention": lambda: nn.MultiheadAttention(4, 2),
+    "LSTM": lambda: nn.LSTM(4, 3),
+    "GRU": lambda: nn.GRU(4, 3),
+    "Dropout": lambda: nn.Dropout(0.5),
+    "ReLU": lambda: nn.ReLU(),
+    "Sequential": lambda: nn.Sequential(
+        [nn.DenseLayer(4, 3), nn.BatchNorm1d(3), nn.ReLU()]
+    ),
+}
+
+
+def _differently_initialised(build):
+    mt.manual_seed(0)
+    source = build()
+    mt.manual_seed(99)
+    target = build()
+    return source, target
+
+
+@pytest.mark.parametrize("name", list(CATALOGUE), ids=list(CATALOGUE))
+def test_every_layer_round_trips_in_memory(name):
+    source, target = _differently_initialised(CATALOGUE[name])
+    expected = _snapshot(source)
+
+    target.load_state_dict(source.state_dict())
+
+    assert sorted(_snapshot(target)) == sorted(expected)
+    for entry, values in expected.items():
+        np.testing.assert_array_equal(_snapshot(target)[entry], values, err_msg=entry)
+
+
+@pytest.mark.parametrize("name", list(CATALOGUE), ids=list(CATALOGUE))
+def test_every_layer_round_trips_through_a_file(name, tmp_path):
+    source, target = _differently_initialised(CATALOGUE[name])
+    expected = _snapshot(source)
+
+    path = str(tmp_path / "model.bin")
+    source.save(path)
+    target.load_state_dict(type(target).load_state_from(path))
+
+    for entry, values in expected.items():
+        np.testing.assert_array_equal(_snapshot(target)[entry], values, err_msg=entry)
