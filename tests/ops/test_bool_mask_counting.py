@@ -1,0 +1,145 @@
+# Copyright (c) Soumyadip Sarkar.
+# All rights reserved.
+#
+# This source code is licensed under the Apache-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Summing a boolean mask counts its true entries.
+
+`mask.sum()` is the ordinary way to ask how many elements satisfied a
+condition, and it raised `Sum not supported for boolean tensors`. It was the
+one hole in the boolean reductions -- `max`, `min`, `all`, `any`, `argmax`,
+`argmin`, `sort` and `topk` all worked on masks already -- and the workaround
+was to spell the cast out by hand:
+
+    (x > 0).astype("int64").sum()
+
+`bool` genuinely has no addition to accumulate in, which is what the rejection
+was about, but that is an argument for widening the accumulator rather than for
+refusing. NumPy and PyTorch both count into `int64`, and so does this now, with
+`cumsum` following for the running count. The rest of the boolean surface is
+deliberately untouched: `prod` stays `bool` (it is `all` by another name),
+`mean`, `var`, `std`, `cumprod`, `norm` and `logsumexp` still raise, since what
+they should return for a mask is a design question rather than an obvious one.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import minitensor as mt
+
+MASK = np.array([[True, False, True], [True, True, False]])
+
+
+def _mask(array):
+    return mt.Tensor(array, dtype="bool")
+
+
+def test_the_total_is_the_count():
+    total = _mask(MASK).sum()
+    assert total.item() == MASK.sum() == 4
+    assert str(total.dtype) == "int64"
+
+
+@pytest.mark.parametrize("dim", [0, 1, -1, -2])
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_counting_along_a_dim_matches_numpy(dim, keepdim):
+    got = _mask(MASK).sum(dim, keepdim)
+    expected = MASK.sum(axis=dim, keepdims=keepdim)
+
+    np.testing.assert_array_equal(got.numpy(), expected)
+    assert tuple(got.shape_vec()) == expected.shape
+    assert str(got.dtype) == "int64"
+
+
+@pytest.mark.parametrize("dim", [0, 1, -1])
+def test_the_running_count_matches_numpy(dim):
+    got = _mask(MASK).cumsum(dim)
+    np.testing.assert_array_equal(got.numpy(), MASK.cumsum(axis=dim))
+    assert str(got.dtype) == "int64"
+
+
+def test_nansum_counts_too():
+    """It delegates to `sum` for anything that cannot hold a NaN."""
+    got = _mask(MASK).nansum()
+    assert got.item() == 4
+    assert str(got.dtype) == "int64"
+
+
+def test_the_count_is_wider_than_the_mask():
+    """The reason for `int64`: a count is not bounded by `bool`, and on a large
+    mask a narrow accumulator would wrap rather than answer."""
+    size = 3_000_000
+    got = _mask(np.ones(size, dtype=bool)).sum()
+    assert got.item() == size
+
+
+@pytest.mark.parametrize(
+    "shape,dim",
+    [((0,), 0), ((0, 3), 0), ((2, 0), 1), ((0, 3), 1)],
+)
+def test_an_empty_mask_counts_zero(shape, dim):
+    array = np.zeros(shape, dtype=bool)
+    got = _mask(array).sum(dim)
+    np.testing.assert_array_equal(got.numpy(), array.sum(axis=dim))
+
+
+def test_it_agrees_with_the_cast_people_were_writing_by_hand():
+    values = np.arange(-5, 7, dtype=np.float64).reshape(3, 4)
+    tensor = mt.Tensor(values, dtype="float64")
+    mask = tensor.gt(0.0)
+
+    direct = mask.sum()
+    spelled_out = mask.astype("int64").sum()
+
+    assert direct.item() == spelled_out.item() == int((values > 0).sum())
+    assert str(direct.dtype) == str(spelled_out.dtype)
+
+
+def test_a_mask_from_a_comparison_counts_along_a_dim():
+    """The shape this is actually used in: how many entries per row passed."""
+    values = np.arange(12, dtype=np.float64).reshape(3, 4)
+    got = mt.Tensor(values, dtype="float64").gt(5.0).sum(1)
+    np.testing.assert_array_equal(got.numpy(), (values > 5.0).sum(axis=1))
+
+
+# --- what deliberately did not change ---------------------------------------
+
+
+@pytest.mark.parametrize("name", ["mean", "var", "std"])
+def test_the_ambiguous_reductions_still_raise(name):
+    """NumPy defines these on masks and PyTorch refuses them, so there is no
+    obvious answer to adopt. The refusal names the operation."""
+    with pytest.raises(Exception) as excinfo:
+        getattr(_mask(MASK), name)()
+    assert "boolean" in str(excinfo.value) or "float" in str(excinfo.value)
+
+
+def test_prod_still_returns_bool():
+    """`prod` over a mask is `all` written differently, and it already had a
+    boolean answer."""
+    result = _mask(MASK).prod()
+    assert str(result.dtype) == "bool"
+    assert bool(result.item()) == bool(MASK.prod())
+
+
+@pytest.mark.parametrize("name", ["max", "min", "all", "any"])
+def test_the_reductions_that_already_worked_are_unchanged(name):
+    result = getattr(_mask(MASK), name)()
+    assert str(result.dtype) == "bool"
+    assert bool(result.item()) == bool(getattr(np, name)(MASK))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
+def test_non_boolean_sums_keep_their_dtype(dtype):
+    """Only `bool` is widened. Everything else reduces in its own dtype, which
+    is the rule this leaves alone."""
+    array = np.arange(6).astype(dtype).reshape(2, 3)
+    tensor = mt.Tensor(array, dtype=dtype)
+
+    assert str(tensor.sum().dtype) == dtype
+    assert str(tensor.sum(0).dtype) == dtype
+    assert str(tensor.cumsum(0).dtype) == dtype
+    np.testing.assert_array_equal(tensor.sum(1).numpy(), array.sum(axis=1))

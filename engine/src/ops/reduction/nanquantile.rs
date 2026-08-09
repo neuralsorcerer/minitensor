@@ -382,6 +382,16 @@ pub(crate) use crate::ops::util::normalize_dim;
 
 /// Sum reduction along specified dimensions
 pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // Summing a mask counts its true entries, which is the most common thing
+    // anyone does with one. `bool` has no addition to accumulate in, so the
+    // count lands in `int64` -- the same answer NumPy and PyTorch give -- and
+    // the existing integer path takes it from there. Rejecting this outright
+    // left `mask.sum()` as the one hole in the boolean reductions: `max`,
+    // `min`, `all`, `any`, `argmax` and `sort` all already worked.
+    if tensor.dtype() == DataType::Bool {
+        return sum(&tensor.astype(DataType::Int64)?, dim, keepdim);
+    }
+
     // Normalise negative dimensions and deduplicate
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();

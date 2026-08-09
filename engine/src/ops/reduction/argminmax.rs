@@ -713,9 +713,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sum_bool_error() {
+    fn test_sum_bool_counts_into_int64() {
+        // Summing a mask counts its true entries, in the width NumPy and
+        // PyTorch both use. `bool` itself has nothing to accumulate in.
         let t = create_tensor_bool(vec![true, false, true, true], vec![2, 2]);
-        assert!(sum(&t, Some(vec![0]), false).is_err());
+
+        let per_column = sum(&t, Some(vec![0]), false).unwrap();
+        assert_eq!(per_column.dtype(), DataType::Int64);
+        assert_eq!(per_column.data().as_i64_slice().unwrap(), &[2, 1]);
+
+        let total = sum(&t, None, false).unwrap();
+        assert_eq!(total.dtype(), DataType::Int64);
+        assert_eq!(total.data().as_i64_slice().unwrap(), &[3]);
     }
 
     #[test]

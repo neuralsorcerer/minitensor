@@ -579,6 +579,42 @@ substitution does not have to be worked out from the rule.
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
+#### What dtype a reduction comes back in
+
+Reductions keep the input's dtype, with two exceptions.
+
+`sum`, `nansum` and `cumsum` over a `bool` tensor count its true entries and
+return `int64` — `mask.sum()` is how many elements passed, matching NumPy and
+PyTorch. `bool` has no addition of its own, so there is no narrower answer.
+The other boolean reductions are unchanged: `prod`, `max`, `min`, `all` and
+`any` return `bool`; `argmax`/`argmin` return `int64`; `mean`, `var`, `std`,
+`cumprod`, `norm` and `logsumexp` raise.
+
+`mean` over an integer tensor returns a float: `float32` for `int32`,
+`float64` for `int64`.
+
+Everywhere else the input dtype is kept, **including for integer accumulation**,
+which is narrower than NumPy and PyTorch — both widen an integer reduction to
+`int64`. Summing an `int32` tensor accumulates in `int32` and wraps on
+overflow rather than raising, exactly as `int32 + int32` does elementwise. It
+takes a large input to reach: summing pixel values in `0..=255` overflows past
+about 8.4 million elements. Cast first when the total may not fit.
+
+```python
+import minitensor as mt
+
+counts = mt.Tensor([[1, 2], [3, 4]], dtype="int32")
+print(counts.sum().dtype, counts.astype("int64").sum().dtype)
+
+mask = counts.gt(2)                      # a mask counts into int64 on its own
+print(mask.sum().item(), mask.sum().dtype)
+```
+
+```text
+int32 int64
+2 int64
+```
+
 `norm(p=2, dim=None, keepdim=False)` takes the vector p-norm over `dim`, or over
 the flattened tensor when `dim` is `None`. It accepts the same dimension forms as
 `sum`. Supported orders are any finite `p > 0`, `float("inf")` (largest
