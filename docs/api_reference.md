@@ -447,6 +447,23 @@ on `Tensor` objects (many also have functional/top-level equivalents):
 - `squeeze`, `unsqueeze`, `expand`
 - `flatten`, `ravel`
 
+`squeeze(dim)` follows PyTorch rather than NumPy for an axis that is not
+length 1: it returns the tensor unchanged instead of raising. `squeeze()` with
+no argument drops every length-1 axis.
+
+### Splitting an axis
+
+- `split(size_or_sections, dim)` cuts into pieces of `size` each, the last one
+  shorter if the axis does not divide evenly, or into explicitly given sizes.
+- `chunk(sections, dim)` cuts into `sections` pieces of equal size.
+- `split_with_sections(sections, dim)` takes the sizes explicitly.
+
+`chunk` requires the axis length to be a multiple of `sections` and raises
+otherwise. This is stricter than PyTorch's `chunk`, which shortens the last
+piece (and can return fewer pieces than asked for); use `split` when the axis
+may not divide evenly. All three round-trip through `cat` along the same
+dimension, including for a zero-length axis, which yields one empty piece.
+
 ### Indexing & reordering
 
 - `index_select`, `gather`, `narrow`

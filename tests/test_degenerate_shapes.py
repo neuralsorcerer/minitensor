@@ -214,3 +214,75 @@ def test_normalization_over_an_empty_feature_axis(shape, name):
     # survive regardless of what the values come out as.
     tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
     assert getattr(mt, name)(tensor, [shape[-1]]).shape == shape
+
+
+# `split` built its section list with `while remaining > 0`, so a zero-length
+# axis produced no sections at all and the call returned an empty list. Every
+# neighbouring operation disagreed: `chunk` and `split_with_sections` both
+# returned the single empty piece, as does `np.split`. The visible cost was the
+# round trip -- `cat(t.split(n, d), d)` is how a caller reassembles what it
+# split, and on an empty batch it failed with "cannot concatenate empty list of
+# tensors" rather than rebuilding the empty tensor.
+
+EMPTY_AXIS_CASES = [
+    ((0,), 0),
+    ((0, 3), 0),
+    ((2, 0), 1),
+    ((0, 3, 4), 0),
+    ((2, 0, 4), 1),
+    ((2, 3, 0), 2),
+]
+
+
+@pytest.mark.parametrize("shape,dim", EMPTY_AXIS_CASES)
+@pytest.mark.parametrize("size", [1, 2, 5])
+def test_splitting_an_empty_axis_yields_one_empty_piece(shape, dim, size):
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    pieces = tensor.split(size, dim)
+
+    assert len(pieces) == len(np.split(np.zeros(shape, np.float32), [], axis=dim))
+    assert [tuple(p.shape_vec()) for p in pieces] == [shape]
+
+
+@pytest.mark.parametrize("shape,dim", EMPTY_AXIS_CASES)
+def test_split_and_cat_round_trip_over_an_empty_axis(shape, dim):
+    """The property the pair exists for, and the one the empty list broke."""
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    assert tuple(mt.cat(list(tensor.split(2, dim)), dim).shape_vec()) == shape
+
+
+@pytest.mark.parametrize("shape,dim", EMPTY_AXIS_CASES)
+def test_split_agrees_with_chunk_and_explicit_sections(shape, dim):
+    """All three ways of cutting an axis, on the same empty tensor."""
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    counts = {
+        "split": len(tensor.split(1, dim)),
+        "chunk": len(tensor.chunk(1, dim)),
+        "sections": len(tensor.split_with_sections([0], dim)),
+    }
+    assert set(counts.values()) == {1}, counts
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("size", [1, 2, 3, 4, 5, 6, 7])
+def test_a_non_empty_axis_is_unchanged(dim, size):
+    """The remainder path is the one that was already right."""
+    array = np.arange(24, dtype=np.float32).reshape(4, 6)
+    tensor = mt.from_numpy(array)
+
+    got = [piece.numpy() for piece in tensor.split(size, dim)]
+    expected = np.split(array, list(range(size, array.shape[dim], size)), axis=dim)
+
+    assert len(got) == len(expected)
+    for a, b in zip(got, expected):
+        np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("shape,dim", EMPTY_AXIS_CASES)
+def test_the_functional_forms_agree(shape, dim):
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    assert (
+        len(tensor.split(1, dim))
+        == len(F.split(tensor, 1, dim))
+        == len(mt.split(tensor, 1, dim))
+    )
