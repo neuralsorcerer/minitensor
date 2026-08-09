@@ -42,6 +42,11 @@ dev = [
     "pytest-benchmark>=5.2",
     "pytest-cov>=7.1",
     "black[jupyter]>=26.5",
+    # The other formatter the pre-commit config runs and `[tool.isort]` below
+    # configures. Without it here, `pip install -e '.[dev]'` leaves `isort`
+    # missing while `black` is present, so running the two by hand -- as the
+    # README's code-style section describes -- fails on the second one.
+    "isort>=6.0",
     "mypy>=2.1",
     "pre-commit>=4.6",
     "numpy>=2.2",
