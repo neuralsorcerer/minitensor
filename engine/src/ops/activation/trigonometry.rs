@@ -66,8 +66,16 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     };
 
     let output_shape = match broadcast {
-        PowBroadcast::None | PowBroadcast::ExponentScalar => base_shape.clone(),
-        PowBroadcast::BaseScalar => exponent_shape.clone(),
+        PowBroadcast::None => base_shape.clone(),
+        // A one-element operand still contributes its rank. `(1, 1) ** (3,)`
+        // broadcasts to `(1, 3)`, not to `(3,)`, so taking the other operand's
+        // shape verbatim dropped a dimension. Broadcasting cannot fail here --
+        // every dimension of a one-element shape is 1 -- and it yields the
+        // other operand's element count, so the scalar fast paths below still
+        // produce exactly the right number of elements in the right order.
+        PowBroadcast::BaseScalar | PowBroadcast::ExponentScalar => {
+            base_shape.broadcast_with(&exponent_shape)?
+        }
     };
 
     /// One dtype arm: map `powf` over the operands for the detected
