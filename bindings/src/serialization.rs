@@ -14,7 +14,8 @@ use engine::{
     tensor::Shape,
 };
 use pyo3::prelude::*;
-use std::collections::HashMap;
+use pyo3::types::{PyIterator, PyList};
+use std::collections::{BTreeMap, HashMap};
 
 /// The format version a checkpoint was written with, and whether a given reader can load it.
 #[pyclass(name = "ModelVersion", from_py_object)]
@@ -447,6 +448,50 @@ impl PyStateDict {
         self.inner.parameters.contains_key(name) || self.inner.buffers.contains_key(name)
     }
 
+    /// Every name in the state dict, parameters before buffers.
+    ///
+    /// This is the same span `__getitem__`, `__len__` and `__contains__`
+    /// already cover, so the four agree on what the state dict holds. Defining
+    /// it is also what makes `dict(state)` and `{**state}` work: `**` looks for
+    /// `keys()` plus subscripting, and both halves are now here.
+    fn keys(&self) -> Vec<String> {
+        self.parameter_names()
+            .into_iter()
+            .chain(self.buffer_names())
+            .collect()
+    }
+
+    /// Every tensor, in `keys()` order.
+    fn values(&self) -> PyResult<Vec<PyTensor>> {
+        self.keys()
+            .iter()
+            .map(|name| self.__getitem__(name))
+            .collect()
+    }
+
+    /// `(name, tensor)` pairs, in `keys()` order -- `for name, tensor in
+    /// state.items()`, the way a PyTorch state dict is usually walked.
+    fn items(&self) -> PyResult<Vec<(String, PyTensor)>> {
+        self.keys()
+            .into_iter()
+            .map(|name| {
+                let tensor = self.__getitem__(&name)?;
+                Ok((name, tensor))
+            })
+            .collect()
+    }
+
+    /// Iterating yields names, as it does for a `dict`.
+    ///
+    /// Without this, Python fell back to the legacy sequence protocol and
+    /// called `__getitem__(0)`, so `for name in state`, `list(state)` and
+    /// `dict(state)` all failed with `'int' object is not an instance of
+    /// 'str'` -- a message about the wrong thing entirely.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        let names = PyList::new(slf.py(), slf.keys())?;
+        Ok(PyIterator::from_object(&names)?.into_any().unbind())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "StateDict({} parameters, {} buffers)",
@@ -484,7 +529,7 @@ impl PyDeploymentModel {
                 input_shapes: Vec::new(),
                 output_shapes: Vec::new(),
                 state_dict: StateDict::new(),
-                inference_config: HashMap::new(),
+                inference_config: BTreeMap::new(),
             },
         }
     }

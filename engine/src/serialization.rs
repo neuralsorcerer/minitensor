@@ -11,7 +11,15 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    // Every map below is written into a checkpoint, and `HashMap` iterates in
+    // an order that depends on a per-process random hash seed. That order
+    // reached the file: saving the same model twice produced two different
+    // byte streams, so a checkpoint could not be content-hashed, compared
+    // against another, or diffed without spurious changes. `BTreeMap` iterates
+    // sorted, which makes the bytes a function of the weights alone. The
+    // encodings are unchanged -- all three formats write a map either way, and
+    // reading is unaffected, so checkpoints written before this still load.
+    collections::BTreeMap,
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
@@ -84,7 +92,7 @@ pub struct ModelMetadata {
     /// Output shape information
     pub output_shapes: Vec<Shape>,
     /// Additional custom metadata
-    pub custom: HashMap<String, String>,
+    pub custom: BTreeMap<String, String>,
 }
 
 impl ModelMetadata {
@@ -99,7 +107,7 @@ impl ModelMetadata {
             architecture,
             input_shapes: Vec::new(),
             output_shapes: Vec::new(),
-            custom: HashMap::new(),
+            custom: BTreeMap::new(),
         }
     }
 
@@ -248,17 +256,17 @@ impl SerializedTensor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateDict {
     /// Parameter tensors by name
-    pub parameters: HashMap<String, SerializedTensor>,
+    pub parameters: BTreeMap<String, SerializedTensor>,
     /// Buffer tensors by name (non-trainable parameters)
-    pub buffers: HashMap<String, SerializedTensor>,
+    pub buffers: BTreeMap<String, SerializedTensor>,
 }
 
 impl StateDict {
     /// Create empty state dict
     pub fn new() -> Self {
         Self {
-            parameters: HashMap::new(),
-            buffers: HashMap::new(),
+            parameters: BTreeMap::new(),
+            buffers: BTreeMap::new(),
         }
     }
 
@@ -334,9 +342,9 @@ pub struct OptimizerState {
     /// Number of parameters the optimizer was tracking, checked on load.
     pub num_parameters: usize,
     /// Non-tensor state, e.g. NAdam's running `mu_product`.
-    pub scalars: HashMap<String, f64>,
+    pub scalars: BTreeMap<String, f64>,
     /// Per-parameter buffers keyed `"{slot}.{name}"`, e.g. `"0.exp_avg"`.
-    pub buffers: HashMap<String, SerializedTensor>,
+    pub buffers: BTreeMap<String, SerializedTensor>,
 }
 
 impl OptimizerState {
@@ -345,8 +353,8 @@ impl OptimizerState {
             algorithm: algorithm.into(),
             step_count,
             num_parameters,
-            scalars: HashMap::new(),
-            buffers: HashMap::new(),
+            scalars: BTreeMap::new(),
+            buffers: BTreeMap::new(),
         }
     }
 
@@ -697,7 +705,7 @@ pub struct DeploymentModel {
     /// Compressed state dictionary
     pub state_dict: StateDict,
     /// Inference configuration
-    pub inference_config: HashMap<String, String>,
+    pub inference_config: BTreeMap<String, String>,
 }
 
 impl DeploymentModel {
@@ -714,7 +722,7 @@ impl DeploymentModel {
             input_shapes: model.metadata.input_shapes.clone(),
             output_shapes: model.metadata.output_shapes.clone(),
             state_dict: model.state_dict.clone(),
-            inference_config: HashMap::new(),
+            inference_config: BTreeMap::new(),
         }
     }
 

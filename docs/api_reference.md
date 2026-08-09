@@ -1887,19 +1887,29 @@ cannot be inspected or reordered.
 
 ### Reading and building a `StateDict`
 
-Beyond `parameter_names()`, `buffer_names()`, `len()` and `in`, a state dict
-gives up its tensors:
+A state dict behaves as a mapping from name to tensor:
 
 - `state[name]` -- the tensor under `name`, checking parameters then buffers.
-- `get_parameter(name)` / `get_buffer(name)` -- the same, one namespace at a
-  time. The two are distinct in the file format, so a name may appear in both.
-- `parameters()` / `buffers()` -- every entry, as a plain dict of tensors.
+- `keys()`, `values()`, `items()`, `len()`, `in`, and iteration -- the usual
+  mapping views, so `dict(state)`, `{**state}` and
+  `for name, tensor in state.items()` all work. Every one of them spans
+  parameters and buffers together.
+- `get_parameter(name)` / `get_buffer(name)` -- one namespace at a time. The
+  two are distinct in the file format, so a name may appear in both.
+- `parameter_names()` / `buffer_names()` -- the names on one side only.
+- `parameters()` / `buffers()` -- every entry on one side, as a plain dict.
 - `add_parameter(name, tensor)` / `add_buffer(name, tensor)` -- record one,
   replacing any already under that name.
 
 Together those let a checkpoint be inspected rather than only replayed --
 reading a saved weight, copying one model's weights into another, or assembling
 a state dict from tensors you already hold.
+
+Names come back sorted, parameters before buffers, and that order does not
+change between runs. It is also the order they are written to a checkpoint in,
+which makes a saved file a function of the weights alone: saving one model
+twice gives byte-identical output apart from the `created_at` timestamp, so
+checkpoints can be compared by digest and diffed without spurious reordering.
 
 ```python
 import minitensor as mt
