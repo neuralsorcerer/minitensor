@@ -2282,6 +2282,67 @@ True
 Note `zero_grad()` is not a substitute: it clears the gradients of the
 parameters it was given, not the interior entries.
 
+### Run inference inside `no_grad()`
+
+A loop that only calls *forward* grows too, and for a different reason: every
+forward records its intermediates, and nothing releases them until a
+`backward()` walks the graph or `clear_autograd_graph()` empties it. Neither
+condition happens in an inference loop, so it grows without bound.
+
+Two things that look like they should help do not. **Discarding the output does
+not release the graph** — recording is held in a graph the module owns, not by
+the output tensor, so a loop that keeps nothing still accumulates. And
+`model.eval()` does not either: it switches Dropout off and freezes BatchNorm's
+running statistics, which is about what the layers compute, not about whether
+the computation is recorded.
+
+Measured over 300 forwards of a two-layer `Sequential` with a 256-row batch,
+discarding every output:
+
+| Width | Per forward | Over 300 forwards |
+| --- | --- | --- |
+| 32 | ~42 KB | ~12 MB |
+| 128 | ~122 KB | ~36 MB |
+| 512 | ~496 KB | ~145 MB |
+
+`no_grad()` removes it completely — no graph entries, no growth — and an
+inference loop has no use for the recording anyway:
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+mt.manual_seed(0)
+model = nn.Sequential([nn.DenseLayer(32, 32), nn.ReLU()])
+x = mt.ones((8, 32))
+
+mt.clear_autograd_graph()
+for _ in range(10):
+    model(x)                       # the output is discarded every time
+print(mt.autograd_graph_size()[0])
+
+model.eval()                       # about layer behaviour, not recording
+mt.clear_autograd_graph()
+for _ in range(10):
+    model(x)
+print(mt.autograd_graph_size()[0])
+
+mt.clear_autograd_graph()
+with mt.no_grad():
+    for _ in range(10):
+        model(x)
+print(mt.autograd_graph_size()[0])
+```
+
+```text
+33
+33
+0
+```
+
+A training loop needs neither guard: `backward()` releases the subgraph it
+walked, so forward-then-backward stays flat on its own.
+
 ### The graph is thread-local, and a missing graph is silent
 
 Each thread records into its own autograd graph, so concurrent threads do not
