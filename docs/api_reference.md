@@ -1881,6 +1881,20 @@ appended for the backward direction of a bidirectional stack. `Sequential`
 prefixes each child with its index (`0.weight`, `2.bias`), recursing so a
 nested layer keeps its own names.
 
+`load_state_dict` requires every one of those names to be present and shaped
+like the slot it lands in, and raises naming all the problems at once if not:
+
+```text
+load_state_dict: missing from the state dict: 0.bias; wrong shape: 1.weight
+(expected [5], got [3])
+```
+
+Nothing is written unless every entry checks out, so a load that raises leaves
+the module exactly as it was — a caller that catches the error and falls back
+gets the model it had, not one holding half a checkpoint. There is no partial
+or non-strict mode; to load a subset deliberately, assign the tensors you want
+through the parameter itself.
+
 A custom `Layer` that does not override `named_parameters` falls back to
 positional keys (`param_0`, `param_1`, ...), which still load correctly but
 cannot be inspected or reordered.

@@ -192,52 +192,144 @@ pub trait Module: Layer {
     }
 
     /// Load state dictionary
+    ///
+    /// Every entry the layer expects has to be present and shaped like the slot
+    /// it lands in. Both checks used to be `if let Ok(..)`, which discarded the
+    /// error, and each failure was silent in its own way:
+    ///
+    /// - a name the state dict did not carry -- a renamed parameter, a
+    ///   truncated checkpoint, an empty state dict -- left that slot at whatever
+    ///   it already held and reported success, so resuming from the checkpoint
+    ///   quietly continued from the initialisation instead;
+    /// - a name it did carry but at the wrong shape replaced the slot with that
+    ///   tensor, leaving the layer structurally inconsistent. The load still
+    ///   reported success and the first forward pass failed on a shape it never
+    ///   mentions loading, pointing at the wrong place entirely.
+    ///
+    /// Both now collect and report, so one message names every problem rather
+    /// than making the caller rediscover them one at a time.
+    ///
+    /// Checking happens before anything is written, so a load that fails leaves
+    /// the layer exactly as it was. A caller that catches the error and falls
+    /// back gets the model it had, not one with half a checkpoint in it.
     fn load_state_dict(
         &mut self,
         state_dict: &crate::serialization::StateDict,
         device: Option<crate::device::Device>,
     ) -> Result<()> {
-        // Load parameters
-        let mut named_params = self.named_parameters_mut();
-        if named_params.is_empty() {
-            // Fall back to indexed assignment
-            let mut params = self.parameters_mut();
-            for (i, param_ref) in params.iter_mut().enumerate() {
-                if let Ok(loaded_tensor) =
-                    state_dict.load_parameter(&format!("param_{}", i), device)
-                {
-                    **param_ref = loaded_tensor;
+        let mut missing: Vec<String> = Vec::new();
+        let mut mismatched: Vec<String> = Vec::new();
+
+        // Pass one: look every slot up and compare shapes, through the shared
+        // accessors so nothing is modified. `named_*` and `named_*_mut` are
+        // required to produce the same names, so what passes here is what the
+        // assignment below will find.
+        {
+            let named = self.named_parameters();
+            if named.is_empty() {
+                for (i, param) in self.parameters().iter().enumerate() {
+                    let name = format!("param_{}", i);
+                    let loaded = state_dict.load_parameter(&name, device);
+                    check_loadable(name, param, loaded, &mut missing, &mut mismatched);
+                }
+            } else {
+                for (name, param) in named {
+                    let loaded = state_dict.load_parameter(&name, device);
+                    check_loadable(name, param, loaded, &mut missing, &mut mismatched);
                 }
             }
-        } else {
-            for (name, param_ref) in named_params.iter_mut() {
-                if let Ok(loaded_tensor) = state_dict.load_parameter(name, device) {
-                    // Replace parameter tensor in-place
-                    **param_ref = loaded_tensor;
+        }
+        {
+            let named = self.named_buffers();
+            if named.is_empty() {
+                for (i, buffer) in self.buffers().iter().enumerate() {
+                    let name = format!("buffer_{}", i);
+                    let loaded = state_dict.load_buffer(&name, device);
+                    check_loadable(name, buffer, loaded, &mut missing, &mut mismatched);
+                }
+            } else {
+                for (name, buffer) in named {
+                    let loaded = state_dict.load_buffer(&name, device);
+                    check_loadable(name, buffer, loaded, &mut missing, &mut mismatched);
                 }
             }
         }
 
-        // Load buffers (named if provided, otherwise indexed to mirror
+        if !missing.is_empty() || !mismatched.is_empty() {
+            missing.sort();
+            mismatched.sort();
+            let mut report = String::from("load_state_dict: ");
+            if !missing.is_empty() {
+                report.push_str(&format!(
+                    "missing from the state dict: {}",
+                    missing.join(", ")
+                ));
+            }
+            if !mismatched.is_empty() {
+                if !missing.is_empty() {
+                    report.push_str("; ");
+                }
+                report.push_str(&format!("wrong shape: {}", mismatched.join(", ")));
+            }
+            return Err(MinitensorError::invalid_operation(report));
+        }
+
+        // Pass two: assign. Every lookup above succeeded at the right shape, so
+        // a failure here would mean the two accessors disagree.
+        let mut named_params = self.named_parameters_mut();
+        if named_params.is_empty() {
+            let mut params = self.parameters_mut();
+            for (i, param_ref) in params.iter_mut().enumerate() {
+                if let Ok(loaded) = state_dict.load_parameter(&format!("param_{}", i), device) {
+                    **param_ref = loaded;
+                }
+            }
+        } else {
+            for (name, param_ref) in named_params.iter_mut() {
+                if let Ok(loaded) = state_dict.load_parameter(name, device) {
+                    **param_ref = loaded;
+                }
+            }
+        }
+
+        // Buffers (named if provided, otherwise indexed to mirror
         // `state_dict`). The indexed path restores BatchNorm running stats.
         let mut named_buffers = self.named_buffers_mut();
         if named_buffers.is_empty() {
             let mut bufs = self.buffers_mut();
             for (i, buf_ref) in bufs.iter_mut().enumerate() {
-                if let Ok(loaded_tensor) = state_dict.load_buffer(&format!("buffer_{}", i), device)
-                {
-                    **buf_ref = loaded_tensor;
+                if let Ok(loaded) = state_dict.load_buffer(&format!("buffer_{}", i), device) {
+                    **buf_ref = loaded;
                 }
             }
         } else {
             for (name, buf_ref) in named_buffers.iter_mut() {
-                if let Ok(loaded_tensor) = state_dict.load_buffer(name, device) {
-                    **buf_ref = loaded_tensor;
+                if let Ok(loaded) = state_dict.load_buffer(name, device) {
+                    **buf_ref = loaded;
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+/// Record why `loaded` cannot go into `slot`, if it cannot.
+fn check_loadable(
+    name: String,
+    slot: &Tensor,
+    loaded: Result<Tensor>,
+    missing: &mut Vec<String>,
+    mismatched: &mut Vec<String>,
+) {
+    match loaded {
+        Ok(tensor) if tensor.shape().dims() == slot.shape().dims() => {}
+        Ok(tensor) => mismatched.push(format!(
+            "{name} (expected {:?}, got {:?})",
+            slot.shape().dims(),
+            tensor.shape().dims()
+        )),
+        Err(_) => missing.push(name),
     }
 }
 
