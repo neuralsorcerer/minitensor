@@ -1788,10 +1788,46 @@ impl Tensor {
         }
 
         let out_shape = Shape::new(out_dims.clone());
-        if value.numel() != out_shape.numel() && value.numel() != 1 {
-            return Err(MinitensorError::invalid_argument(
-                "Assigned value has incompatible shape",
-            ));
+
+        // Match the value against the selection by *shape*, right-aligned, the
+        // way NumPy and PyTorch do -- and the way `t[mask] = value` already did.
+        //
+        // Comparing element counts instead was wrong in both directions. It
+        // rejected real broadcasts, so `t[0] = row` could not fill a block with
+        // one row. Worse, it accepted any value with the same count whatever its
+        // shape and then wrote it in flat order, so assigning a transposed block
+        // -- `t[0] = m.T` with `m` shaped `(4, 3)` into a `(3, 4)` selection --
+        // silently stored the wrong arrangement. NumPy raises for that.
+        //
+        // `value_strides` carries the result: stride 0 for a dimension being
+        // broadcast, so the same element is read for every coordinate along it.
+        let value_dims = value.shape().dims();
+        let out_rank = out_dims.len();
+        let value_rank = value_dims.len();
+        let describe = || {
+            MinitensorError::invalid_argument(format!(
+                "cannot assign a value of shape {:?} to a selection of shape {:?}: \
+                 the value's dimensions must match the selection's from the right, \
+                 or be 1 to broadcast",
+                value_dims, out_dims
+            ))
+        };
+        // A value may carry more dimensions than the selection as long as the
+        // extra leading ones are 1; NumPy strips those rather than refusing.
+        if value_rank > out_rank && value_dims[..value_rank - out_rank].iter().any(|&d| d != 1) {
+            return Err(describe());
+        }
+        let mut value_strides = vec![0usize; out_rank];
+        let mut acc = 1usize;
+        for k in 0..value_rank.min(out_rank) {
+            let j = value_rank - 1 - k;
+            let out_j = out_rank - 1 - k;
+            if value_dims[j] == out_dims[out_j] {
+                value_strides[out_j] = acc;
+            } else if value_dims[j] != 1 {
+                return Err(describe());
+            }
+            acc *= value_dims[j];
         }
 
         let out_strides = Strides::from_shape(&out_shape);
@@ -1809,81 +1845,91 @@ impl Tensor {
             DataType::Float32 => {
                 let slice = data.as_f32_slice_mut().unwrap();
                 let val_slice = value.data().as_f32_slice().unwrap();
-                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
+                for idx in 0..out_shape.numel() {
                     let mut rem = idx;
                     let mut src_idx = offset;
+                    let mut val_idx = 0;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
                         let step = steps[j];
                         src_idx += (starts[j] + coord * step) * strides[orig_dim];
+                        val_idx += coord * value_strides[j];
                     }
-                    slice[src_idx] = val;
+                    slice[src_idx] = val_slice[val_idx];
                 }
             }
             DataType::Float64 => {
                 let slice = data.as_f64_slice_mut().unwrap();
                 let val_slice = value.data().as_f64_slice().unwrap();
-                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
+                for idx in 0..out_shape.numel() {
                     let mut rem = idx;
                     let mut src_idx = offset;
+                    let mut val_idx = 0;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
                         let step = steps[j];
                         src_idx += (starts[j] + coord * step) * strides[orig_dim];
+                        val_idx += coord * value_strides[j];
                     }
-                    slice[src_idx] = val;
+                    slice[src_idx] = val_slice[val_idx];
                 }
             }
             DataType::Int32 => {
                 let slice = data.as_i32_slice_mut().unwrap();
                 let val_slice = value.data().as_i32_slice().unwrap();
-                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
+                for idx in 0..out_shape.numel() {
                     let mut rem = idx;
                     let mut src_idx = offset;
+                    let mut val_idx = 0;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
                         let step = steps[j];
                         src_idx += (starts[j] + coord * step) * strides[orig_dim];
+                        val_idx += coord * value_strides[j];
                     }
-                    slice[src_idx] = val;
+                    slice[src_idx] = val_slice[val_idx];
                 }
             }
             DataType::Int64 => {
                 let slice = data.as_i64_slice_mut().unwrap();
                 let val_slice = value.data().as_i64_slice().unwrap();
-                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
+                for idx in 0..out_shape.numel() {
                     let mut rem = idx;
                     let mut src_idx = offset;
+                    let mut val_idx = 0;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
                         let step = steps[j];
                         src_idx += (starts[j] + coord * step) * strides[orig_dim];
+                        val_idx += coord * value_strides[j];
                     }
-                    slice[src_idx] = val;
+                    slice[src_idx] = val_slice[val_idx];
                 }
             }
             DataType::Bool => {
                 let slice = data.as_bool_slice_mut().unwrap();
                 let val_slice = value.data().as_bool_slice().unwrap();
-                for (idx, &val) in val_slice.iter().cycle().take(out_shape.numel()).enumerate() {
+                for idx in 0..out_shape.numel() {
                     let mut rem = idx;
                     let mut src_idx = offset;
+                    let mut val_idx = 0;
                     for (j, &stride) in out_strides.as_slice().iter().enumerate() {
                         let coord = rem / stride;
                         rem %= stride;
                         let orig_dim = orig_dim_map[j];
                         let step = steps[j];
                         src_idx += (starts[j] + coord * step) * strides[orig_dim];
+                        val_idx += coord * value_strides[j];
                     }
-                    slice[src_idx] = val;
+                    slice[src_idx] = val_slice[val_idx];
                 }
             }
         }

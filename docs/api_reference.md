@@ -505,6 +505,14 @@ scalar or anything broadcastable to the selection shape
 place. Masks inside mixed index tuples (e.g. `t[0, mask]`) are not
 supported and raise.
 
+Assignment through a basic subscript broadcasts the same way, matching the
+value against the selection right-aligned: each of the value's dimensions must
+equal the selection's or be `1`, and extra leading dimensions of the value must
+be `1`. A value whose *shape* does not broadcast is rejected even when it holds
+the right number of elements — `t[0] = m` with `m` shaped `(4, 3)` into a
+`(3, 4)` selection raises rather than storing `m`'s elements row-major, as
+NumPy does.
+
 A **negative slice step** is rejected, as it is in PyTorch — `t[::-1]` raises
 rather than reversing. Use `flip`, which reverses every requested axis in one
 pass, and follow it with a positive stride if the step was not `-1`:
