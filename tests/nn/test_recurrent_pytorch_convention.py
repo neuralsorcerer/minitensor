@@ -4,33 +4,35 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""LSTM and GRU follow PyTorch's gate layout, so PyTorch weights load correctly.
+"""The recurrent layout around the gate order: stacking, direction, and state.
 
-The parameters are named `weight_ih_l{k}` / `weight_hh_l{k}` / `bias_ih_l{k}` /
-`bias_hh_l{k}`, with `_reverse` for the backward direction -- PyTorch's names,
-which is a promise that PyTorch's tensors can be dropped into them. Keeping that
-promise needs more than the names: the four LSTM gates are packed into one
-`(4H, input)` matrix and the three GRU gates into one `(3H, input)`, so the
-order they sit in is invisible in the shapes. Loading a checkpoint into the
-wrong order raises nothing, changes no shape, and produces confident garbage.
+`tests/nn/test_recurrent_attention_reference.py` already pins the gate order
+itself -- LSTM's `i, f, g, o` and GRU's `r, z, n` -- against reference
+recurrences, and asserts that the wrong orders disagree. This file covers the
+rest of what the PyTorch-shaped names promise, which nothing checked.
 
-Nothing verified that order, so these do, by running each layer against a
-reference written out gate by gate:
+`weight_ih_l{k}` / `weight_hh_l{k}` / `bias_ih_l{k}` / `bias_hh_l{k}`, with
+`_reverse` for the backward direction, is an invitation to drop PyTorch's own
+tensors straight in. That only works if everything around each gate matrix
+agrees too, and none of it is visible in the shapes: `batch_first` has to
+transpose the same run rather than compute a different one, a second layer has
+to consume the first layer's output, `bidirectional` has to concatenate a
+forward pass with one that genuinely runs backwards, and the names have to be
+exactly PyTorch's for every combination of layers and directions.
 
-- LSTM packs `i, f, g, o` and computes `c = f*c + i*g`, `h = o*tanh(c)`.
-- GRU packs `r, z, n` and computes `n = tanh(W_in x + b_in + r*(W_hn h + b_hn))`,
-  `h = (1-z)*n + z*h`. Where `r` is applied is the subtle half: it multiplies
-  the hidden contribution *after* its matmul, not the hidden state before it,
-  and the two differ.
+`forward_with_state` is here for the same reason -- it returns the final hidden
+and cell state, and accepts an initial one, and a caller porting a loop over
+`(h, c)` needs both halves to behave.
 
-The reference is also checked against the alternatives -- the sweep tries other
-gate orders and requires exactly the PyTorch one to match -- so a test that
-passed for both would show up as ambiguity rather than success.
+One gate detail lives here rather than in the sibling file, because it is about
+placement rather than order: GRU's reset gate scales the hidden contribution
+*after* its matmul, `tanh(W_in x + b_in + r*(W_hn h + b_hn))`, not the hidden
+state before it. The sibling file states that in a comment without testing it;
+`test_the_gru_reset_gate_applies_after_the_hidden_matmul` builds the other model
+and requires it to disagree.
 """
 
 from __future__ import annotations
-
-import itertools
 
 import numpy as np
 import pytest
@@ -87,14 +89,16 @@ def _named(weights, suffix="l0"):
     )
 
 
-# --- references, written gate by gate ---------------------------------------
+# --- the reference recurrence -----------------------------------------------
 
 
-def _lstm_reference(
-    x, w_ih, w_hh, b_ih, b_hh, order=("i", "f", "g", "o"), reverse=False
-):
+def _lstm_reference(x, w_ih, w_hh, b_ih, b_hh, reverse=False):
+    """PyTorch's `i, f, g, o` recurrence, which the sibling file pins."""
     hidden = w_hh.shape[1]
-    slots = {name: slice(k * hidden, (k + 1) * hidden) for k, name in enumerate(order)}
+    slots = {
+        name: slice(k * hidden, (k + 1) * hidden)
+        for k, name in enumerate(("i", "f", "g", "o"))
+    }
     h = np.zeros((x.shape[1], hidden))
     c = h.copy()
     steps = range(x.shape[0] - 1, -1, -1) if reverse else range(x.shape[0])
@@ -115,60 +119,13 @@ def _lstm_reference(
     return np.stack(outputs)
 
 
-def _gru_reference(x, w_ih, w_hh, b_ih, b_hh, order=("r", "z", "n")):
-    hidden = w_hh.shape[1]
-    slots = {name: slice(k * hidden, (k + 1) * hidden) for k, name in enumerate(order)}
-    h = np.zeros((x.shape[1], hidden))
-
-    outputs = []
-    for t in range(x.shape[0]):
-        from_input = x[t] @ w_ih.T + b_ih
-        from_hidden = h @ w_hh.T + b_hh
-        r = _sigmoid(from_input[:, slots["r"]] + from_hidden[:, slots["r"]])
-        z = _sigmoid(from_input[:, slots["z"]] + from_hidden[:, slots["z"]])
-        # `r` scales the hidden contribution after its matmul, not the state
-        # before it. Doing it the other way is a different model.
-        n = np.tanh(from_input[:, slots["n"]] + r * from_hidden[:, slots["n"]])
-        h = (1 - z) * n + z * h
-        outputs.append(h.copy())
-
-    return np.stack(outputs)
-
-
-# --- the gate order ---------------------------------------------------------
-
-
-def test_lstm_uses_pytorch_gate_order():
-    rng = _rng()
-    x = rng.standard_normal((SEQ, BATCH, INPUT))
-    weights = _weights(rng, 4, INPUT, HIDDEN)
-    got = _run(_load(nn.LSTM(INPUT, HIDDEN), _named(weights)), x)
-
-    matching = [
-        order
-        for order in itertools.permutations("ifgo")
-        if np.allclose(got, _lstm_reference(x, *weights, order=order), atol=TOL)
-    ]
-    assert matching == [("i", "f", "g", "o")], matching
-
-
-def test_gru_uses_pytorch_gate_order():
-    rng = _rng()
-    x = rng.standard_normal((SEQ, BATCH, INPUT))
-    weights = _weights(rng, 3, INPUT, HIDDEN)
-    got = _run(_load(nn.GRU(INPUT, HIDDEN), _named(weights)), x)
-
-    matching = [
-        order
-        for order in itertools.permutations("rzn")
-        if np.allclose(got, _gru_reference(x, *weights, order=order), atol=TOL)
-    ]
-    assert matching == [("r", "z", "n")], matching
+# --- the one gate detail the sibling file does not test ----------------------
 
 
 def test_the_gru_reset_gate_applies_after_the_hidden_matmul():
-    """The other placement -- scaling `h` before `W_hn` -- is a different model,
-    and has to disagree, or the test above proves nothing about it."""
+    """The sibling file's reference states this in a comment; nothing checked
+    it. The other placement -- scaling `h` before `W_hn` rather than scaling
+    what comes out of it -- is a different model, so it has to disagree."""
     rng = _rng()
     x = rng.standard_normal((SEQ, BATCH, INPUT))
     w_ih, w_hh, b_ih, b_hh = _weights(rng, 3, INPUT, HIDDEN)
@@ -190,7 +147,7 @@ def test_the_gru_reset_gate_applies_after_the_hidden_matmul():
     assert not np.allclose(got, np.stack(outputs), atol=TOL)
 
 
-# --- the rest of the PyTorch layout -----------------------------------------
+# --- the layout the PyTorch names promise ------------------------------------
 
 
 def test_batch_first_is_the_same_run_transposed():
