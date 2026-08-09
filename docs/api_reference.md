@@ -2296,14 +2296,16 @@ the output tensor, so a loop that keeps nothing still accumulates. And
 running statistics, which is about what the layers compute, not about whether
 the computation is recorded.
 
-Measured over 300 forwards of a two-layer `Sequential` with a 256-row batch,
-discarding every output:
+Resident memory over 300 forwards of a two-layer `Sequential` with a 256-row
+batch, discarding every output, each row measured in its own process (a second
+measurement in the same process reads near zero — the allocator has already
+grown the heap and does not need to ask for more):
 
 | Width | Per forward | Over 300 forwards |
 | --- | --- | --- |
 | 32 | ~42 KB | ~12 MB |
-| 128 | ~122 KB | ~36 MB |
-| 512 | ~496 KB | ~145 MB |
+| 128 | ~162 KB | ~48 MB |
+| 512 | ~642 KB | ~188 MB |
 
 `no_grad()` removes it completely — no graph entries, no growth — and an
 inference loop has no use for the recording anyway:
