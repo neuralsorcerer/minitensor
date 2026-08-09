@@ -85,11 +85,30 @@ def test_float_zero_divisor_is_nan():
     assert np.isnan(out).all()
 
 
-def test_bool_operands_rejected():
+def test_two_bool_operands_rejected():
+    """There is no result dtype for them -- `bool` has no floor division."""
+    mask = mt.from_numpy(np.array([True, True]))
     with pytest.raises(Exception):
-        mt.from_numpy(np.array([True])) // 1
+        mask // mt.from_numpy(np.array([True, True]))
     with pytest.raises(Exception):
-        mt.from_numpy(np.array([True])) % 1
+        mask % mt.from_numpy(np.array([True, True]))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
+def test_a_bool_paired_with_a_number_divides_like_that_number(dtype):
+    """It promotes and divides, as `+`, `*` and `/` already did with the same
+    operands, and as NumPy does."""
+    number = np.array([2, 3, 1], dtype=dtype)
+    # Whichever operand divides has to stay away from zero, so the mask on the
+    # right is all-True. `False` as a divisor is division by zero, which these
+    # operators already reject for integers regardless of the operand dtypes.
+    for a, b in [(np.array([True, False, True]), number), (number, np.ones(3, bool))]:
+        np.testing.assert_array_equal(
+            (mt.from_numpy(a) // mt.from_numpy(b)).numpy(), a // b
+        )
+        np.testing.assert_array_equal(
+            (mt.from_numpy(a) % mt.from_numpy(b)).numpy(), np.remainder(a, b)
+        )
 
 
 def test_broadcasting_floordiv_mod():

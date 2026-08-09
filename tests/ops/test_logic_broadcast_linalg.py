@@ -19,11 +19,18 @@ def test_eq_broadcasting():
     np.testing.assert_array_equal(result.numpy(), expected)
 
 
-def test_lt_bool_error():
-    a = mt.Tensor([True, False], dtype="bool")
-    b = mt.Tensor([False, True], dtype="bool")
-    with pytest.raises(ValueError):
-        a.lt(b)
+@pytest.mark.parametrize("op", ["lt", "le", "gt", "ge"])
+def test_ordered_comparisons_order_bools(op):
+    """`false < true`, the same ordering `minimum`/`maximum` already used on
+    bools and the same one NumPy applies."""
+    left = np.array([True, False, True, False])
+    right = np.array([False, True, True, False])
+
+    result = getattr(mt.Tensor(left, dtype="bool"), op)(mt.Tensor(right, dtype="bool"))
+    expected = getattr(left, f"__{op}__")(right)
+
+    np.testing.assert_array_equal(result.numpy(), expected)
+    assert str(result.dtype) == "bool"
 
 
 def test_gt_incompatible_shapes_error():

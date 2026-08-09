@@ -47,25 +47,36 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
     use BinaryOpKind::*;
     match op {
         Add | Mul | Maximum | Minimum => Ok(promote_arithmetic_dtype(lhs, rhs)),
+        // These three are undefined only when the *result* would be boolean,
+        // which happens exactly when both operands are. A bool paired with a
+        // number promotes to that number's dtype and the operation is ordinary
+        // arithmetic from there -- `count - mask` is what NumPy and PyTorch
+        // both compute, and what `+`, `*` and `/` already do here. Testing the
+        // operands instead of the promoted type rejected those mixed pairs too.
         Sub => {
-            if lhs == DataType::Bool || rhs == DataType::Bool {
+            let promoted = promote_arithmetic_dtype(lhs, rhs);
+            if promoted == DataType::Bool {
                 Err(MinitensorError::invalid_operation(
-                    "Subtraction not supported for boolean tensors",
+                    "Subtraction is not defined for two boolean tensors; use `ne` \
+                     (logical xor) for the difference between them, or cast one \
+                     operand to a numeric dtype first",
                 ))
             } else {
-                Ok(promote_arithmetic_dtype(lhs, rhs))
+                Ok(promoted)
             }
         }
         Div => Ok(promote_division_dtype(lhs, rhs)),
         // Unlike true division, floor division and remainder keep integer
         // operands integral (Python/PyTorch semantics).
         FloorDiv | Rem => {
-            if lhs == DataType::Bool || rhs == DataType::Bool {
+            let promoted = promote_arithmetic_dtype(lhs, rhs);
+            if promoted == DataType::Bool {
                 Err(MinitensorError::invalid_operation(
-                    "Floor division and remainder not supported for boolean tensors",
+                    "Floor division and remainder are not defined for two boolean \
+                     tensors; cast one operand to a numeric dtype first",
                 ))
             } else {
-                Ok(promote_arithmetic_dtype(lhs, rhs))
+                Ok(promoted)
             }
         }
     }
@@ -147,13 +158,55 @@ mod tests {
                 .unwrap(),
             DataType::Float32
         );
-        assert!(
+        // A boolean paired with a number promotes and divides like that number;
+        // only two booleans have no result type to land in.
+        assert_eq!(
             result_dtype_for_binary_op(DataType::Bool, DataType::Int32, BinaryOpKind::FloorDiv)
+                .unwrap(),
+            DataType::Int32
+        );
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Float32, DataType::Bool, BinaryOpKind::Rem)
+                .unwrap(),
+            DataType::Float32
+        );
+        assert!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::FloorDiv)
                 .is_err()
         );
         assert!(
-            result_dtype_for_binary_op(DataType::Float32, DataType::Bool, BinaryOpKind::Rem)
-                .is_err()
+            result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::Rem).is_err()
         );
+    }
+
+    #[test]
+    fn test_sub_rejects_only_two_booleans() {
+        // `mask - mask` has no numeric result type, but `count - mask` does and
+        // is what NumPy and PyTorch compute. Guarding on the operand dtypes
+        // instead of the promoted one rejected the mixed pairs as well, even
+        // though `+`, `*` and `/` accepted exactly the same operands.
+        assert!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::Sub).is_err()
+        );
+        for other in [
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+        ] {
+            assert_eq!(
+                result_dtype_for_binary_op(DataType::Bool, other, BinaryOpKind::Sub).unwrap(),
+                other
+            );
+            assert_eq!(
+                result_dtype_for_binary_op(other, DataType::Bool, BinaryOpKind::Sub).unwrap(),
+                other
+            );
+            // and it agrees with the other arithmetic operators on those pairs
+            assert_eq!(
+                result_dtype_for_binary_op(other, DataType::Bool, BinaryOpKind::Sub).unwrap(),
+                result_dtype_for_binary_op(other, DataType::Bool, BinaryOpKind::Add).unwrap()
+            );
+        }
     }
 }

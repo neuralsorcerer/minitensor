@@ -57,7 +57,7 @@ cmp_kernel!(cmp_i64, i64, as_i64_slice, "i64");
 cmp_kernel!(cmp_bool, bool, as_bool_slice, "bool");
 
 macro_rules! cmp_op {
-    ($fn_name:ident, $op:tt, $bool_ok:expr) => {
+    ($fn_name:ident, $op:tt) => {
         pub fn $fn_name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             if lhs.device() != rhs.device() {
                 return Err(MinitensorError::device_mismatch(
@@ -68,12 +68,6 @@ macro_rules! cmp_op {
             let (lhs_cast, rhs_cast, common_dtype) =
                 coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
 
-            if matches!(common_dtype, DataType::Bool) && !$bool_ok {
-                return Err(MinitensorError::invalid_operation(
-                    "Comparison not supported for boolean tensors",
-                ));
-            }
-
             let lhs_ref = lhs_cast.as_ref();
             let rhs_ref = rhs_cast.as_ref();
 
@@ -83,10 +77,7 @@ macro_rules! cmp_op {
                 DataType::Float64 => cmp_f64(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
                 DataType::Int32 => cmp_i32(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
                 DataType::Int64 => cmp_i64(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-                DataType::Bool => {
-                    debug_assert!($bool_ok);
-                    cmp_bool(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?
-                }
+                DataType::Bool => cmp_bool(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
             };
 
             Ok(Tensor::new(
@@ -172,12 +163,16 @@ pub fn isclose(
     ))
 }
 
-cmp_op!(eq, ==, true);
-cmp_op!(ne, !=, true);
-cmp_op!(lt, <, false);
-cmp_op!(le, <=, false);
-cmp_op!(gt, >, false);
-cmp_op!(ge, >=, false);
+cmp_op!(eq, ==);
+cmp_op!(ne, !=);
+// Ordered comparisons apply to booleans as well, with `false < true`. Refusing
+// them was inconsistent with everything around it: `eq`/`ne` accepted booleans,
+// `minimum`/`maximum` already ordered them, and a boolean compared against a
+// number promoted and compared fine -- only two boolean operands were rejected.
+cmp_op!(lt, <);
+cmp_op!(le, <=);
+cmp_op!(gt, >);
+cmp_op!(ge, >=);
 
 #[cfg(test)]
 mod tests {
@@ -243,10 +238,29 @@ mod tests {
     }
 
     #[test]
-    fn test_lt_bool_error() {
-        let a = tensor_from_vec_bool(vec![true, false]);
-        let b = tensor_from_vec_bool(vec![false, true]);
-        assert!(lt(&a, &b).is_err());
+    fn test_ordered_comparisons_order_booleans() {
+        // `false < true`, as NumPy and PyTorch both have it. `eq`/`ne` already
+        // accepted booleans and `minimum`/`maximum` already ordered them, so
+        // rejecting `lt` here was the odd one out.
+        let a = tensor_from_vec_bool(vec![true, false, true, false]);
+        let b = tensor_from_vec_bool(vec![false, true, true, false]);
+
+        assert_eq!(
+            lt(&a, &b).unwrap().data().as_bool_slice().unwrap(),
+            &[false, true, false, false]
+        );
+        assert_eq!(
+            le(&a, &b).unwrap().data().as_bool_slice().unwrap(),
+            &[false, true, true, true]
+        );
+        assert_eq!(
+            gt(&a, &b).unwrap().data().as_bool_slice().unwrap(),
+            &[true, false, false, false]
+        );
+        assert_eq!(
+            ge(&a, &b).unwrap().data().as_bool_slice().unwrap(),
+            &[true, false, true, true]
+        );
     }
 
     #[test]

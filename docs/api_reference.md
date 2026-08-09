@@ -389,6 +389,19 @@ It is also the route mixed-dtype arithmetic takes: operands are promoted to a
 common dtype through the same conversion, so `float32_tensor * float64_tensor`
 back-propagates to both sides.
 
+Promotion follows PyTorch rather than NumPy where the two differ: an integer
+operand takes the float operand's width (`int64 + float32` is `float32`, not
+`float64`), and `/` always produces a float (`int64 / int64` is `float32`).
+A `bool` operand promotes to whatever it is paired with.
+
+Whether an operation accepts a boolean operand is decided by that promoted
+dtype, not by the operands. `-`, `//` and `%` have no boolean result to land
+in, so they are rejected when *both* sides are `bool` — as they are in NumPy —
+and accepted for every mixed pair, where the mask promotes and the operation is
+ordinary arithmetic (`counts - mask`). The ordered comparisons `lt`, `le`, `gt`
+and `ge` accept booleans with `False < True`, the same ordering `minimum` and
+`maximum` apply to them.
+
 Casting to `int32`, `int64` or `bool` returns a tensor with
 `requires_grad=False`. Those dtypes cannot carry a gradient, and reporting
 `True` for one would describe a tensor that looks tracked and then contributes
