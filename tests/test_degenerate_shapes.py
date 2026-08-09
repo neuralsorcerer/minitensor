@@ -355,3 +355,78 @@ def test_softmax_on_a_populated_tensor_is_unchanged(dim):
         mt.from_numpy(values).softmax(dim).numpy(),
         shifted / shifted.sum(axis=dim, keepdims=True),
     )
+
+
+# The other end of the degenerate-shape range: dimensions that are each valid
+# but whose product overflows `usize`. `Shape::numel` computes that product with
+# checked arithmetic and panics, which is deliberate -- a wrapped element count
+# would under-allocate storage that indexing code still trusts, turning an
+# absurd shape into out-of-bounds access rather than a clean failure. But it is
+# the last line of defence, not what a caller should meet: `mt.zeros(2**32,
+# 2**32)` reached it straight from Python, panicking across the binding.
+#
+# `reshape` already rejected its own dimensions with an ordinary error, so the
+# fix is that pattern applied to the shape arguments that lacked it. The panic
+# stays underneath for anything that gets past the boundary.
+
+OVERFLOWING = [
+    (2**32, 2**32),
+    (2**48, 2**48),
+    (2**33, 2**33),
+    (2**16, 2**16, 2**16, 2**16),
+]
+
+
+@pytest.mark.parametrize(
+    "shape", OVERFLOWING, ids=lambda s: "x".join(str(d) for d in s)
+)
+def test_a_shape_whose_product_overflows_is_refused(shape):
+    for build in [
+        lambda: mt.zeros(*shape),
+        lambda: mt.ones(shape),
+        lambda: mt.full(shape, 1.0),
+        lambda: mt.empty(shape),
+        lambda: mt.randn(*shape),
+    ]:
+        with pytest.raises(ValueError) as excinfo:
+            build()
+        assert "more elements" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "shape", OVERFLOWING, ids=lambda s: "x".join(str(d) for d in s)
+)
+def test_expanding_past_the_addressable_range_is_refused(shape):
+    """`expand` resolves its `-1` entries in the engine, so it cannot be checked
+    where the argument is parsed and needs its own guard."""
+    unit = mt.from_numpy(np.zeros((1,) * len(shape), dtype=np.float32))
+    with pytest.raises(ValueError) as excinfo:
+        unit.expand(list(shape))
+    assert "more elements" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "shape", OVERFLOWING, ids=lambda s: "x".join(str(d) for d in s)
+)
+def test_the_tensor_local_constructors_refuse_it_too(shape):
+    unit = mt.from_numpy(np.zeros((1,), dtype=np.float32))
+    for build in [
+        lambda: unit.new_zeros(shape),
+        lambda: unit.new_ones(shape),
+        lambda: unit.new_full(shape, 2.0),
+    ]:
+        with pytest.raises(ValueError):
+            build()
+
+
+def test_ordinary_and_empty_shapes_are_unaffected():
+    """The guard is a product check, so it must not disturb a shape containing a
+    zero -- whose product is zero, not an overflow."""
+    assert tuple(mt.zeros(2, 3).shape_vec()) == (2, 3)
+    assert tuple(mt.zeros(0, 3).shape_vec()) == (0, 3)
+    assert tuple(mt.zeros(()).shape_vec()) == ()
+    assert tuple(mt.ones([4, 1, 2]).shape_vec()) == (4, 1, 2)
+
+    unit = mt.from_numpy(np.zeros((1, 1), dtype=np.float32))
+    assert tuple(unit.expand([4, 5]).shape_vec()) == (4, 5)
+    assert tuple(unit.expand([-1, 3]).shape_vec()) == (1, 3)

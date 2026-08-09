@@ -1461,6 +1461,23 @@ impl Tensor {
             }
         }
 
+        // The requested sizes are each valid on their own but may multiply past
+        // `usize`. `Shape::numel` catches that with a panic -- deliberately, so
+        // a wrapped count can never under-allocate storage -- but the panic is
+        // meant as a last line of defence, not as what `x.expand([2**32, 2**32])`
+        // returns to a Python caller. `reshape` rejects its own dimensions this
+        // way; this does the same for `expand`, whose `-1` entries are only
+        // resolved here and so cannot be checked where the argument is parsed.
+        if new_dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .is_none()
+        {
+            return Err(MinitensorError::invalid_operation(format!(
+                "expand to {new_dims:?} has more elements than this platform can represent"
+            )));
+        }
+
         let new_shape = Shape::new(new_dims);
         let broadcasts = new_shape.dims() != orig_dims;
         // Only the broadcasting case needs a new buffer; otherwise the existing

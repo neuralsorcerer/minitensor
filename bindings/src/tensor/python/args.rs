@@ -92,7 +92,35 @@ fn convert_usize_to_isize(value: usize, arg_name: &str) -> PyResult<isize> {
     })
 }
 
+/// Reject a shape whose dimensions multiply past `usize` before it reaches the
+/// engine.
+///
+/// Each dimension is already checked on its own, but nothing checked the
+/// product, and `Shape::numel` computes that with `checked_mul` and *panics* on
+/// overflow -- deliberately, since a wrapped element count would under-allocate
+/// storage that indexing code still trusts. That panic is meant as the last
+/// line of defence, not as what a caller sees: `mt.zeros(2**32, 2**32)` reached
+/// it straight from Python. `reshape` already validates its own dimensions this
+/// way and returns an error; this gives every other shape argument the same
+/// treatment, and leaves the panic underneath for anything that slips past.
+fn reject_overflowing_shape(dims: Vec<usize>, arg_name: &str) -> PyResult<Vec<usize>> {
+    if dims
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .is_none()
+    {
+        return Err(PyValueError::new_err(format!(
+            "{arg_name} {dims:?} has more elements than this platform can represent"
+        )));
+    }
+    Ok(dims)
+}
+
 pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
+    reject_overflowing_shape(parse_shape_tuple_dims(shape, arg_name)?, arg_name)
+}
+
+fn parse_shape_tuple_dims(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
     if shape.is_empty() {
         return Ok(Vec::new());
     }
@@ -100,7 +128,7 @@ pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyRes
     if shape.len() == 1 {
         let first = shape.get_item(0)?;
         if let Ok(tuple) = first.cast::<PyTuple>() {
-            return parse_shape_tuple(tuple, arg_name);
+            return parse_shape_tuple_dims(tuple, arg_name);
         }
         if let Ok(list) = first.cast::<PyList>() {
             let mut dims = Vec::with_capacity(list.len());
@@ -130,8 +158,12 @@ pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyRes
 }
 
 pub(crate) fn parse_shape_like(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
+    reject_overflowing_shape(parse_shape_like_dims(obj, arg_name)?, arg_name)
+}
+
+fn parse_shape_like_dims(obj: &Bound<PyAny>, arg_name: &str) -> PyResult<Vec<usize>> {
     if let Ok(tuple) = obj.cast::<PyTuple>() {
-        return parse_shape_tuple(tuple, arg_name);
+        return parse_shape_tuple_dims(tuple, arg_name);
     }
 
     if let Ok(list) = obj.cast::<PyList>() {
