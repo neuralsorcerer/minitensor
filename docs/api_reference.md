@@ -42,7 +42,7 @@ of convenience aliases.
 | `default_dtype(dtype)` | Context manager for temporary dtype overrides. |
 | `manual_seed(seed)` | Seed the RNG used by random ops. |
 | `get_gradient(tensor)` | Access a tensor’s gradient in the global graph. |
-| `clear_autograd_graph()` | Clear the global autograd graph, releasing every stored gradient. Required in any loop that calls `backward()` without an optimizer step -- see below. |
+| `clear_autograd_graph()` | Clear the global autograd graph, releasing every stored gradient — leaves included, so not for use between the backward passes of one accumulation. Training and backpropagating loops stay bounded without it; see below. |
 | `is_autograd_graph_consumed()` | Inspect whether a graph has been consumed. |
 | `mark_autograd_graph_consumed()` | Mark the current graph as consumed. |
 | `no_grad()` | Context manager: disable gradient recording (results are detached leaves; nothing is saved for backward). |
