@@ -340,3 +340,51 @@ def test_a_forward_without_backward_still_shows_up_as_growth():
         sizes.append(mt.autograd_graph_size()[0])
 
     assert sizes == sorted(sizes) and sizes[-1] > sizes[0], sizes
+
+
+# The growth above is what an inference loop does, and two instincts for
+# stopping it do not work. Both are worth pinning because the reference now
+# tells people to reach for `no_grad()` instead, and the reason it has to say so
+# is that neither of these is enough.
+
+
+def test_discarding_the_output_does_not_release_the_graph():
+    """Where this departs from PyTorch, and the reason the loop above grows at
+    all: there the output tensor owns its history and dropping it frees the
+    graph, so a loop that keeps nothing stays flat. Here the recording is held
+    by the graph the module records into, and binding nothing changes that."""
+    model = mt.nn.Sequential([mt.nn.DenseLayer(4, 8), mt.nn.ReLU()])
+    batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
+
+    mt.clear_autograd_graph()
+    for _ in range(10):
+        model(batch)  # not bound to a name, not kept
+    gc.collect()
+
+    assert mt.autograd_graph_size()[0] > 0
+
+
+def test_eval_mode_does_not_stop_the_recording():
+    """`eval()` is about what the layers compute -- Dropout off, BatchNorm's
+    statistics frozen -- not about whether the computation is recorded. PyTorch
+    draws the same line, so the instinct carried over from it is right; the
+    instinct that `eval()` is enough for inference is the wrong one."""
+    model = mt.nn.Sequential([mt.nn.DenseLayer(4, 8), mt.nn.ReLU()])
+    batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
+
+    def growth():
+        mt.clear_autograd_graph()
+        for _ in range(10):
+            model(batch)
+        return mt.autograd_graph_size()[0]
+
+    training = growth()
+    model.eval()
+    assert growth() == training
+
+    # and the guard that does work, on the same model in the same mode
+    mt.clear_autograd_graph()
+    with mt.no_grad():
+        for _ in range(10):
+            model(batch)
+    assert mt.autograd_graph_size()[0] == 0
