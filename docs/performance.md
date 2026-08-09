@@ -65,7 +65,13 @@ of Python floats infers `float32`, the configured default, where NumPy infers
 ## Where the time goes
 
 Measured against NumPy on a 4-core x86-64 container, float32, release build.
-Ratios below 1 mean MiniTensor is faster.
+Ratios below 1 mean MiniTensor is faster. They are ratios against a moving
+target: NumPy's elementwise and transcendental kernels have gained SIMD
+implementations over recent releases, so the same MiniTensor build measures
+differently against a different NumPy. Re-measure before drawing a conclusion
+from any single figure, and prefer the 1M column — at 4K and 64K the per-call
+costs below are large enough that run-to-run variance on a shared machine can
+swamp the difference being measured.
 
 | op | 4K | 64K | 1M |
 | --- | --- | --- | --- |
@@ -104,10 +110,12 @@ cargo test --release -p engine -- --ignored --nocapture transcendental
 ```
 
 `sort` deserves a note because it is easy to mis-measure: `mt.sort` always
-returns values *and* indices, so the comparable NumPy operation is
-`argsort` plus a gather, not `np.sort`. Against that it is roughly at parity
-(1.1x at 1M). Against `np.sort` alone it looks 25x slower, but that is
-comparing different work.
+returns values *and* indices, so the comparable NumPy operation is `argsort`
+plus a gather, not `np.sort`. Against that it is roughly at parity — 1.1x to
+1.4x at 1M depending on the machine and the NumPy build. Against `np.sort`
+alone it looks several times slower again (9x here, 25x on an older NumPy), but
+that is comparing different work, and the gap moves with whatever SIMD sort the
+installed NumPy ships rather than with anything in this library.
 
 ## Choosing a GEMM backend
 
