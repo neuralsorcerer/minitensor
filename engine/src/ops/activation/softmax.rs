@@ -369,6 +369,17 @@ fn softmax_geometry(dims: &[usize], dim: usize) -> Option<(usize, usize, usize)>
     } else {
         dims[dim + 1..].iter().product()
     };
+    // An empty axis *after* the reduced one makes the group size zero, and the
+    // four callers all feed that straight to `par_chunks`, which panics on a
+    // chunk size of zero rather than returning an error. It was reachable from
+    // Python -- `softmax((3, 0), dim=0)` -- so the panic crossed the binding,
+    // where it carries no useful message. The tensor is empty whenever this
+    // holds, exactly as when `dim_size` is zero, so there is nothing to compute
+    // either way. A zero *before* the reduced axis is already harmless: it
+    // makes the input slice empty, and `par_chunks` yields no chunks.
+    if after == 0 {
+        return None;
+    }
     Some((dim_size, after, dim_size * after))
 }
 

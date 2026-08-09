@@ -940,6 +940,16 @@ fn zip_blocks_maybe_par<T, F>(
     T: Send + Sync,
     F: Fn(usize, &[T], &[T], &mut [T]) + Send + Sync,
 {
+    // `group` is the reduced axis times everything after it, so it is zero
+    // exactly when one of those axes is empty -- and then the tensor has no
+    // elements and all three slices are empty. `chunks` and `par_chunks` both
+    // panic on a chunk size of zero rather than yielding nothing, and the
+    // panic crossed the binding: `softmax((3, 0), dim=0).sum().backward()`
+    // reached it from Python. There is no block to run either way.
+    if group == 0 {
+        return;
+    }
+
     if grad_output.len() < PAR_THRESHOLD {
         for (block_idx, ((go, sv), out)) in grad_output
             .chunks(group)

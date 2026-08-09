@@ -286,3 +286,72 @@ def test_the_functional_forms_agree(shape, dim):
         == len(F.split(tensor, 1, dim))
         == len(mt.split(tensor, 1, dim))
     )
+
+
+# `softmax` and `log_softmax` panicked -- a Rust `chunk_size must not be zero`
+# crossing the binding -- whenever an axis *after* the reduced one was empty.
+# Their block size is the reduced axis times everything after it, so a trailing
+# zero made it zero, and both `chunks` and `par_chunks` panic on that rather
+# than yielding nothing. Two sites had it: the forward's shared geometry helper,
+# which already special-cased an empty reduced axis but not an empty trailing
+# one, and the backward's shared block-walker.
+#
+# The condition is narrow, which is why an audit that swept empty axes over the
+# reductions missed it: a zero *before* the reduced axis is harmless, because
+# the input slice is then empty and yields no chunks at all. Only
+# `softmax((3, 0), dim=0)` and its relatives reached it.
+
+SOFTMAX_EMPTY_SHAPES = [
+    (0,),
+    (0, 0),
+    (3, 0),
+    (0, 3),
+    (1, 0),
+    (0, 1),
+    (2, 0, 3),
+    (2, 3, 0),
+    (0, 2, 3),
+    (3, 0, 0),
+    (2, 0, 0, 3),
+]
+
+
+def _every_dim(shape):
+    return range(-len(shape), len(shape))
+
+
+@pytest.mark.parametrize("name", ["softmax", "log_softmax"])
+@pytest.mark.parametrize("shape", SOFTMAX_EMPTY_SHAPES, ids=str)
+def test_softmax_over_an_empty_axis_returns_an_empty_tensor(name, shape):
+    tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
+    for dim in _every_dim(shape):
+        result = getattr(tensor, name)(dim)
+        assert tuple(result.shape_vec()) == shape, f"dim={dim}"
+        assert result.numel() == 0
+
+
+@pytest.mark.parametrize("name", ["softmax", "log_softmax"])
+@pytest.mark.parametrize("shape", SOFTMAX_EMPTY_SHAPES, ids=str)
+def test_softmax_backward_over_an_empty_axis_survives(name, shape):
+    """The forward and the backward panicked at separate sites, so fixing one
+    left the other reachable through `.backward()`."""
+    for dim in _every_dim(shape):
+        mt.clear_autograd_graph()
+        tensor = mt.from_numpy(np.zeros(shape, dtype=np.float64)).requires_grad_(True)
+        getattr(tensor, name)(dim).sum().backward()
+
+        gradient = mt.get_gradient(tensor)
+        if gradient is not None:
+            assert tuple(gradient.shape_vec()) == shape, f"dim={dim}"
+
+
+@pytest.mark.parametrize("dim", [0, 1, -1, -2])
+def test_softmax_on_a_populated_tensor_is_unchanged(dim):
+    """The guard must only fire on the empty case."""
+    values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    shifted = np.exp(values - values.max(axis=dim, keepdims=True))
+
+    np.testing.assert_allclose(
+        mt.from_numpy(values).softmax(dim).numpy(),
+        shifted / shifted.sum(axis=dim, keepdims=True),
+    )
