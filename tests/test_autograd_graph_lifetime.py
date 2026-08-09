@@ -388,3 +388,45 @@ def test_eval_mode_does_not_stop_the_recording():
         for _ in range(10):
             model(batch)
     assert mt.autograd_graph_size()[0] == 0
+
+
+def test_clearing_between_accumulation_steps_discards_the_running_total():
+    """`clear_autograd_graph()` releases every stored gradient, leaves included.
+
+    The reference used to prescribe it inside a loop that backpropagates without
+    stepping, on the grounds that such a loop grew -- which stopped being true
+    once each backward started releasing the previous pass's interiors. The
+    advice outlived the problem, and for the accumulation case it names it is
+    worse than unnecessary: the running total the accumulation exists to build
+    is one of the gradients it releases.
+
+    `test_accumulating_gradients_over_many_backwards_does_not_grow_memory` above
+    is the same loop left alone, and shows both that the total survives and that
+    nothing piles up behind it.
+    """
+    weight = mt.Tensor(np.ones((8, 8), dtype=np.float32)).requires_grad_(True)
+    x = mt.Tensor(np.ones((4, 8), dtype=np.float32))
+
+    for _ in range(4):
+        mt.sum(mt.matmul(x, weight)).backward()
+        mt.clear_autograd_graph()
+
+    assert mt.get_gradient(weight) is None
+
+
+def test_a_backpropagating_loop_does_not_grow_without_being_cleared():
+    """The claim the prescription rested on. One pass's worth of entries is all
+    it holds, however long it runs -- so there is nothing for a clear to save."""
+    model = mt.nn.Sequential(
+        [mt.nn.DenseLayer(16, 16), mt.nn.ReLU(), mt.nn.DenseLayer(16, 8)]
+    )
+    x = mt.Tensor(np.ones((8, 16), dtype=np.float32))
+    y = mt.Tensor(np.zeros((8, 8), dtype=np.float32))
+
+    mt.clear_autograd_graph()
+    sizes = []
+    for _ in range(20):
+        mt.nn.mse_loss(model(x), y).backward()  # no step, no clear
+        sizes.append(mt.autograd_graph_size())
+
+    assert len(set(sizes)) == 1, sizes

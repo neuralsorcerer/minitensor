@@ -2255,32 +2255,42 @@ print(mt.get_gradient(h) is not None)
 True
 ```
 
-A loop that backpropagates *without* stepping an optimizer -- gradient
+A loop that backpropagates *without* stepping an optimizer — gradient
 inspection, a custom optimizer written in Python, accumulating many
-micro-batches before one step -- has to clear the graph itself, or memory grows
-by roughly one intermediate tensor per iteration (measured at ~65 KB per
-iteration for a 256x32 intermediate, ~141 KB for 256x128):
+micro-batches before one step — does not need to clear anything either. Each
+`backward()` releases the interior gradients the previous one left behind, so
+what the loop holds is one pass's worth however long it runs. Fifty backward
+passes over a five-layer model sit at the same handful of entries as the first
+one.
 
 ```python
 import minitensor as mt
 
 w = mt.ones((4, 4), requires_grad=True)
 
-for _ in range(3):
+sizes = []
+for _ in range(5):
     h = mt.matmul(mt.ones((4, 4)), w)
     mt.sum(h).backward()
     _ = w.grad                   # inspect it, no optimizer involved
-    mt.clear_autograd_graph()    # without this the graph grows without bound
+    sizes.append(mt.autograd_graph_size())
 
-print(mt.get_gradient(h) is None)
+print(len(set(sizes)) == 1)
 ```
 
 ```text
 True
 ```
 
-Note `zero_grad()` is not a substitute: it clears the gradients of the
-parameters it was given, not the interior entries.
+**Do not reach for `clear_autograd_graph()` inside such a loop.** It releases
+*every* stored gradient, leaves included, so calling it between the backward
+passes of a gradient accumulation discards exactly the running total the
+accumulation exists to build — `.grad` comes back `None` and the step that
+follows does nothing. It is for tearing down between unrelated pieces of work,
+not for use within one.
+
+Note `zero_grad()` is not the same thing either: it clears the gradients of the
+parameters it was given, and leaves interior entries alone.
 
 ### Run inference inside `no_grad()`
 
