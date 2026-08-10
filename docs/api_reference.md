@@ -2435,6 +2435,30 @@ device 'metal' is not available: minitensor executes on the CPU only, so tensors
 The request fails where the device was named rather than producing a tensor
 that reports `device=cuda:0` and then fails in every operation applied to it.
 
+### Asking for a tensor that will not fit
+
+A shape whose dimensions multiply past what `usize` can address is refused with
+a `ValueError` before anything is allocated — `mt.zeros(2**32, 2**32)`,
+`x.expand([2**32, 2**32])` and the rest of the shape arguments all report
+`has more elements than this platform can represent`.
+
+A shape that *is* addressable but larger than available memory is a different
+matter, and worth knowing about because it does not behave like NumPy:
+**the allocation failure aborts the process.** NumPy raises `MemoryError` and
+PyTorch raises a `RuntimeError`, both catchable; here the Rust allocator's
+failure path terminates the interpreter, so no `try`/`except` can intervene.
+
+```text
+np.zeros(12 * 10**9, dtype=np.float32)   # MemoryError, caller continues
+mt.zeros(12 * 10**9)                     # process aborts
+```
+
+The same applies to any operation whose *output* is too large — `repeat`,
+`contiguous` on a wide `expand`, `arange` — not only to explicit construction.
+Size the allocation before requesting it if a graceful failure matters; the
+tensor constructors return their storage directly rather than a `Result`, so
+propagating an allocation error would have to change every one of them.
+
 `DeviceType` still models CUDA, Metal, and OpenCL, and the `cuda` / `metal` /
 `opencl` Cargo features compile `engine::backends` — device contexts,
 allocators, and a small standalone kernel set (add, mul, matmul, relu,
