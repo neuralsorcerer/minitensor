@@ -84,6 +84,14 @@ cuda = ["dep:cudarc"]
 metal = ["dep:metal"]
 opencl = ["dep:opencl3"]
 gpu = ["cuda", "metal", "opencl"]
+# Inert. These once gated the matching `nn` submodules, but 707048b removed the
+# three `#[cfg(feature = ...)]` attributes from `engine/src/nn/mod.rs` and left
+# the declarations here, so convolution, dropout and normalization are compiled
+# unconditionally and naming any of these changes nothing. Kept because removing
+# a feature name breaks any manifest that lists it, and noted because a reader
+# comparing this list against the code would otherwise look for gates that are
+# no longer there. Nothing in the repository -- workflows, docs, or manifests --
+# refers to them.
 conv = []
 dropout = []
 normalization = []
