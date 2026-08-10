@@ -89,8 +89,12 @@ jobs:
           source .venv/bin/activate
           python -m pip install -U "pip>=22.1.2"
           python -m pip install "maturin[patchelf]"
-          maturin develop --release --features dynamic-loading
+          # `pip install ".[dev]"` builds the project as well, with default
+          # features, so it goes first and `maturin develop` writes the
+          # extension last -- otherwise a pip that reinstalls over the existing
+          # same-version install would drop `dynamic-loading` again.
           python -m pip install ".[dev]"
+          maturin develop --release --features dynamic-loading
 
       # Skipping is the failure mode this job exists to prevent, so a run that
       # skips has to be red rather than green.
