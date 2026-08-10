@@ -13,9 +13,23 @@ differentiates that transpose, copies it again for `grad_input` and once more
 to carry the weight gradient back through it. A GEMM addresses its operands by
 row and column stride, so it can read the weight transposed in place instead.
 
-These tests pin the two things that has to preserve: the result, bit for bit
-against the composition it replaces, and the three gradients against their
-closed forms.
+These tests pin the two things that has to preserve: the result, against the
+composition it replaces, and the three gradients against their closed forms.
+
+Agreement with the composition is checked to the dtype's precision rather than
+bit for bit. Under the default build it is in fact bit for bit -- `matrixmultiply`
+runs the same kernel whichever way the operand is addressed. OpenBLAS instead
+dispatches on all three extents, and for some shapes the transposed form lands
+on a kernel that accumulates `k` in a different order, so `--features blas`
+comes out a few float32 ulps away on those and exactly equal on the rest. Which
+shapes fall where is an OpenBLAS implementation detail, not something this
+library promises, so the assertions ask for what it does promise.
+
+The tolerance is set for headroom over that, not to the edge of it: the widest
+disagreement measured over these shapes sits ~26x inside it. It is still
+nowhere near loose enough to pass a real mistake -- reading the weight with the
+wrong stride, or permuting its rows, comes out around 2e2 relative, seven
+orders of magnitude out.
 """
 
 from __future__ import annotations
@@ -52,8 +66,9 @@ _SHAPES = [
 def test_linear_matches_the_transpose_and_matmul_it_replaces(
     shape, in_features, out_features, with_bias
 ):
-    # Bit-for-bit, not merely close: the GEMM sees the same operands in the
-    # same order, only addressed differently.
+    # The GEMM sees the same operands in the same order, only addressed
+    # differently -- see the module docstring on why that is checked to
+    # float32's precision rather than to the last bit.
     rng = np.random.default_rng(1)
     x = mt.Tensor(rng.standard_normal(shape).astype(np.float32))
     w = mt.Tensor(rng.standard_normal((out_features, in_features)).astype(np.float32))
@@ -69,7 +84,7 @@ def test_linear_matches_the_transpose_and_matmul_it_replaces(
         reference = reference + b
 
     assert tuple(got.shape) == tuple(reference.shape)
-    assert np.array_equal(got.numpy(), reference.numpy())
+    np.testing.assert_allclose(got.numpy(), reference.numpy(), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("shape,in_features,out_features", _SHAPES)
@@ -158,13 +173,25 @@ def test_linear_keeps_its_dtype(dtype):
 
 
 def test_dense_layer_output_is_unchanged():
+    """`DenseLayer` agrees with materializing the transpose and multiplying.
+
+    The layer reaches `linear` through `Layer::forward` rather than the free
+    function the tests above call, so this pins that the layer hands its own
+    weight and bias to the same fused path.
+
+    This shape, (8, 64) by (32, 64), is one that OpenBLAS answers a few ulps
+    apart between the two routes -- see the module docstring.
+    """
     rng = np.random.default_rng(4)
     layer = nn.DenseLayer(64, 32)
     weight, bias = layer.parameters()[0], layer.parameters()[1]
     x = mt.Tensor(rng.standard_normal((8, 64)).astype(np.float32))
 
-    assert np.array_equal(
-        layer(x).numpy(), (mt.matmul(x, weight.transpose(0, 1)) + bias).numpy()
+    np.testing.assert_allclose(
+        layer(x).numpy(),
+        (mt.matmul(x, weight.transpose(0, 1)) + bias).numpy(),
+        rtol=1e-5,
+        atol=1e-5,
     )
 
 

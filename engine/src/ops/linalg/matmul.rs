@@ -279,6 +279,115 @@ pub(crate) unsafe fn gemm_f64(
     }
 }
 
+/// The transposed-operand GEMMs, for the BLAS path.
+///
+/// `split_gemm!` below produces these for `matrixmultiply`, but it is compiled
+/// only when `blas` is off. Their callers are not gated on the feature -- the
+/// dense layer's forward, conv2d's im2col, and matmul's backward all read one
+/// operand transposed rather than copying it -- so without a BLAS pair the
+/// crate simply does not build with `--features blas`.
+///
+/// Both are the ordinary `gemm` with a transpose flag set. `cblas` reads a
+/// transposed operand in place, so neither materializes one, which is the whole
+/// point of the callers using them.
+#[cfg(feature = "blas")]
+macro_rules! blas_transposed_gemm {
+    ($nt:ident, $tn:ident, $ty:ty, $gemm:path) => {
+        /// `c = a * b`, with `b` holding the logical `(k, n)` operand as
+        /// `(n, k)` row-major.
+        ///
+        /// # Safety
+        ///
+        /// `a`, `b` and `c` must point to at least `m * k`, `n * k` and `m * n`
+        /// readable (writable, for `c`) elements.
+        #[inline]
+        pub(crate) unsafe fn $nt(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            let (a, b, c) = unsafe {
+                (
+                    std::slice::from_raw_parts(a, m * k),
+                    std::slice::from_raw_parts(b, n * k),
+                    std::slice::from_raw_parts_mut(c, m * n),
+                )
+            };
+            unsafe {
+                $gemm(
+                    Layout::RowMajor,
+                    Transpose::None,
+                    // `b` is `(n, k)`, so its rows are `k` apart and BLAS reads
+                    // it transposed to get the logical `(k, n)`.
+                    Transpose::Ordinary,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0,
+                    a,
+                    k as i32,
+                    b,
+                    k as i32,
+                    0.0,
+                    c,
+                    n as i32,
+                );
+            }
+        }
+
+        /// `c = a^T * b`, where `a` holds the logical `(m, k)` operand as
+        /// `(k, m)` row-major.
+        ///
+        /// # Safety
+        ///
+        /// As [`$nt`], with `a` read as `k * m` elements and `b` as `k * n`.
+        #[inline]
+        pub(crate) unsafe fn $tn(
+            m: usize,
+            k: usize,
+            n: usize,
+            a: *const $ty,
+            b: *const $ty,
+            c: *mut $ty,
+        ) {
+            let (a, b, c) = unsafe {
+                (
+                    std::slice::from_raw_parts(a, k * m),
+                    std::slice::from_raw_parts(b, k * n),
+                    std::slice::from_raw_parts_mut(c, m * n),
+                )
+            };
+            unsafe {
+                $gemm(
+                    Layout::RowMajor,
+                    // `a` is `(k, m)`, so its rows are `m` apart.
+                    Transpose::Ordinary,
+                    Transpose::None,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    1.0,
+                    a,
+                    m as i32,
+                    b,
+                    n as i32,
+                    0.0,
+                    c,
+                    n as i32,
+                );
+            }
+        }
+    };
+}
+
+#[cfg(feature = "blas")]
+blas_transposed_gemm!(gemm_nt_f32, gemm_tn_f32, f32, cblas::sgemm);
+#[cfg(feature = "blas")]
+blas_transposed_gemm!(gemm_nt_f64, gemm_tn_f64, f64, cblas::dgemm);
+
 /// A raw pointer that may be captured by a rayon task.
 ///
 /// The tasks a split GEMM spawns each write a disjoint part of `c` and only
