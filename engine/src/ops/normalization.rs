@@ -398,7 +398,9 @@ pub fn layer_norm(
 
     let norm: usize = normalized_shape.iter().product();
     let total = input.numel();
-    let rows = if norm == 0 { 0 } else { total / norm };
+    // A zero-sized normalized axis divides by zero; there are no rows in that
+    // case, which is what `checked_div` reports as `None`.
+    let rows = total.checked_div(norm).unwrap_or(0);
 
     // Statistics shape: the input's, with the normalized dims collapsed to 1.
     let mut stat_dims = input.shape().dims().to_vec();
@@ -669,7 +671,9 @@ pub fn rms_norm(
 
     let norm: usize = normalized_shape.iter().product();
     let total = input.numel();
-    let rows = if norm == 0 { 0 } else { total / norm };
+    // A zero-sized normalized axis divides by zero; there are no rows in that
+    // case, which is what `checked_div` reports as `None`.
+    let rows = total.checked_div(norm).unwrap_or(0);
 
     let mut stat_dims = input.shape().dims().to_vec();
     for d in stat_dims.iter_mut().skip(axis_start) {

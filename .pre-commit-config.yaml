@@ -7,8 +7,14 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files
+  # Keep in step with the `black` lower bound in pyproject's `dev` extra. The
+  # two disagree about `textwrap.dedent("""...""")` -- 25.9.0 splits the call
+  # across lines, 26.5 hugs the string back inside the parentheses -- so a
+  # contributor who formats with the version the `dev` extra installs writes
+  # something this hook then rejects, and vice versa. There is no formatting
+  # that satisfies both.
   - repo: https://github.com/psf/black
-    rev: 25.9.0
+    rev: 26.5.1
     hooks:
       - id: black
         additional_dependencies: ["black[jupyter]"]
