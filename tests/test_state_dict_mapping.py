@@ -204,20 +204,42 @@ def test_the_key_order_in_the_file_is_sorted(tmp_path):
         assert list(section) == sorted(section)
 
 
+def _bytes_without_the_timestamp(path, fmt):
+    """The file's bytes with `created_at` cut out of them.
+
+    It is the one field meant to differ between two saves, so it has to come
+    out before they can be compared. It cannot be masked in place, because it
+    is not a fixed width: chrono prints the fractional second to 0, 3, 6 or 9
+    digits depending on how many trailing zeros it has, so two saves a
+    microsecond apart differ in length as well as in content roughly one time
+    in a thousand. All three formats store the field as its RFC 3339 string
+    preceded by the byte giving that string's length -- an opening quote, in
+    JSON -- and both have to go, since the length byte varies with the width
+    too.
+    """
+    raw = _read_bytes(path)
+    stamp = S.ModelSerializer.load(
+        path, S.SerializationFormat(fmt)
+    ).metadata.created_at.encode()
+    start = raw.index(stamp)
+    return raw[: start - 1] + raw[start + len(stamp) :]
+
+
 @pytest.mark.parametrize("fmt", ["json", "binary", "messagepack"])
 def test_saving_the_same_model_twice_produces_the_same_bytes(tmp_path, fmt):
-    """`created_at` is a timestamp and is meant to differ; everything else in
-    the file is a function of the weights. With the lengths equal, the bytes
-    that differ are confined to that one field."""
+    """Every byte but the timestamp is a function of the model.
+
+    This is what the `BTreeMap`s buy. `HashMap` seeds its hasher per instance,
+    so the parameter and buffer sections came out in a different order on each
+    save and no two checkpoints of the same weights were ever the same file.
+    """
     (tmp_path / "one").mkdir()
     (tmp_path / "two").mkdir()
 
-    one = _read_bytes(_checkpoint(tmp_path / "one", fmt))
-    two = _read_bytes(_checkpoint(tmp_path / "two", fmt))
+    one = _bytes_without_the_timestamp(_checkpoint(tmp_path / "one", fmt), fmt)
+    two = _bytes_without_the_timestamp(_checkpoint(tmp_path / "two", fmt), fmt)
 
-    assert len(one) == len(two)
-    differing = sum(a != b for a, b in zip(one, two))
-    assert differing <= 32, f"{differing} bytes differ, beyond the timestamp"
+    assert one == two
 
 
 def test_the_state_dict_half_is_byte_identical(tmp_path):
