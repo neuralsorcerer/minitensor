@@ -166,7 +166,7 @@ pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Resul
 ///
 /// Only the *reduced* axis matters. `max(dim=1)` on a `(0, 3)` tensor is fine --
 /// every slice it reduces has three elements, there just are not any slices, so
-/// the empty output is the honest answer and NumPy agrees. `max(dim=1)` on a
+/// the empty output is the honest answer. `max(dim=1)` on a
 /// `(3, 0)` tensor is not: it would have to invent three values out of nothing.
 ///
 /// Without this the kernels returned their fold identity, which for floats is

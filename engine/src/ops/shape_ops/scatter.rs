@@ -264,8 +264,8 @@ fn scatter_impl(
 /// operations adjoint.
 ///
 /// When two entries of `index` name the same destination the later one wins.
-/// PyTorch leaves that case explicitly non-deterministic; here the destination
-/// is partitioned across tasks so the order is fixed, and the gradient follows
+/// Rather than leave that case non-deterministic, the destination is
+/// partitioned across tasks so the order is fixed, and the gradient follows
 /// it — only the writer whose value survived receives any.
 pub fn scatter(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
     scatter_impl(tensor, dim, index, src, false)

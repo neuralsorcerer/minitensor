@@ -170,10 +170,9 @@ fn reduce_along_dim_par<T, C, S>(
 /// Like [`reduce_along_dim_par`] but also records the index (along the reduced
 /// dimension) of the winning element, parallelizing over output positions.
 /// `better(candidate, current_best)` decides replacement using a strict
-/// comparison, so the first winner keeps its index (matches NumPy/PyTorch
-/// argmax/argmin tie-breaking); `short(val)` returning `Some(v)` finalizes the
-/// output early with value `v` at the current index (NaN propagation, boolean
-/// any/all short-circuit).
+/// comparison, so the first winner keeps its index on a tie; `short(val)`
+/// returning `Some(v)` finalizes the output early with value `v` at the
+/// current index (NaN propagation, boolean any/all short-circuit).
 #[inline]
 pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
     input: &[T],
@@ -263,8 +262,8 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
 
 /// Global min/max over the non-NaN elements.
 ///
-/// Returns NaN when every element is NaN, matching NumPy's `nanmin`/`nanmax`.
-/// The four dtype-specific versions this replaces each carried a
+/// Returns NaN when every element is NaN -- there is no non-NaN element to
+/// report. The four dtype-specific versions this replaces each carried a
 /// `(value, found)` accumulator seeded with a `±inf` sentinel;
 /// `reduce_with` has no identity element, so there is no sentinel that a real
 /// input value could collide with.
@@ -281,8 +280,8 @@ fn nan_extremum_all<T: Float + Send + Sync>(data: &[T], which: Extremum) -> T {
 
 /// Index of the global extremum.
 ///
-/// Ties go to the lowest index. A NaN wins outright, matching
-/// `torch.argmax`/`argmin`; ties among NaNs also go to the lowest index. As
+/// Ties go to the lowest index. A NaN wins outright; ties among NaNs also go
+/// to the lowest index. As
 /// with [`nan_extremum_all`] there is no identity element, so the `±inf` /
 /// `i32::MIN` seeds the ten dtype-specific versions carried -- each of which a
 /// real input could equal -- are gone.
@@ -526,9 +525,8 @@ float_extremum_columns!(min_columns_f64, f64, f64::INFINITY, <);
 ///
 /// The value-only forms of `min` and `max` differed only in their seed and
 /// their fold, exactly as the value-and-index forms in `minmax_indices` did.
-/// A NaN anywhere in a float slice short-circuits the whole column, matching
-/// `torch.min`/`torch.max`; bool short-circuits on the first `true` (max) or
-/// `false` (min).
+/// A NaN anywhere in a float slice short-circuits the whole column; bool
+/// short-circuits on the first `true` (max) or `false` (min).
 fn extremum_along_dim(
     tensor: &Tensor,
     dim: usize,

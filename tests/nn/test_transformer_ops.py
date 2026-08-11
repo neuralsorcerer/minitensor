@@ -297,8 +297,8 @@ def test_boolean_mask_polarity_is_opposite_between_the_two_families():
     """Pin the convention on both sides, because they disagree.
 
     `scaled_dot_product_attention` keeps `True` positions; `masked_softmax`,
-    `masked_log_softmax` and `masked_fill` exclude them. Both follow PyTorch,
-    which is inconsistent here, and only the attention side was documented.
+    `masked_log_softmax` and `masked_fill` exclude them. The convention is
+    inconsistent here, and only the attention side was documented.
     Getting it backwards raises nothing -- it attends to exactly the positions
     the caller meant to hide -- so the contrast is asserted directly.
     """
@@ -338,9 +338,9 @@ def test_boolean_mask_polarity_is_opposite_between_the_two_families():
 def test_a_row_with_nothing_to_attend_to_is_zero_not_nan():
     """`0/0` has no answer; record which one this library returns.
 
-    PyTorch yields NaN for a fully-masked attention row. Zeros propagate
-    quietly instead, so the difference matters to anyone porting code that
-    relied on NaN to surface a bad mask.
+    A fully-masked attention row could yield NaN. Zeros propagate quietly
+    instead, so the difference matters to anyone porting code that relied on
+    NaN to surface a bad mask.
     """
     rng = np.random.default_rng(1)
     q, k, v = (rng.standard_normal((1, 3, 4)).astype(np.float32) for _ in range(3))

@@ -184,7 +184,7 @@ impl Layer for BatchNorm1d {
         // Delegate to the functional kernel rather than re-deriving the
         // statistics here. That kernel is rank-generic and — critically —
         // stores the *unbiased* batch variance in `running_var` (Bessel's
-        // correction), matching PyTorch. The copy that used to live here
+        // correction). The copy that used to live here
         // stored the biased variance, so the layer and `F.batch_norm`
         // disagreed about eval-time normalization for the same input.
         crate::ops::normalization::batch_norm(
@@ -799,7 +799,7 @@ mod tests {
     fn test_batchnorm1d_eval_uses_running_stats() {
         // With momentum = 1.0 a single training forward sets the running stats
         // to exactly that batch's statistics (mean, and the UNBIASED variance
-        // PyTorch stores). Eval must then normalize a *different* batch with
+        // `running_var` stores). Eval must then normalize a *different* batch with
         // those running stats, independent of the eval batch — not recompute
         // batch statistics.
         let mut layer =
@@ -867,7 +867,7 @@ mod tests {
         let var = layer.running_var().data().as_f32_slice().unwrap();
         assert!((mean[0] - 2.5).abs() < 1e-5, "channel 0 mean: {}", mean[0]);
         assert!((mean[1] - 25.0).abs() < 1e-4, "channel 1 mean: {}", mean[1]);
-        // `running_var` stores the UNBIASED batch variance (PyTorch's Bessel
+        // `running_var` stores the UNBIASED batch variance (Bessel's
         // correction), while the normalization itself uses the biased one.
         // n = N * L = 4, so biased 1.25 -> 1.25 * 4/3, and 125 -> 125 * 4/3.
         assert!(

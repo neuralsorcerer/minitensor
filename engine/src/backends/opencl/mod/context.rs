@@ -583,8 +583,8 @@ __kernel void matmul_kernel(__global const float* a,
     /// ReLU activation kernel
     ///
     /// `fmax(0, x)` would return 0 for a NaN input (OpenCL `fmax` drops NaN),
-    /// but the CPU `relu` deliberately propagates NaN (as does PyTorch). Guard
-    /// with `isnan` so both paths agree.
+    /// but the CPU `relu` deliberately propagates NaN. Guard with `isnan` so
+    /// both paths agree.
     pub const RELU_KERNEL: &str = r#"
 __kernel void relu_kernel(__global const float* input,
                          __global float* output,
@@ -654,7 +654,7 @@ __kernel void relu_kernel(__global const float* input,
                          const unsigned int n) {
     int gid = get_global_id(0);
     if (gid < n) {
-        // isnan guard: keep NaN instead of letting fmax drop it (CPU/PyTorch parity).
+        // isnan guard: keep NaN instead of letting fmax drop it (CPU parity).
         float x = input[gid];
         output[gid] = isnan(x) ? x : fmax(0.0f, x);
     }

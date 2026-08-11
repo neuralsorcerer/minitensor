@@ -191,8 +191,9 @@ pub fn sort(
 
     // Nothing to order, and no storage to order it in: `sort_along_dim_par`
     // chunks by `dim_size * inner`, which is zero here, and `par_chunks_mut(0)`
-    // panics. NumPy and PyTorch both return the empty input back, so do that --
-    // after `normalize_dim` above, so an out-of-range `dim` still errors.
+    // panics. Returning the empty input back is the sensible answer, so do
+    // that -- after `normalize_dim` above, so an out-of-range `dim` still
+    // errors.
     if tensor.numel() == 0 {
         let values = Tensor::new(
             Arc::new(TensorData::zeros_on_device(
@@ -518,7 +519,7 @@ pub fn var(
     if unbiased {
         // A single sample makes Bessel's correction `n / (n - 1)` undefined, and
         // the biased variance it scales is exactly zero, so the product is NaN
-        // -- the answer NumPy and PyTorch both give.
+        // -- which is the honest answer for an undefined correction.
         //
         // That case goes through the same multiply as any other correction
         // rather than substituting a freshly built NaN tensor. A replacement

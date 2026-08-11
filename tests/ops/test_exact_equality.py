@@ -13,8 +13,8 @@ For contiguous CPU tensors -- which is nearly all of them -- it returned
     array_equal(NaN,  NaN)    was True,  should be False  (bits match, values do not)
 
 Which made it disagree with the library's own `eq`, which says the opposite of
-both, and with NumPy and PyTorch, which agree with `eq`. `allclose` next door
-already guarded its byte path on `!dtype.is_float()`; this one did not.
+both. `allclose` next door already guarded its byte path on
+`!dtype.is_float()`; this one did not.
 
 Nothing tested it, so the whole suite passed either way. The tests here are
 written as agreement checks -- against `eq` and against NumPy -- rather than

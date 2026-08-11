@@ -97,7 +97,7 @@ def test_two_bool_operands_rejected():
 @pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
 def test_a_bool_paired_with_a_number_divides_like_that_number(dtype):
     """It promotes and divides, as `+`, `*` and `/` already did with the same
-    operands, and as NumPy does."""
+    operands."""
     number = np.array([2, 3, 1], dtype=dtype)
     # Whichever operand divides has to stay away from zero, so the mask on the
     # right is all-True. `False` as a divisor is division by zero, which these

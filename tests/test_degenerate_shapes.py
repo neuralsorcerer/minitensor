@@ -114,7 +114,7 @@ def test_bce_with_logits_over_an_empty_input(reduction, expected):
 
 def test_bce_with_logits_mean_over_an_empty_input_is_nan_like_every_other_mean():
     # 0/0. This matches `mse_loss`, `binary_cross_entropy`, a plain `mean()` and
-    # NumPy, so it is the consistent answer rather than a special case.
+    # so it is the consistent answer rather than a special case.
     empty = f32(0, 3)
     assert np.isnan(F.binary_cross_entropy_with_logits(empty, empty).numpy())
     assert np.isnan(F.mse_loss(empty, empty).numpy())
@@ -168,7 +168,7 @@ def test_reducing_an_empty_axis_matches_numpy(shape, name):
 @pytest.mark.parametrize("shape", EMPTY_SHAPES)
 @pytest.mark.parametrize("name", ["std", "var"])
 def test_dispersion_over_an_empty_axis_is_nan_like_numpy(shape, name):
-    # 0/0 for the biased estimator, exactly as NumPy reports it.
+    # 0/0 for the biased estimator.
     array = np.zeros(shape, dtype=np.float32)
     tensor = mt.from_numpy(array)
     for dim in range(len(shape)):
@@ -181,8 +181,8 @@ def test_dispersion_over_an_empty_axis_is_nan_like_numpy(shape, name):
 
 @pytest.mark.parametrize("shape", EMPTY_SHAPES)
 def test_sort_and_argsort_return_the_empty_input(shape):
-    # NumPy and PyTorch both hand the empty input straight back rather than
-    # erroring, so an empty batch flows through a pipeline unchanged.
+    # The empty input is handed straight back rather than erroring, so an
+    # empty batch flows through a pipeline unchanged.
     tensor = mt.from_numpy(np.zeros(shape, dtype=np.float32))
     values, indices = tensor.sort()
     assert values.shape == shape

@@ -208,8 +208,8 @@ pub(crate) fn cmp_bool_asc(a: &(usize, bool), b: &(usize, bool)) -> Ordering {
 /// `sum` and `prod` can answer for an empty input because they have identities
 /// (0 and 1). `max`, `median` and friends cannot, and a sentinel is worse than
 /// no answer: the int64 `max` of nothing is `i64::MIN`, which is also a
-/// perfectly ordinary value, so the caller cannot tell the two apart. NumPy and
-/// PyTorch both raise here.
+/// perfectly ordinary value, so the caller cannot tell the two apart. Raising
+/// is the only honest answer.
 ///
 /// `op` names the operation so the message points at what the caller actually
 /// called -- this used to be hardcoded to `median`, which is how `nanquantile`
@@ -227,11 +227,10 @@ pub(crate) fn ensure_non_empty(numel: usize, op: &str) -> Result<()> {
 /// Median of the tensor, optionally along one dimension.
 ///
 /// For an even number of elements this returns the **lower** of the two middle
-/// values, matching PyTorch's `torch.median` — it does *not* average them the
-/// way `numpy.median` does. That is what lets the reduction also report the
-/// index of the element it selected (returned as the second tuple element when
-/// `dim` is given). Use `quantile(0.5)` for the interpolated, NumPy-compatible
-/// definition.
+/// values; it does *not* average them. That is what lets the reduction also
+/// report the index of the element it selected (returned as the second tuple
+/// element when `dim` is given), since an averaged midpoint belongs to no
+/// element. Use `quantile(0.5)` for the interpolated definition.
 pub fn median(
     tensor: &Tensor,
     dim: Option<isize>,
@@ -426,8 +425,8 @@ pub fn nanquantile(
 /// Compute the median while ignoring NaN values.
 ///
 /// Like [`median`], an even count selects the lower of the two middle values
-/// (PyTorch's convention) rather than averaging them as `numpy.nanmedian`
-/// does; `nanquantile(0.5)` is the interpolated equivalent.
+/// rather than averaging them; `nanquantile(0.5)` is the interpolated
+/// equivalent.
 pub fn nanmedian(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     ensure_floating_point_dtype_for(tensor.dtype(), "nanmedian")?;
 
@@ -515,8 +514,8 @@ fn ensure_floating_point_dtype_for(dtype: DataType, operation: &str) -> Result<(
 }
 
 // A single-element reduction slice trivially equals its only value; when that
-// value is NaN it flows straight through, matching NumPy/PyTorch, which return
-// NaN for all-NaN slices rather than erroring.
+// value is NaN it flows straight through. An all-NaN slice returns NaN rather
+// than erroring -- there is no non-NaN element to report.
 
 pub(crate) fn fill_quantiles_all_single_f32(value: f32, values: &mut [f32]) {
     if value.is_nan() {
@@ -536,7 +535,7 @@ pub(crate) fn fill_quantiles_all_single_f64(value: f64, values: &mut [f64]) {
 
 pub(crate) fn fill_nanquantiles_all_single_f32(value: f32, values: &mut [f32]) {
     // A single-element tensor's quantile is its value for every q; NaN flows
-    // through (NumPy/PyTorch return NaN for all-NaN input).
+    // through, since an all-NaN input has no value to report.
     values.fill(value);
 }
 
@@ -715,8 +714,7 @@ fn nanquantile_all(
 
     let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
 
-    // An all-NaN input yields NaN (NumPy/PyTorch semantics) rather than an
-    // error.
+    // An all-NaN input yields NaN rather than an error.
     match tensor.dtype() {
         DataType::Float32 => {
             let data = tensor

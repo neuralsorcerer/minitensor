@@ -504,7 +504,7 @@ kernel void relu_kernel(device const float* input [[buffer(0)]],
                        constant uint& n [[buffer(2)]],
                        uint index [[thread_position_in_grid]]) {
     if (index >= n) return;
-    // isnan guard: max/fmax drop NaN, but CPU relu / PyTorch propagate it.
+    // isnan guard: max/fmax drop NaN, but the CPU relu propagates it.
     float x = input[index];
     output[index] = isnan(x) ? x : fmax(0.0f, x);
 }
@@ -571,7 +571,7 @@ kernel void relu_kernel(device const float* input [[buffer(0)]],
                        constant uint& n [[buffer(2)]],
                        uint index [[thread_position_in_grid]]) {
     if (index >= n) return;
-    // isnan guard: max/fmax drop NaN, but CPU relu / PyTorch propagate it.
+    // isnan guard: max/fmax drop NaN, but the CPU relu propagates it.
     float x = input[index];
     output[index] = isnan(x) ? x : fmax(0.0f, x);
 }

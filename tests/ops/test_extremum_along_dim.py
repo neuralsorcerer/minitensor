@@ -25,7 +25,7 @@ after giving both the lane treatment:
     max, middle axis of a 3-D      1.539 ms   0.742 ms
 
 `norm(inf, dim)` is exactly this reduction: 3.52 ms to 0.67 ms along the last
-axis, and from 1.4x NumPy to 0.29x.
+axis, a 5.3x gain.
 
 The lane split is what these tests are really about. NaN is now tracked as a
 separate flag so the value loop can stay a bare comparison -- `v > best` is

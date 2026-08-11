@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_ordered_comparisons_order_booleans() {
-        // `false < true`, as NumPy and PyTorch both have it. `eq`/`ne` already
+        // `false < true` is the natural order. `eq`/`ne` already
         // accepted booleans and `minimum`/`maximum` already ordered them, so
         // rejecting `lt` here was the odd one out.
         let a = tensor_from_vec_bool(vec![true, false, true, false]);

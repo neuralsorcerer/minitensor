@@ -86,8 +86,8 @@ impl PyTensor {
     }
 
     fn __pos__(&self) -> Self {
-        // `+t` is the identity; the clone shares storage via Arc, matching
-        // torch's behavior of returning the input values unchanged.
+        // `+t` is the identity; the clone shares storage via Arc and returns
+        // the input values unchanged.
         self.clone()
     }
 
@@ -102,7 +102,7 @@ impl PyTensor {
     }
 
     fn __getitem__(&self, key: &Bound<PyAny>) -> PyResult<Self> {
-        // NumPy-style fancy forms first: boolean masks select blocks along
+        // Fancy forms first: boolean masks select blocks along
         // the leading dims, 1-D integer keys select rows along dim 0.
         if let Some(result) = try_fancy_index_tensor(&self.inner, key)? {
             return Ok(Self::from_tensor(result));
@@ -135,7 +135,7 @@ impl PyTensor {
 
         // Boolean-mask assignment (`t[mask] = value`): the mask must match
         // the leading dimensions; `value` may be a scalar or anything that
-        // broadcasts to the selection shape (NumPy semantics).
+        // broadcasts to the selection shape.
         if let Some(mask) = try_bool_mask_key(key)? {
             let m_dims = mask.shape().dims();
             if m_dims.len() > in_dims.len() || in_dims[..m_dims.len()] != *m_dims {

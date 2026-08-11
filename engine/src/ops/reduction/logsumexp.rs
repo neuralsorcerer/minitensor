@@ -292,8 +292,7 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
 /// Cumulative sum along a specified dimension
 pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     // A running count of a mask, for the same reason `sum` accepts one: the
-    // accumulator has to be wider than `bool`, and `int64` is where NumPy and
-    // PyTorch both put it.
+    // accumulator has to be wider than `bool`, and `int64` is where it goes.
     if tensor.dtype() == DataType::Bool {
         return cumsum(&tensor.astype(DataType::Int64)?, dim);
     }

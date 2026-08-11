@@ -15,7 +15,7 @@ mode so that marking a leaf trainable inside `no_grad` still works.
 The result was a tensor with `requires_grad=True` and a `grad_fn` but no graph
 node -- it looked tracked and back-propagated to nothing. Feeding one into a
 later graph made it a spurious leaf that accumulated a `.grad` of its own while
-the real input got none. PyTorch returns `requires_grad=False` here.
+the real input got none. `requires_grad=False` is the right answer here.
 
 `reshape`, `flatten`, `ravel`, `squeeze`, `unsqueeze`, `repeat`, `roll`,
 `norm`, `mae_loss`, `huber_loss` and `binary_cross_entropy_with_logits` were

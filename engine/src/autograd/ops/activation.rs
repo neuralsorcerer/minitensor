@@ -427,7 +427,7 @@ impl GradientFunction for ReluBackward {
                 zip_mask_into(grad_slice, go, &self.mask, |g: f32, keep| {
                     // Multiply rather than select: a NaN gradient must stay
                     // NaN even where the mask is clear (NaN inputs are not
-                    // `> 0`, and PyTorch propagates NaN through relu).
+                    // `> 0`, and relu propagates NaN).
                     g * if keep { 1.0 } else { 0.0 }
                 });
             }
@@ -443,7 +443,7 @@ impl GradientFunction for ReluBackward {
                 zip_mask_into(grad_slice, go, &self.mask, |g: f64, keep| {
                     // Multiply rather than select: a NaN gradient must stay
                     // NaN even where the mask is clear (NaN inputs are not
-                    // `> 0`, and PyTorch propagates NaN through relu).
+                    // `> 0`, and relu propagates NaN).
                     g * if keep { 1.0 } else { 0.0 }
                 });
             }

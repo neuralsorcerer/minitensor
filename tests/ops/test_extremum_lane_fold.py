@@ -66,7 +66,7 @@ def test_a_lone_extreme_value_wins_from_any_lane(dtype, size, position):
 
 
 # Sizes start at 2: a single element leaves no non-NaN value for the nanmax
-# comparison below, and NumPy warns on an all-NaN slice. That case is covered
+# comparison below, and an all-NaN slice warns. That case is covered
 # by `test_all_nan_and_infinities` instead.
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 @pytest.mark.parametrize("size", [2, 7, 8, 9, 8193])
@@ -80,7 +80,7 @@ def test_nan_propagates_from_any_lane(dtype, size, position):
 
     assert np.isnan(tensor.max().numpy())
     assert np.isnan(tensor.min().numpy())
-    # nanmax/nanmin still skip it, as NumPy does.
+    # nanmax/nanmin still skip it.
     assert tensor.nanmax().numpy() == np.nanmax(values)
     assert tensor.nanmin().numpy() == np.nanmin(values)
 

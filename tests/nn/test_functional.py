@@ -23,8 +23,8 @@ def test_relu_negative_and_nan():
 
 
 def test_batch_norm_running_var_is_unbiased():
-    # PyTorch stores the UNBIASED batch variance in running_var (Bessel's
-    # correction, var_biased * n/(n-1)) even though the normalization itself
+    # running_var stores the UNBIASED batch variance (Bessel's correction,
+    # var_biased * n/(n-1)) even though the normalization itself
     # uses the biased estimate. For x with 2 rows per channel the correction
     # factor is 2/(2-1) = 2. The running buffers are updated in place, so they
     # are passed as raw engine tensors.
@@ -57,8 +57,8 @@ def test_hardshrink_matches_numpy_and_grad():
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_hardshrink_propagates_nan(dtype):
-    # hardshrink must pass NaN through, like every other elementwise activation
-    # (and PyTorch). A NaN input compares false against both bounds; testing
+    # hardshrink must pass NaN through, like every other elementwise
+    # activation. A NaN input compares false against both bounds; testing
     # the finite-value complement `|x| > lambd` would drop NaN into the "zero"
     # branch, silently turning NaN into 0.
     tensor = mt.Tensor([float("nan"), 1.2, -0.2, 0.9], dtype=dtype)
@@ -1340,7 +1340,7 @@ def test_leaky_relu_default_slope_matches_the_layer():
 @pytest.mark.parametrize("negative_slope", [0.01, 0.25, 1.0])
 def test_leaky_relu_gradient_takes_the_slope_side_at_zero(negative_slope):
     # The kink at zero has no derivative; the convention is the negative side,
-    # which is what PyTorch uses and what `relu` here has always used. This
+    # which is what `relu` here has always used. This
     # kernel used `>= 0` and so returned 1 at zero, disagreeing with the `relu`
     # directly above it in the same file.
     values = np.array([-1.0, 0.0, 1.0])

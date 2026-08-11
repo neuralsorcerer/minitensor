@@ -50,8 +50,8 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
         // These three are undefined only when the *result* would be boolean,
         // which happens exactly when both operands are. A bool paired with a
         // number promotes to that number's dtype and the operation is ordinary
-        // arithmetic from there -- `count - mask` is what NumPy and PyTorch
-        // both compute, and what `+`, `*` and `/` already do here. Testing the
+        // arithmetic from there -- `count - mask` is the natural reading, and
+        // what `+`, `*` and `/` already do here. Testing the
         // operands instead of the promoted type rejected those mixed pairs too.
         Sub => {
             let promoted = promote_arithmetic_dtype(lhs, rhs);
@@ -67,7 +67,7 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
         }
         Div => Ok(promote_division_dtype(lhs, rhs)),
         // Unlike true division, floor division and remainder keep integer
-        // operands integral (Python/PyTorch semantics).
+        // operands integral (Python's semantics).
         FloorDiv | Rem => {
             let promoted = promote_arithmetic_dtype(lhs, rhs);
             if promoted == DataType::Bool {
@@ -181,8 +181,8 @@ mod tests {
 
     #[test]
     fn test_sub_rejects_only_two_booleans() {
-        // `mask - mask` has no numeric result type, but `count - mask` does and
-        // is what NumPy and PyTorch compute. Guarding on the operand dtypes
+        // `mask - mask` has no numeric result type, but `count - mask` does.
+        // Guarding on the operand dtypes
         // instead of the promoted one rejected the mixed pairs as well, even
         // though `+`, `*` and `/` accepted exactly the same operands.
         assert!(

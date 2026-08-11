@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_sgd_momentum_dampening_first_step_matches_pytorch() {
-        // PyTorch seeds the momentum buffer with the raw gradient on the first
+        // The momentum buffer is seeded with the raw gradient on the first
         // step (`buf = grad.clone()`), applying the (1 - dampening) factor only
         // from the second step onward. Verify both steps against hand-computed
         // reference values (lr=0.1, momentum=0.9, dampening=0.5, grad=2.0).
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_rmsprop_momentum_lr_schedule_matches_pytorch() {
-        // PyTorch keeps lr out of the RMSprop momentum buffer:
+        // lr is kept out of the RMSprop momentum buffer:
         //   buf = momentum*buf + grad/denom ; param -= lr*buf
         // so a mid-training lr change rescales the entire accumulated buffer.
         // Reference (f64, alpha=0.99, eps=1e-8, momentum=0.9, grad=2.0):

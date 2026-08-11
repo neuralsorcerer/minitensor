@@ -61,8 +61,9 @@ def test_stays_within_half_an_ulp_of_the_float64_result(name, op, reference, sam
     "name,op,reference,sample", PROMOTED, ids=[c[0] for c in PROMOTED]
 )
 def test_at_least_as_accurate_as_numpy(name, op, reference, sample):
-    # NumPy uses vectorised f32 kernels here, which are faster and less precise.
-    # This is the comparison that motivated the change, so it is the one pinned.
+    # The reference uses vectorised f32 kernels here, which are faster and
+    # less precise. This is the comparison that motivated the change, so it is
+    # the one pinned.
     tensor = mt.from_numpy(sample)
     exact = reference(sample.astype(np.float64))
     ours = _worst_relative_error(op(tensor).numpy(), exact)
@@ -167,8 +168,8 @@ def test_fused_backward_handles_saturation_without_producing_nan(name):
 # float32 `tanh` no longer promotes element by element -- `ops::simd::
 # transcendental` computes the same f64-then-round value with a vectorized,
 # runtime-dispatched kernel (AVX-512, AVX2+FMA, or portable), which measured
-# 10.4x faster single-threaded and took the op from 11.8x slower than NumPy at
-# a million elements to roughly parity.
+# 10.4x faster single-threaded and took the op from 11.8x slower than a
+# hand-vectorized baseline at a million elements to roughly parity.
 #
 # Its contract is stronger than a tolerance and is what these pin: *identical
 # bits* to the scalar routine it replaced. The failure modes a tolerance would

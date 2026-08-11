@@ -178,7 +178,7 @@ pub(crate) fn nanquantiles_all(
             }
             if q_len == 1 {
                 let mut buffer: Vec<f32> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-                // All-NaN input -> NaN (NumPy/PyTorch semantics).
+                // All-NaN input -> NaN: there is no value to report.
                 values[0] = if buffer.is_empty() {
                     f32::NAN
                 } else {
@@ -223,7 +223,7 @@ pub(crate) fn nanquantiles_all(
             }
             if q_len == 1 {
                 let mut buffer: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-                // All-NaN input -> NaN (NumPy/PyTorch semantics).
+                // All-NaN input -> NaN: there is no value to report.
                 values[0] = if buffer.is_empty() {
                     f64::NAN
                 } else {
@@ -329,8 +329,8 @@ pub(crate) fn quantile_dim_layout(
 /// thread.)
 ///
 /// `nan_aware` decides what a NaN in a column means: with it off, one NaN makes
-/// the whole quantile NaN (`torch.quantile`); with it on, NaNs are dropped and
-/// only an all-NaN column yields NaN (`numpy.nanquantile`).
+/// the whole quantile NaN; with it on, NaNs are dropped and only an all-NaN
+/// column yields NaN.
 fn quantile_along_dim_core<T: TotalCmp + Send + Sync>(
     input: &[T],
     values: &mut [T],
@@ -593,8 +593,8 @@ quantiles_along_dim_entry!(quantiles_along_dim, false, "quantile");
 quantiles_along_dim_entry!(nanquantiles_along_dim, true, "nanquantile");
 
 /// A median is the *lower* of the two middle order statistics for an even
-/// count, matching `torch.median`/`torch.nanmedian` rather than NumPy's
-/// interpolated definition. Selecting rank `(len - 1) / 2` is exactly
+/// count, rather than the interpolated midpoint of the two. Selecting rank
+/// `(len - 1) / 2` is exactly
 /// [`QuantileInterpolation::Lower`] at `q = 0.5`, so the median reductions are
 /// the quantile reductions with that interpolation pinned.
 ///
@@ -656,8 +656,8 @@ pub(crate) fn nanmedian_all(tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
 ///
 /// A column with no non-NaN value yields NaN, and unlike `nanquantile` an
 /// empty reduced dimension is a NaN result rather than an error -- the median
-/// of nothing is as undefined as the median of all-NaN, and `numpy.nanmedian`
-/// answers both the same way.
+/// of nothing is as undefined as the median of all-NaN, so both answer the
+/// same way.
 pub(crate) fn nanmedian_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     let dims = tensor.shape().dims();
     if !dims.is_empty() && dims[dim] == 0 {

@@ -27,10 +27,9 @@ pub(crate) enum Extremum {
 /// first element attaining it.
 ///
 /// A NaN anywhere in a float slice wins outright (`reduce_arg_along_dim_par`'s
-/// short-circuit), matching `torch.min`/`torch.max`; `nan_aware` instead skips
-/// NaNs entirely, so an all-NaN slice reports NaN at index 0 as NumPy's
-/// `nanmin`/`nanmax` do. Integer and bool dtypes have no NaN and are rejected
-/// in the NaN-aware form.
+/// short-circuit); `nan_aware` instead skips NaNs entirely, so an all-NaN
+/// slice reports NaN at index 0. Integer and bool dtypes have no NaN and are
+/// rejected in the NaN-aware form.
 pub(crate) fn extremum_along_dim_with_indices(
     tensor: &Tensor,
     dim: usize,

@@ -285,7 +285,7 @@ impl ComputationGraph {
     }
 
     /// Accumulate a freshly computed gradient map into the stored gradients,
-    /// summing on collision. This is PyTorch's `backward()` contract: repeated
+    /// summing on collision. That is the `backward()` contract: repeated
     /// backward passes add into `.grad` (of the persistent leaf tensors) until
     /// `zero_grad` clears it, which is what enables gradient accumulation over
     /// micro-batches and multi-loss training. Interior (non-leaf) gradients are
@@ -333,7 +333,7 @@ impl ComputationGraph {
         });
 
         // Interior gradient *entries* are kept, not dropped with their node:
-        // minitensor exposes non-leaf `.grad` after backward, unlike PyTorch.
+        // minitensor exposes non-leaf `.grad` after backward.
         // They are only meaningful for the pass that produced them, though, so
         // this drops the ones the previous pass left behind.
         //

@@ -504,7 +504,7 @@ impl Optimizer for AdamW {
 }
 
 impl Optimizer for Adam {
-    /// Buffer names follow PyTorch's (`exp_avg`, `exp_avg_sq`,
+    /// Buffer names are the conventional ones (`exp_avg`, `exp_avg_sq`,
     /// `max_exp_avg_sq`) so a checkpoint is readable by anyone who has seen
     /// one before.
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {

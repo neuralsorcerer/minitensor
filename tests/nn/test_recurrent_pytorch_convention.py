@@ -9,16 +9,16 @@
 `tests/nn/test_recurrent_attention_reference.py` already pins the gate order
 itself -- LSTM's `i, f, g, o` and GRU's `r, z, n` -- against reference
 recurrences, and asserts that the wrong orders disagree. This file covers the
-rest of what the PyTorch-shaped names promise, which nothing checked.
+rest of what the layered/directional names promise, which nothing checked.
 
 `weight_ih_l{k}` / `weight_hh_l{k}` / `bias_ih_l{k}` / `bias_hh_l{k}`, with
-`_reverse` for the backward direction, is an invitation to drop PyTorch's own
+`_reverse` for the backward direction, is an invitation to drop pretrained
 tensors straight in. That only works if everything around each gate matrix
 agrees too, and none of it is visible in the shapes: `batch_first` has to
 transpose the same run rather than compute a different one, a second layer has
 to consume the first layer's output, `bidirectional` has to concatenate a
 forward pass with one that genuinely runs backwards, and the names have to be
-exactly PyTorch's for every combination of layers and directions.
+exactly right for every combination of layers and directions.
 
 `forward_with_state` is here for the same reason -- it returns the final hidden
 and cell state, and accepts an initial one, and a caller porting a loop over
@@ -93,7 +93,7 @@ def _named(weights, suffix="l0"):
 
 
 def _lstm_reference(x, w_ih, w_hh, b_ih, b_hh, reverse=False):
-    """PyTorch's `i, f, g, o` recurrence, which the sibling file pins."""
+    """The `i, f, g, o` recurrence, which the sibling file pins."""
     hidden = w_hh.shape[1]
     slots = {
         name: slice(k * hidden, (k + 1) * hidden)
@@ -147,7 +147,7 @@ def test_the_gru_reset_gate_applies_after_the_hidden_matmul():
     assert not np.allclose(got, np.stack(outputs), atol=TOL)
 
 
-# --- the layout the PyTorch names promise ------------------------------------
+# --- the layout the parameter names promise ----------------------------------
 
 
 def test_batch_first_is_the_same_run_transposed():

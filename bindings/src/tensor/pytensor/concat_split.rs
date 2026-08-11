@@ -133,8 +133,8 @@ impl PyTensor {
                 // below never runs for it, which left `cat(t.split(n, d), d)`
                 // -- the round trip these two exist for -- failing on "cannot
                 // concatenate empty list" instead of rebuilding the empty
-                // tensor. `chunk`, `split_with_sections` and NumPy all yield
-                // the single empty piece here.
+                // tensor. `chunk` and `split_with_sections` both yield the
+                // single empty piece here.
                 sections.push(0);
             }
             let mut remaining = dim_size;

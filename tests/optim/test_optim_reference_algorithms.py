@@ -7,7 +7,8 @@
 """Step-for-step comparison against the reference optimizer algorithms.
 
 Each optimizer is driven with a fixed gradient sequence and checked against a
-NumPy transcription of PyTorch's algorithm box, to full double precision. The
+NumPy transcription of each published algorithm box, to full double
+precision. The
 per-optimizer test files check individual behaviours; this file checks that the
 update rule as a whole is the published one, including how the hyperparameters
 interact (momentum with dampening, coupled vs decoupled weight decay, centered

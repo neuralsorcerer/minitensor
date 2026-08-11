@@ -361,8 +361,7 @@ impl Tensor {
     ///
     /// Leaf tensors that require gradients (i.e. parameters) are mutated in
     /// place even when the storage is shared, so that optimizer updates stay
-    /// visible through every handle to the parameter — mirroring PyTorch's
-    /// in-place parameter update semantics. That path goes through the
+    /// visible through every handle to the parameter. That path goes through the
     /// storage layer's interior mutability (see [`DataMut`]) instead of
     /// fabricating a `&mut TensorData` from the shared `Arc`.
     #[inline(always)]
@@ -1599,10 +1598,9 @@ impl Tensor {
                     if end > dim_size {
                         return Err(MinitensorError::index_error(end as isize, 0, dim_size));
                     }
-                    // An inverted range selects nothing -- `x[2:1]` is empty in
-                    // both NumPy and PyTorch, not an error. This used to reject
-                    // it, reporting a perfectly in-bounds `end` as an
-                    // out-of-bounds index.
+                    // An inverted range selects nothing -- `x[2:1]` is empty,
+                    // not an error. This used to reject it, reporting a
+                    // perfectly in-bounds `end` as an out-of-bounds index.
                     let size = if end <= start {
                         0
                     } else {
@@ -1787,10 +1785,9 @@ impl Tensor {
                     if end > dim_size {
                         return Err(MinitensorError::index_error(end as isize, 0, dim_size));
                     }
-                    // An inverted range selects nothing -- `x[2:1]` is empty in
-                    // both NumPy and PyTorch, not an error. This used to reject
-                    // it, reporting a perfectly in-bounds `end` as an
-                    // out-of-bounds index.
+                    // An inverted range selects nothing -- `x[2:1]` is empty,
+                    // not an error. This used to reject it, reporting a
+                    // perfectly in-bounds `end` as an out-of-bounds index.
                     let size = if end <= start {
                         0
                     } else {
@@ -1806,15 +1803,15 @@ impl Tensor {
 
         let out_shape = Shape::new(out_dims.clone());
 
-        // Match the value against the selection by *shape*, right-aligned, the
-        // way NumPy and PyTorch do -- and the way `t[mask] = value` already did.
+        // Match the value against the selection by *shape*, right-aligned --
+        // the way `t[mask] = value` already did.
         //
         // Comparing element counts instead was wrong in both directions. It
         // rejected real broadcasts, so `t[0] = row` could not fill a block with
         // one row. Worse, it accepted any value with the same count whatever its
         // shape and then wrote it in flat order, so assigning a transposed block
         // -- `t[0] = m.T` with `m` shaped `(4, 3)` into a `(3, 4)` selection --
-        // silently stored the wrong arrangement. NumPy raises for that.
+        // silently stored the wrong arrangement, which has to raise.
         //
         // `value_strides` carries the result: stride 0 for a dimension being
         // broadcast, so the same element is read for every coordinate along it.
@@ -1830,7 +1827,7 @@ impl Tensor {
             ))
         };
         // A value may carry more dimensions than the selection as long as the
-        // extra leading ones are 1; NumPy strips those rather than refusing.
+        // extra leading ones are 1; those are stripped rather than refused.
         if value_rank > out_rank && value_dims[..value_rank - out_rank].iter().any(|&d| d != 1) {
             return Err(describe());
         }
@@ -2874,8 +2871,7 @@ impl Tensor {
         // Floats are not among them, in *both* directions: two NaNs share a bit
         // pattern and are not equal, and `+0.0` and `-0.0` differ in bits and
         // are. Running floats through here made `array_equal` disagree with the
-        // library's own `eq`, which says exactly the opposite of both -- and
-        // with NumPy and PyTorch, which agree with `eq`.
+        // library's own `eq`, which says exactly the opposite of both.
         //
         // `allclose_with_equal_nan` above already guards its byte path this way.
         if !self.dtype.is_float()

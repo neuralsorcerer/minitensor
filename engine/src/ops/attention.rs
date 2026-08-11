@@ -64,11 +64,11 @@ fn scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> 
 /// * a **float** mask is added to the scores before softmax (use
 ///   `-inf` where attention is disallowed, or a relative-position bias);
 /// * a **bool** mask keeps positions that are `true` and disables `false`
-///   ones (PyTorch convention).
+///   ones.
 ///
 /// `is_causal` applies a causal (autoregressive) mask so query position `i`
 /// attends only to key positions `j <= i`. When `L != S` the mask is aligned to
-/// the bottom-right of the score matrix, matching PyTorch. Supplying both
+/// the bottom-right of the score matrix. Supplying both
 /// `attn_mask` and `is_causal` is rejected.
 ///
 /// `scale` overrides the default `1/sqrt(E)` scaling.

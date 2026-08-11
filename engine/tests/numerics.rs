@@ -4,8 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-//! Value semantics that have to agree with NumPy and PyTorch, in places where a
-//! plausible implementation quietly disagrees.
+//! Value semantics in places where a plausible implementation quietly gets
+//! them wrong.
 
 use std::sync::Arc;
 
@@ -37,8 +37,8 @@ fn tensor_f64(values: Vec<f64>) -> Tensor {
 
 #[test]
 fn test_round_breaks_ties_to_even() {
-    // NumPy, PyTorch and Python's built-in `round` all send halves to the even
-    // neighbour. Rust's `f32::round` sends them away from zero, so calling it
+    // Python's built-in `round` sends halves to the even neighbour. Rust's
+    // `f32::round` sends them away from zero, so calling it
     // directly disagreed at every exact .5: round(0.5) gave 1 rather than 0,
     // round(2.5) gave 3 rather than 2.
     let input = vec![-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5];

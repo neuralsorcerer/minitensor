@@ -728,7 +728,7 @@ impl TensorData {
 /// possibly after copy-on-write). The `Shared` variant is the one deliberate
 /// exception in the crate: in-place updates of leaf parameters whose storage
 /// is shared across `Arc` handles, so the update stays visible through every
-/// handle (PyTorch in-place parameter semantics). Its safety contract is
+/// handle. Its safety contract is
 /// documented on [`TensorData::data_ptr_shared`] and upheld by the callers:
 /// optimizer steps run GIL-serialized, after backward has finished reading
 /// saved operands.

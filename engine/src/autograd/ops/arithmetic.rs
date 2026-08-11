@@ -382,7 +382,7 @@ impl GradientFunction for ExpBackward {
 ///
 /// Saves the output `y = sqrt(x)` (rather than the input) so the derivative
 /// `d/dx sqrt(x) = 0.5 / sqrt(x)` is a single division: `grad_output / (2y)`.
-/// At `x == 0` this divides by zero and yields `inf`, matching PyTorch.
+/// At `x == 0` this divides by zero and yields `inf`.
 pub struct SqrtBackward {
     pub input_id: TensorId,
     pub output: Tensor,

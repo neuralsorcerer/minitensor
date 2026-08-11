@@ -138,7 +138,7 @@ impl PyTensor {
         }
     }
 
-    /// Alias of `clamp`, for NumPy's spelling.
+    /// Alias of `clamp`, under its array-library spelling.
     #[pyo3(signature = (min=None, max=None))]
     pub fn clip(&self, min: Option<&Bound<PyAny>>, max: Option<&Bound<PyAny>>) -> PyResult<Self> {
         let min_val = parse_clip_bound(min, "min")?;

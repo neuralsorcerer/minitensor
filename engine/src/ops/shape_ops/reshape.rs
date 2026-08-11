@@ -787,7 +787,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
         )));
     }
 
-    // An inverted range selects nothing, matching NumPy and PyTorch. Clamping
+    // An inverted range selects nothing. Clamping
     // here rather than erroring also keeps the `end - start` below from
     // underflowing `usize`.
     let end = end.max(start);
@@ -1443,7 +1443,7 @@ mod reshape_tests {
 
     #[test]
     fn slice_treats_an_inverted_range_as_empty() {
-        // `end < start` selects nothing, as in NumPy and PyTorch. It cannot
+        // `end < start` selects nothing. It cannot
         // simply fall through to the size computation either: `end - start` is
         // `usize` arithmetic, so an unclamped inverted range would underflow
         // rather than produce a small result.

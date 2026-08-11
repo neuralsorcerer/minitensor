@@ -115,7 +115,7 @@ def test_numeric_protocol_dunders(t22):
 
 def test_adam_adamw_default_learning_rate():
     # Adam/AdamW default every hyperparameter except lr in their signature;
-    # lr was required (unlike PyTorch, which defaults it to 1e-3).
+    # lr was required, rather than defaulting to 1e-3.
     from minitensor import optim
 
     for cls in (optim.Adam, optim.AdamW):

@@ -7,8 +7,8 @@
 """Weight initialization.
 
 Six of these already existed as tensor constructors -- `mt.xavier_uniform`,
-`mt.he_normal` and so on. What `nn.init` adds is the namespace a PyTorch user
-looks in, `calculate_fan_in_and_fan_out`, the Kaiming/Glorot spellings, and a
+`mt.he_normal` and so on. What `nn.init` adds is the conventional namespace,
+`calculate_fan_in_and_fan_out`, the Kaiming/Glorot spellings, and a
 `requires_grad` default suited to building parameters.
 
 That last one is a difference between two spellings of the same scheme, so it

@@ -336,7 +336,7 @@ pub fn transpose(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyT
     tensor.transpose(Some(dim0), Some(dim1))
 }
 
-/// Alias of `transpose`, for NumPy's spelling.
+/// Alias of `transpose`, under its array-library spelling.
 #[pyfunction]
 #[pyo3(signature = (input, axis0, axis1))]
 pub fn swapaxes(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<PyTensor> {
@@ -370,7 +370,7 @@ pub fn movedim(
     tensor.movedim(source, destination)
 }
 
-/// Alias of `movedim`, for NumPy's spelling.
+/// Alias of `movedim`, under its array-library spelling.
 #[pyfunction]
 #[pyo3(signature = (input, source, destination))]
 pub fn moveaxis(
@@ -430,7 +430,7 @@ pub fn roll(
     tensor.roll(shifts, dims)
 }
 
-/// Alias of `clamp`, for NumPy's spelling.
+/// Alias of `clamp`, under its array-library spelling.
 #[pyfunction]
 #[pyo3(signature = (input, min=None, max=None))]
 pub fn clip(

@@ -7,8 +7,8 @@
 """Boolean operands are judged by the result dtype, not by the operand dtypes.
 
 `-`, `//` and `%` have no meaning on two booleans -- there is no boolean
-difference or quotient -- so they are rejected, which is what NumPy and PyTorch
-do too. But the guards tested the *operands*, so they also rejected every mixed
+difference or quotient -- so they are rejected. But the guards tested the
+*operands*, so they also rejected every mixed
 pair, where the boolean promotes to the other operand's dtype and the operation
 is ordinary arithmetic from there:
 
@@ -16,8 +16,7 @@ is ordinary arithmetic from there:
                          # and counts / mask were all accepted
 
 Nine pairs per operator went that way. `+`, `*` and `/` accepted exactly the
-same operands, so the inconsistency was internal as much as it was a
-divergence from NumPy.
+same operands, so the inconsistency was internal.
 
 The ordered comparisons had the mirror-image problem. `lt`, `le`, `gt` and `ge`
 were rejected when *both* operands were boolean, and accepted when only one was

@@ -88,8 +88,8 @@ impl Recurrent {
     /// Build a stack of `num_layers` cells.
     ///
     /// Every parameter is drawn from `U(-1/sqrt(hidden_size), 1/sqrt(hidden_size))`,
-    /// including the biases — the convention PyTorch uses for recurrent layers,
-    /// and unlike the zero biases the feedforward layers here start from.
+    /// including the biases — the usual convention for recurrent layers, and
+    /// unlike the zero biases the feedforward layers here start from.
     pub fn new(
         kind: CellKind,
         input_size: usize,
@@ -139,8 +139,8 @@ impl Recurrent {
                 hidden_size * directions
             };
             // Directions are adjacent within a layer, so the flat order is
-            // layer0-forward, layer0-reverse, layer1-forward, ... matching how
-            // PyTorch names `*_l{k}` and `*_l{k}_reverse`.
+            // layer0-forward, layer0-reverse, layer1-forward, ... matching the
+            // `*_l{k}` and `*_l{k}_reverse` names.
             for _ in 0..directions {
                 let make =
                     |shape: Vec<usize>| uniform.init_tensor(Shape::new(shape), dtype, device, true);
@@ -267,8 +267,8 @@ impl Recurrent {
         let from_hidden = Self::affine(h, w_hh_t, b_hh)?;
         let gates = add(from_input, &from_hidden)?;
 
-        // Block order is i, f, g, o — the same layout PyTorch's weights use, so
-        // a state dict transfers without permuting.
+        // Block order is i, f, g, o — the layout the stored weights use, so a
+        // state dict transfers without permuting.
         let input_gate = self.gate(&gates, 0)?.sigmoid()?;
         let forget_gate = self.gate(&gates, 1)?.sigmoid()?;
         let candidate = self.gate(&gates, 2)?.tanh()?;
@@ -300,7 +300,7 @@ impl Recurrent {
         // hidden state before its matmul. The two are not equivalent — with the
         // bias inside the product, as it is here, `r` also scales `b_hn` — and
         // this is the detail GRU implementations most often get wrong. This
-        // matches PyTorch and cuDNN.
+        // matches cuDNN.
         let gated_hidden = mul(&reset, &self.gate(&from_hidden, 2)?)?;
         let candidate = add(&self.gate(from_input, 2)?, &gated_hidden)?.tanh()?;
 
@@ -553,7 +553,7 @@ impl Recurrent {
 }
 
 impl Layer for Recurrent {
-    /// PyTorch's names: `weight_ih_l{k}`, `weight_hh_l{k}`, `bias_ih_l{k}`,
+    /// Names are `weight_ih_l{k}`, `weight_hh_l{k}`, `bias_ih_l{k}`,
     /// `bias_hh_l{k}`, with `_reverse` appended for the backward direction.
     ///
     /// The flat layer order is layer0-forward, layer0-reverse, layer1-forward,

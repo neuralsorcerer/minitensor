@@ -720,8 +720,8 @@ mod tests {
 
     #[test]
     fn test_grad_accumulates_across_backward_passes() {
-        // Successive backward() passes add into the stored gradient (PyTorch
-        // semantics) until the graph/gradients are cleared.
+        // Successive backward() passes add into the stored gradient until the
+        // graph/gradients are cleared.
         clear_graph().unwrap();
         let x = Tensor::new(
             Arc::new(TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu())),

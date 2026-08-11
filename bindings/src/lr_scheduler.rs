@@ -15,8 +15,7 @@
 //!
 //! The engine trait is `get_lr(step, base_lr) -> f64`: pure, with the step
 //! counter owned by the caller. These wrappers own that counter and the base
-//! learning rate, and write the result back to the optimizer, which is the
-//! shape PyTorch users expect.
+//! learning rate, and write the result back to the optimizer.
 
 use crate::optim::PyOptimizer;
 use engine::optim::{
@@ -80,8 +79,8 @@ impl PyLRScheduler {
     ///
     /// Every schedule here is a pure function of `(last_epoch, base_lr)` --
     /// none of them accumulate -- so those two numbers are the whole of the
-    /// mutable state. A plain dict, as PyTorch returns, because there are no
-    /// tensors to write and the caller can put it wherever the rest of their
+    /// mutable state. A plain dict, because there are no tensors to write
+    /// and the caller can put it wherever the rest of their
     /// checkpoint goes.
     ///
     /// Without it, restoring a checkpoint restarted the schedule: a run that
@@ -140,8 +139,8 @@ impl PyLRScheduler {
 }
 
 impl PyLRScheduler {
-    /// Build the base class and apply the schedule's step-0 value, matching
-    /// PyTorch, where constructing a scheduler already sets the initial rate.
+    /// Build the base class and apply the schedule's step-0 value, so
+    /// constructing a scheduler already sets the initial rate.
     fn build(
         py: Python<'_>,
         optimizer: Py<PyOptimizer>,

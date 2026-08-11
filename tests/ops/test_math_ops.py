@@ -624,7 +624,7 @@ def test_tensor_sign_float_dtype():
 
 
 def test_tensor_sign_propagates_nan():
-    # NaN must propagate through sign (matches NumPy and PyTorch), not collapse
+    # NaN must propagate through sign, not collapse
     # to 0 (the >0/<0/else fallthrough used to return 0 for NaN).
     for dtype in ("float32", "float64"):
         values = np.array([np.nan, -np.inf, np.inf, -3.0, 0.0], dtype=dtype)
@@ -701,8 +701,8 @@ def _make_tensor_values():
 def _round_half_to_even(values: np.ndarray, decimals: int = 0) -> np.ndarray:
     """Reference rounding: halves go to the even neighbour.
 
-    This is the IEEE 754 default and what NumPy, PyTorch and Python's built-in
-    ``round`` all do, so ``np.round`` is the reference. An earlier version of
+    This is the IEEE 754 default and what Python's built-in ``round`` does,
+    so ``np.round`` is the reference. An earlier version of
     this helper rounded halves away from zero, matching Rust's ``f32::round``,
     which the implementation reached for by default; ``-0.5`` came back as
     ``-1.0`` where every reference library gives ``-0.0``.
@@ -806,8 +806,8 @@ def test_clamp_min_max_helpers():
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_clamp_propagates_nan(dtype):
-    # NaN must pass through clamp/clip unchanged, matching np.clip and
-    # torch.clamp (and minitensor's own maximum/minimum). A previous
+    # NaN must pass through clamp/clip unchanged, as minitensor's own
+    # maximum/minimum do. A previous
     # implementation used Rust f64::max/min, which return the non-NaN operand,
     # so clamp(nan, -1, 1) silently returned the -1 bound.
     tensor = mt.Tensor([float("nan"), 5.0, -5.0, 0.3], dtype=dtype)

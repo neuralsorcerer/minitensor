@@ -10,8 +10,8 @@
 //!
 //! These were the slowest things in the elementwise surface, all for the same
 //! reason: a `libm` call per element, which no amount of rayon parallelism can
-//! vectorize away. `tanh` measured 11.8x slower than NumPy's own SIMD `tanh` at
-//! a million float32 elements and 31x at 4096, *after* spreading over four
+//! vectorize away. `tanh` measured 11.8x slower than a hand-vectorized SIMD
+//! `tanh` at a million float32 elements and 31x at 4096, *after* spreading over four
 //! cores; `erf` -- and so the exact GELU that every transformer uses -- ran at
 //! 25 ns per element.
 //!
@@ -197,7 +197,7 @@
 //! `tanh` is **bit-identical to the previous `(x as f64).tanh() as f32` on all
 //! 2^32 float32 inputs**, on every dispatch path (AVX-512, AVX2+FMA, portable).
 //! So the accuracy argument recorded in `ops::activation::hyperbolic` -- worst
-//! relative error 5.9e-08, ahead of NumPy's 1.1e-07 -- carries over unchanged.
+//! relative error 5.9e-08 -- carries over unchanged.
 //! Its polynomial degree was picked against that same sweep: one term shorter
 //! still matches everywhere, two terms shorter breaks 43 inputs, so degree 12
 //! is the first with a whole term of margin.
@@ -244,39 +244,36 @@
 //! motivated the work:
 //!
 //! ```text
-//!                        before    after           vs NumPy
-//!     tanh               7090us    606us   11.7x      0.84x
-//!     erf                6708us    848us    7.9x         --
-//!     erfc               5347us    651us    8.2x         --
-//!     expm1              4696us    283us   16.6x      0.69x
-//!     sinh               6091us    410us   14.8x      0.81x
-//!     cosh               2138us    358us    6.0x      0.82x
-//!     gelu (exact)       6471us    953us    6.8x         --
-//!     gelu (tanh)        9340us    655us   14.3x         --
-//!     gelu backward      7937us   2372us    3.3x         --
-//!     log                 895us    438us    2.0x      0.64x
-//!     log1p              4257us    453us    9.4x      0.67x
-//!     softplus           7388us   1031us    7.2x         --
-//!     sigmoid            2541us    640us    4.0x         --
-//!     silu               1888us    687us    2.7x         --
-//!     silu backward      ~2.1ms   ~0.7ms    ~3x          --
-//!     sin                2538us    515us    4.9x      0.64x
-//!     cos                2632us    457us    5.8x      0.70x
-//!     tan                6319us    544us   11.6x      0.72x
+//!                        before    after
+//!     tanh               7090us    606us   11.7x
+//!     erf                6708us    848us    7.9x
+//!     erfc               5347us    651us    8.2x
+//!     expm1              4696us    283us   16.6x
+//!     sinh               6091us    410us   14.8x
+//!     cosh               2138us    358us    6.0x
+//!     gelu (exact)       6471us    953us    6.8x
+//!     gelu (tanh)        9340us    655us   14.3x
+//!     gelu backward      7937us   2372us    3.3x
+//!     log                 895us    438us    2.0x
+//!     log1p              4257us    453us    9.4x
+//!     softplus           7388us   1031us    7.2x
+//!     sigmoid            2541us    640us    4.0x
+//!     silu               1888us    687us    2.7x
+//!     silu backward      ~2.1ms   ~0.7ms    ~3x
+//!     sin                2538us    515us    4.9x
+//!     cos                2632us    457us    5.8x
+//!     tan                6319us    544us   11.6x
 //! ```
-//!
-//! Everything with a NumPy column is now faster than NumPy, which has no
-//! vectorized `erf` or GELU to compare against at all.
 //!
 //! The backward figure is the whole gradient step, so about 1.3ms of it is
 //! autograd graph and allocation overhead that this work does not touch -- the
 //! kernel itself went from roughly 6.6ms to 1.1ms. It was the most expensive
 //! gradient in the activation set, costing more than the forward pass.
 //!
-//! `tanh` went from 11.8x slower than NumPy's SIMD `tanh` to faster than it.
-//! At small sizes a gap remains, and it is the accuracy decision showing up as
-//! a cost: NumPy evaluates in float32 lanes (16 wide under AVX-512) with a
-//! shorter polynomial, while these evaluate in float64 (8 wide).
+//! `tanh` went from 11.8x slower than a hand-vectorized SIMD `tanh` to ahead
+//! of it. At small sizes a gap remains, and it is the accuracy decision
+//! showing up as a cost: evaluating in float32 lanes (16 wide under AVX-512)
+//! with a shorter polynomial beats these float64 lanes (8 wide).
 //!
 //! # The portable fallback
 //!
@@ -298,8 +295,8 @@
 //! them, but a correctly-rounded float64 result needs the reduction and the
 //! polynomials carried to ~2^-60 -- double-double residuals in places where
 //! the float32 path can round freely -- and that is a different piece of work.
-//! The float64 gap is also much smaller to begin with (`tanh` is 2.5x NumPy at
-//! a million elements against float32's 11.8x).
+//! The float64 gap is also much smaller to begin with (`tanh` is 2.5x off a
+//! vectorized baseline at a million elements against float32's 11.8x).
 //!
 //! `erfc` is untouched: it needs relative accuracy out where `erf` has
 //! saturated, so it wants the high branch extended rather than reused.

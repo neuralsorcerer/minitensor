@@ -500,8 +500,8 @@ fn ensure_no_integer_zero_divisor(rhs: &Tensor) -> Result<()> {
 /// quotient rounded toward negative infinity; integer operands stay integral).
 ///
 /// The result never carries a gradient: the derivative is zero almost
-/// everywhere and undefined at the jumps, so like PyTorch this op does not
-/// participate in autograd.
+/// everywhere and undefined at the jumps, so this op does not participate in
+/// autograd.
 pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if lhs.device() != rhs.device() {
         return Err(MinitensorError::device_mismatch(
@@ -620,8 +620,8 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 }
 
 /// Element-wise bitwise NOT (`~`): logical NOT for bool tensors, two's
-/// complement NOT for integer tensors, rejected for floats — PyTorch's `~`
-/// semantics. Non-differentiable by construction.
+/// complement NOT for integer tensors, rejected for floats.
+/// Non-differentiable by construction.
 pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
     /// Applies `!` for one dtype into a fresh buffer, parallel above
     /// `PAR_THRESHOLD`.

@@ -6,9 +6,9 @@
 
 """What `backward()` keeps, and what clears it.
 
-Unlike PyTorch, MiniTensor exposes `.grad` on interior (non-leaf) tensors after
-a backward pass. That is a deliberate feature, and it is why the gradient map
-retains an entry per interior tensor rather than dropping it with the node.
+MiniTensor exposes `.grad` on interior (non-leaf) tensors after a backward
+pass. That is a deliberate feature, and it is why the gradient map retains an
+entry per interior tensor rather than dropping it with the node.
 
 It retains them for one pass. Interior tensors get a fresh id on every forward,
 so nothing ever overwrote an old entry; keeping them all meant a loop that
@@ -349,10 +349,10 @@ def test_a_forward_without_backward_still_shows_up_as_growth():
 
 
 def test_discarding_the_output_does_not_release_the_graph():
-    """Where this departs from PyTorch, and the reason the loop above grows at
-    all: there the output tensor owns its history and dropping it frees the
-    graph, so a loop that keeps nothing stays flat. Here the recording is held
-    by the graph the module records into, and binding nothing changes that."""
+    """Why the loop above grows at all. Where the output tensor owns its
+    history, dropping it frees the graph and a loop that keeps nothing stays
+    flat. Here the recording is held by the graph the module records into, and
+    binding nothing changes that."""
     model = mt.nn.Sequential([mt.nn.DenseLayer(4, 8), mt.nn.ReLU()])
     batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))
 
@@ -366,8 +366,7 @@ def test_discarding_the_output_does_not_release_the_graph():
 
 def test_eval_mode_does_not_stop_the_recording():
     """`eval()` is about what the layers compute -- Dropout off, BatchNorm's
-    statistics frozen -- not about whether the computation is recorded. PyTorch
-    draws the same line, so the instinct carried over from it is right; the
+    statistics frozen -- not about whether the computation is recorded. The
     instinct that `eval()` is enough for inference is the wrong one."""
     model = mt.nn.Sequential([mt.nn.DenseLayer(4, 8), mt.nn.ReLU()])
     batch = mt.Tensor(np.zeros((1, 4), dtype=np.float32))

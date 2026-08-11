@@ -4,9 +4,9 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""NumPy-style fancy indexing: boolean masks and integer-list row selection.
+"""Fancy indexing: boolean masks and integer-list row selection.
 
-Boolean masks follow NumPy's rule: the mask's shape must equal the tensor's
+Boolean masks follow one rule: the mask's shape must equal the tensor's
 leading ``mask.ndim`` dimensions, and selection stacks the remaining blocks —
 so a full-shape mask yields a 1-D tensor of elements and a 1-D mask over a
 matrix yields rows. Integer lists/arrays/tensors select rows along dim 0 with
@@ -43,7 +43,7 @@ def test_row_bool_mask_selects_rows(x):
 def test_mask_edge_shapes(x):
     all_false = np.zeros(4, dtype=bool)
     assert mt.from_numpy(x)[all_false].numpy().shape == (0, 3)
-    # 0-d masks add a leading axis exactly like NumPy.
+    # 0-d masks add a leading axis.
     np.testing.assert_allclose(
         mt.from_numpy(x)[np.array(True)].numpy(), x[np.array(True)]
     )
@@ -131,7 +131,7 @@ def test_bool_mask_setitem_scalar(x):
 
 
 def test_bool_mask_setitem_tensor_values(x):
-    # NumPy semantics: values broadcast to the selection shape
+    # Values broadcast to the selection shape
     # [n_true] + trailing dims.
     m = x > 0
     n_true = int(m.sum())

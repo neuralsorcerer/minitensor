@@ -128,9 +128,8 @@ impl GradMode {
 /// Return a context manager that disables gradient recording.
 ///
 /// Inside the block, operation results do not require gradients, no autograd
-/// nodes are recorded, and no operands are saved for backward — mirroring
-/// `torch.no_grad()`. Tensors can still opt in explicitly via
-/// `requires_grad_(True)`.
+/// nodes are recorded, and no operands are saved for backward. Tensors can
+/// still opt in explicitly via `requires_grad_(True)`.
 #[pyfunction]
 fn no_grad() -> GradMode {
     GradMode {

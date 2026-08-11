@@ -508,7 +508,7 @@ const MINMAX_CHUNK: usize = 8 * 1024;
 /// splits its addition measured 6.2x faster per chunk on f32 (2.67ms -> 0.43ms
 /// over 2M elements, single-threaded), with identical results including the NaN
 /// flag. That gap was visible from Python: `max` was the one f32 reduction
-/// slower than NumPy while `sum` was four times quicker.
+/// lagging the others, while `sum` was already four times quicker.
 macro_rules! float_extremum_all {
     ($name:ident, $accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal, $identity:expr, $better:tt, $lanes:expr) => {
         pub(crate) fn $name(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {

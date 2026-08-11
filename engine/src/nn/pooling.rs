@@ -75,8 +75,8 @@ pub struct AvgPool2d {
 impl AvgPool2d {
     /// Create an average pooling layer.
     ///
-    /// `count_include_pad` defaults to true, matching PyTorch: padded cells are
-    /// counted in the divisor unless asked otherwise.
+    /// `count_include_pad` defaults to true: padded cells are counted in the
+    /// divisor unless asked otherwise.
     pub fn new(
         kernel_size: (usize, usize),
         stride: Option<(usize, usize)>,

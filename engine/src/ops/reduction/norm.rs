@@ -87,11 +87,10 @@ fn reduce_extremum(tensor: &Tensor, dims: &[usize], is_max: bool) -> Result<Tens
 ///   scale would produce.
 /// * Infinity, meaning the slice contains one. Dividing by it gave `inf / inf`
 ///   for that element and `finite / inf = 0` for the rest, so the norm of a
-///   slice holding an infinity came back NaN where NumPy and PyTorch both
-///   report `inf`. With a scale of one the accumulation runs unscaled, `inf`
-///   survives the sum and the root, and the final multiply by one keeps it --
-///   while a NaN elsewhere in the slice still poisons the sum and wins, which
-///   is also what NumPy does.
+///   slice holding an infinity came back NaN where `inf` is the right answer.
+///   With a scale of one the accumulation runs unscaled, `inf` survives the
+///   sum and the root, and the final multiply by one keeps it -- while a NaN
+///   elsewhere in the slice still poisons the sum and wins.
 ///
 /// Neither substitution weakens the overflow guard, which only ever mattered
 /// for a finite scale: every `|x| <= m` gives `|x / m| <= 1`.

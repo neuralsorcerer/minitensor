@@ -308,8 +308,8 @@ fn test_nanquantiles_keepdim_no_dim_layout() {
 
 #[test]
 fn test_nanquantile_all_nan_returns_nan() {
-    // NumPy/PyTorch (and this library's nanmedian) return NaN for an all-NaN
-    // slice rather than erroring.
+    // An all-NaN slice returns NaN rather than erroring, as this library's
+    // nanmedian does.
     let tensor = create_test_tensor_f32(vec![f32::NAN, f32::NAN], vec![2], false);
 
     let result =

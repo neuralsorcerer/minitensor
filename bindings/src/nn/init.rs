@@ -8,9 +8,9 @@
 //!
 //! Six of these already existed as tensor constructors -- `mt.xavier_uniform`,
 //! `mt.he_normal` and so on, each with a `_like` variant taking a reference
-//! tensor instead of a shape. What was missing was the namespace a PyTorch user
-//! looks in, `calculate_fan_in_and_fan_out`, and the Kaiming/Glorot spellings
-//! of names this library had picked a side on.
+//! tensor instead of a shape. What was missing was the conventional
+//! namespace, `calculate_fan_in_and_fan_out`, and the Kaiming/Glorot
+//! spellings of names this library had picked a side on.
 //!
 //! **The `requires_grad` default differs from the top-level constructors, on
 //! purpose.** `mt.xavier_uniform(shape)` sits beside `mt.zeros` and `mt.randn`
@@ -20,7 +20,7 @@
 //! -- and a parameter created without `requires_grad` does not train, silently.
 //! So this namespace defaults to `true`. Both take the argument explicitly.
 //!
-//! These are factories, not PyTorch's in-place `xavier_uniform_(tensor)`: the
+//! These are factories, not in-place fills like `xavier_uniform_(tensor)`: the
 //! engine's initializers build a tensor from a shape, which is also how every
 //! layer in `nn` creates its parameters, and there is no in-place fill to wrap.
 //! To re-initialize an existing parameter, build a new tensor and assign it.

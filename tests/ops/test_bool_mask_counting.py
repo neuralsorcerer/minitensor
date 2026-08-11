@@ -16,7 +16,7 @@ was to spell the cast out by hand:
 
 `bool` genuinely has no addition to accumulate in, which is what the rejection
 was about, but that is an argument for widening the accumulator rather than for
-refusing. NumPy and PyTorch both count into `int64`, and so does this now, with
+refusing. The count goes into `int64`, and so does this now, with
 `cumsum` following for the running count. The rest of the boolean surface is
 deliberately untouched: `prod` stays `bool` (it is `all` by another name),
 `mean`, `var`, `std`, `cumprod`, `norm` and `logsumexp` still raise, since what
@@ -110,8 +110,8 @@ def test_a_mask_from_a_comparison_counts_along_a_dim():
 
 @pytest.mark.parametrize("name", ["mean", "var", "std"])
 def test_the_ambiguous_reductions_still_raise(name):
-    """NumPy defines these on masks and PyTorch refuses them, so there is no
-    obvious answer to adopt. The refusal names the operation."""
+    """There is no obvious answer to adopt for these on a mask, so they are
+    refused. The refusal names the operation."""
     with pytest.raises(Exception) as excinfo:
         getattr(_mask(MASK), name)()
     assert "boolean" in str(excinfo.value) or "float" in str(excinfo.value)

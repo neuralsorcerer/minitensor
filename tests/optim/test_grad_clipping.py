@@ -55,10 +55,10 @@ def test_clip_grad_norm_scales_to_the_cap(max_norm):
     params = _with_grads(*GRADS)
     returned = nn.clip_grad_norm_(params, max_norm)
 
-    # The return value is the norm *before* clipping, as in PyTorch.
+    # The return value is the norm *before* clipping.
     assert returned == pytest.approx(TOTAL, rel=1e-12)
 
-    # PyTorch's coefficient, epsilon included.
+    # The scaling coefficient, epsilon included.
     coefficient = max_norm / (TOTAL + 1e-6) if TOTAL > max_norm else 1.0
     for parameter, gradient in zip(params, GRADS):
         np.testing.assert_allclose(

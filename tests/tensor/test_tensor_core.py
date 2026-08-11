@@ -841,7 +841,7 @@ def test_backward_create_graph_not_supported():
 
 
 def test_grad_accumulates_across_backward_calls():
-    # PyTorch semantics: .grad adds up over successive backward() passes until
+    # .grad adds up over successive backward() passes until
     # zero_grad clears it (this is what enables gradient accumulation).
     x = mt.Tensor([1.0, 2.0, 3.0], requires_grad=True)
 

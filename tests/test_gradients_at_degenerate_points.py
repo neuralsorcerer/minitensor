@@ -34,7 +34,7 @@ with *no gradient at all*:
     x.var(1).sum().backward()   ->  get_gradient(x) is None
 
 A missing gradient reads as "this parameter was not used" and an optimizer skips
-it without a word. NaN, which is what PyTorch produces here, says plainly that
+it without a word. NaN says plainly that
 something is undefined. Routing the degenerate case through the same multiply as
 every other correction keeps the chain intact and lets the NaN through.
 """

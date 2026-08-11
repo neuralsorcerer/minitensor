@@ -243,10 +243,10 @@ impl SGD {
         let param_id = param.id();
 
         // Get or create velocity buffer. `is_new` marks a freshly created (or
-        // reset) buffer: on that first step PyTorch initializes the momentum
-        // buffer to the gradient itself (`buf = grad.clone()`), applying the
+        // reset) buffer: on that first step the momentum buffer is the
+        // gradient itself (`buf = grad.clone()`), applying the
         // `(1 - dampening)` factor only from the second step onward. Tracking
-        // this lets us reproduce that behavior instead of damping the first step.
+        // this keeps the first step undamped.
         let (velocity, is_new) = match self.velocity.entry(param_id) {
             Entry::Occupied(mut entry) => {
                 let needs_reset = entry.get().shape() != param.shape()

@@ -400,8 +400,8 @@ impl PyTensor {
                 Ok((values_tensor, indices_tensor))
             }
             // Deliberate departure from `_convert_error`, which maps
-            // `InvalidArgument` to `ValueError`: PyTorch raises `RuntimeError`
-            // for `median()` on an empty tensor, and
+            // `InvalidArgument` to `ValueError`: `median()` on an empty tensor
+            // raises `RuntimeError`, and
             // `test_median_empty_tensor_raises` pins that. Everything else
             // keeps the standard mapping.
             Err(err @ MinitensorError::InvalidArgument { .. }) => {

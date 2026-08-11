@@ -17,13 +17,13 @@ so assigning a transposed block stored the wrong arrangement and said nothing:
     m = Tensor(arange(12).reshape(4, 3))
     t[0] = m          # selection is (3, 4); numel matches, so this "worked"
 
-NumPy raises for that, because `(4, 3)` does not broadcast to `(3, 4)`. Here it
+That has to raise, because `(4, 3)` does not broadcast to `(3, 4)`. Here it
 silently wrote `m`'s elements row-major into a differently shaped block -- the
 kind of mistake that surfaces much later as a model that trains badly.
 
 The same check refused real broadcasts, since their counts differ. `t[0] = row`
-could not fill a `(3, 4)` block from a `(4,)` row, which NumPy and PyTorch both
-allow and which `t[mask] = value` already allowed here.
+could not fill a `(3, 4)` block from a `(4,)` row, which broadcasting allows
+and which `t[mask] = value` already allowed here.
 
 Both follow from matching shapes right-aligned instead: each of the value's
 dimensions equals the selection's or is 1, extra leading dimensions of the value
@@ -180,7 +180,7 @@ def test_a_broadcast_value_fills_the_selection(subscript, shape):
 
 
 def test_extra_leading_ones_on_the_value_are_stripped():
-    """NumPy ignores them rather than counting them against the rank."""
+    """They are ignored rather than counted against the rank."""
     reference = BASE.copy()
     reference[0] = _value((1, 3, 4))
 

@@ -438,7 +438,7 @@ pub fn lecun_normal_init(
 
 /// Calculate fan_in and fan_out for a tensor shape.
 ///
-/// Follows the same convention as the layers here and as PyTorch: a weight is
+/// Follows the same convention as the layers here: a weight is
 /// stored `[out_features, in_features]`, so `fan_in` is the *trailing*
 /// dimension, and a convolution weight's fans are scaled by its receptive
 /// field. Public because a caller writing their own scheme needs the same

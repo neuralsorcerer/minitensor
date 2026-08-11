@@ -17,7 +17,7 @@ while `for name in state`, `list(state)` and `dict(state)` failed with
 
 which says nothing about what went wrong. It comes from Python falling back to
 the legacy sequence protocol and calling `__getitem__(0)` on a subscript that
-wants a name. Since PyTorch's `state_dict()` is an ordered dict, `.items()` and
+wants a name. Since a `state_dict()` is an ordered mapping, `.items()` and
 `dict(...)` are the first things anyone reaches for.
 
 Underneath, the parameters and buffers were `HashMap`s. Rust seeds its hasher

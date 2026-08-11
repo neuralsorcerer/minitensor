@@ -180,8 +180,8 @@ pub fn backward(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<()> {
         execute_backward_plan(&plan, tensor.id(), grad)?
     };
 
-    // Accumulate into the stored gradients (PyTorch semantics: `.grad` adds up
-    // across backward passes until `zero_grad`). The guard keeps the in-place
+    // Accumulate into the stored gradients (`.grad` adds up across backward
+    // passes until `zero_grad`). The guard keeps the in-place
     // accumulation adds from trying to re-borrow the graph or record nodes.
     let _guard = NoGradGuard::new();
     GLOBAL_GRAPH.with(|graph| graph.borrow_mut().accumulate_gradients(gradients))?;
@@ -710,7 +710,7 @@ impl GradientFunction for RemainderBackward {
     }
 }
 
-/// Gradient function for NumPy-style boolean indexing (`masked_index`)
+/// Gradient function for boolean-mask indexing (`masked_index`)
 pub struct MaskedIndexBackward {
     /// The (contiguous, detached) boolean mask that produced the selection.
     pub mask: Tensor,

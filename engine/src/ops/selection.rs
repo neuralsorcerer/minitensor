@@ -163,11 +163,11 @@ pub fn masked_fill_scalar(input: &Tensor, mask: &Tensor, value: f64) -> Result<T
     masked_fill(input, mask, &scalar)
 }
 
-/// NumPy-style boolean indexing: `mask`'s shape must equal `input`'s leading
+/// Boolean-mask indexing: `mask`'s shape must equal `input`'s leading
 /// `mask.ndim()` dimensions, and the result stacks the selected trailing
 /// blocks — shape `[n_true] + input.shape[mask.ndim():]`. A full-shape mask
-/// therefore selects individual elements into a 1-D tensor (PyTorch's
-/// `masked_select`), while a 1-D mask over a matrix selects rows.
+/// therefore selects individual elements into a 1-D tensor, while a 1-D mask
+/// over a matrix selects rows.
 pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     if mask.dtype() != DataType::Bool {
         return Err(MinitensorError::invalid_operation(
@@ -268,7 +268,7 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
-/// NumPy-style boolean-mask assignment: writes `values` into the blocks of
+/// Boolean-mask assignment: writes `values` into the blocks of
 /// `input` selected by `mask` (same leading-dimensions rule as
 /// [`masked_index`]). `values` is cast to `input`'s dtype and must broadcast
 /// to the selection shape `[n_true] + input.shape[mask.ndim():]` — so a
@@ -380,7 +380,7 @@ pub fn masked_index_assign(input: &mut Tensor, mask: &Tensor, values: &Tensor) -
     Ok(())
 }
 
-/// Select `input[i]` where `condition[i]` else `other[i]`, with NumPy
+/// Select `input[i]` where `condition[i]` else `other[i]`, with the usual
 /// broadcasting, into a fresh fully-initialized buffer. Parallel above the
 /// binary threshold on both the same-shape and the broadcast path (the
 /// previous fill-style kernel was sequential on both).

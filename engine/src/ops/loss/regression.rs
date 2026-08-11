@@ -511,7 +511,7 @@ pub fn binary_cross_entropy_loss(
         let _guard = NoGradGuard::new();
 
         // Compute BCE: -[targets * log_tensor(predictions) + (1 - targets) * log_tensor(1 - predictions)]
-        // PyTorch clamps the log outputs to >= -100 so a saturated prediction
+        // The log outputs are clamped to >= -100 so a saturated prediction
         // (exactly 0 or 1) yields a finite loss instead of +inf.
         let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
 
@@ -717,9 +717,9 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
 
         // Apply reduction.
         //
-        // `mean` is the element-wise mean, as it is for every other loss here and
-        // as it is in PyTorch. It used to divide by the batch dimension instead --
-        // PyTorch's `batchmean` -- while [`KLDivLossBackward`] divided by the
+        // `mean` is the element-wise mean, as it is for every other loss here.
+        // It used to divide by the batch dimension instead -- `batchmean` --
+        // while [`KLDivLossBackward`] divided by the
         // element count, so forward and backward disagreed by a factor of
         // `numel / batch` (4x for a 3x4 input) whenever there was more than one
         // column. `batchmean` is now spelled out, and scales its gradient to match.

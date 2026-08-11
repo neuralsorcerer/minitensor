@@ -181,7 +181,7 @@ _FUNCTIONAL_ONLY = (
     "l1_loss",
     "kl_div",
     "focal_loss",
-    # Gradient utilities. PyTorch spells these `torch.nn.utils.clip_grad_norm_`,
+    # Gradient utilities. `nn` is the conventional place to look for these,
     # so they stay under `mt.nn` rather than becoming `mt.clip_grad_norm_`.
     "clip_grad_norm_",
     "clip_grad_value_",

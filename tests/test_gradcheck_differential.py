@@ -595,7 +595,7 @@ _FORWARD_OPS = [
     ("prod", lambda t: t.prod(), _FWD_POS, lambda a: np.array(a.prod())),
     ("max", lambda t: t.max(), _FWD_ANY, lambda a: np.array(a.max())),
     ("min", lambda t: t.min(), _FWD_ANY, lambda a: np.array(a.min())),
-    # var/std default to the unbiased (sample) estimator, as PyTorch does.
+    # var/std default to the unbiased (sample) estimator.
     ("var", lambda t: t.var(), _FWD_ANY, lambda a: np.array(a.var(ddof=1))),
     ("std", lambda t: t.std(), _FWD_ANY, lambda a: np.array(a.std(ddof=1))),
     ("sum_dim", lambda t: t.sum(dim=1), _FWD_3D, lambda a: a.sum(axis=1)),

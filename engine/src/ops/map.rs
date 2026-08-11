@@ -89,15 +89,15 @@ pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
 ///
 /// The old value of 1024 is one `PAR_CHUNK`, so it was the first size at which
 /// a split actually happens -- and therefore the first size to pay the
-/// worker-wake cost. Measured broadcast add (`Nx1 + 1xN`, float32) against
-/// NumPy on the same 4-core machine:
+/// worker-wake cost. Measured broadcast add (`Nx1 + 1xN`, float32) on a
+/// 4-core machine:
 ///
 /// ```text
-///        N   minitensor   numpy
-///     1024       1.4 us   2.3 us   (one chunk: runs inline, no wake)
-///     4096      21.6 us   4.7 us   <- 4.6x slower than numpy
-///    16384      25.6 us  14.6 us
-///    65536      30.9 us  41.9 us   <- parallel pays off
+///        N   minitensor
+///     1024       1.4 us   (one chunk: runs inline, no wake)
+///     4096      21.6 us   <- waking the workers costs ~20us flat
+///    16384      25.6 us
+///    65536      30.9 us   <- enough work to amortize the wake
 /// ```
 pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
 

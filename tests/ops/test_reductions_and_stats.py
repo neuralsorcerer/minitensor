@@ -111,8 +111,8 @@ def test_max_min_reject_an_empty_tensor():
     # These used to return the fold identity: -inf for max, +inf for min. That
     # is defensible for floats and indefensible for integers, where the identity
     # is `iinfo.min` -- a value a real tensor can hold, so `max([])` came back
-    # bit-identical to `max([INT_MIN])` with no way to tell them apart. NumPy,
-    # PyTorch, and this library's own `median`/`quantile` all raise instead.
+    # bit-identical to `max([INT_MIN])` with no way to tell them apart. This
+    # library's own `median`/`quantile` raise instead.
     t = mt.Tensor(np.array([], dtype=np.float32))
     with pytest.raises(Exception, match="does not support empty tensors"):
         t.max()
@@ -141,7 +141,7 @@ def test_max_min_reject_reducing_an_empty_axis(keepdim):
 def test_reducing_a_populated_axis_of_an_empty_tensor_is_still_allowed():
     # Only the reduced axis has to be non-empty. Every slice along axis 1 here
     # has three elements; there simply are not any slices, so an empty result is
-    # the honest answer -- and it is what NumPy returns.
+    # the honest answer.
     t = mt.Tensor(np.empty((0, 3), dtype=np.float32))
     values, indices = t.max(dim=1)
     assert values.shape == (0,)
@@ -504,8 +504,8 @@ def test_functional_nanquantile_matches_numpy():
 
 
 def test_nanquantile_all_nan_returns_nan():
-    # NumPy/PyTorch (and this library's nanmedian) return NaN for an all-NaN
-    # slice rather than raising; nanquantile now matches.
+    # An all-NaN slice returns NaN rather than raising, as this library's
+    # nanmedian does; nanquantile now matches.
     data = mt.tensor([np.nan, np.nan])
     assert np.isnan(data.nanquantile(0.5).numpy())
 
@@ -1050,7 +1050,7 @@ def test_extremum_reductions_match_numpy_across_dtypes_and_axes(dtype, shape):
 def test_bool_extremum_reductions_short_circuit_like_numpy():
     # Bool has two values, so the reducer stops at the first True (max) or
     # first False (min) instead of comparing the whole slice; the index it
-    # reports must still be NumPy's.
+    # reports must still be the first-match index.
     data = np.array([[False, True, True], [False, False, False], [True, False, True]])
     t = mt.Tensor(data).astype("bool")
     np.testing.assert_array_equal(t.argmax(dim=1).numpy(), np.argmax(data, axis=1))
@@ -1058,8 +1058,8 @@ def test_bool_extremum_reductions_short_circuit_like_numpy():
 
 
 def test_nan_wins_plain_extremum_but_not_the_nan_aware_form():
-    # torch.max propagates NaN; np.nanmax skips it. Both forms share one kernel,
-    # so pin the difference.
+    # The plain extremum propagates NaN; the nan-aware form skips it. Both
+    # share one kernel, so pin the difference.
     x = np.array([[1.0, np.nan, 3.0], [np.nan, np.nan, np.nan]], dtype=np.float32)
     t = mt.Tensor(x)
 
@@ -1092,7 +1092,7 @@ def test_global_arg_reductions_on_bool_including_no_match():
     t = mt.Tensor(data).astype("bool")
     assert t.argmax().item() == int(np.argmax(data))
     assert t.argmin().item() == int(np.argmin(data))
-    # No element matches: fall back to index 0, as NumPy does.
+    # No element matches: fall back to index 0.
     assert mt.Tensor(np.ones(4, dtype=bool)).astype("bool").argmin().item() == 0
     assert mt.Tensor(np.zeros(4, dtype=bool)).astype("bool").argmax().item() == 0
 
@@ -1232,8 +1232,8 @@ def test_multi_nanquantile_along_dim_matches_numpy(shape, qs):
 
 @pytest.mark.parametrize("shape", [(8,), (5, 6), (2, 3, 4)])
 def test_nanmedian_equals_median_when_there_are_no_nans(shape):
-    # torch's contract: nanmedian is identical to median on NaN-free input.
-    # nanmedian used to interpolate (numpy's definition) while median selected
+    # The contract: nanmedian is identical to median on NaN-free input.
+    # nanmedian used to interpolate while median selected
     # the lower middle, so the two disagreed on every even-length reduction.
     rng = np.random.default_rng(20240725)
     x = rng.standard_normal(shape)
@@ -1249,7 +1249,7 @@ def test_nanmedian_equals_median_when_there_are_no_nans(shape):
 def test_median_and_nanmedian_take_the_lower_middle_for_even_counts():
     x = np.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype=np.float64)
     t = mt.Tensor(x, dtype="float64")
-    # 2.0/6.0, not the interpolated 2.5/6.5 that numpy.median would give.
+    # 2.0/6.0, not the interpolated 2.5/6.5.
     np.testing.assert_array_equal(t.median(dim=1)[0].numpy(), [2.0, 6.0])
     np.testing.assert_array_equal(t.nanmedian(dim=1).numpy(), [2.0, 6.0])
     assert t.median().item() == 4.0

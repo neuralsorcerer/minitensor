@@ -583,7 +583,6 @@ impl PySGD {
         }
         // Nesterov's lookahead is `grad + momentum * buf`, which is only the
         // correct extrapolation when `buf` accumulated the full gradient.
-        // PyTorch rejects the combination for the same reason.
         if nesterov && dampening != 0.0 {
             return Err(PyValueError::new_err(
                 "Nesterov momentum requires zero dampening.",

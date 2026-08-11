@@ -6,14 +6,14 @@
 
 """A rejected `t[::-1]` says which axis, and what to write instead.
 
-Reversing by subscript is not supported, which is also PyTorch's position --
-`flip` is the operation for it. But the refusal used to read
+Reversing by subscript is not supported -- `flip` is the operation for it.
+But the refusal used to read
 
     IndexError: slice step must be positive
 
 which states the rule and leaves the caller to find the remedy. It does not say
 which axis of a multi-axis subscript was at fault, and it does not mention
-`flip` at all, so someone arriving from NumPy with `x[::-1]` has to go looking.
+`flip` at all, so anyone reaching for `x[::-1]` has to go looking.
 
 The message now names the axis and spells out the equivalent call, including
 the positive stride that a step other than `-1` still needs: `x[::-2]` is
@@ -21,7 +21,7 @@ the positive stride that a step other than `-1` still needs: `x[::-2]` is
 
 The test that matters here is `test_the_suggested_call_is_the_right_one`. A
 suggestion that does not actually reproduce what the caller asked for is worse
-than none, so it is executed against NumPy's own negative-step slice rather
+than none, so it is executed against a reference negative-step slice rather
 than eyeballed.
 """
 

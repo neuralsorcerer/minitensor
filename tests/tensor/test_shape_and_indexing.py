@@ -130,7 +130,7 @@ def test_unsqueeze_negative_dim():
 def test_out_of_bounds_subscript_reports_index_axis_and_size():
     # A bare "Index out of bounds" told the caller neither which axis was
     # overrun nor how long it is, which are the two facts needed to fix the
-    # call. Match NumPy's information content.
+    # call. The message carries both.
     t = mt.ones(2, 3)
 
     with pytest.raises(IndexError, match=r"index 5 .*dimension 0 with size 2"):
@@ -433,15 +433,14 @@ def test_slice_out_of_range_empty():
 
 
 def test_reverse_slice_error():
-    # Negative steps are rejected, matching PyTorch rather than NumPy. Use
-    # `flip` for a reversed view.
+    # Negative steps are rejected. Use `flip` for a reversed view.
     t = mt.arange(10)
     with pytest.raises(IndexError):
         _ = t[::-1]
 
 
 def test_inverted_slice_range_is_empty_not_an_error():
-    # `x[2:1]` selects nothing in both NumPy and PyTorch. This used to raise
+    # `x[2:1]` selects nothing. This used to raise
     # IndexError reporting `1 is out of bounds` for a dimension of size 3 --
     # an in-bounds value, described as out of bounds, for a slice that was
     # merely empty.
@@ -496,7 +495,7 @@ def test_multi_dim_slice():
 
 def test_boolean_mask_indexing():
     # Formerly unsupported (this test asserted a TypeError); boolean masks now
-    # follow NumPy semantics. Full coverage lives in test_fancy_indexing.py.
+    # follow the mask rules. Full coverage lives in test_fancy_indexing.py.
     t = mt.Tensor([0.0, 1.0, 2.0, 3.0])
     mask = t.gt(mt.Tensor([1.0]))
     np.testing.assert_allclose(t[mask].numpy(), np.array([2.0, 3.0], dtype=np.float32))
@@ -504,7 +503,7 @@ def test_boolean_mask_indexing():
 
 def test_integer_array_indexing():
     # Formerly unsupported (this test asserted a TypeError); integer lists now
-    # select rows along dim 0 like NumPy.
+    # select rows along dim 0.
     t = mt.Tensor([10.0, 20.0, 30.0, 40.0])
     np.testing.assert_allclose(
         t[[2, 0]].numpy(), np.array([30.0, 10.0], dtype=np.float32)

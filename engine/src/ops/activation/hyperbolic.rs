@@ -345,8 +345,9 @@ macro_rules! float_unary_kernel_param {
 // substantially faster than promoting -- `sinf` by 2.7x, `cbrtf` by 2.9x -- at
 // equal accuracy, so promoting them would be a regression for nothing, and none
 // has yet been worth a vectorized kernel of its own: `exp` already measures
-// within 1.6x of NumPy, against the 12x that `sinh` and `expm1` started from.
-// `sin` and `cos` are the strongest remaining candidates at about 3.7x, and
+// within 1.6x of a hand-vectorized baseline, against the 12x that `sinh` and
+// `expm1` started from. `sin` and `cos` are the strongest remaining
+// candidates at about 3.7x, and
 // they need an argument reduction none of the existing kernels provide.
 
 float_unary_kernel!(exp_f64, as_f64_slice, f64, Float64, "f64", f64::exp);

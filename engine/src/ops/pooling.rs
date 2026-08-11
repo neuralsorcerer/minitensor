@@ -64,7 +64,7 @@ fn pool_geometry(
         )));
     }
     // A window that starts entirely inside the padding would pool nothing but
-    // padding, which has no defined maximum; PyTorch rejects it the same way.
+    // padding, which has no defined maximum, so it is rejected.
     if padding.0 * 2 > kernel.0 || padding.1 * 2 > kernel.1 {
         return Err(MinitensorError::invalid_argument(format!(
             "{name} padding must not exceed half the window size"
@@ -216,7 +216,7 @@ macro_rules! avg_pool2d_kernel {
                                 }
                             }
                             // `count_include_pad` decides whether the padded
-                            // cells count towards the divisor, matching PyTorch.
+                            // cells count towards the divisor.
                             let divisor = if count_include_pad {
                                 kernel.0 * kernel.1
                             } else {

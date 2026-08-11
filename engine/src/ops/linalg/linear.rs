@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 /// `input @ weight^T + bias`.
 ///
-/// `weight` is `[out_features, in_features]`, the layout PyTorch stores and
-/// every checkpoint of this library already uses. Composing this out of
+/// `weight` is `[out_features, in_features]`, the layout every checkpoint of
+/// this library already uses. Composing this out of
 /// `transpose` and `matmul` therefore copies the whole weight matrix on every
 /// forward pass -- and then, because the backward differentiates that
 /// transpose, copies it again to get `grad_input` and once more to carry the

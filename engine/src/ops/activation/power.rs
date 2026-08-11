@@ -535,8 +535,8 @@ fn clip_f32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     let min_f32 = min_val.map(|v| v as f32);
     let max_f32 = max_val.map(|v| v as f32);
     let out = unary_map(input_data, |val: f32| {
-        // NaN must pass through unchanged (NumPy `clip` / PyTorch `clamp`
-        // parity, and consistency with `maximum`/`minimum`). Rust's
+        // NaN must pass through unchanged, for consistency with
+        // `maximum`/`minimum`. Rust's
         // `f32::max`/`min` return the *non*-NaN operand, so without this guard
         // a NaN input would be silently replaced by a clamp bound.
         if val.is_nan() {
@@ -564,8 +564,8 @@ fn clip_f64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
     })?;
 
     let out = unary_map(input_data, |val: f64| {
-        // NaN must pass through unchanged (NumPy `clip` / PyTorch `clamp`
-        // parity, and consistency with `maximum`/`minimum`). Rust's
+        // NaN must pass through unchanged, for consistency with
+        // `maximum`/`minimum`. Rust's
         // `f64::max`/`min` return the *non*-NaN operand, so without this guard
         // a NaN input would be silently replaced by a clamp bound.
         if val.is_nan() {
@@ -779,8 +779,8 @@ fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     })?;
 
     let multiplier = 10.0_f32.powi(decimals);
-    // Ties go to the even neighbour, as NumPy, PyTorch and Python's built-in
-    // `round` all do. Rust's `f32::round` rounds halves away from zero instead,
+    // Ties go to the even neighbour, as Python's built-in `round` does.
+    // Rust's `f32::round` rounds halves away from zero instead,
     // which disagreed at every exact .5: round(0.5) gave 1 rather than 0, and
     // round(2.5) gave 3 rather than 2.
     let out = unary_map(input_data, |val: f32| {
@@ -799,7 +799,7 @@ fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     })?;
 
     let multiplier = 10.0_f64.powi(decimals);
-    // Half-to-even, matching NumPy/PyTorch; see `round_f32`.
+    // Half-to-even; see `round_f32`.
     let out = unary_map(input_data, |val: f64| {
         (val * multiplier).round_ties_even() / multiplier
     });

@@ -62,8 +62,8 @@ impl PyTensor {
         Ok(())
     }
 
-    /// Set `requires_grad` in place and return `self`, so calls chain the
-    /// same way as in PyTorch: `x = mt.randn(2, 2).requires_grad_(True)`.
+    /// Set `requires_grad` in place and return `self`, so calls chain:
+    /// `x = mt.randn(2, 2).requires_grad_(True)`.
     pub fn requires_grad_<'py>(
         mut slf: PyRefMut<'py, Self>,
         requires_grad: bool,

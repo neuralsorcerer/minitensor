@@ -34,7 +34,7 @@ where
 /// Compute the sign of each tensor element (-1.0, 0.0, or 1.0)
 pub(crate) fn sign_tensor(tensor: &Tensor) -> Result<Tensor> {
     // Producer kernel (no memset + raw-pointer loop). NaN propagates, matching
-    // the public `sign` op and PyTorch's L1 gradient.
+    // the public `sign` op and the L1 gradient.
     let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_bce_saturated_prediction_stays_finite() {
-        // PyTorch clamps BCE's log outputs to >= -100 (forward) and its backward
+        // BCE clamps its log outputs to >= -100 (forward) and its backward
         // denominator to >= 1e-12, so a saturated prediction (exactly 0 or 1)
         // yields a finite loss and gradient instead of inf/nan.
         let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], true);

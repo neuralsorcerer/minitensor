@@ -713,7 +713,7 @@ fn first_list_leaf<'py>(item: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, 
 }
 
 /// Select rows along dim 0 for integer fancy indexing, wrapping negative
-/// indices like NumPy.
+/// indices.
 fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
     if reference.ndim() == 0 {
         return Err(PyIndexError::new_err("too many indices for a 0-d tensor"));
@@ -754,7 +754,7 @@ pub(crate) fn try_bool_mask_key(key: &Bound<PyAny>) -> PyResult<Option<Tensor>> 
     Ok(None)
 }
 
-/// NumPy-style fancy `__getitem__` forms: a boolean mask selects blocks along
+/// Fancy `__getitem__` forms: a boolean mask selects blocks along
 /// the leading dimensions (`masked_index`); a 1-D integer tensor/ndarray/list
 /// selects rows along dim 0 (negative indices wrap). Returns `Ok(None)` when
 /// `key` is not a fancy index so basic indexing can proceed.
@@ -809,7 +809,7 @@ pub(crate) fn try_fancy_index_tensor(
 
     if let Ok(list) = key.cast::<PyList>() {
         // Bool lists were handled above; a flat list of ints selects rows.
-        // (An empty list selects zero rows, like NumPy.)
+        // (An empty list selects zero rows.)
         let mut vals = Vec::with_capacity(list.len());
         for item in list.iter() {
             if item.is_instance_of::<pyo3::types::PyBool>() || item.cast::<PyList>().is_ok() {
@@ -860,8 +860,8 @@ fn parse_index(item: &Bound<PyAny>, axis: usize, dim_size: usize) -> PyResult<Te
             .map_err(|_| PyValueError::new_err("dim_size too large"))?;
         let indices = slice.indices(dim_size_isize)?;
         if indices.step < 0 {
-            // Reversing by subscript is not supported (PyTorch declines it
-            // too), but "slice step must be positive" stated the rule and left
+            // Reversing by subscript is not supported, but "slice step must
+            // be positive" stated the rule and left
             // the caller to find the remedy. `flip` is the remedy, and a step
             // other than -1 needs the positive stride afterwards -- applied to
             // the *same* axis, so the leading colons have to be there.

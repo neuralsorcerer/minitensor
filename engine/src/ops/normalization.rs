@@ -170,12 +170,12 @@ pub fn batch_norm(
         let mean_flat = mean_used.view(Shape::new(vec![num_features]))?.detach();
         let var_flat = var_used.view(Shape::new(vec![num_features]))?.detach();
 
-        // PyTorch stores the *unbiased* batch variance in running_var (Bessel's
+        // `running_var` stores the *unbiased* batch variance (Bessel's
         // correction: var_biased * n / (n - 1)), even though the normalization
         // above deliberately uses the biased estimate. Apply the correction so
-        // eval-time statistics match PyTorch. `n` is the number of elements
-        // reduced per channel; the degenerate n == 1 case has no unbiased
-        // variance, so it is left uncorrected (PyTorch rejects it outright).
+        // the eval-time statistics are the unbiased ones. `n` is the number of
+        // elements reduced per channel; the degenerate n == 1 case has no
+        // unbiased variance, so it is left uncorrected.
         let count = input.numel() / num_features;
         let var_flat = if count > 1 {
             let correction = count as f64 / (count as f64 - 1.0);

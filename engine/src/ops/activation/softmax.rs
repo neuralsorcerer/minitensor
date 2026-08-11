@@ -251,12 +251,12 @@ pub(crate) fn hardshrink_f32(
         MinitensorError::internal_error("Failed to get f32 slice from input tensor")
     })?;
 
-    // Phrase the dead-zone test as `-lambd <= v <= lambd` (PyTorch's form)
-    // rather than its finite-value complement `v > lambd || v < -lambd`. The
-    // two agree for every finite input, but for NaN the complement is false on
-    // both sides and would zero the NaN; testing the dead zone leaves NaN in
-    // the `else` branch so it passes through, matching PyTorch and the rest of
-    // minitensor's elementwise ops.
+    // Phrase the dead-zone test as `-lambd <= v <= lambd` rather than its
+    // finite-value complement `v > lambd || v < -lambd`. The two agree for
+    // every finite input, but for NaN the complement is false on both sides
+    // and would zero the NaN; testing the dead zone leaves NaN in the `else`
+    // branch so it passes through, matching the rest of minitensor's
+    // elementwise ops.
     let out = unary_map(
         input_data,
         |v: f32| {
@@ -308,7 +308,7 @@ pub(crate) fn leaky_relu_f32(
     // when a gradient function will consume it.
     //
     // `> 0`, not `>= 0`: at exactly zero the derivative is the negative
-    // slope, as in PyTorch and as in `relu_f32` right above, which has always
+    // slope, as in `relu_f32` right above, which has always
     // used the strict comparison. The forward is unaffected -- both branches
     // give zero at zero -- so only the gradient at the kink moves.
     let out = unary_map(
@@ -338,7 +338,7 @@ pub(crate) fn leaky_relu_f64(
     // when a gradient function will consume it.
     //
     // `> 0`, not `>= 0`: at exactly zero the derivative is the negative
-    // slope, as in PyTorch and as in `relu_f64` right above, which has always
+    // slope, as in `relu_f64` right above, which has always
     // used the strict comparison. The forward is unaffected -- both branches
     // give zero at zero -- so only the gradient at the kink moves.
     let out = unary_map(

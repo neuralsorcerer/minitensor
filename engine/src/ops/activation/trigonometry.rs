@@ -108,8 +108,8 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
                     let exp_val = e[0];
                     // Fast paths for common small integer exponents avoid the
                     // expensive transcendental `powf`. Repeated multiplication
-                    // matches NumPy/PyTorch (which lower `x**2`/`x**3` to
-                    // multiplies) and agrees with `powf` on IEEE special values
+                    // is the standard lowering for `x**2`/`x**3`, and agrees
+                    // with `powf` on IEEE special values
                     // (NaN, +/-inf, +/-0) for these exponents. The gradient is
                     // produced separately by `PowBackward`, so it is unchanged.
                     if exp_val == 2.0 {

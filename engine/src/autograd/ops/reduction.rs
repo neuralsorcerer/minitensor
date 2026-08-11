@@ -428,7 +428,7 @@ impl GradientFunction for QuantileBackward {
 /// overflow on its own for large `p` or large inputs.
 ///
 /// Two points are genuinely undefined rather than merely awkward, and both are
-/// resolved the way PyTorch resolves them:
+/// resolved deliberately:
 ///
 /// * At `x = 0` the p-norm has a corner and no derivative. The gradient is
 ///   reported as 0 (the subgradient of least magnitude). Composing this out of

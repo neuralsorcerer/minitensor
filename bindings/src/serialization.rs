@@ -470,7 +470,7 @@ impl PyStateDict {
     }
 
     /// `(name, tensor)` pairs, in `keys()` order -- `for name, tensor in
-    /// state.items()`, the way a PyTorch state dict is usually walked.
+    /// state.items()`, the way a state dict is usually walked.
     fn items(&self) -> PyResult<Vec<(String, PyTensor)>> {
         self.keys()
             .into_iter()

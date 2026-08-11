@@ -62,8 +62,7 @@ fn with_parameters<R>(
 
 /// Scale gradients in place so their combined L2 norm is at most `max_norm`.
 ///
-/// Returns the total norm *before* clipping, as PyTorch does, so a training
-/// loop can log it. Parameters without a gradient are skipped. Only float
+/// Returns the total norm *before* clipping, so a training loop can log it. Parameters without a gradient are skipped. Only float
 /// gradients participate.
 #[pyfunction]
 #[pyo3(name = "clip_grad_norm_", signature = (parameters, max_norm))]
@@ -80,9 +79,9 @@ pub fn clip_grad_norm(py: Python<'_>, parameters: &Bound<PyAny>, max_norm: f64) 
 
 /// Clamp every gradient element in place.
 ///
-/// With only `clip_value` the range is `[-clip_value, clip_value]`, matching
-/// PyTorch's `clip_grad_value_`. `min_value`/`max_value` give the asymmetric
-/// form the engine also supports.
+/// With only `clip_value` the range is `[-clip_value, clip_value]`.
+/// `min_value`/`max_value` give the asymmetric form the engine also
+/// supports.
 #[pyfunction]
 #[pyo3(name = "clip_grad_value_", signature = (parameters, clip_value=None, min_value=None, max_value=None))]
 pub fn clip_grad_value(

@@ -52,7 +52,7 @@ class TestGradMode:
         with mt.no_grad():
             y = x * 2.0 + 1.0
             assert not y.requires_grad
-        # Backward on a detached result must fail like PyTorch.
+        # Backward on a detached result must fail.
         with pytest.raises(RuntimeError):
             y.sum().backward()
 
