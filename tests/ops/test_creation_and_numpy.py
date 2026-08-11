@@ -961,6 +961,18 @@ def test_as_tensor_and_from_numpy_agree_on_widened_dtypes(source_dtype, expected
 def test_dtypes_that_cannot_widen_exactly_are_rejected_with_guidance(source_dtype):
     # uint64 above int64's max, and longdouble's wider mantissa, cannot survive
     # a cast. Rounding a user's data silently is worse than making them choose.
+    if (
+        source_dtype == "longdouble"
+        and np.finfo(np.longdouble).nmant == np.finfo(np.float64).nmant
+    ):
+        # `long double` is only wider than `double` where the platform makes it
+        # so: it is 80-bit extended on x86-64 Linux, but plain 64-bit double
+        # under MSVC and on arm64 macOS, where numpy makes `longdouble` an
+        # alias for float64. There the cast is exact and there is nothing to
+        # reject -- refusing it would be the bug.
+        assert mt.from_numpy(np.ones(2, dtype=source_dtype)).dtype == "float64"
+        return
+
     source = np.ones(2, dtype=source_dtype)
     with pytest.raises(TypeError, match="Unsupported NumPy dtype"):
         mt.from_numpy(source)

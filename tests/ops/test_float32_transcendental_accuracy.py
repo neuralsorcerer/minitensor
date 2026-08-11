@@ -468,7 +468,14 @@ def test_gelu_gradient_matches_the_analytic_derivative(
     mt.clear_autograd_graph()
 
     expected = reference(sample)
-    tolerance = 2e-7 if dtype == "float32" else 1e-12
+    # The float64 bound is not tight to an ulp on purpose. The erf reference
+    # goes through libm's `erfc`, which differs between platforms by an ulp or
+    # so, and the two terms of the derivative very nearly cancel on the left
+    # tail -- around x = -3.9 the sum lands near 7e-5 while the terms are each
+    # ~1e-4. One libm ulp there is ~1e-12 in relative terms, which is what
+    # macOS's `erfc` costs against glibc's, so a 1e-12 bound fails there while
+    # passing on Linux.
+    tolerance = 2e-7 if dtype == "float32" else 5e-12
     np.testing.assert_allclose(got, expected.astype(dtype), rtol=tolerance, atol=1e-45)
 
 
