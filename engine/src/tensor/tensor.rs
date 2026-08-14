@@ -14,7 +14,9 @@ pub use crate::tensor::dtype::DataType;
 pub use crate::tensor::shape::{Shape, Strides};
 pub use crate::tensor::storage::{DataMut, TensorData};
 
-use crate::ops::map::{BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, unary_map_threshold};
+use crate::ops::map::{
+    BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, PAR_THRESHOLD, unary_map, unary_map_threshold,
+};
 use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
     device::Device,
@@ -1952,180 +1954,130 @@ impl Tensor {
 }
 
 impl Tensor {
-    /// Check if tensor contains NaN values
-    #[inline(always)]
-    pub fn has_nan(&self) -> bool {
-        match self.dtype {
-            DataType::Float32 => {
-                if let Some(data) = self.data.as_f32_slice() {
-                    data.iter().any(|&x| x.is_nan())
-                } else {
-                    false
-                }
+    /// Generates one of the whole-tensor float queries (`has_nan`, `has_inf`).
+    ///
+    /// Parallel above [`PAR_THRESHOLD`], and short-circuiting: `par_iter().any`
+    /// stops the other workers once one of them finds a hit, so the answer for
+    /// a tensor that does contain one arrives without reading the rest.
+    /// Both predicates are taken as generic closures, not `fn` pointers.
+    /// The distinction is not cosmetic: a `fn(f32) -> bool` parameter
+    /// instantiates the generic once for the pointer type and leaves an
+    /// indirect call in the loop, which nothing can vectorize or inline
+    /// through. A closure type is unique per call site, so `is_nan` lands
+    /// inside the loop body. See [`Self::float_predicate`] for what that was
+    /// worth when measured.
+    fn any_float<F32, F64>(&self, test_f32: F32, test_f64: F64) -> bool
+    where
+        F32: Fn(f32) -> bool + Sync,
+        F64: Fn(f64) -> bool + Sync,
+    {
+        #[inline(always)]
+        fn scan<T: Copy + Sync>(data: &[T], test: impl Fn(T) -> bool + Sync) -> bool {
+            if data.len() < PAR_THRESHOLD {
+                data.iter().any(|&x| test(x))
+            } else {
+                data.par_iter().any(|&x| test(x))
             }
-            DataType::Float64 => {
-                if let Some(data) = self.data.as_f64_slice() {
-                    data.iter().any(|&x| x.is_nan())
-                } else {
-                    false
-                }
-            }
-            _ => false, // Integer and boolean types cannot be NaN
         }
+        match self.dtype {
+            DataType::Float32 => self.data.as_f32_slice().is_some_and(|d| scan(d, test_f32)),
+            DataType::Float64 => self.data.as_f64_slice().is_some_and(|d| scan(d, test_f64)),
+            // Integer and boolean types can be neither NaN nor infinite.
+            _ => false,
+        }
+    }
+
+    /// Check if tensor contains NaN values
+    pub fn has_nan(&self) -> bool {
+        self.any_float(|x: f32| x.is_nan(), |x: f64| x.is_nan())
     }
 
     /// Check if tensor contains infinite values
-    #[inline(always)]
     pub fn has_inf(&self) -> bool {
-        match self.dtype {
+        self.any_float(|x: f32| x.is_infinite(), |x: f64| x.is_infinite())
+    }
+
+    /// Generates one of the element-wise float predicates.
+    ///
+    /// All three used to allocate a zero-filled buffer and then overwrite every
+    /// element of it -- two passes over the output, which is the cost
+    /// `ops::map` exists to remove -- and then walk it on a single thread
+    /// whatever the size. They go through `unary_map` now, like every other
+    /// cheap unary op: each element written once, and the work spread above
+    /// `PAR_THRESHOLD`. Over a million float32 elements that is 254us -> 74us.
+    ///
+    /// `non_float` is the answer for the dtypes that cannot hold the value in
+    /// question at all -- false for NaN and infinity, true for finiteness.
+    ///
+    /// The predicates are generic closures rather than `fn` pointers for the
+    /// reason given on [`Self::any_float`], and the difference is most of the
+    /// operation: over a million float32 elements, `isnan` through a function
+    /// pointer measured 443us -- *worse* than the sequential loop it replaced,
+    /// because an indirect call per element costs more than the parallelism
+    /// saves -- against 102us once the predicate could be inlined.
+    fn float_predicate<F32, F64>(
+        &self,
+        test_f32: F32,
+        test_f64: F64,
+        non_float: bool,
+    ) -> Result<Tensor>
+    where
+        F32: Fn(f32) -> bool + Send + Sync,
+        F64: Fn(f64) -> bool + Send + Sync,
+    {
+        let output = match self.dtype {
             DataType::Float32 => {
-                if let Some(data) = self.data.as_f32_slice() {
-                    data.iter().any(|&x| x.is_infinite())
-                } else {
-                    false
-                }
+                let input = self
+                    .data
+                    .as_f32_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
+                TensorData::from_vec::<bool>(
+                    unary_map(input, test_f32),
+                    DataType::Bool,
+                    self.device,
+                )
             }
             DataType::Float64 => {
-                if let Some(data) = self.data.as_f64_slice() {
-                    data.iter().any(|&x| x.is_infinite())
-                } else {
-                    false
-                }
+                let input = self
+                    .data
+                    .as_f64_slice()
+                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
+                TensorData::from_vec::<bool>(
+                    unary_map(input, test_f64),
+                    DataType::Bool,
+                    self.device,
+                )
             }
-            _ => false, // Integer and boolean types cannot be infinite
-        }
+            _ => TensorData::from_vec::<bool>(
+                vec![non_float; self.numel()],
+                DataType::Bool,
+                self.device,
+            ),
+        };
+
+        Ok(Tensor::new(
+            Arc::new(output),
+            self.shape.clone(),
+            DataType::Bool,
+            self.device,
+            false,
+        ))
     }
 
     /// Element-wise check for NaN values
-    #[inline(always)]
     pub fn isnan(&self) -> Result<Tensor> {
-        let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
-        match self.dtype {
-            DataType::Float32 => {
-                let input = self
-                    .data
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_nan();
-                }
-            }
-            DataType::Float64 => {
-                let input = self
-                    .data
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_nan();
-                }
-            }
-            _ => {
-                // Non-floating types cannot be NaN; output already zero
-            }
-        }
-        Ok(Tensor::new(
-            Arc::new(output),
-            self.shape.clone(),
-            DataType::Bool,
-            self.device,
-            false,
-        ))
+        self.float_predicate(|x: f32| x.is_nan(), |x: f64| x.is_nan(), false)
     }
 
     /// Element-wise check for infinite values
-    #[inline(always)]
     pub fn isinf(&self) -> Result<Tensor> {
-        let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
-        match self.dtype {
-            DataType::Float32 => {
-                let input = self
-                    .data
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_infinite();
-                }
-            }
-            DataType::Float64 => {
-                let input = self
-                    .data
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_infinite();
-                }
-            }
-            _ => {
-                // Non-floating types cannot be infinite; output remains false
-            }
-        }
-        Ok(Tensor::new(
-            Arc::new(output),
-            self.shape.clone(),
-            DataType::Bool,
-            self.device,
-            false,
-        ))
+        self.float_predicate(|x: f32| x.is_infinite(), |x: f64| x.is_infinite(), false)
     }
 
     /// Element-wise check for finite values
-    #[inline(always)]
     pub fn isfinite(&self) -> Result<Tensor> {
-        let mut output = TensorData::zeros_on_device(self.numel(), DataType::Bool, self.device);
-        match self.dtype {
-            DataType::Float32 => {
-                let input = self
-                    .data
-                    .as_f32_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f32 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_finite();
-                }
-            }
-            DataType::Float64 => {
-                let input = self
-                    .data
-                    .as_f64_slice()
-                    .ok_or_else(|| MinitensorError::internal_error("Expected f64 data"))?;
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for (o, &x) in out_slice.iter_mut().zip(input.iter()) {
-                    *o = x.is_finite();
-                }
-            }
-            _ => {
-                // Integer and bool types are always finite
-                let out_slice = output
-                    .as_bool_slice_mut()
-                    .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-                for o in out_slice.iter_mut() {
-                    *o = true;
-                }
-            }
-        }
-        Ok(Tensor::new(
-            Arc::new(output),
-            self.shape.clone(),
-            DataType::Bool,
-            self.device,
-            false,
-        ))
+        // Integer and boolean values are always finite.
+        self.float_predicate(|x: f32| x.is_finite(), |x: f64| x.is_finite(), true)
     }
 
     /// Get the maximum value in the tensor
@@ -3613,5 +3565,151 @@ mod tests {
 
         assert_eq!(detached.data().as_f64_slice().unwrap(), &[0.0, 1.0, 0.0]);
         assert_eq!(source.data().as_f64_slice().unwrap(), &[0.0, 0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod float_predicate_tests {
+    use super::*;
+    use crate::device::Device;
+
+    fn tensor_f32(data: Vec<f32>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<f32>(
+                data,
+                DataType::Float32,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn tensor_i64(data: Vec<i64>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<i64>(
+                data,
+                DataType::Int64,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    const SPECIALS: [f32; 7] = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        1.0,
+        -1.5,
+    ];
+
+    /// The three predicates partition every float: exactly one of "NaN",
+    /// "infinite" and "finite" holds for each. Checked below the parallel
+    /// threshold and above it, at a length that leaves a partial chunk.
+    #[test]
+    fn the_predicates_partition_every_float() {
+        for len in [SPECIALS.len(), PAR_THRESHOLD + 37] {
+            let data: Vec<f32> = (0..len).map(|i| SPECIALS[i % SPECIALS.len()]).collect();
+            let t = tensor_f32(data.clone());
+            let nan = t.isnan().unwrap();
+            let inf = t.isinf().unwrap();
+            let fin = t.isfinite().unwrap();
+            let (nan, inf, fin) = (
+                nan.data().as_bool_slice().unwrap().to_vec(),
+                inf.data().as_bool_slice().unwrap().to_vec(),
+                fin.data().as_bool_slice().unwrap().to_vec(),
+            );
+            assert_eq!(nan.len(), len);
+            for i in 0..len {
+                let x = data[i];
+                assert_eq!(nan[i], x.is_nan(), "isnan({x}) at {i}, len {len}");
+                assert_eq!(inf[i], x.is_infinite(), "isinf({x}) at {i}, len {len}");
+                assert_eq!(fin[i], x.is_finite(), "isfinite({x}) at {i}, len {len}");
+                assert_eq!(
+                    nan[i] as u8 + inf[i] as u8 + fin[i] as u8,
+                    1,
+                    "{x} answered to {} of the three",
+                    nan[i] as u8 + inf[i] as u8 + fin[i] as u8
+                );
+            }
+        }
+    }
+
+    /// A dtype that cannot hold NaN or infinity answers the whole set at once:
+    /// nothing is NaN, nothing is infinite, everything is finite.
+    #[test]
+    fn exact_dtypes_are_entirely_finite() {
+        let t = tensor_i64(vec![i64::MIN, -1, 0, 1, i64::MAX]);
+        assert_eq!(
+            t.isnan().unwrap().data().as_bool_slice().unwrap(),
+            &[false; 5]
+        );
+        assert_eq!(
+            t.isinf().unwrap().data().as_bool_slice().unwrap(),
+            &[false; 5]
+        );
+        assert_eq!(
+            t.isfinite().unwrap().data().as_bool_slice().unwrap(),
+            &[true; 5]
+        );
+        assert!(!t.has_nan());
+        assert!(!t.has_inf());
+    }
+
+    /// `has_nan`/`has_inf` short-circuit across the parallel split, so the
+    /// position of the one hit must not matter -- including when it is the very
+    /// last element, which a worker other than the first has to find.
+    #[test]
+    fn the_whole_tensor_queries_find_a_hit_anywhere() {
+        for len in [8usize, PAR_THRESHOLD + 5] {
+            for &pos in &[0usize, 1, len / 2, len - 1] {
+                let mut data = vec![1.0f32; len];
+                data[pos] = f32::NAN;
+                let t = tensor_f32(data.clone());
+                assert!(t.has_nan(), "NaN at {pos} of {len}");
+                assert!(!t.has_inf(), "no inf expected, {pos} of {len}");
+
+                data[pos] = f32::NEG_INFINITY;
+                let t = tensor_f32(data);
+                assert!(t.has_inf(), "inf at {pos} of {len}");
+                assert!(!t.has_nan(), "no NaN expected, {pos} of {len}");
+            }
+            assert!(!tensor_f32(vec![1.0; len]).has_nan());
+            assert!(!tensor_f32(vec![1.0; len]).has_inf());
+        }
+    }
+
+    /// An empty tensor has no hits and produces no elements.
+    #[test]
+    fn empty_tensors_answer_emptily() {
+        let t = tensor_f32(Vec::new());
+        assert!(!t.has_nan());
+        assert!(!t.has_inf());
+        assert!(
+            t.isnan()
+                .unwrap()
+                .data()
+                .as_bool_slice()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            t.isfinite()
+                .unwrap()
+                .data()
+                .as_bool_slice()
+                .unwrap()
+                .is_empty()
+        );
     }
 }
