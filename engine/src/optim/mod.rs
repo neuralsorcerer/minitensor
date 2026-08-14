@@ -22,7 +22,7 @@ pub use lion::Lion;
 pub use nadam::NAdam;
 pub use optimizer::{
     ConstantLR, CosineAnnealingLR, ExponentialLR, GradientClipping, LearningRateScheduler,
-    Optimizer, ParameterGroup, StepLR,
+    Optimizer, ParamGroups, ParameterGroup, StepLR, check_param_grad_match, parameter_gradient,
 };
 pub use rmsprop::RMSprop;
 pub use sgd::SGD;

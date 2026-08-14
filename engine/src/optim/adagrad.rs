@@ -4,11 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::optimizer::{
+    GradientClipping, Optimizer, ParamGroups, ParameterGroup, check_param_grad_match,
+    parameter_gradient,
+};
 use super::utils::{load_param_buffers, save_param_buffers};
 use crate::serialization::OptimizerState;
 use crate::{
-    autograd::{self, TensorId},
+    autograd::TensorId,
     error::Result,
     ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
@@ -27,18 +30,13 @@ use rustc_hash::FxHashMap;
 /// runs — the denominator grows without bound — and the reason the moving-average
 /// methods exist.
 pub struct Adagrad {
-    /// Parameter groups with different learning rates
-    param_groups: Vec<ParameterGroup>,
-    /// Fast lookup from parameter id to its group index
-    param_lookup: FxHashMap<TensorId, usize>,
-    /// Default learning rate (for backward compatibility)
-    default_lr: f64,
+    /// Parameter groups, their reverse index, and the defaults for a
+    /// parameter in none of them.
+    groups: ParamGroups,
     /// Decay applied to the learning rate as steps accumulate
     lr_decay: f64,
     /// Epsilon for numerical stability
     epsilon: f64,
-    /// Weight decay coefficient
-    weight_decay: f64,
     /// Value the accumulator starts at
     initial_accumulator_value: f64,
     /// Running sum of squared gradients, per parameter
@@ -63,28 +61,17 @@ impl Adagrad {
         epsilon: Option<f64>,
     ) -> Self {
         Self {
-            param_groups: Vec::new(),
-            param_lookup: FxHashMap::default(),
-            default_lr: learning_rate,
+            groups: {
+                let mut g = ParamGroups::new(learning_rate);
+                g.set_default_weight_decay(weight_decay.unwrap_or(0.0));
+                g
+            },
             lr_decay: lr_decay.unwrap_or(0.0),
             epsilon: epsilon.unwrap_or(1e-10),
-            weight_decay: weight_decay.unwrap_or(0.0),
             initial_accumulator_value: initial_accumulator_value.unwrap_or(0.0),
             state_sum: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        }
-    }
-
-    /// Rebuild internal parameter lookup table
-    fn rebuild_param_lookup(&mut self) {
-        self.param_lookup.clear();
-        let total: usize = self.param_groups.iter().map(|g| g.params.len()).sum();
-        self.param_lookup.reserve(total);
-        for (idx, group) in self.param_groups.iter().enumerate() {
-            for &p in &group.params {
-                self.param_lookup.insert(p, idx);
-            }
         }
     }
 
@@ -94,21 +81,15 @@ impl Adagrad {
         lr_decay: f64,
         epsilon: f64,
     ) -> Self {
-        let default_lr = param_groups.first().map(|g| g.lr).unwrap_or(0.01);
-        let mut optimizer = Self {
-            param_groups,
-            param_lookup: FxHashMap::default(),
-            default_lr,
+        Self {
+            groups: ParamGroups::from_groups(param_groups, 0.01),
             lr_decay,
             epsilon,
-            weight_decay: 0.0,
             initial_accumulator_value: 0.0,
             state_sum: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        };
-        optimizer.rebuild_param_lookup();
-        optimizer
+        }
     }
 
     /// Set gradient clipping
@@ -139,35 +120,17 @@ impl Adagrad {
 
     /// Get weight decay coefficient
     pub fn weight_decay(&self) -> f64 {
-        self.weight_decay
+        self.groups.default_weight_decay()
     }
 
     /// Set weight decay coefficient
     pub fn set_weight_decay(&mut self, weight_decay: f64) {
-        self.weight_decay = weight_decay;
+        self.groups.set_default_weight_decay(weight_decay);
     }
 
     /// Get the value new accumulators start at
     pub fn initial_accumulator_value(&self) -> f64 {
         self.initial_accumulator_value
-    }
-
-    /// Get learning rate for a specific parameter
-    fn get_param_lr(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].lr
-        } else {
-            self.default_lr
-        }
-    }
-
-    /// Get weight decay for a specific parameter
-    fn get_param_weight_decay(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].weight_decay
-        } else {
-            self.weight_decay
-        }
     }
 
     /// Apply the Adagrad update to one parameter
@@ -180,18 +143,7 @@ impl Adagrad {
     ) -> Result<()> {
         let param_id = param.id();
 
-        if param.device() != grad.device() {
-            return Err(crate::error::MinitensorError::device_mismatch(
-                param.device().to_string(),
-                grad.device().to_string(),
-            ));
-        }
-        if param.shape() != grad.shape() {
-            return Err(crate::error::MinitensorError::shape_mismatch(
-                param.shape().dims().to_vec(),
-                grad.shape().dims().to_vec(),
-            ));
-        }
+        check_param_grad_match(param, grad)?;
 
         let initial = self.initial_accumulator_value;
         let state_sum = self.state_sum.entry(param_id).or_insert_with(|| {
@@ -307,16 +259,12 @@ impl Optimizer for Adagrad {
                 continue;
             }
 
-            let grad = if let Some(g) = autograd::get_gradient(param) {
-                g
-            } else if let Some(g) = param.grad() {
-                (**g).clone()
-            } else {
+            let Some(grad) = parameter_gradient(param) else {
                 continue;
             };
 
-            let lr = self.get_param_lr(param.id());
-            let weight_decay = self.get_param_weight_decay(param.id());
+            let lr = self.groups.lr(param.id());
+            let weight_decay = self.groups.weight_decay(param.id());
 
             self.apply_adagrad_update(param, &grad, lr, weight_decay)?;
         }
@@ -324,42 +272,5 @@ impl Optimizer for Adagrad {
         Ok(())
     }
 
-    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()> {
-        for param in parameters.iter_mut() {
-            param.zero_grad(set_to_none);
-        }
-        Ok(())
-    }
-
-    fn learning_rate(&self) -> f64 {
-        self.default_lr
-    }
-
-    fn set_learning_rate(&mut self, lr: f64) {
-        self.default_lr = lr;
-        for group in &mut self.param_groups {
-            group.lr = lr;
-        }
-    }
-
-    fn param_groups(&self) -> &[ParameterGroup] {
-        &self.param_groups
-    }
-
-    fn param_groups_mut(&mut self) -> &mut [ParameterGroup] {
-        &mut self.param_groups
-    }
-
-    fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
-        let idx = self.param_groups.len();
-        for &p in &group.params {
-            self.param_lookup.insert(p, idx);
-        }
-        self.param_groups.push(group);
-        Ok(())
-    }
-
-    fn step_count(&self) -> usize {
-        self.step_count
-    }
+    crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }

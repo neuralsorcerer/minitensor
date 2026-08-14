@@ -50,6 +50,203 @@ impl ParameterGroup {
     }
 }
 
+/// The parameter-group bookkeeping every optimizer in this module keeps: the
+/// groups themselves, a reverse index from parameter to group, and the values
+/// to fall back on for a parameter that belongs to no group.
+///
+/// Each optimizer used to carry the four fields and the three methods over
+/// them verbatim -- `rebuild_param_lookup`, `get_param_lr`,
+/// `get_param_weight_decay` -- six identical copies whose only difference was
+/// the surrounding struct. Sharing them is not only less code: the reverse
+/// index is easy to leave stale, and there is now one `push` that cannot.
+#[derive(Debug, Clone, Default)]
+pub struct ParamGroups {
+    groups: Vec<ParameterGroup>,
+    /// Fast lookup from parameter id to its group index.
+    lookup: FxHashMap<TensorId, usize>,
+    /// Learning rate for parameters in no group.
+    default_lr: f64,
+    /// Weight decay for parameters in no group.
+    default_weight_decay: f64,
+}
+
+impl ParamGroups {
+    /// Empty, with `default_lr` covering every parameter.
+    pub fn new(default_lr: f64) -> Self {
+        Self {
+            groups: Vec::new(),
+            lookup: FxHashMap::default(),
+            default_lr,
+            default_weight_decay: 0.0,
+        }
+    }
+
+    /// Build from explicit groups. The fallback learning rate is the first
+    /// group's, or `fallback_lr` when there are no groups at all.
+    pub fn from_groups(groups: Vec<ParameterGroup>, fallback_lr: f64) -> Self {
+        let default_lr = groups.first().map(|g| g.lr).unwrap_or(fallback_lr);
+        let mut this = Self {
+            groups,
+            lookup: FxHashMap::default(),
+            default_lr,
+            default_weight_decay: 0.0,
+        };
+        this.rebuild_lookup();
+        this
+    }
+
+    fn rebuild_lookup(&mut self) {
+        self.lookup.clear();
+        self.lookup
+            .reserve(self.groups.iter().map(|g| g.params.len()).sum());
+        for (idx, group) in self.groups.iter().enumerate() {
+            for &p in &group.params {
+                self.lookup.insert(p, idx);
+            }
+        }
+    }
+
+    /// Learning rate for one parameter: its group's, or the default.
+    pub fn lr(&self, param_id: TensorId) -> f64 {
+        match self.lookup.get(&param_id) {
+            Some(&idx) => self.groups[idx].lr,
+            None => self.default_lr,
+        }
+    }
+
+    /// Weight decay for one parameter: its group's, or the default.
+    pub fn weight_decay(&self, param_id: TensorId) -> f64 {
+        match self.lookup.get(&param_id) {
+            Some(&idx) => self.groups[idx].weight_decay,
+            None => self.default_weight_decay,
+        }
+    }
+
+    /// The rate reported by `Optimizer::learning_rate`.
+    pub fn default_lr(&self) -> f64 {
+        self.default_lr
+    }
+
+    /// Set the rate everywhere: the default and every group, which is what
+    /// `Optimizer::set_learning_rate` promises.
+    pub fn set_lr(&mut self, lr: f64) {
+        self.default_lr = lr;
+        for group in &mut self.groups {
+            group.lr = lr;
+        }
+    }
+
+    /// The decay applied to parameters in no group.
+    pub fn default_weight_decay(&self) -> f64 {
+        self.default_weight_decay
+    }
+
+    /// Set the decay for parameters in no group. Groups keep their own.
+    pub fn set_default_weight_decay(&mut self, weight_decay: f64) {
+        self.default_weight_decay = weight_decay;
+    }
+
+    pub fn groups(&self) -> &[ParameterGroup] {
+        &self.groups
+    }
+
+    pub fn groups_mut(&mut self) -> &mut [ParameterGroup] {
+        &mut self.groups
+    }
+
+    /// Add a group, indexing its parameters as it goes.
+    pub fn push(&mut self, group: ParameterGroup) {
+        let idx = self.groups.len();
+        for &p in &group.params {
+            self.lookup.insert(p, idx);
+        }
+        self.groups.push(group);
+    }
+}
+
+/// The gradient an optimizer should step on for `param`, or `None` if it has
+/// none this iteration and should be skipped.
+///
+/// The graph is consulted first and `.grad` second: a backward pass leaves the
+/// gradient in the graph, and `.grad` is the copy that survives one being
+/// released. Every optimizer here opened its loop with these six lines.
+pub fn parameter_gradient(param: &Tensor) -> Option<Tensor> {
+    if let Some(g) = crate::autograd::get_gradient(param) {
+        Some(g)
+    } else {
+        param.grad().map(|g| (**g).clone())
+    }
+}
+
+/// Reject a gradient that cannot be applied to its parameter elementwise.
+///
+/// Every per-parameter update below indexes the two buffers in lockstep, so a
+/// mismatch here would be a wrong answer rather than a slow one.
+pub fn check_param_grad_match(param: &Tensor, grad: &Tensor) -> Result<()> {
+    if param.device() != grad.device() {
+        return Err(crate::error::MinitensorError::device_mismatch(
+            param.device().to_string(),
+            grad.device().to_string(),
+        ));
+    }
+    if param.shape() != grad.shape() {
+        return Err(crate::error::MinitensorError::shape_mismatch(
+            param.shape().dims().to_vec(),
+            grad.shape().dims().to_vec(),
+        ));
+    }
+    Ok(())
+}
+
+/// Implements the seven [`Optimizer`] methods that are pure bookkeeping —
+/// identical in every optimizer here, and differing only in which fields hold
+/// the groups and the step count.
+///
+/// `$groups` names a [`ParamGroups`] field, `$step_count` a `usize` one.
+#[macro_export]
+macro_rules! delegate_optimizer_bookkeeping {
+    ($groups:ident, $step_count:ident) => {
+        fn zero_grad(
+            &self,
+            parameters: &mut [&mut $crate::tensor::Tensor],
+            set_to_none: bool,
+        ) -> $crate::error::Result<()> {
+            for param in parameters.iter_mut() {
+                param.zero_grad(set_to_none);
+            }
+            Ok(())
+        }
+
+        fn learning_rate(&self) -> f64 {
+            self.$groups.default_lr()
+        }
+
+        fn set_learning_rate(&mut self, lr: f64) {
+            self.$groups.set_lr(lr);
+        }
+
+        fn param_groups(&self) -> &[$crate::optim::ParameterGroup] {
+            self.$groups.groups()
+        }
+
+        fn param_groups_mut(&mut self) -> &mut [$crate::optim::ParameterGroup] {
+            self.$groups.groups_mut()
+        }
+
+        fn add_param_group(
+            &mut self,
+            group: $crate::optim::ParameterGroup,
+        ) -> $crate::error::Result<()> {
+            self.$groups.push(group);
+            Ok(())
+        }
+
+        fn step_count(&self) -> usize {
+            self.$step_count
+        }
+    };
+}
+
 /// Gradient clipping configuration
 #[derive(Debug, Clone, Default)]
 pub enum GradientClipping {
@@ -261,5 +458,82 @@ pub trait Optimizer: Send + Sync {
                 group.lr = new_lr;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod param_groups_tests {
+    use super::*;
+    use crate::autograd::TensorId;
+
+    fn ids(n: usize) -> Vec<TensorId> {
+        (0..n).map(|_| TensorId::new()).collect()
+    }
+
+    /// A parameter's group decides its rate and decay; one in no group falls
+    /// back to the defaults. This is the lookup every optimizer used to keep
+    /// its own copy of.
+    #[test]
+    fn lookup_prefers_the_group_then_the_default() {
+        let p = ids(3);
+        let groups = vec![
+            ParameterGroup::new(vec![p[0]], 0.1).with_weight_decay(0.01),
+            ParameterGroup::new(vec![p[1]], 0.2).with_weight_decay(0.02),
+        ];
+        let mut pg = ParamGroups::from_groups(groups, 9.9);
+
+        assert_eq!(pg.lr(p[0]), 0.1);
+        assert_eq!(pg.lr(p[1]), 0.2);
+        assert_eq!(pg.weight_decay(p[0]), 0.01);
+        assert_eq!(pg.weight_decay(p[1]), 0.02);
+
+        // `p[2]` is in no group: defaults. The fallback rate is the first
+        // group's, not the `fallback_lr` argument, which only applies when
+        // there are no groups at all.
+        assert_eq!(pg.lr(p[2]), 0.1);
+        assert_eq!(pg.weight_decay(p[2]), 0.0);
+        pg.set_default_weight_decay(0.5);
+        assert_eq!(pg.weight_decay(p[2]), 0.5);
+        // and a grouped parameter is unaffected by the default
+        assert_eq!(pg.weight_decay(p[0]), 0.01);
+
+        assert_eq!(ParamGroups::from_groups(Vec::new(), 9.9).lr(p[2]), 9.9);
+    }
+
+    /// A group added after construction is indexed as it goes in -- the
+    /// failure mode of a hand-maintained reverse index is that it is not, and
+    /// the parameter silently keeps stepping at the default rate.
+    #[test]
+    fn a_pushed_group_is_immediately_findable() {
+        let p = ids(2);
+        let mut pg = ParamGroups::new(0.5);
+        assert_eq!(pg.lr(p[0]), 0.5);
+
+        pg.push(ParameterGroup::new(vec![p[0]], 0.01).with_weight_decay(0.7));
+        assert_eq!(pg.lr(p[0]), 0.01);
+        assert_eq!(pg.weight_decay(p[0]), 0.7);
+        assert_eq!(pg.lr(p[1]), 0.5, "an unrelated parameter keeps the default");
+        assert_eq!(pg.groups().len(), 1);
+    }
+
+    /// `set_learning_rate` moves every group as well as the default, which is
+    /// what makes it usable on an optimizer that has groups.
+    #[test]
+    fn setting_the_rate_moves_every_group() {
+        let p = ids(2);
+        let mut pg = ParamGroups::from_groups(
+            vec![
+                ParameterGroup::new(vec![p[0]], 0.1),
+                ParameterGroup::new(vec![p[1]], 0.2),
+            ],
+            0.0,
+        );
+        pg.set_lr(0.03);
+        assert_eq!(pg.default_lr(), 0.03);
+        assert_eq!(pg.lr(p[0]), 0.03);
+        assert_eq!(pg.lr(p[1]), 0.03);
+        // ...and leaves the per-group decay alone
+        pg.groups_mut()[0].weight_decay = 0.9;
+        assert_eq!(pg.weight_decay(p[0]), 0.9);
     }
 }

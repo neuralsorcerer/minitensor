@@ -4,11 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::optimizer::{
+    GradientClipping, Optimizer, ParamGroups, ParameterGroup, check_param_grad_match,
+    parameter_gradient,
+};
 use super::utils::{load_param_buffers, save_param_buffers};
 use crate::serialization::OptimizerState;
 use crate::{
-    autograd::{self, TensorId},
+    autograd::TensorId,
     error::Result,
     ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
@@ -35,18 +38,13 @@ use rustc_hash::FxHashMap;
 /// learning rate is therefore typically ~3-10× smaller than the AdamW one, with
 /// a correspondingly larger weight decay.
 pub struct Lion {
-    /// Parameter groups with per-group learning rate / weight decay.
-    param_groups: Vec<ParameterGroup>,
-    /// Fast lookup from parameter id to its group index.
-    param_lookup: FxHashMap<TensorId, usize>,
-    /// Default learning rate (single-group case).
-    default_lr: f64,
+    /// Parameter groups, their reverse index, and the defaults for a
+    /// parameter in none of them.
+    groups: ParamGroups,
     /// Momentum interpolation coefficient for the update direction.
     beta1: f64,
     /// Momentum EMA coefficient for the stored buffer.
     beta2: f64,
-    /// Decoupled weight decay coefficient.
-    weight_decay: f64,
     /// Momentum buffers, one per parameter.
     m: FxHashMap<TensorId, Tensor>,
     /// Number of steps taken.
@@ -86,46 +84,29 @@ impl Lion {
         weight_decay: Option<f64>,
     ) -> Self {
         Self {
-            param_groups: Vec::new(),
-            param_lookup: FxHashMap::default(),
-            default_lr: learning_rate,
+            groups: {
+                let mut g = ParamGroups::new(learning_rate);
+                g.set_default_weight_decay(weight_decay.unwrap_or(0.0));
+                g
+            },
             beta1: beta1.unwrap_or(0.9),
             beta2: beta2.unwrap_or(0.99),
-            weight_decay: weight_decay.unwrap_or(0.0),
             m: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        }
-    }
-
-    /// Rebuild internal parameter lookup table.
-    fn rebuild_param_lookup(&mut self) {
-        self.param_lookup.clear();
-        let total: usize = self.param_groups.iter().map(|g| g.params.len()).sum();
-        self.param_lookup.reserve(total);
-        for (idx, group) in self.param_groups.iter().enumerate() {
-            for &p in &group.params {
-                self.param_lookup.insert(p, idx);
-            }
         }
     }
 
     /// Create a new Lion optimizer with explicit parameter groups.
     pub fn with_param_groups(param_groups: Vec<ParameterGroup>, beta1: f64, beta2: f64) -> Self {
-        let default_lr = param_groups.first().map(|g| g.lr).unwrap_or(1e-4);
-        let mut optimizer = Self {
-            param_groups,
-            param_lookup: FxHashMap::default(),
-            default_lr,
+        Self {
+            groups: ParamGroups::from_groups(param_groups, 1e-4),
             beta1,
             beta2,
-            weight_decay: 0.0,
             m: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        };
-        optimizer.rebuild_param_lookup();
-        optimizer
+        }
     }
 
     /// Configure gradient clipping.
@@ -146,23 +127,7 @@ impl Lion {
 
     /// Weight decay coefficient.
     pub fn weight_decay(&self) -> f64 {
-        self.weight_decay
-    }
-
-    fn get_param_lr(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].lr
-        } else {
-            self.default_lr
-        }
-    }
-
-    fn get_param_weight_decay(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].weight_decay
-        } else {
-            self.weight_decay
-        }
+        self.groups.default_weight_decay()
     }
 
     /// Apply the Lion update to a single parameter in place.
@@ -178,18 +143,7 @@ impl Lion {
             Tensor::zeros(param.shape().clone(), param.dtype(), param.device(), false)
         });
 
-        if param.device() != grad.device() {
-            return Err(crate::error::MinitensorError::device_mismatch(
-                param.device().to_string(),
-                grad.device().to_string(),
-            ));
-        }
-        if param.shape() != grad.shape() {
-            return Err(crate::error::MinitensorError::shape_mismatch(
-                param.shape().dims().to_vec(),
-                grad.shape().dims().to_vec(),
-            ));
-        }
+        check_param_grad_match(param, grad)?;
 
         let beta1 = self.beta1;
         let beta2 = self.beta2;
@@ -279,60 +233,19 @@ impl Optimizer for Lion {
                 continue;
             }
 
-            let grad = if let Some(g) = autograd::get_gradient(param) {
-                g
-            } else if let Some(g) = param.grad() {
-                (**g).clone()
-            } else {
+            let Some(grad) = parameter_gradient(param) else {
                 continue;
             };
 
-            let lr = self.get_param_lr(param.id());
-            let weight_decay = self.get_param_weight_decay(param.id());
+            let lr = self.groups.lr(param.id());
+            let weight_decay = self.groups.weight_decay(param.id());
             self.apply_lion_update(param, &grad, lr, weight_decay)?;
         }
 
         Ok(())
     }
 
-    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()> {
-        for param in parameters.iter_mut() {
-            param.zero_grad(set_to_none);
-        }
-        Ok(())
-    }
-
-    fn learning_rate(&self) -> f64 {
-        self.default_lr
-    }
-
-    fn set_learning_rate(&mut self, lr: f64) {
-        self.default_lr = lr;
-        for group in &mut self.param_groups {
-            group.lr = lr;
-        }
-    }
-
-    fn param_groups(&self) -> &[ParameterGroup] {
-        &self.param_groups
-    }
-
-    fn param_groups_mut(&mut self) -> &mut [ParameterGroup] {
-        &mut self.param_groups
-    }
-
-    fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
-        let idx = self.param_groups.len();
-        for &p in &group.params {
-            self.param_lookup.insert(p, idx);
-        }
-        self.param_groups.push(group);
-        Ok(())
-    }
-
-    fn step_count(&self) -> usize {
-        self.step_count
-    }
+    crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }
 
 #[cfg(test)]

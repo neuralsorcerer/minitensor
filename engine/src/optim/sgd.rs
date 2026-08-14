@@ -4,11 +4,14 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::optimizer::{GradientClipping, Optimizer, ParameterGroup};
+use super::optimizer::{
+    GradientClipping, Optimizer, ParamGroups, ParameterGroup, check_param_grad_match,
+    parameter_gradient,
+};
 use super::utils::{load_param_buffers, save_param_buffers};
 use crate::serialization::OptimizerState;
 use crate::{
-    autograd::{self, TensorId},
+    autograd::TensorId,
     error::Result,
     ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::Tensor,
@@ -19,16 +22,11 @@ use std::collections::hash_map::Entry;
 
 /// SGD optimizer with momentum support and parameter groups
 pub struct SGD {
-    /// Parameter groups with different learning rates
-    param_groups: Vec<ParameterGroup>,
-    /// Fast lookup from parameter id to its group index
-    param_lookup: FxHashMap<TensorId, usize>,
-    /// Default learning rate (for backward compatibility)
-    default_lr: f64,
+    /// Parameter groups, their reverse index, and the defaults for a
+    /// parameter in none of them.
+    groups: ParamGroups,
     /// Momentum coefficient
     momentum: f64,
-    /// Weight decay coefficient
-    weight_decay: f64,
     /// Dampening for momentum
     dampening: f64,
     /// Whether to use Nesterov momentum
@@ -44,49 +42,30 @@ pub struct SGD {
 impl SGD {
     /// Create a new SGD optimizer with single parameter group
     pub fn new(learning_rate: f64, momentum: Option<f64>, weight_decay: Option<f64>) -> Self {
+        let mut groups = ParamGroups::new(learning_rate);
+        groups.set_default_weight_decay(weight_decay.unwrap_or(0.0));
         Self {
-            param_groups: Vec::new(),
-            param_lookup: FxHashMap::default(),
-            default_lr: learning_rate,
+            groups,
             momentum: momentum.unwrap_or(0.0),
-            weight_decay: weight_decay.unwrap_or(0.0),
             dampening: 0.0,
             nesterov: false,
             velocity: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        }
-    }
-
-    /// Rebuild internal parameter lookup table
-    fn rebuild_param_lookup(&mut self) {
-        self.param_lookup.clear();
-        let total: usize = self.param_groups.iter().map(|g| g.params.len()).sum();
-        self.param_lookup.reserve(total);
-        for (idx, group) in self.param_groups.iter().enumerate() {
-            for &p in &group.params {
-                self.param_lookup.insert(p, idx);
-            }
         }
     }
 
     /// Create a new SGD optimizer with parameter groups
     pub fn with_param_groups(param_groups: Vec<ParameterGroup>, momentum: f64) -> Self {
-        let default_lr = param_groups.first().map(|g| g.lr).unwrap_or(0.001);
-        let mut optimizer = Self {
-            param_groups,
-            param_lookup: FxHashMap::default(),
-            default_lr,
+        Self {
+            groups: ParamGroups::from_groups(param_groups, 0.001),
             momentum,
-            weight_decay: 0.0,
             dampening: 0.0,
             nesterov: false,
             velocity: FxHashMap::default(),
             step_count: 0,
             gradient_clipping: GradientClipping::default(),
-        };
-        optimizer.rebuild_param_lookup();
-        optimizer
+        }
     }
 
     /// Set dampening for momentum
@@ -119,12 +98,12 @@ impl SGD {
 
     /// Get weight decay coefficient
     pub fn weight_decay(&self) -> f64 {
-        self.weight_decay
+        self.groups.default_weight_decay()
     }
 
     /// Set weight decay coefficient
     pub fn set_weight_decay(&mut self, weight_decay: f64) {
-        self.weight_decay = weight_decay;
+        self.groups.set_default_weight_decay(weight_decay);
     }
 
     /// Get the momentum dampening coefficient
@@ -137,43 +116,6 @@ impl SGD {
         self.nesterov
     }
 
-    /// Get learning rate for a specific parameter
-    fn get_param_lr(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].lr
-        } else {
-            self.default_lr
-        }
-    }
-
-    /// Get weight decay for a specific parameter
-    fn get_param_weight_decay(&self, param_id: TensorId) -> f64 {
-        if let Some(&idx) = self.param_lookup.get(&param_id) {
-            self.param_groups[idx].weight_decay
-        } else {
-            self.weight_decay
-        }
-    }
-
-    /// Validate parameter and gradient compatibility
-    fn validate_param_grad(&self, param: &Tensor, grad: &Tensor) -> Result<()> {
-        if param.device() != grad.device() {
-            return Err(crate::error::MinitensorError::device_mismatch(
-                param.device().to_string(),
-                grad.device().to_string(),
-            ));
-        }
-
-        if param.shape() != grad.shape() {
-            return Err(crate::error::MinitensorError::shape_mismatch(
-                param.shape().dims().to_vec(),
-                grad.shape().dims().to_vec(),
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Apply simple SGD update without momentum and optional weight decay
     fn apply_simple_update(
         &mut self,
@@ -182,7 +124,7 @@ impl SGD {
         lr: f64,
         weight_decay: f64,
     ) -> Result<()> {
-        self.validate_param_grad(param, grad)?;
+        check_param_grad_match(param, grad)?;
 
         /// One dtype arm. The math lives in a single chunk closure; the chunk
         /// loop stays on the calling thread for small parameters (biases, norm
@@ -238,7 +180,7 @@ impl SGD {
         lr: f64,
         weight_decay: f64,
     ) -> Result<()> {
-        self.validate_param_grad(param, grad)?;
+        check_param_grad_match(param, grad)?;
 
         let param_id = param.id();
 
@@ -366,17 +308,13 @@ impl Optimizer for SGD {
                 continue;
             }
 
-            let grad = if let Some(g) = autograd::get_gradient(param) {
-                g
-            } else if let Some(g) = param.grad() {
-                (**g).clone()
-            } else {
+            let Some(grad) = parameter_gradient(param) else {
                 continue;
             };
 
             // Get learning rate for this parameter
-            let lr = self.get_param_lr(param.id());
-            let weight_decay = self.get_param_weight_decay(param.id());
+            let lr = self.groups.lr(param.id());
+            let weight_decay = self.groups.weight_decay(param.id());
 
             if self.momentum > 0.0 {
                 self.apply_momentum_update(param, &grad, lr, weight_decay)?;
@@ -389,43 +327,5 @@ impl Optimizer for SGD {
         Ok(())
     }
 
-    fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()> {
-        for param in parameters.iter_mut() {
-            param.zero_grad(set_to_none);
-        }
-        Ok(())
-    }
-
-    fn learning_rate(&self) -> f64 {
-        self.default_lr
-    }
-
-    fn set_learning_rate(&mut self, lr: f64) {
-        self.default_lr = lr;
-        // Also update all parameter groups if they exist
-        for group in &mut self.param_groups {
-            group.lr = lr;
-        }
-    }
-
-    fn param_groups(&self) -> &[ParameterGroup] {
-        &self.param_groups
-    }
-
-    fn param_groups_mut(&mut self) -> &mut [ParameterGroup] {
-        &mut self.param_groups
-    }
-
-    fn add_param_group(&mut self, group: ParameterGroup) -> Result<()> {
-        let idx = self.param_groups.len();
-        for &p in &group.params {
-            self.param_lookup.insert(p, idx);
-        }
-        self.param_groups.push(group);
-        Ok(())
-    }
-
-    fn step_count(&self) -> usize {
-        self.step_count
-    }
+    crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }
