@@ -10,13 +10,137 @@ use crate::autograd::MinMaxBackward;
 use crate::{
     autograd::add_to_graph,
     error::{MinitensorError, Result},
+    ops::map::PAR_THRESHOLD,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
+/// Which of the two boolean folds to run.
+///
+/// `any` and `all` are the same reduction with two things exchanged: what the
+/// answer starts as, and what ends the scan. `any` starts `false` and stops at
+/// the first truthy element; `all` starts `true` and stops at the first falsy
+/// one. Everything else -- how each dtype decides truthiness, the output shape,
+/// the walk over the reduced axis -- is common, so it is written once below and
+/// the entry points pass this.
+///
+/// They used to be four functions in two files, three hundred lines between
+/// them, `any_along_dim` here and `all_along_dim` over in `logsumexp.rs`, each
+/// with the same five dtype arms spelled out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BoolFold {
+    Any,
+    All,
+}
+
+impl BoolFold {
+    /// The answer for a slice with nothing in it, and the value a scan holds
+    /// until something contradicts it. `any` of nothing is false; `all` of
+    /// nothing is true.
+    #[inline(always)]
+    fn identity(self) -> bool {
+        self == BoolFold::All
+    }
+}
+
+/// Expand `$body` once per dtype, with `$input` bound to the element slice and
+/// `$truthy` to the predicate that decides whether one element counts.
+///
+/// "Counts" is nonzero for the numeric dtypes and the value itself for `Bool`,
+/// which is what makes `any`/`all` work on any tensor rather than only on masks.
+macro_rules! with_truthy_slice {
+    ($tensor:expr, |$input:ident, $truthy:ident| $body:expr) => {{
+        macro_rules! arm {
+            ($accessor:ident, $ty:ty, $tyname:literal, $pred:expr) => {{
+                let $input = $tensor.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+                })?;
+                let $truthy = $pred;
+                $body
+            }};
+        }
+        match $tensor.dtype() {
+            DataType::Float32 => arm!(as_f32_slice, f32, "f32", |v: f32| v != 0.0),
+            DataType::Float64 => arm!(as_f64_slice, f64, "f64", |v: f64| v != 0.0),
+            DataType::Int32 => arm!(as_i32_slice, i32, "i32", |v: i32| v != 0),
+            DataType::Int64 => arm!(as_i64_slice, i64, "i64", |v: i64| v != 0),
+            DataType::Bool => arm!(as_bool_slice, bool, "bool", |v: bool| v),
+        }
+    }};
+}
+
+/// Wrap a boolean result as a 0-d (or all-ones, under `keepdim`) tensor.
+fn bool_scalar_tensor(value: bool, tensor: &Tensor, keepdim: bool) -> Result<Tensor> {
+    let shape = if keepdim {
+        Shape::new(vec![1; tensor.ndim()])
+    } else {
+        Shape::scalar()
+    };
+    let mut data = TensorData::zeros_on_device(1, DataType::Bool, tensor.device());
+    data.as_bool_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?[0] =
+        value;
+    Ok(Tensor::new(
+        Arc::new(data),
+        shape,
+        DataType::Bool,
+        tensor.device(),
+        false,
+    ))
+}
+
+/// `any`/`all` over every element.
+fn bool_fold_all(tensor: &Tensor, keepdim: bool, fold: BoolFold) -> Result<Tensor> {
+    let value = with_truthy_slice!(tensor, |input, truthy| match fold {
+        BoolFold::Any => input.par_iter().any(|&v| truthy(v)),
+        BoolFold::All => input.par_iter().all(|&v| truthy(v)),
+    });
+    bool_scalar_tensor(value, tensor, keepdim)
+}
+
+/// Longest column band one task takes when the reduced axis is not the last
+/// one. Wide enough that the per-task overhead disappears against a band's
+/// `dim_size` passes over it, short enough that the band's accumulator and the
+/// slab it is reading stay in cache together.
+const BOOL_FOLD_BAND: usize = 4096;
+
+/// How much of a contiguous run one branchless block covers, when the reduced
+/// axis is the last one. Long enough to fill a couple of vector registers,
+/// short enough that a scan which settles immediately reads little more than
+/// it has to.
+const RUN_BLOCK: usize = 64;
+
+/// `any`/`all` along one axis.
+///
+/// Two layouts, because the reduced axis being last or not decides which way
+/// the reads run.
+///
+/// **`inner == 1`** -- the reduced axis is the last one, so each output owns a
+/// contiguous run of `dim_size` elements. Scanning that run directly is already
+/// sequential in memory, and it can stop at the first element that settles the
+/// answer.
+///
+/// **`inner > 1`** -- each output's elements are `inner` apart, so scanning one
+/// output at a time walks the input in strides and touches a fresh cache line
+/// every step. Accumulating whole slabs instead (`out[r] op= input[k][r]` for
+/// every `r` at once) reads in memory order, at the cost of visiting every
+/// element rather than stopping early. The early exit comes back at slab
+/// granularity: after each slab, if nothing is left at the identity there is
+/// nothing more to learn.
+///
+/// The parallel split is over the output — bands of columns within a slab, so
+/// that a reduction over dimension 0 (one outer position, all the work in one
+/// slab) is split at all — and it is gated on the *input* length, because that
+/// is where the work is. Gating on the output would leave a 1024x1024 reduction
+/// to a single core on the strength of its 1024 outputs.
+fn bool_fold_along_dim(
+    tensor: &Tensor,
+    dim: usize,
+    keepdim: bool,
+    fold: BoolFold,
+) -> Result<Tensor> {
     if dim >= tensor.ndim() {
         return Err(MinitensorError::dim_out_of_range(
             dim as isize,
@@ -31,126 +155,113 @@ pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Resul
     } else {
         output_shape.remove(dim);
     }
-    let output_shape_obj = Shape::new(output_shape.clone());
+    let output_shape_obj = Shape::new(output_shape);
     let mut result_data =
         TensorData::zeros_on_device(output_shape_obj.numel(), DataType::Bool, tensor.device());
 
     let dim_size = input_shape[dim];
-    let _outer = input_shape[..dim].iter().product::<usize>();
     let inner = input_shape[dim + 1..].iter().product::<usize>();
     let outer_stride = dim_size * inner;
+    let identity = fold.identity();
+    let numel = tensor.numel();
 
-    match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
+    // `inner == 0` is the only case with nothing to do: it means some axis
+    // inside the reduced one is empty, so the output is empty too, and it is
+    // also the one chunk length `chunks_mut` refuses to take. A `dim_size` of
+    // zero is *not* this case -- the output is a full set of identities, which
+    // both branches below produce by scanning nothing.
+    if inner != 0 {
+        with_truthy_slice!(tensor, |input, truthy| {
             let output = result_data.as_bool_slice_mut().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get mutable bool slice")
             })?;
-            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let o = idx / inner;
-                let r = idx % inner;
-                let mut val = false;
-                for d in 0..dim_size {
-                    let in_idx = o * outer_stride + d * inner + r;
-                    if input[in_idx] != 0.0 {
-                        val = true;
-                        break;
+
+            if inner == 1 {
+                // Contiguous runs, one per output, with a true early exit.
+                let run = |first: usize, chunk: &mut [bool]| {
+                    for (i, slot) in chunk.iter_mut().enumerate() {
+                        let base = (first + i) * dim_size;
+                        let mut val = identity;
+                        // Blocked rather than a bare `for .. { if .. break }`:
+                        // the branch out of the middle of a loop is what stops
+                        // it vectorizing, and these runs are usually scanned
+                        // most of the way through. Within a block the combine
+                        // is branchless, and the block boundary is where the
+                        // scan is allowed to give up -- so an `any` that
+                        // settles on the first element still reads only one
+                        // block, not the whole run.
+                        for block in input[base..base + dim_size].chunks(RUN_BLOCK) {
+                            let mut acc = identity;
+                            for &v in block {
+                                if identity {
+                                    acc &= truthy(v);
+                                } else {
+                                    acc |= truthy(v);
+                                }
+                            }
+                            if acc != identity {
+                                val = !identity;
+                                break;
+                            }
+                        }
+                        *slot = val;
                     }
+                };
+                if numel < PAR_THRESHOLD {
+                    run(0, output);
+                } else {
+                    let band = BOOL_FOLD_BAND;
+                    output
+                        .par_chunks_mut(band)
+                        .enumerate()
+                        .for_each(|(b, chunk)| run(b * band, chunk));
                 }
-                *out = val;
-            });
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let output = result_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let o = idx / inner;
-                let r = idx % inner;
-                let mut val = false;
-                for d in 0..dim_size {
-                    let in_idx = o * outer_stride + d * inner + r;
-                    if input[in_idx] != 0.0 {
-                        val = true;
-                        break;
+            } else {
+                // Slab accumulation. `band` divides `inner` so every task stays
+                // inside one slab and can derive its outer position from the
+                // chunk index alone.
+                let band = column_band(inner);
+                let bands_per_slab = inner / band;
+                let run = |chunk_index: usize, chunk: &mut [bool]| {
+                    let o = chunk_index / bands_per_slab;
+                    let col0 = (chunk_index % bands_per_slab) * band;
+                    let width = chunk.len();
+                    chunk.fill(identity);
+                    let mut base = o * outer_stride + col0;
+                    for _ in 0..dim_size {
+                        let slab = &input[base..base + width];
+                        for (slot, &v) in chunk.iter_mut().zip(slab) {
+                            // `identity` is the same for every element of the
+                            // call, so this unswitches into a plain `&=` for
+                            // `all` and `|=` for `any`.
+                            if identity {
+                                *slot &= truthy(v);
+                            } else {
+                                *slot |= truthy(v);
+                            }
+                        }
+                        // Everything has settled; the remaining slabs cannot
+                        // change an answer. `all` stops here on the usual
+                        // rejection, `any` on the usual acceptance.
+                        if chunk.iter().all(|&v| v != identity) {
+                            break;
+                        }
+                        base += inner;
                     }
+                };
+                if numel < PAR_THRESHOLD {
+                    output
+                        .chunks_mut(band)
+                        .enumerate()
+                        .for_each(|(c, chunk)| run(c, chunk));
+                } else {
+                    output
+                        .par_chunks_mut(band)
+                        .enumerate()
+                        .for_each(|(c, chunk)| run(c, chunk));
                 }
-                *out = val;
-            });
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            let output = result_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let o = idx / inner;
-                let r = idx % inner;
-                let mut val = false;
-                for d in 0..dim_size {
-                    let in_idx = o * outer_stride + d * inner + r;
-                    if input[in_idx] != 0 {
-                        val = true;
-                        break;
-                    }
-                }
-                *out = val;
-            });
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            let output = result_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let o = idx / inner;
-                let r = idx % inner;
-                let mut val = false;
-                for d in 0..dim_size {
-                    let in_idx = o * outer_stride + d * inner + r;
-                    if input[in_idx] != 0 {
-                        val = true;
-                        break;
-                    }
-                }
-                *out = val;
-            });
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let output = result_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            output.par_iter_mut().enumerate().for_each(|(idx, out)| {
-                let o = idx / inner;
-                let r = idx % inner;
-                let mut val = false;
-                for d in 0..dim_size {
-                    let in_idx = o * outer_stride + d * inner + r;
-                    if input[in_idx] {
-                        val = true;
-                        break;
-                    }
-                }
-                *out = val;
-            });
-        }
+            }
+        });
     }
 
     Ok(Tensor::new(
@@ -160,6 +271,46 @@ pub(crate) fn any_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Resul
         tensor.device(),
         false,
     ))
+}
+
+/// The widest band no longer than [`BOOL_FOLD_BAND`] that divides `inner`
+/// exactly, so a band never straddles two slabs.
+///
+/// Falling back to `inner` itself costs nothing when the outer dimension is
+/// large -- whole slabs still go to separate tasks -- and only leaves a single
+/// task when `inner` is both large and awkwardly factored.
+fn column_band(inner: usize) -> usize {
+    if inner <= BOOL_FOLD_BAND {
+        return inner;
+    }
+    for parts in 2..=(inner / BOOL_FOLD_BAND + 1) {
+        if inner.is_multiple_of(parts) && inner / parts <= BOOL_FOLD_BAND {
+            return inner / parts;
+        }
+    }
+    inner
+}
+
+/// Logical `all` reduction, over one dimension or the whole tensor.
+pub fn all(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    match dim {
+        None => bool_fold_all(tensor, keepdim, BoolFold::All),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            bool_fold_along_dim(tensor, d, keepdim, BoolFold::All)
+        }
+    }
+}
+
+/// Logical `any` reduction, over one dimension or the whole tensor.
+pub fn any(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    match dim {
+        None => bool_fold_all(tensor, keepdim, BoolFold::Any),
+        Some(d) => {
+            let d = normalize_dim(d, tensor.ndim())?;
+            bool_fold_along_dim(tensor, d, keepdim, BoolFold::Any)
+        }
+    }
 }
 
 /// Reject an extremum reduction that has no elements to choose between.
@@ -808,4 +959,142 @@ pub fn topk(
     let values = attach_gather_like_grad(values, tensor, axis, &indices)?;
 
     Ok((values, indices))
+}
+
+#[cfg(test)]
+mod bool_fold_tests {
+    use super::*;
+    use crate::device::Device;
+
+    fn f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<f32>(
+                data,
+                DataType::Float32,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn bool_tensor(data: Vec<bool>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<bool>(
+                data,
+                DataType::Bool,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn out(t: &Tensor) -> Vec<bool> {
+        t.data().as_bool_slice().unwrap().to_vec()
+    }
+
+    /// Both folds along each axis of the same tensor, against the answer read
+    /// off by hand. The two used to be separate implementations in separate
+    /// files, so nothing forced them to agree about layout; now they are one
+    /// walk and this says what that walk produces.
+    #[test]
+    fn any_and_all_agree_with_a_hand_reduction_on_every_axis() {
+        // 2x3, with a row that is all-nonzero, a row that is all-zero in one
+        // column and mixed elsewhere.
+        let t = f32_tensor(vec![1.0, 2.0, 3.0, 0.0, 0.0, 4.0], vec![2, 3]);
+
+        assert_eq!(
+            out(&any(&t, Some(0), false).unwrap()),
+            vec![true, true, true]
+        );
+        assert_eq!(
+            out(&all(&t, Some(0), false).unwrap()),
+            vec![false, false, true]
+        );
+        assert_eq!(out(&any(&t, Some(1), false).unwrap()), vec![true, true]);
+        assert_eq!(out(&all(&t, Some(1), false).unwrap()), vec![true, false]);
+
+        // negative axis resolves the same way
+        assert_eq!(
+            out(&all(&t, Some(-1), false).unwrap()),
+            out(&all(&t, Some(1), false).unwrap())
+        );
+
+        // keepdim only changes the shape
+        let kept = all(&t, Some(1), true).unwrap();
+        assert_eq!(kept.shape().dims(), &[2, 1]);
+        assert_eq!(out(&kept), vec![true, false]);
+
+        // whole-tensor
+        assert_eq!(out(&any(&t, None, false).unwrap()), vec![true]);
+        assert_eq!(out(&all(&t, None, false).unwrap()), vec![false]);
+        assert_eq!(all(&t, None, true).unwrap().shape().dims(), &[1, 1]);
+    }
+
+    /// An axis of length zero reduces to each fold's identity: `any` of nothing
+    /// is false, `all` of nothing is vacuously true. This is the case a scan
+    /// written as "stop at the first disagreement" gets right only because it
+    /// starts from the identity.
+    #[test]
+    fn an_empty_axis_reduces_to_the_identity() {
+        let t = f32_tensor(Vec::new(), vec![2, 0]);
+        assert_eq!(out(&any(&t, Some(1), false).unwrap()), vec![false, false]);
+        assert_eq!(out(&all(&t, Some(1), false).unwrap()), vec![true, true]);
+
+        // Reducing the *other* axis leaves an empty output, not an identity.
+        assert!(out(&any(&t, Some(0), false).unwrap()).is_empty());
+        assert!(out(&all(&t, Some(0), false).unwrap()).is_empty());
+
+        // ...and so does the whole-tensor form over no elements at all.
+        assert_eq!(out(&any(&t, None, false).unwrap()), vec![false]);
+        assert_eq!(out(&all(&t, None, false).unwrap()), vec![true]);
+    }
+
+    /// Truthiness is "nonzero" for the numeric dtypes and the value itself for
+    /// `Bool`. Negative and NaN both count as truthy, being nonzero.
+    #[test]
+    fn truthiness_is_nonzero_including_negatives_and_nan() {
+        let t = f32_tensor(vec![-1.0, f32::NAN, -0.0, 0.0], vec![4]);
+        assert_eq!(out(&any(&t, None, false).unwrap()), vec![true]);
+        assert_eq!(out(&all(&t, None, false).unwrap()), vec![false]);
+
+        // -0.0 is zero, so a slice of only signed zeros is entirely falsy.
+        let zeros = f32_tensor(vec![0.0, -0.0], vec![2]);
+        assert_eq!(out(&any(&zeros, None, false).unwrap()), vec![false]);
+
+        let b = bool_tensor(vec![false, true, false, false], vec![2, 2]);
+        assert_eq!(out(&any(&b, Some(1), false).unwrap()), vec![true, false]);
+        assert_eq!(out(&all(&b, Some(1), false).unwrap()), vec![false, false]);
+    }
+
+    /// The along-axis fold runs sequentially below the threshold and in
+    /// parallel above it. The split is over whole output slabs, so it cannot
+    /// change an answer -- which this checks at a size that crosses it, with
+    /// the one disagreeing element placed at each end of the scanned axis.
+    #[test]
+    fn the_parallel_split_does_not_change_the_answer() {
+        let rows = PAR_THRESHOLD + 3;
+        let cols = 4;
+        for offender in [0usize, cols - 1] {
+            let mut data = vec![1.0f32; rows * cols];
+            // one zero per row, at a fixed position along the reduced axis
+            for r in 0..rows {
+                data[r * cols + offender] = 0.0;
+            }
+            let t = f32_tensor(data, vec![rows, cols]);
+
+            let alls = out(&all(&t, Some(1), false).unwrap());
+            let anys = out(&any(&t, Some(1), false).unwrap());
+            assert_eq!(alls.len(), rows);
+            assert!(alls.iter().all(|&v| !v), "offender at {offender}");
+            assert!(anys.iter().all(|&v| v), "offender at {offender}");
+        }
+    }
 }
