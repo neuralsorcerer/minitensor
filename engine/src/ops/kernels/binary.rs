@@ -5,7 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::ops::map::{
-    BINARY_PAR_THRESHOLD, PAR_CHUNK, binary_map, build_vec_with, unary_map_threshold,
+    BINARY_PAR_THRESHOLD, PAR_CHUNK, SIMD_PAR_CHUNK, SIMD_PAR_THRESHOLD, binary_map,
+    binary_map_blocks_threshold, build_vec_with, unary_map_threshold,
 };
 use crate::ops::simd::*;
 use crate::{
@@ -60,8 +61,17 @@ macro_rules! binary_kernel {
     };
 }
 
-/// Same as [`binary_kernel!`], with a SIMD fast path for same-shape inputs
-/// (f32/f64 only).
+/// Same as [`binary_kernel!`], with a vectorized fast path for same-shape
+/// inputs (f32/f64 only).
+///
+/// The fast path runs the multiversioned loop from `ops::simd` over blocks,
+/// spread across the pool above [`SIMD_PAR_THRESHOLD`]. It used to hand the
+/// whole buffer to one call, which left `a + b` running on a single core at
+/// every size — while the *broadcasting* form of the same operation, and the
+/// integer dtypes (which have no fast path and fall through to
+/// [`broadcast_binary_map`]), were parallel. So a float32 `a + b` over 4M
+/// elements took 4.2ms where `a + b[:, None]` over the same data took under
+/// one, and adding a shape of 1 to an operand made the op nearly 5x faster.
 macro_rules! binary_kernel_simd {
     ($name:ident, $accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $simd:ident, $op:expr) => {
         pub(crate) fn $name(
@@ -84,12 +94,16 @@ macro_rules! binary_kernel_simd {
                 ))
             })?;
             let out = if can_use_simd_fast_path(lhs.shape(), rhs.shape(), output_shape) {
-                // SAFETY: the SIMD entry points initialize every output
-                // element when they return Ok.
+                // SAFETY: the block kernel writes every element of the output
+                // block it is given, and the driver's blocks tile the output.
                 unsafe {
-                    build_vec_with(output_shape.numel(), |spare| {
-                        $simd(lhs_data, rhs_data, spare)
-                    })?
+                    binary_map_blocks_threshold(
+                        lhs_data,
+                        rhs_data,
+                        SIMD_PAR_THRESHOLD,
+                        SIMD_PAR_CHUNK,
+                        $simd,
+                    )
                 }
             } else {
                 broadcast_binary_map(
@@ -117,7 +131,7 @@ binary_kernel_simd!(
     f32,
     Float32,
     "f32",
-    simd_add_f32,
+    add_f32_blocks,
     |a, b| a + b
 );
 binary_kernel_simd!(
@@ -126,7 +140,7 @@ binary_kernel_simd!(
     f64,
     Float64,
     "f64",
-    simd_add_f64,
+    add_f64_blocks,
     |a, b| a + b
 );
 binary_kernel!(add_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
@@ -149,7 +163,7 @@ binary_kernel_simd!(
     f32,
     Float32,
     "f32",
-    simd_sub_f32,
+    sub_f32_blocks,
     |a, b| a - b
 );
 binary_kernel_simd!(
@@ -158,7 +172,7 @@ binary_kernel_simd!(
     f64,
     Float64,
     "f64",
-    simd_sub_f64,
+    sub_f64_blocks,
     |a, b| a - b
 );
 binary_kernel!(sub_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
@@ -173,7 +187,7 @@ binary_kernel_simd!(
     f32,
     Float32,
     "f32",
-    simd_mul_f32,
+    mul_f32_blocks,
     |a, b| a * b
 );
 binary_kernel_simd!(
@@ -182,7 +196,7 @@ binary_kernel_simd!(
     f64,
     Float64,
     "f64",
-    simd_mul_f64,
+    mul_f64_blocks,
     |a, b| a * b
 );
 binary_kernel!(mul_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
@@ -205,7 +219,7 @@ binary_kernel_simd!(
     f32,
     Float32,
     "f32",
-    simd_div_f32,
+    div_f32_blocks,
     |a, b| a / b
 );
 binary_kernel_simd!(
@@ -214,7 +228,7 @@ binary_kernel_simd!(
     f64,
     Float64,
     "f64",
-    simd_div_f64,
+    div_f64_blocks,
     |a, b| a / b
 );
 
@@ -603,6 +617,78 @@ mod tests {
                 expected.as_slice(),
                 "broadcast {ash:?} + {bsh:?}"
             );
+        }
+    }
+
+    #[test]
+    fn equal_shape_arithmetic_is_exact_across_the_parallel_split() {
+        // The equal-shape fast path splits the buffer into `SIMD_PAR_CHUNK`
+        // blocks above `SIMD_PAR_THRESHOLD`. Nothing about `+`, `-`, `*` or `/`
+        // depends on where those boundaries fall -- each element reads only its
+        // own index -- so the result must be identical element for element on
+        // both sides of the threshold and at lengths that leave a partial block.
+        //
+        // Chosen to straddle it: below, exactly at, one past, and a length whose
+        // last block is short. `1 << 16` is the threshold and `8192` the block.
+        for len in [
+            1usize,
+            15, // under `can_use_simd_fast_path`'s floor: broadcast path
+            16, // the floor exactly: fast path, sequential
+            (1 << 16) - 1,
+            1 << 16,       // first parallel length
+            (1 << 16) + 1, // 8 full blocks and a block of one
+            (1 << 16) + 8191,
+            (1 << 17) + 4097,
+        ] {
+            let a: Vec<f32> = (0..len).map(|i| (i % 977) as f32 * 0.125 - 61.0).collect();
+            let b: Vec<f32> = (0..len).map(|i| (i % 641) as f32 * 0.25 - 80.0).collect();
+            let ta = create_test_tensor_f32(a.clone(), vec![len], false);
+            let tb = create_test_tensor_f32(b.clone(), vec![len], false);
+
+            for (name, got, op) in [
+                (
+                    "add",
+                    add(&ta, &tb).unwrap(),
+                    (|x, y| x + y) as fn(f32, f32) -> f32,
+                ),
+                ("sub", sub(&ta, &tb).unwrap(), |x, y| x - y),
+                ("mul", mul(&ta, &tb).unwrap(), |x, y| x * y),
+                ("div", div(&ta, &tb).unwrap(), |x, y| x / y),
+            ] {
+                let expected: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| op(x, y)).collect();
+                assert_eq!(
+                    got.data().as_f32_slice().unwrap(),
+                    expected.as_slice(),
+                    "{name} at len {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn equal_shape_division_keeps_ieee_semantics_across_blocks() {
+        // Division is the one of the four with values it must not normalize
+        // away, and `0.0` divisors placed every third element land at differing
+        // offsets within each block. Both sides of the parallel threshold.
+        for len in [64usize, (1 << 16) + 5] {
+            let a: Vec<f32> = (0..len)
+                .map(|i| match i % 3 {
+                    0 => -1.0,
+                    1 => 0.0,
+                    _ => 1.0,
+                })
+                .collect();
+            let ta = create_test_tensor_f32(a, vec![len], false);
+            let tb = create_test_tensor_f32(vec![0.0; len], vec![len], false);
+            let got = div(&ta, &tb).unwrap();
+            let out = got.data().as_f32_slice().unwrap();
+            for i in 0..len {
+                match i % 3 {
+                    0 => assert_eq!(out[i], f32::NEG_INFINITY, "len {len} index {i}"),
+                    1 => assert!(out[i].is_nan(), "len {len} index {i}"),
+                    _ => assert_eq!(out[i], f32::INFINITY, "len {len} index {i}"),
+                }
+            }
         }
     }
 

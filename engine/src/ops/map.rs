@@ -83,9 +83,11 @@ pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
 
 /// Element count above which binary/broadcast kernels parallelize.
 ///
-/// Same reasoning as [`PAR_THRESHOLD`]. Note this only governs the
-/// *broadcasting* path: equal-shape elementwise binary ops take the sequential
-/// SIMD fast path in `ops::kernels::binary` and never reach rayon at all.
+/// Same reasoning as [`PAR_THRESHOLD`]. Note this governs the *broadcasting*
+/// path, and the dtypes with no vectorized kernel; equal-shape f32/f64
+/// arithmetic takes the fast path in `ops::kernels::binary` and splits at
+/// [`SIMD_PAR_THRESHOLD`] instead, which is measured separately because the
+/// work per element is smaller there.
 ///
 /// The old value of 1024 is one `PAR_CHUNK`, so it was the first size at which
 /// a split actually happens -- and therefore the first size to pay the
@@ -101,8 +103,58 @@ pub(crate) const VECTOR_F32_PAR_THRESHOLD: usize = 1 << 14; // 16384 elements
 /// ```
 pub(crate) const BINARY_PAR_THRESHOLD: usize = 1 << 15; // 32768 elements
 
+/// Element count above which the equal-shape arithmetic kernels in
+/// `ops::kernels::binary` parallelize — the `+`, `-`, `*`, `/` that every other
+/// operation is built out of.
+///
+/// They get their own threshold for the same reason
+/// [`VECTOR_F32_PAR_THRESHOLD`] does, one step further along: at one arithmetic
+/// operation per two loads and a store, they are the cheapest kernels in the
+/// engine, so the fixed region-entry cost takes the most elements to repay.
+/// Measured on a 4-core x86-64 container, float32 `add` (us):
+///
+/// ```text
+///        N   sequential   parallel
+///    16384         2.34       6.25
+///    32768         4.80       7.41
+///    65536        10.52       9.64   <- parallel takes the lead
+///   131072        48.37      15.71     3.1x
+///  1048576       506.49     124.13     4.1x
+///  4194304      4200.93     855.13     4.9x
+/// ```
+///
+/// Sitting *below* the crossover is the usual convention (see
+/// [`PAR_THRESHOLD`]), and the reason to sit only just below it is the middle
+/// row: the sequential side is still winning at 32768.
+///
+/// Note the shape of the sequential column — it is linear to 65536 and then
+/// steps by 4.6x at 131072, where the three buffers stop fitting in cache. Past
+/// that point one core is waiting on memory, and the parallel speedup is mostly
+/// the other three cores' load/store units rather than their arithmetic.
+pub(crate) const SIMD_PAR_THRESHOLD: usize = 1 << 16; // 65536 elements
+
 /// Chunk size for parallel map loops.
 pub(crate) const PAR_CHUNK: usize = 1024;
+
+/// Chunk size for the arithmetic kernels' parallel loops.
+///
+/// Eight times [`PAR_CHUNK`], because these kernels are cheap enough per
+/// element that a 1024-element block spends a visible fraction of itself
+/// entering and leaving. Same measurement as [`SIMD_PAR_THRESHOLD`], varying
+/// only the block length (float32 `add`, us):
+///
+/// ```text
+///        N   1024-elem   8192-elem
+///    65536       13.64        9.64
+///   131072       17.76       15.71
+///   262144       41.59       33.58
+///  4194304      925.70      855.13
+/// ```
+///
+/// Above 8192 the blocks start to outrun the cache again (at 65536 elements per
+/// block, 262144 measured 28.66us but 4194304 rose to 1044.57), so this is the
+/// length that is good everywhere rather than best anywhere.
+pub(crate) const SIMD_PAR_CHUNK: usize = 8192;
 
 /// Build a `Vec<U>` of exactly `len` elements, delegating initialization of
 /// the spare capacity to `fill`.
@@ -318,6 +370,12 @@ where
 /// means being handed slices rather than elements. Gradient kernels take the
 /// saved input and the incoming gradient, so they need two.
 ///
+/// `chunk` is the block length, which the callers here do not agree on: a
+/// gradient kernel costing nanoseconds per element wants the short
+/// [`PAR_CHUNK`] blocks that keep every core fed, while the arithmetic kernels
+/// cost fractions of one and want [`SIMD_PAR_CHUNK`] so the per-block overhead
+/// is not most of the work.
+///
 /// # Safety
 ///
 /// On return `op` must have initialized **every** element of each output block
@@ -327,6 +385,7 @@ pub(crate) unsafe fn binary_map_blocks_threshold<A, B, U, F>(
     lhs: &[A],
     rhs: &[B],
     threshold: usize,
+    chunk: usize,
     op: F,
 ) -> Vec<U>
 where
@@ -336,6 +395,7 @@ where
     F: Fn(&[A], &[B], &mut [MaybeUninit<U>]) + Send + Sync,
 {
     debug_assert_eq!(lhs.len(), rhs.len());
+    debug_assert!(chunk > 0);
     let len = lhs.len();
     // SAFETY: forwarded to the caller by this function's own contract.
     unsafe {
@@ -343,9 +403,9 @@ where
             if len < threshold {
                 op(lhs, rhs, spare);
             } else {
-                lhs.par_chunks(PAR_CHUNK)
-                    .zip(rhs.par_chunks(PAR_CHUNK))
-                    .zip(spare.par_chunks_mut(PAR_CHUNK))
+                lhs.par_chunks(chunk)
+                    .zip(rhs.par_chunks(chunk))
+                    .zip(spare.par_chunks_mut(chunk))
                     .for_each(|((lc, rc), oc)| op(lc, rc, oc));
             }
             Ok(())

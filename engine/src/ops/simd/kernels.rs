@@ -4,23 +4,20 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use super::*;
-
 use crate::{
     error::{MinitensorError, Result},
     tensor::Shape,
 };
 use std::mem::MaybeUninit;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
-
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
-
 /// SIMD capabilities detected at runtime
 #[derive(Debug, Clone, Copy)]
 pub struct SimdCapabilities {
+    /// 256-bit float arithmetic (`vaddps`/`vaddpd`). This, not [`Self::avx2`],
+    /// is what the element-wise float kernels need: AVX2 extends the *integer*
+    /// instructions, and a Sandy/Ivy Bridge machine has the wide float
+    /// registers without it.
+    pub avx: bool,
     pub avx2: bool,
     pub avx512: bool,
     pub sse4_1: bool,
@@ -33,11 +30,15 @@ impl SimdCapabilities {
     pub fn detect() -> Self {
         Self {
             #[cfg(target_arch = "x86_64")]
+            avx: is_x86_feature_detected!("avx"),
+            #[cfg(target_arch = "x86_64")]
             avx2: is_x86_feature_detected!("avx2"),
             #[cfg(target_arch = "x86_64")]
             avx512: is_x86_feature_detected!("avx512f"),
             #[cfg(target_arch = "x86_64")]
             sse4_1: is_x86_feature_detected!("sse4.1"),
+            #[cfg(not(target_arch = "x86_64"))]
+            avx: false,
             #[cfg(not(target_arch = "x86_64"))]
             avx2: false,
             #[cfg(not(target_arch = "x86_64"))]
@@ -65,138 +66,155 @@ pub fn simd_capabilities() -> SimdCapabilities {
     *SIMD_CAPS.get_or_init(SimdCapabilities::detect)
 }
 
-/// SIMD-optimized element-wise addition for f32 arrays.
+/// Generates one element-wise binary kernel: the loop, one compilation of it
+/// per instruction set, and the runtime pick between them.
 ///
-/// The binary SIMD entry points write into `MaybeUninit` output so freshly
-/// allocated (never zeroed) buffers can be used directly; on success every
-/// element of `output` has been written. See `ops::map` for the
-/// allocation pattern.
-pub fn simd_add_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
+/// Every kernel here is the same loop — `out[i] = lhs[i] OP rhs[i]` — and that
+/// is a loop LLVM vectorizes exactly, provided it is told which registers it
+/// may use. So the loop is written once and compiled twice, the same way
+/// `ops::simd::transcendental` handles its far more intricate kernels.
+///
+/// This replaces four hand-written intrinsic bodies per operation (AVX2, SSE,
+/// NEON, scalar) per dtype — 24 functions of `_mm256_loadu_ps`/`step_by`
+/// boilerplate that between them said nothing the operator did not. Writing
+/// them out cost more than the duplication:
+///
+/// * **Three of the four paths were never distinguishable from the fallback.**
+///   SSE2 is baseline on every x86-64 target, so the "scalar" body already
+///   compiled to `addps`/`addpd`; the `sse4.1` variants emitted the identical
+///   instructions behind a runtime check, since SSE4.1 adds nothing to float
+///   arithmetic. NEON is likewise baseline on aarch64, so the NEON bodies were
+///   the fallback with extra steps.
+/// * **The hand-written loops were the slower ones.** One vector operation per
+///   iteration with no unrolling, and a scalar remainder loop that kept its
+///   bounds checks. LLVM unrolls the same loop four ways and vectorizes the
+///   remainder, which is worth 1.4x-1.5x on cache-resident data (float32 add,
+///   4096 elements: 0.94us -> 0.67us).
+///
+/// # Why there is no AVX-512 tier
+///
+/// A third compilation is one line here, so it was measured rather than
+/// assumed — and 512-bit registers lost at every size on the AVX-512 machine
+/// available, by 26% on cache-resident data and 34% when memory-bound
+/// (float32 add, us, one process so the ISA is the only variable):
+///
+/// ```text
+///        N     SSE2      AVX   AVX-512
+///     4096    0.739    0.485     0.609
+///    65536   12.154    9.962    11.777
+///  4194304 4035.903 4333.065  5427.977
+/// ```
+///
+/// Which is the ordinary shape of it: these kernels are one arithmetic
+/// operation per two loads and a store, so they saturate on memory long before
+/// they saturate on vector width, and the frequency these parts drop to when
+/// 512-bit code issues is not repaid. Note the last row — past the caches even
+/// AVX loses to the baseline, which is what makes the parallel split in
+/// `ops::kernels::binary` matter far more here than the register width does.
+macro_rules! binary_elementwise {
+    ($(#[$meta:meta])* $entry:ident, $core:ident, $ty:ty, $op:tt) => {
+        /// The dispatching loop, with the length agreement taken on trust.
+        ///
+        /// `out.len()` sets the length and both inputs are reborrowed to it, so
+        /// a caller that passes a short input panics on the reborrow rather
+        /// than leaving the output partly written. [`$entry`] is the checked
+        /// public form; this one exists so the blocked driver in
+        /// `ops::kernels::binary` — which slices all three buffers itself, and
+        /// so cannot get the lengths wrong — does not have to answer a `Result`
+        /// it can never receive.
+        #[inline]
+        pub(crate) fn $core(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+            /// The loop. `#[inline(always)]` is what makes the wrapper below a
+            /// second compilation rather than a call to this one: inlining into
+            /// a `#[target_feature]` function rebuilds the body with that
+            /// function's registers available.
+            #[inline(always)]
+            fn body(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+                // Reborrowing both inputs at the output length is what removes
+                // the bounds checks: it gives LLVM one length for all three
+                // slices, so nothing in the loop can trap.
+                let n = out.len();
+                let (lhs, rhs) = (&lhs[..n], &rhs[..n]);
+                for i in 0..n {
+                    out[i].write(lhs[i] $op rhs[i]);
+                }
+            }
 
-    let caps = simd_capabilities();
+            // `avx`, not `avx2`: these are float operations, and 256-bit
+            // `vaddps`/`vaddpd` arrived with AVX. AVX2 is an integer extension,
+            // so gating on it would skip the machines that have the registers
+            // but not the integer instructions.
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx")]
+            fn body_avx(lhs: &[$ty], rhs: &[$ty], out: &mut [MaybeUninit<$ty>]) {
+                body(lhs, rhs, out)
+            }
 
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_add_f32_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_add_f32_sse(lhs, rhs, output) };
+            #[cfg(target_arch = "x86_64")]
+            if simd_capabilities().avx {
+                // SAFETY: `detect` confirmed avx on this CPU.
+                unsafe { body_avx(lhs, rhs, out) };
+                return;
+            }
+
+            // Baseline: SSE2 on x86-64, NEON on aarch64 — both already
+            // vectorize this loop, which is why the ISA-specific bodies for
+            // them were never anything but this one.
+            body(lhs, rhs, out)
         }
-    }
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_add_f32_neon(lhs, rhs, output) };
+        $(#[$meta])*
+        pub fn $entry(lhs: &[$ty], rhs: &[$ty], output: &mut [MaybeUninit<$ty>]) -> Result<()> {
+            if lhs.len() != rhs.len() || lhs.len() != output.len() {
+                return Err(MinitensorError::invalid_operation(
+                    "Array lengths must match for SIMD operations",
+                ));
+            }
+            $core(lhs, rhs, output);
+            Ok(())
         }
-    }
-
-    // Fallback to scalar implementation
-    simd_add_f32_scalar(lhs, rhs, output)
+    };
 }
 
-/// SIMD-optimized element-wise subtraction for f32 arrays
-pub fn simd_sub_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_sub_f32_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_sub_f32_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_sub_f32_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_sub_f32_scalar(lhs, rhs, output)
-}
-
-/// SIMD-optimized element-wise multiplication for f32 arrays
-pub fn simd_mul_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_mul_f32_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_mul_f32_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_mul_f32_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_mul_f32_scalar(lhs, rhs, output)
-}
-
-/// SIMD-optimized element-wise division for f32 arrays
-pub fn simd_div_f32(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_div_f32_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_div_f32_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_div_f32_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_div_f32_scalar(lhs, rhs, output)
-}
-
-// Scalar fallback implementations
-fn simd_add_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] + rhs[i]);
-    }
-    Ok(())
-}
+binary_elementwise!(
+    /// Element-wise `lhs + rhs` for equal-length f32 slices.
+    ///
+    /// The binary SIMD entry points write into `MaybeUninit` output so freshly
+    /// allocated (never zeroed) buffers can be used directly; on success every
+    /// element of `output` has been written. See `ops::map` for the allocation
+    /// pattern.
+    simd_add_f32, add_f32_blocks, f32, +
+);
+binary_elementwise!(
+    /// Element-wise `lhs - rhs` for equal-length f32 slices.
+    simd_sub_f32, sub_f32_blocks, f32, -
+);
+binary_elementwise!(
+    /// Element-wise `lhs * rhs` for equal-length f32 slices.
+    simd_mul_f32, mul_f32_blocks, f32, *
+);
+binary_elementwise!(
+    /// Element-wise `lhs / rhs` for equal-length f32 slices. IEEE semantics:
+    /// a zero divisor yields ±inf, or NaN for `0 / 0`.
+    simd_div_f32, div_f32_blocks, f32, /
+);
+binary_elementwise!(
+    /// Element-wise `lhs + rhs` for equal-length f64 slices.
+    simd_add_f64, add_f64_blocks, f64, +
+);
+binary_elementwise!(
+    /// Element-wise `lhs - rhs` for equal-length f64 slices.
+    simd_sub_f64, sub_f64_blocks, f64, -
+);
+binary_elementwise!(
+    /// Element-wise `lhs * rhs` for equal-length f64 slices.
+    simd_mul_f64, mul_f64_blocks, f64, *
+);
+binary_elementwise!(
+    /// Element-wise `lhs / rhs` for equal-length f64 slices. IEEE semantics:
+    /// a zero divisor yields ±inf, or NaN for `0 / 0`.
+    simd_div_f64, div_f64_blocks, f64, /
+);
 
 /// Unrolled sum for f32 slices to leverage auto-vectorization
 pub fn simd_sum_f32(data: &[f32]) -> f32 {
@@ -342,368 +360,6 @@ pub fn simd_prod_i64(data: &[i64]) -> i64 {
     total
 }
 
-fn simd_sub_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] - rhs[i]);
-    }
-    Ok(())
-}
-
-fn simd_mul_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] * rhs[i]);
-    }
-    Ok(())
-}
-
-fn simd_div_f32_scalar(lhs: &[f32], rhs: &[f32], output: &mut [MaybeUninit<f32>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] / rhs[i]);
-    }
-    Ok(())
-}
-
-// x86_64 AVX2 implementations
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn simd_add_f32_avx2(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 8; // AVX2 processes 8 f32s at once
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    // Process SIMD_WIDTH elements at a time
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm256_add_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    // Handle remaining elements
-    for i in simd_len..len {
-        output[i].write(lhs[i] + rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn simd_sub_f32_avx2(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 8;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm256_sub_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] - rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn simd_mul_f32_avx2(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 8;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm256_mul_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] * rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn simd_div_f32_avx2(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 8;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm256_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm256_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm256_div_ps(a, b);
-            _mm256_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] / rhs[i]);
-    }
-
-    Ok(())
-}
-
-// x86_64 SSE implementations
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-unsafe fn simd_add_f32_sse(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4; // SSE processes 4 f32s at once
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm_add_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] + rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-unsafe fn simd_sub_f32_sse(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm_sub_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] - rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-unsafe fn simd_mul_f32_sse(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm_mul_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] * rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-unsafe fn simd_div_f32_sse(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = _mm_loadu_ps(lhs.as_ptr().add(i));
-            let b = _mm_loadu_ps(rhs.as_ptr().add(i));
-            let result = _mm_div_ps(a, b);
-            _mm_storeu_ps(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] / rhs[i]);
-    }
-
-    Ok(())
-}
-
-// ARM NEON implementations
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn simd_add_f32_neon(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4; // NEON processes 4 f32s at once
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = vld1q_f32(lhs.as_ptr().add(i));
-            let b = vld1q_f32(rhs.as_ptr().add(i));
-            let result = vaddq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] + rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn simd_sub_f32_neon(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = vld1q_f32(lhs.as_ptr().add(i));
-            let b = vld1q_f32(rhs.as_ptr().add(i));
-            let result = vsubq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] - rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn simd_mul_f32_neon(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = vld1q_f32(lhs.as_ptr().add(i));
-            let b = vld1q_f32(rhs.as_ptr().add(i));
-            let result = vmulq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] * rhs[i]);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn simd_div_f32_neon(
-    lhs: &[f32],
-    rhs: &[f32],
-    output: &mut [MaybeUninit<f32>],
-) -> Result<()> {
-    const SIMD_WIDTH: usize = 4;
-
-    let len = lhs.len();
-    let simd_len = len - (len % SIMD_WIDTH);
-
-    for i in (0..simd_len).step_by(SIMD_WIDTH) {
-        unsafe {
-            let a = vld1q_f32(lhs.as_ptr().add(i));
-            let b = vld1q_f32(rhs.as_ptr().add(i));
-            let result = vdivq_f32(a, b);
-            vst1q_f32(output.as_mut_ptr().add(i).cast(), result);
-        }
-    }
-
-    for i in simd_len..len {
-        output[i].write(lhs[i] / rhs[i]);
-    }
-
-    Ok(())
-}
-
 /// Check if two tensors can use optimized SIMD operations (same shape, contiguous)
 pub fn can_use_simd_fast_path(lhs_shape: &Shape, rhs_shape: &Shape, output_shape: &Shape) -> bool {
     // For now, only optimize when all shapes are identical (no broadcasting)
@@ -711,148 +367,6 @@ pub fn can_use_simd_fast_path(lhs_shape: &Shape, rhs_shape: &Shape, output_shape
     lhs_shape.dims() == rhs_shape.dims()
         && lhs_shape.dims() == output_shape.dims()
         && lhs_shape.numel() >= 16 // Only use SIMD for reasonably sized arrays
-}
-
-/// SIMD-optimized element-wise addition for f64 arrays
-pub fn simd_add_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_add_f64_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_add_f64_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_add_f64_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_add_f64_scalar(lhs, rhs, output)
-}
-
-/// SIMD-optimized element-wise subtraction for f64 arrays
-pub fn simd_sub_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_sub_f64_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_sub_f64_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_sub_f64_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_sub_f64_scalar(lhs, rhs, output)
-}
-
-/// SIMD-optimized element-wise multiplication for f64 arrays
-pub fn simd_mul_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_mul_f64_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_mul_f64_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_mul_f64_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_mul_f64_scalar(lhs, rhs, output)
-}
-
-/// SIMD-optimized element-wise division for f64 arrays
-pub fn simd_div_f64(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    if lhs.len() != rhs.len() || lhs.len() != output.len() {
-        return Err(MinitensorError::invalid_operation(
-            "Array lengths must match for SIMD operations",
-        ));
-    }
-
-    let caps = simd_capabilities();
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if caps.avx2 {
-            return unsafe { simd_div_f64_avx2(lhs, rhs, output) };
-        } else if caps.sse4_1 {
-            return unsafe { simd_div_f64_sse(lhs, rhs, output) };
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        if caps.neon {
-            return unsafe { simd_div_f64_neon(lhs, rhs, output) };
-        }
-    }
-
-    // Fallback to scalar implementation
-    simd_div_f64_scalar(lhs, rhs, output)
-}
-
-// f64 scalar fallback implementations
-fn simd_add_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] + rhs[i]);
-    }
-    Ok(())
-}
-
-fn simd_sub_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] - rhs[i]);
-    }
-    Ok(())
-}
-
-fn simd_mul_f64_scalar(lhs: &[f64], rhs: &[f64], output: &mut [MaybeUninit<f64>]) -> Result<()> {
-    for i in 0..lhs.len() {
-        output[i].write(lhs[i] * rhs[i]);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

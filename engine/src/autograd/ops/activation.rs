@@ -102,6 +102,7 @@ fn gelu_backward_f32(input: &Tensor, grad_output: &Tensor, approximate: bool) ->
             saved,
             gout,
             crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+            crate::ops::map::PAR_CHUNK,
             |x, g, dst| {
                 if approximate {
                     kernel.gelu_tanh_backward(x, g, dst)
@@ -262,6 +263,7 @@ fn silu_backward_f32(input: &Tensor, grad_output: &Tensor) -> Result<Tensor> {
             saved,
             gout,
             crate::ops::map::VECTOR_F32_PAR_THRESHOLD,
+            crate::ops::map::PAR_CHUNK,
             |x, g, dst| kernel.silu_backward(x, g, dst),
         )
     };
