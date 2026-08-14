@@ -284,8 +284,8 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
 /// Floor tensor values
 pub fn floor(tensor: &Tensor) -> Result<Tensor> {
     let output_data = match tensor.dtype() {
-        DataType::Float32 => floor_f32(tensor)?,
-        DataType::Float64 => floor_f64(tensor)?,
+        DataType::Float32 => floor_f32(tensor, 0.0)?,
+        DataType::Float64 => floor_f64(tensor, 0.0)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Floor only supported for floating point tensors",
@@ -312,8 +312,8 @@ pub fn floor(tensor: &Tensor) -> Result<Tensor> {
 /// Ceiling tensor values
 pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
     let output_data = match tensor.dtype() {
-        DataType::Float32 => ceil_f32(tensor)?,
-        DataType::Float64 => ceil_f64(tensor)?,
+        DataType::Float32 => ceil_f32(tensor, 0.0)?,
+        DataType::Float64 => ceil_f64(tensor, 0.0)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Ceiling only supported for floating point tensors",
@@ -527,113 +527,66 @@ fn sign_i64(tensor: &Tensor) -> Result<TensorData> {
     ))
 }
 
-fn clip_f32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
+/// Generates a dtype-specialized `clip` kernel.
+///
+/// Two details keep the loop in vector registers, and the previous form had
+/// neither.
+///
+/// `if v < lo { lo } else { v }` rather than `v.max(lo)`: on floats these are
+/// not the same operation. `f32::max` returns the *non*-NaN operand, so a NaN
+/// input would come back as a clamp bound -- which is why the old kernel opened
+/// with an `is_nan` early return. A comparison against NaN is false, so the
+/// same NaN passes through here with nothing to test for, and the branch that
+/// bought the correctness is gone with it. (For floats this also fixes the
+/// bounds' order of preference at signed zero: `-0.0` clipped below by `0.0`
+/// now reliably stays `-0.0`, where `f32::max` was free to return either.)
+///
+/// And the bounds are resolved once, before the loop, instead of matching two
+/// `Option`s per element.
+macro_rules! clip_kernel {
+    ($name:ident, $ty:ty, $dtype:ident, $accessor:ident, $tyname:literal) => {
+        fn $name(
+            tensor: &Tensor,
+            min_val: Option<f64>,
+            max_val: Option<f64>,
+        ) -> Result<TensorData> {
+            let input_data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input tensor"
+                ))
+            })?;
 
-    let min_f32 = min_val.map(|v| v as f32);
-    let max_f32 = max_val.map(|v| v as f32);
-    let out = unary_map(input_data, |val: f32| {
-        // NaN must pass through unchanged, for consistency with
-        // `maximum`/`minimum`. Rust's
-        // `f32::max`/`min` return the *non*-NaN operand, so without this guard
-        // a NaN input would be silently replaced by a clamp bound.
-        if val.is_nan() {
-            return val;
+            // Lower bound first, then upper: with `lo > hi` the upper bound
+            // wins, which is the conventional reading of a reversed interval.
+            let out = match (min_val.map(|v| v as $ty), max_val.map(|v| v as $ty)) {
+                (Some(lo), Some(hi)) => unary_map(input_data, move |v: $ty| {
+                    let v = if v < lo { lo } else { v };
+                    if v > hi { hi } else { v }
+                }),
+                (Some(lo), None) => {
+                    unary_map(input_data, move |v: $ty| if v < lo { lo } else { v })
+                }
+                (None, Some(hi)) => {
+                    unary_map(input_data, move |v: $ty| if v > hi { hi } else { v })
+                }
+                (None, None) => input_data.to_vec(),
+            };
+
+            Ok(TensorData::from_vec::<$ty>(
+                out,
+                DataType::$dtype,
+                tensor.device(),
+            ))
         }
-        let mut v = val;
-        if let Some(min) = min_f32 {
-            v = v.max(min);
-        }
-        if let Some(max) = max_f32 {
-            v = v.min(max);
-        }
-        v
-    });
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+    };
 }
 
-fn clip_f64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let out = unary_map(input_data, |val: f64| {
-        // NaN must pass through unchanged, for consistency with
-        // `maximum`/`minimum`. Rust's
-        // `f64::max`/`min` return the *non*-NaN operand, so without this guard
-        // a NaN input would be silently replaced by a clamp bound.
-        if val.is_nan() {
-            return val;
-        }
-        let mut v = val;
-        if let Some(min) = min_val {
-            v = v.max(min);
-        }
-        if let Some(max) = max_val {
-            v = v.min(max);
-        }
-        v
-    });
-    Ok(TensorData::from_vec::<f64>(
-        out,
-        DataType::Float64,
-        tensor.device(),
-    ))
-}
-
-fn clip_i32(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
-    let input_data = tensor.data().as_i32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i32 slice from input tensor")
-    })?;
-
-    let min_i32 = min_val.map(|v| v as i32);
-    let max_i32 = max_val.map(|v| v as i32);
-    let out = unary_map(input_data, |val: i32| {
-        let mut v = val;
-        if let Some(min) = min_i32 {
-            v = v.max(min);
-        }
-        if let Some(max) = max_i32 {
-            v = v.min(max);
-        }
-        v
-    });
-    Ok(TensorData::from_vec::<i32>(
-        out,
-        DataType::Int32,
-        tensor.device(),
-    ))
-}
-
-fn clip_i64(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Result<TensorData> {
-    let input_data = tensor.data().as_i64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get i64 slice from input tensor")
-    })?;
-
-    let min_i64 = min_val.map(|v| v as i64);
-    let max_i64 = max_val.map(|v| v as i64);
-    let out = unary_map(input_data, |val: i64| {
-        let mut v = val;
-        if let Some(min) = min_i64 {
-            v = v.max(min);
-        }
-        if let Some(max) = max_i64 {
-            v = v.min(max);
-        }
-        v
-    });
-    Ok(TensorData::from_vec::<i64>(
-        out,
-        DataType::Int64,
-        tensor.device(),
-    ))
-}
+clip_kernel!(clip_f32, f32, Float32, as_f32_slice, "f32");
+clip_kernel!(clip_f64, f64, Float64, as_f64_slice, "f64");
+clip_kernel!(clip_i32, i32, Int32, as_i32_slice, "i32");
+clip_kernel!(clip_i64, i64, Int64, as_i64_slice, "i64");
 
 fn nan_to_num_f32(
     tensor: &Tensor,
@@ -773,78 +726,293 @@ impl FloatClassify for f64 {
     }
 }
 
-fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
+/// Applies one of the multiversioned rounding-family kernels over a whole
+/// tensor, in blocks, parallel above the cheap-unary threshold.
+///
+/// The bodies live in `ops::simd`, and have to, because rounding a vector needs
+/// an instruction the x86-64 baseline does not carry. Written as a plain
+/// closure through `unary_map`, every one of these compiled to a `libm` call
+/// per element and ran 8.7x slower than it had to; handing over a block at a
+/// time is what lets the loop sit inside the multiversioned function.
+macro_rules! rounding_op {
+    ($name:ident, $ty:ty, $dtype:ident, $accessor:ident, $kernel:ident, $tyname:literal) => {
+        pub(crate) fn $name(tensor: &Tensor, param: $ty) -> Result<TensorData> {
+            let input_data = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from input tensor"
+                ))
+            })?;
+            // SAFETY: the kernel writes every element of each block it is
+            // given, and the driver's blocks tile the output.
+            let out = unsafe {
+                crate::ops::map::unary_map_blocks_threshold(
+                    input_data,
+                    crate::ops::map::PAR_THRESHOLD,
+                    |src, dst| crate::ops::simd::$kernel(src, dst, param),
+                )
+            };
+            Ok(TensorData::from_vec::<$ty>(
+                out,
+                DataType::$dtype,
+                tensor.device(),
+            ))
+        }
+    };
+}
 
-    let multiplier = 10.0_f32.powi(decimals);
-    // Ties go to the even neighbour, as Python's built-in `round` does.
-    // Rust's `f32::round` rounds halves away from zero instead,
-    // which disagreed at every exact .5: round(0.5) gave 1 rather than 0, and
-    // round(2.5) gave 3 rather than 2.
-    let out = unary_map(input_data, |val: f32| {
-        (val * multiplier).round_ties_even() / multiplier
-    });
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+// Ties go to the even neighbour, as Python's built-in `round` does. Rust's
+// `f32::round` rounds halves away from zero instead, which disagreed at every
+// exact .5: round(0.5) gave 1 rather than 0, and round(2.5) gave 3 rather than
+// 2. The kernels use `round_ties_even`, which is the mode `roundps`/`roundpd`
+// implement, so the vectorized form needs no correction to agree.
+rounding_op!(
+    round_f32_scaled,
+    f32,
+    Float32,
+    as_f32_slice,
+    round_f32_blocks,
+    "f32"
+);
+rounding_op!(
+    round_f64_scaled,
+    f64,
+    Float64,
+    as_f64_slice,
+    round_f64_blocks,
+    "f64"
+);
+rounding_op!(
+    floor_f32,
+    f32,
+    Float32,
+    as_f32_slice,
+    floor_f32_blocks,
+    "f32"
+);
+rounding_op!(
+    floor_f64,
+    f64,
+    Float64,
+    as_f64_slice,
+    floor_f64_blocks,
+    "f64"
+);
+rounding_op!(ceil_f32, f32, Float32, as_f32_slice, ceil_f32_blocks, "f32");
+rounding_op!(ceil_f64, f64, Float64, as_f64_slice, ceil_f64_blocks, "f64");
+
+fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
+    round_f32_scaled(tensor, 10.0_f32.powi(decimals))
 }
 
 fn round_f64(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
-
-    let multiplier = 10.0_f64.powi(decimals);
-    // Half-to-even; see `round_f32`.
-    let out = unary_map(input_data, |val: f64| {
-        (val * multiplier).round_ties_even() / multiplier
-    });
-    Ok(TensorData::from_vec::<f64>(
-        out,
-        DataType::Float64,
-        tensor.device(),
-    ))
+    round_f64_scaled(tensor, 10.0_f64.powi(decimals))
 }
 
-fn floor_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
+#[cfg(test)]
+mod rounding_and_clip_tests {
+    use super::*;
+    use crate::device::Device;
+    use crate::tensor::{Shape, TensorData};
+    use std::sync::Arc;
 
-    let out = unary_map(input_data, f32::floor);
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
-}
+    fn f32_tensor(data: Vec<f32>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<f32>(
+                data,
+                DataType::Float32,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
 
-fn floor_f64(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f64 slice from input tensor")
-    })?;
+    /// The rounding family runs a different compilation of its loop depending
+    /// on what the CPU offers, and only one of them is exercised on any given
+    /// machine. What must not vary is the answer: these are the inputs where a
+    /// rounding mode can be got wrong.
+    #[test]
+    fn rounding_family_agrees_with_the_scalar_definition() {
+        // Halves in both signs (ties-to-even is the point), values either side
+        // of an integer, negatives, zeroes with their signs, and the specials.
+        let values: Vec<f32> = vec![
+            -3.5,
+            -2.5,
+            -1.5,
+            -0.5,
+            0.5,
+            1.5,
+            2.5,
+            3.5,
+            -1.25,
+            -0.75,
+            0.75,
+            1.25,
+            -0.0,
+            0.0,
+            1.0,
+            -1.0,
+            1e7,
+            -1e7,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        // Long enough to cross the parallel threshold and leave a partial
+        // block, repeating the awkward values at every offset within one.
+        let long: Vec<f32> = (0..(1 << 17) + 37)
+            .map(|i| values[i % values.len()])
+            .collect();
 
-    let out = unary_map(input_data, f64::floor);
-    Ok(TensorData::from_vec::<f64>(
-        out,
-        DataType::Float64,
-        tensor.device(),
-    ))
-}
+        for data in [values.clone(), long] {
+            let t = f32_tensor(data.clone());
 
-fn ceil_f32(tensor: &Tensor) -> Result<TensorData> {
-    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
-        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
-    })?;
+            let got = floor(&t).unwrap();
+            for (i, (&g, &x)) in got
+                .data()
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .zip(&data)
+                .enumerate()
+            {
+                let want = x.floor();
+                assert!(
+                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                    "floor({x}) = {g}, want {want} (index {i})"
+                );
+            }
 
-    let out = unary_map(input_data, f32::ceil);
-    Ok(TensorData::from_vec::<f32>(
-        out,
-        DataType::Float32,
-        tensor.device(),
-    ))
+            let got = ceil(&t).unwrap();
+            for (i, (&g, &x)) in got
+                .data()
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .zip(&data)
+                .enumerate()
+            {
+                let want = x.ceil();
+                assert!(
+                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                    "ceil({x}) = {g}, want {want} (index {i})"
+                );
+            }
+
+            let got = round(&t, 0).unwrap();
+            for (i, (&g, &x)) in got
+                .data()
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .zip(&data)
+                .enumerate()
+            {
+                let want = x.round_ties_even();
+                assert!(
+                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                    "round({x}) = {g}, want {want} (index {i})"
+                );
+            }
+        }
+    }
+
+    /// Halves round to the even neighbour, not away from zero, at every
+    /// decimal place -- the property that makes this `round` agree with
+    /// Python's built-in rather than with `f32::round`.
+    #[test]
+    fn round_breaks_ties_toward_even() {
+        let t = f32_tensor(vec![0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5]);
+        assert_eq!(
+            round(&t, 0).unwrap().data().as_f32_slice().unwrap(),
+            &[0.0, 2.0, 2.0, 4.0, -0.0, -2.0, -2.0]
+        );
+        let t = f32_tensor(vec![0.125, 0.375, -0.125, -0.375]);
+        assert_eq!(
+            round(&t, 2).unwrap().data().as_f32_slice().unwrap(),
+            &[0.12, 0.38, -0.12, -0.38]
+        );
+    }
+
+    /// NaN is not a value to be clamped into range: it has no order relative to
+    /// the bounds, so it comes back untouched. This is what the kernel's
+    /// comparison form gives for free, and what an `f32::max` would get wrong
+    /// by returning whichever operand is not NaN.
+    #[test]
+    fn clip_passes_nan_through_and_honours_one_sided_bounds() {
+        let data = vec![f32::NAN, -5.0, 0.0, 5.0, f32::INFINITY, f32::NEG_INFINITY];
+        let t = f32_tensor(data.clone());
+
+        let both = clip(&t, Some(-1.0), Some(1.0)).unwrap();
+        let out = both.data().as_f32_slice().unwrap();
+        assert!(out[0].is_nan(), "NaN was clamped to {}", out[0]);
+        assert_eq!(&out[1..], &[-1.0, 0.0, 1.0, 1.0, -1.0]);
+
+        let lower = clip(&t, Some(-1.0), None).unwrap();
+        let out = lower.data().as_f32_slice().unwrap();
+        assert!(out[0].is_nan());
+        assert_eq!(&out[1..], &[-1.0, 0.0, 5.0, f32::INFINITY, -1.0]);
+
+        let upper = clip(&t, None, Some(1.0)).unwrap();
+        let out = upper.data().as_f32_slice().unwrap();
+        assert!(out[0].is_nan());
+        assert_eq!(&out[1..], &[-5.0, 0.0, 1.0, 1.0, f32::NEG_INFINITY]);
+
+        // No bounds at all is the identity, NaN included.
+        let neither = clip(&t, None, None).unwrap();
+        let out = neither.data().as_f32_slice().unwrap();
+        assert!(out[0].is_nan());
+        assert_eq!(&out[1..], &data[1..]);
+    }
+
+    /// A reversed interval resolves to the upper bound, because the lower bound
+    /// is applied first.
+    #[test]
+    fn clip_with_reversed_bounds_yields_the_upper_one() {
+        let t = f32_tensor(vec![-10.0, 0.0, 10.0]);
+        assert_eq!(
+            clip(&t, Some(5.0), Some(1.0))
+                .unwrap()
+                .data()
+                .as_f32_slice()
+                .unwrap(),
+            &[1.0, 1.0, 1.0]
+        );
+    }
+
+    /// `reciprocal` takes a division rather than `powf(x, -1)`. The two must
+    /// agree bit for bit, including where IEEE has something specific to say.
+    #[test]
+    fn reciprocal_matches_a_division_exactly() {
+        let data: Vec<f32> = vec![
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            0.5,
+            -0.5,
+            3.0,
+            1e-30,
+            1e30,
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::MIN_POSITIVE,
+        ];
+        let got = reciprocal(&f32_tensor(data.clone())).unwrap();
+        for (&g, &x) in got.data().as_f32_slice().unwrap().iter().zip(&data) {
+            let want = 1.0f32 / x;
+            assert!(
+                g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                "reciprocal({x}) = {g}, want {want}"
+            );
+        }
+    }
 }

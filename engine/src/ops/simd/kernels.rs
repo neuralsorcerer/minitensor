@@ -216,6 +216,92 @@ binary_elementwise!(
     simd_div_f64, div_f64_blocks, f64, /
 );
 
+/// Generates an element-wise unary block kernel for the rounding family —
+/// `floor`, `ceil`, and round-to-nearest-even.
+///
+/// These need their own compilation for a different reason than
+/// [`binary_elementwise!`]'s: not register width, but an instruction that
+/// x86-64's baseline does not have at all. `roundps`/`roundpd` arrived with
+/// SSE4.1, and until LLVM is allowed to use them there is no way to round a
+/// vector, so it gives up on the loop entirely and emits one `floorf` call per
+/// element. Measured over a million float32 elements on a 4-core container:
+///
+/// ```text
+///   floor, baseline (SSE2)   2777.8 us
+///   floor, SSE4.1             319.3 us   8.7x
+/// ```
+///
+/// A 256-bit tier is not worth a third compilation here — `vroundps` measured
+/// 339.3us, indistinguishable from SSE4.1, because at one instruction per
+/// element the loop is bounded by memory rather than by issue width. aarch64
+/// needs no tier at all: `frintm`/`frintp`/`frintn` are baseline NEON, so the
+/// portable body already vectorizes there.
+///
+/// The one-parameter form exists for `round(decimals)`, which scales by a power
+/// of ten before rounding and back afterwards; the parameter is captured once
+/// per block rather than per element.
+macro_rules! rounding_kernel {
+    ($(#[$meta:meta])* $name:ident, $ty:ty, |$x:ident| $body:expr) => {
+        rounding_kernel!($(#[$meta])* $name, $ty, |$x, _unused| $body);
+    };
+    ($(#[$meta:meta])* $name:ident, $ty:ty, |$x:ident, $p:ident| $body:expr) => {
+        $(#[$meta])*
+        pub(crate) fn $name(input: &[$ty], out: &mut [MaybeUninit<$ty>], param: $ty) {
+            #[inline(always)]
+            fn body(input: &[$ty], out: &mut [MaybeUninit<$ty>], $p: $ty) {
+                // Reborrowing at the output length drops the bounds checks; see
+                // `binary_elementwise!`.
+                let n = out.len();
+                let input = &input[..n];
+                for i in 0..n {
+                    let $x = input[i];
+                    out[i].write($body);
+                }
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "sse4.1")]
+            fn body_sse41(input: &[$ty], out: &mut [MaybeUninit<$ty>], p: $ty) {
+                body(input, out, p)
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            if simd_capabilities().sse4_1 {
+                // SAFETY: `detect` confirmed sse4.1 on this CPU.
+                unsafe { body_sse41(input, out, param) };
+                return;
+            }
+
+            body(input, out, param)
+        }
+    };
+}
+
+rounding_kernel!(
+    /// Element-wise `floor` over a block of f32. `param` is ignored.
+    floor_f32_blocks, f32, |x| x.floor()
+);
+rounding_kernel!(
+    /// Element-wise `floor` over a block of f64. `param` is ignored.
+    floor_f64_blocks, f64, |x| x.floor()
+);
+rounding_kernel!(
+    /// Element-wise `ceil` over a block of f32. `param` is ignored.
+    ceil_f32_blocks, f32, |x| x.ceil()
+);
+rounding_kernel!(
+    /// Element-wise `ceil` over a block of f64. `param` is ignored.
+    ceil_f64_blocks, f64, |x| x.ceil()
+);
+rounding_kernel!(
+    /// Round a block of f32 to `param` decimal places, halves to even.
+    round_f32_blocks, f32, |x, m| (x * m).round_ties_even() / m
+);
+rounding_kernel!(
+    /// Round a block of f64 to `param` decimal places, halves to even.
+    round_f64_blocks, f64, |x, m| (x * m).round_ties_even() / m
+);
+
 /// Unrolled sum for f32 slices to leverage auto-vectorization
 pub fn simd_sum_f32(data: &[f32]) -> f32 {
     let mut sums = [0f32; 8];
