@@ -274,3 +274,137 @@ fn test_sum_dim0_matches_a_sequential_reference() {
         );
     }
 }
+
+/// Run `produce` inside a pool of exactly `threads` workers and return the raw
+/// bits of the result, so two runs can be compared without float equality
+/// having an opinion about NaN.
+fn bits_with_threads<F>(threads: usize, produce: F) -> Vec<u32>
+where
+    F: Fn() -> Tensor + Send + Sync,
+{
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("thread pool");
+    pool.install(|| {
+        let out = produce();
+        let data = out.data();
+        // Every operation below produces one of these three dtypes; the bits
+        // are what matter, not the interpretation.
+        if let Some(values) = data.as_f32_slice() {
+            values.iter().map(|v| v.to_bits()).collect()
+        } else if let Some(values) = data.as_i64_slice() {
+            values.iter().map(|v| *v as u32).collect()
+        } else {
+            data.as_bool_slice()
+                .expect("f32, i64 or bool result")
+                .iter()
+                .map(|v| *v as u32)
+                .collect()
+        }
+    })
+}
+
+/// Assert that `produce` gives the same bits at every pool size.
+fn assert_thread_invariant<F>(name: &str, produce: F)
+where
+    F: Fn() -> Tensor + Send + Sync,
+{
+    let reference = bits_with_threads(1, &produce);
+    for threads in [2usize, 3, 5, 8] {
+        assert_eq!(
+            bits_with_threads(threads, &produce),
+            reference,
+            "{name} changed with {threads} threads"
+        );
+    }
+}
+
+/// Everything that splits work across the pool has to give the same answer
+/// whatever the pool size, not only the sum this file was written for.
+///
+/// The surface here is the one whose parallel structure is load-bearing: the
+/// element-wise arithmetic (split into blocks above a threshold), the
+/// reductions that band their output (`any`/`all`, the fused variance), and the
+/// movement kernels (which write into raw capacity, so a mis-tiled split would
+/// leave uninitialised bytes rather than merely regrouping additions).
+///
+/// Only `sum` had a test before, because `sum` is where non-associativity bites
+/// hardest — but a split that drops or double-counts an element is a bug in any
+/// of them, and shows up here as differing bits rather than as a wrong total
+/// nobody has a reference for.
+///
+/// What this can and cannot see is worth being precise about, because it was
+/// checked rather than assumed. Making the dim-0 row banding follow the thread
+/// count — the defect this file was originally written for — fails the
+/// `mean(dim=0)` case here, which nothing covered before. Making the *fused
+/// variance* band by thread count does not fail anything, and correctly so:
+/// each row's variance is computed entirely within one task, so where the row
+/// boundaries fall cannot regroup an addition. A kernel whose splits are
+/// genuinely independent has nothing for this test to catch, and that is the
+/// answer rather than a gap in it.
+#[test]
+fn the_parallel_kernels_are_bitwise_stable_across_thread_counts() {
+    let a = wide_magnitude_tensor(700, 512);
+    let b = moderate_tensor(700, 512, 0x9E37);
+    let column = moderate_tensor(700, 1, 0xBEEF);
+
+    // Element-wise: equal-shape (blocked fast path) and broadcasting.
+    assert_thread_invariant("add", || engine::ops::arithmetic::add(&a, &b).unwrap());
+    assert_thread_invariant("mul", || engine::ops::arithmetic::mul(&a, &b).unwrap());
+    assert_thread_invariant("div", || engine::ops::arithmetic::div(&a, &b).unwrap());
+    assert_thread_invariant("add broadcast", || {
+        engine::ops::arithmetic::add(&a, &column).unwrap()
+    });
+
+    // Cheap unary, including the multiversioned rounding family.
+    let positive = engine::ops::activation::abs(&a).unwrap();
+    assert_thread_invariant("abs", || engine::ops::activation::abs(&a).unwrap());
+    assert_thread_invariant("floor", || engine::ops::activation::floor(&a).unwrap());
+    assert_thread_invariant("round", || engine::ops::activation::round(&a, 0).unwrap());
+    assert_thread_invariant("reciprocal", || {
+        engine::ops::activation::reciprocal(&positive).unwrap()
+    });
+    assert_thread_invariant("clip", || {
+        engine::ops::activation::clip(&a, Some(-0.5), Some(0.5)).unwrap()
+    });
+    assert_thread_invariant("isnan", || a.isnan().unwrap());
+
+    // Reductions on both axes: the two layouts are different code.
+    for dim in [0isize, 1] {
+        assert_thread_invariant(&format!("mean(dim={dim})"), || {
+            reduction::mean(&a, Some(vec![dim]), false).unwrap()
+        });
+        assert_thread_invariant(&format!("prod(dim={dim})"), || {
+            reduction::prod(&b, Some(vec![dim]), false).unwrap()
+        });
+        assert_thread_invariant(&format!("var(dim={dim})"), || {
+            reduction::var(&a, Some(vec![dim]), false, false).unwrap()
+        });
+        assert_thread_invariant(&format!("all(dim={dim})"), || {
+            reduction::all(&a, Some(dim), false).unwrap()
+        });
+        assert_thread_invariant(&format!("any(dim={dim})"), || {
+            reduction::any(&a, Some(dim), false).unwrap()
+        });
+        assert_thread_invariant(&format!("cumsum(dim={dim})"), || {
+            reduction::cumsum(&a, dim).unwrap()
+        });
+    }
+
+    // Movement: these write into uninitialised capacity, so a split that fails
+    // to tile the output shows up as bits that differ run to run.
+    assert_thread_invariant("flip", || engine::ops::shape_ops::flip(&a, &[0]).unwrap());
+    assert_thread_invariant("roll", || {
+        engine::ops::shape_ops::roll(&a, &[7], Some(&[1])).unwrap()
+    });
+    assert_thread_invariant("concatenate", || {
+        engine::ops::shape_ops::concatenate(&[&a, &b], 0).unwrap()
+    });
+    assert_thread_invariant("repeat", || {
+        engine::ops::shape_ops::repeat(&a, &[2, 1]).unwrap()
+    });
+    assert_thread_invariant("slice", || {
+        engine::ops::shape_ops::slice(&a, 0, 100, 600, 3).unwrap()
+    });
+}
