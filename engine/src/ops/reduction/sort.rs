@@ -578,6 +578,11 @@ pub fn var(
     shape_ops::reshape(&variance, target_shape)
 }
 
+/// Rows one task takes when the reduced axis is the last one. A row is
+/// `dim_size` elements read twice, so a band of these is already substantial
+/// work; the point of banding at all is that one row per task is not.
+const VAR_ROW_BAND: usize = 64;
+
 /// Fused single-axis variance for tensors that do not require gradients.
 ///
 /// Two cache-friendly slab passes per outer block (mean, then sum of squared
@@ -612,14 +617,55 @@ fn var_fused_single_axis(
             let n = dim_size as $ty;
             let divisor = if unbiased { n - 1.0 } else { n };
             let all_nan = unbiased && dim_size <= 1;
-            if inner != 0 {
+
+            if all_nan {
+                out.fill(<$ty>::NAN);
+            } else if inner == 1 {
+                // Reducing the last axis: each output owns one contiguous run
+                // of `dim_size` elements, so the two passes read straight
+                // through it and the running mean is a scalar.
+                //
+                // Going through the slab path below instead was what made
+                // `var(dim=-1)` cost seventeen times a `mean` over the same
+                // data. With `inner == 1` its chunks are one element wide, so
+                // rayon was handed one task per output and each of those
+                // allocated a one-element `col_mean` on the heap -- a thousand
+                // allocations and a thousand tasks to reduce a thousand rows.
+                let run = |first: usize, chunk: &mut [$ty]| {
+                    for (i, slot) in chunk.iter_mut().enumerate() {
+                        let base = (first + i) * dim_size;
+                        let row = &input[base..base + dim_size];
+                        let mut total = 0.0 as $ty;
+                        for &v in row {
+                            total += v;
+                        }
+                        let mean = total / n;
+                        let mut acc = 0.0 as $ty;
+                        for &v in row {
+                            let d = v - mean;
+                            acc += d * d;
+                        }
+                        *slot = acc / divisor;
+                    }
+                };
+                if tensor.numel() < crate::ops::map::PAR_THRESHOLD {
+                    run(0, out);
+                } else {
+                    // Rows per task, not elements: a task is `VAR_ROW_BAND`
+                    // whole rows of `dim_size` work each.
+                    let band = VAR_ROW_BAND;
+                    out.par_chunks_mut(band)
+                        .enumerate()
+                        .for_each(|(b, chunk)| run(b * band, chunk));
+                }
+            } else if inner != 0 {
+                // The reduced axis is not the last one, so each output's
+                // elements are `inner` apart. Accumulate whole slabs instead,
+                // which reads the input in memory order; the running means are
+                // a vector of `inner`, allocated once per outer position.
                 out.par_chunks_mut(inner)
                     .enumerate()
                     .for_each(|(o, out_chunk)| {
-                        if all_nan {
-                            out_chunk.fill(<$ty>::NAN);
-                            return;
-                        }
                         let block_base = o * outer_stride;
                         let mut col_mean = vec![0.0 as $ty; inner];
                         for k in 0..dim_size {
@@ -1118,4 +1164,119 @@ pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tenso
         tensor.device(),
         tensor.requires_grad(),
     ))
+}
+
+#[cfg(test)]
+mod var_layout_tests {
+    use super::*;
+    use crate::device::Device;
+
+    fn f32_tensor(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<f32>(
+                data,
+                DataType::Float32,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn values(t: &Tensor) -> Vec<f32> {
+        t.data().as_f32_slice().unwrap().to_vec()
+    }
+
+    /// The fused variance takes one of two layouts depending on whether the
+    /// reduced axis is the last one, and they are different code. Reducing a
+    /// square tensor along each axis in turn runs both over data that is a
+    /// transpose of itself, so the two must produce the same numbers.
+    #[test]
+    fn both_layouts_agree_on_a_transpose() {
+        let n = 37;
+        let data: Vec<f32> = (0..n * n).map(|i| (i % 13) as f32 * 0.5 - 3.0).collect();
+        let mut transposed = vec![0.0f32; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                transposed[c * n + r] = data[r * n + c];
+            }
+        }
+        let a = f32_tensor(data, vec![n, n]);
+        let b = f32_tensor(transposed, vec![n, n]);
+
+        for unbiased in [false, true] {
+            // `a` reduced along its last axis is `b` reduced along its first.
+            let last = values(&var(&a, Some(vec![1]), false, unbiased).unwrap());
+            let first = values(&var(&b, Some(vec![0]), false, unbiased).unwrap());
+            assert_eq!(last.len(), n);
+            for (i, (x, y)) in last.iter().zip(&first).enumerate() {
+                assert!(
+                    (x - y).abs() <= 1e-6 * x.abs().max(1.0),
+                    "row {i}: last-axis {x} vs first-axis {y} (unbiased {unbiased})"
+                );
+            }
+        }
+    }
+
+    /// The last-axis layout bands rows across the pool above the parallel
+    /// threshold. Banding cannot change a row's own two passes, so a tall
+    /// tensor whose rows are all the same must come back with one value
+    /// repeated -- at a height that crosses the threshold and leaves a partial
+    /// band.
+    #[test]
+    fn the_row_band_split_leaves_every_row_alone() {
+        let cols = 8;
+        let rows = crate::ops::map::PAR_THRESHOLD / cols + 7;
+        let row: Vec<f32> = (0..cols).map(|i| i as f32 * 1.5 - 2.0).collect();
+        let data: Vec<f32> = (0..rows).flat_map(|_| row.iter().copied()).collect();
+        let t = f32_tensor(data, vec![rows, cols]);
+
+        let got = values(&var(&t, Some(vec![1]), false, false).unwrap());
+        assert_eq!(got.len(), rows);
+
+        let mean = row.iter().sum::<f32>() / cols as f32;
+        let want = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32;
+        for (i, &g) in got.iter().enumerate() {
+            assert!(
+                (g - want).abs() <= 1e-6 * want.abs().max(1.0),
+                "row {i}: {g} against {want}"
+            );
+        }
+    }
+
+    /// Bessel's correction has nowhere to go on a single sample, and the
+    /// answer is NaN rather than a silent zero. Both layouts must say so.
+    #[test]
+    fn a_single_sample_is_undefined_when_unbiased() {
+        let last = var(
+            &f32_tensor(vec![1.0, 2.0], vec![2, 1]),
+            Some(vec![1]),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(values(&last).iter().all(|v| v.is_nan()));
+
+        let first = var(
+            &f32_tensor(vec![1.0, 2.0], vec![1, 2]),
+            Some(vec![0]),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(values(&first).iter().all(|v| v.is_nan()));
+
+        // ...and is plain zero when it is not corrected.
+        let biased = var(
+            &f32_tensor(vec![1.0, 2.0], vec![2, 1]),
+            Some(vec![1]),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(values(&biased), vec![0.0, 0.0]);
+    }
 }
