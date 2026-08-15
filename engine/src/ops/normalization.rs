@@ -4,7 +4,8 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId, add_to_graph};
+use crate::autograd::with_grad_fn;
+use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
@@ -540,10 +541,7 @@ pub fn layer_norm(
         bias_requires_grad: bias.map(|b| b.requires_grad()).unwrap_or(false),
     });
 
-    let mut output_with_grad = output;
-    output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output_with_grad, Some(grad_fn))?;
-    Ok(output_with_grad)
+    with_grad_fn(output, grad_fn)
 }
 
 /// Apply root-mean-square layer normalization (RMSNorm) to the input tensor.
@@ -749,10 +747,7 @@ pub fn rms_norm(
         weight_requires_grad: weight.map(|w| w.requires_grad()).unwrap_or(false),
     });
 
-    let mut output_with_grad = output;
-    output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output_with_grad, Some(grad_fn))?;
-    Ok(output_with_grad)
+    with_grad_fn(output, grad_fn)
 }
 
 #[cfg(test)]

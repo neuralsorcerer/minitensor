@@ -4,10 +4,10 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
     autograd::{
         AddBackward, DivBackward, MulBackward, NegBackward, RemainderBackward, SubBackward,
-        add_to_graph,
     },
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
@@ -52,8 +52,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 input_ids: [lhs.id(), rhs.id()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
 
         return Ok(output);
@@ -86,10 +85,7 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -232,8 +228,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 input_ids: [lhs.id(), rhs.id()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
 
         return Ok(output);
@@ -265,8 +260,7 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -305,8 +299,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 input_ids: [lhs.id(), rhs.id()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
 
         return Ok(output);
@@ -339,8 +332,7 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -379,8 +371,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 input_ids: [lhs.id(), rhs.id()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
 
         return Ok(output);
@@ -413,8 +404,7 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -461,10 +451,7 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
         let grad_fn = Arc::new(NegBackward {
             input_id: tensor.id(),
         });
-        let mut out_with_grad = output;
-        out_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&out_with_grad, Some(grad_fn))?;
-        Ok(out_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -581,8 +568,7 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
                 input_ids: [lhs.id(), rhs.id()],
                 input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
         return Ok(output);
     }
@@ -612,8 +598,7 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_ids: [lhs.id(), rhs.id()],
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

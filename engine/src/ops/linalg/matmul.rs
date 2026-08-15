@@ -5,9 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::autograd::with_grad_fn;
 
 use crate::{
-    autograd::{DotBackward, MatMulBackward, SolveBackward, add_to_graph},
+    autograd::{DotBackward, MatMulBackward, SolveBackward},
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -1047,10 +1048,7 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -1166,8 +1164,7 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             lhs_requires_grad: lhs.requires_grad(),
             rhs_requires_grad: rhs.requires_grad(),
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -1597,10 +1594,7 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             rhs_requires_grad,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }

@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::RepeatInterleaveBackward;
 use crate::ops::map::build_vec;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -121,8 +121,7 @@ pub fn repeat_interleave(
         let mut result = build_empty_repeat_result(tensor, dim, target_dim)?;
         if requires_grad {
             let grad_fn = build_grad_fn(reps);
-            result.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&result, Some(grad_fn))?;
+            result = with_grad_fn(result, grad_fn)?;
         }
         return Ok(result);
     }
@@ -182,8 +181,7 @@ pub fn repeat_interleave(
 
     if requires_grad {
         let grad_fn = build_grad_fn(reps);
-        result.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result, Some(grad_fn))?;
+        result = with_grad_fn(result, grad_fn)?;
     }
 
     Ok(result)

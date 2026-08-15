@@ -4,8 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{NormBackward, add_to_graph},
+    autograd::NormBackward,
     error::{MinitensorError, Result},
     ops::{
         activation, arithmetic,
@@ -421,10 +422,8 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
             dims,
             keepdim_shape: reduced_shape,
         });
-        let mut output = output.requires_grad_(true);
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        Ok(output)
+        let output = output.requires_grad_(true);
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }

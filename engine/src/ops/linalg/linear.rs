@@ -7,8 +7,9 @@
 //! `input @ weight^T + bias`, the affine map behind every dense layer.
 
 use super::matmul_impl::{gemm_nt_f32, gemm_nt_f64};
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{LinearBackward, add_to_graph},
+    autograd::LinearBackward,
     error::{MinitensorError, Result},
     ops::arithmetic::add,
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -156,8 +157,6 @@ fn attach_grad(
         input_requires_grad: input.requires_grad(),
         weight_requires_grad: weight.requires_grad(),
     });
-    let mut output = output.requires_grad_(true);
-    output.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output, Some(grad_fn))?;
-    Ok(output)
+    let output = output.requires_grad_(true);
+    with_grad_fn(output, grad_fn)
 }

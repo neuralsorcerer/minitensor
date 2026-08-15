@@ -5,13 +5,14 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::autograd::with_grad_fn;
 
 use crate::{
     autograd::{
         AcosBackward, AcoshBackward, AsinBackward, AsinhBackward, AtanBackward, AtanhBackward,
         CosBackward, CoshBackward, ErfBackward, ExpBackward, Expm1Backward, Log1pBackward,
         LogBackward, LogBaseBackward, SigmoidBackward, SinBackward, SinhBackward, TanBackward,
-        TanhBackward, add_to_graph,
+        TanhBackward,
     },
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
@@ -58,10 +59,7 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -99,10 +97,7 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -136,10 +131,7 @@ pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone().detach(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -195,10 +187,7 @@ fn log_base(
             input: tensor.clone().detach(),
             ln_base,
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -247,10 +236,7 @@ fn erf_family(tensor: &Tensor, complementary: bool) -> Result<Tensor> {
             input: tensor.clone().detach(),
             scale: if complementary { -magnitude } else { magnitude },
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -282,10 +268,7 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
             output: output.clone().detach(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -321,10 +304,7 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -362,10 +342,7 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -403,10 +380,7 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -440,10 +414,7 @@ pub fn asin(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -475,10 +446,7 @@ pub fn acos(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -510,10 +478,7 @@ pub fn atan(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -545,10 +510,7 @@ pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -580,10 +542,7 @@ pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -615,10 +574,7 @@ pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -650,10 +606,7 @@ pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -685,10 +638,7 @@ pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -724,10 +674,7 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -765,10 +712,7 @@ pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {

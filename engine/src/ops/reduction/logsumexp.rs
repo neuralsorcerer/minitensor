@@ -11,7 +11,7 @@ use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -280,10 +280,7 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
             dims: dims_clone,
             keepdim,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -327,10 +324,7 @@ pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
             input_id: tensor.id(),
             dim,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -406,10 +400,7 @@ pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
             output: result.clone(),
             dim,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -638,10 +629,7 @@ pub fn nanmean(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Resul
             mask,
             count,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }

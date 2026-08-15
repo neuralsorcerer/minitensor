@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     ops::map::PAR_THRESHOLD,
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -406,10 +406,7 @@ pub(crate) fn attach_gather_like_grad(
         dim,
         index,
     });
-    let mut values = values;
-    values.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&values, Some(grad_fn))?;
-    Ok(values)
+    with_grad_fn(values, grad_fn)
 }
 
 /// Attach a [`MinMaxBackward`] gradient to a `min`/`max`/`nanmax`/`nanmin` value
@@ -433,10 +430,7 @@ fn attach_minmax_grad(
         is_max,
         nan_aware,
     });
-    let mut output = output;
-    output.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output, Some(grad_fn))?;
-    Ok(output)
+    with_grad_fn(output, grad_fn)
 }
 
 /// Minimum value along specified dimension

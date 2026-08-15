@@ -11,7 +11,7 @@ use crate::autograd::NanToNumBackward;
 use crate::autograd::RsqrtBackward;
 use crate::autograd::SqrtBackward;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
 };
@@ -44,10 +44,7 @@ pub fn abs(tensor: &Tensor) -> Result<Tensor> {
             input_id: tensor.id(),
             input: tensor.detach(),
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        return Ok(output_with_grad);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -111,10 +108,7 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
             input_id: tensor.id(),
             output: output.clone().detach(),
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        return Ok(output_with_grad);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -149,10 +143,7 @@ pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
             input_id: tensor.id(),
             output: output.clone().detach(),
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        return Ok(output_with_grad);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -197,10 +188,7 @@ pub fn clip(tensor: &Tensor, min_val: Option<f64>, max_val: Option<f64>) -> Resu
             min: min_val,
             max: max_val,
         });
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        return Ok(output_with_grad);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -244,10 +232,7 @@ pub fn nan_to_num(
             finite_mask,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }

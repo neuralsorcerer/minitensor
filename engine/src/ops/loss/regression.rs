@@ -5,12 +5,12 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::autograd::with_grad_fn;
 
 use crate::{
     autograd::{
         BCELossBackward, BCEWithLogitsLossBackward, CrossEntropyLossBackward, FocalLossBackward,
         HuberLossBackward, KLDivLossBackward, MAELossBackward, MSELossBackward, NoGradGuard,
-        add_to_graph,
     },
     error::{MinitensorError, Result},
     ops::util::create_scalar_tensor,
@@ -110,10 +110,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -190,10 +187,7 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -357,10 +351,7 @@ pub fn cross_entropy_loss(
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -567,10 +558,7 @@ pub fn binary_cross_entropy_loss(
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -675,11 +663,8 @@ pub fn binary_cross_entropy_with_logits_loss(
             pos_weight,
         });
 
-        let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
-
-        Ok(loss_with_grad)
+        let loss_with_grad = loss.requires_grad_(true);
+        with_grad_fn(loss_with_grad, grad_fn)
     } else {
         Ok(loss)
     }
@@ -756,10 +741,7 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -872,10 +854,7 @@ pub fn focal_loss(
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {
@@ -965,10 +944,7 @@ pub fn huber_loss(
         });
 
         let mut loss_with_grad = loss.requires_grad_(true);
-        loss_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&loss_with_grad, Some(grad_fn))?;
+        loss_with_grad = with_grad_fn(loss_with_grad, grad_fn)?;
 
         Ok(loss_with_grad)
     } else {

@@ -12,8 +12,9 @@
 //! `(oh * stride - padding, ow * stride - padding)`, with out-of-range
 //! coordinates treated as padding rather than clamped.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{AvgPool2dBackward, MaxPool2dBackward, add_to_graph},
+    autograd::{AvgPool2dBackward, MaxPool2dBackward},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -288,8 +289,7 @@ pub fn max_pool2d(
             input_shape: input.shape().dims().to_vec(),
             indices,
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -346,8 +346,7 @@ pub fn avg_pool2d(
             padding,
             count_include_pad,
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

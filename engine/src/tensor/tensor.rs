@@ -401,8 +401,7 @@ impl Tensor {
             let grad_fn = Arc::new(CloneBackward {
                 input_id: self.tensor_id,
             });
-            cloned.set_grad_fn(Some(grad_fn.clone()));
-            autograd::add_to_graph(&cloned, Some(grad_fn))?;
+            cloned = autograd::with_grad_fn(cloned, grad_fn)?;
         }
 
         Ok(cloned)
@@ -473,8 +472,7 @@ impl Tensor {
             let grad_fn = Arc::new(CloneBackward {
                 input_id: self.tensor_id,
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            autograd::add_to_graph(&output, Some(grad_fn))?;
+            output = autograd::with_grad_fn(output, grad_fn)?;
         }
 
         Ok(output)
@@ -1496,8 +1494,7 @@ impl Tensor {
                 input_shape: orig_dims.to_vec(),
                 input_id: self.id(),
             });
-            tensor.set_grad_fn(Some(grad_fn.clone()));
-            autograd::add_to_graph(&tensor, Some(grad_fn))?;
+            tensor = autograd::with_grad_fn(tensor, grad_fn)?;
         }
 
         Ok(tensor)
@@ -1741,9 +1738,7 @@ impl Tensor {
             starts,
             steps,
         });
-        let mut output = output;
-        output.set_grad_fn(Some(grad_fn.clone()));
-        autograd::add_to_graph(&output, Some(grad_fn))?;
+        let output = autograd::with_grad_fn(output, grad_fn)?;
         Ok(output)
     }
 
@@ -2494,8 +2489,7 @@ impl Tensor {
                 input_id: self.id(),
                 input_dtype: self.dtype,
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            autograd::add_to_graph(&output, Some(grad_fn))?;
+            output = autograd::with_grad_fn(output, grad_fn)?;
         }
         Ok(output)
     }

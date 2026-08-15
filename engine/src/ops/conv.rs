@@ -4,8 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{Conv2dBackward, add_to_graph},
+    autograd::Conv2dBackward,
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -305,8 +306,7 @@ pub fn conv2d(
             padding,
             deps,
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

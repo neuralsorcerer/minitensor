@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::TransposeBackward;
 use crate::ops::reduction;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -85,10 +85,7 @@ pub fn transpose(tensor: &Tensor, dim0: isize, dim1: isize) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -207,8 +204,7 @@ pub fn diagonal(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Res
             input_id: tensor.id(),
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -262,8 +258,7 @@ fn triangular_op(tensor: &Tensor, diagonal: i64, upper: bool) -> Result<Tensor> 
             input_id: tensor.id(),
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

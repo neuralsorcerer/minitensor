@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::MaskedLogSoftmaxBackward;
 use crate::autograd::SoftmaxBackward;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
 };
@@ -90,10 +90,7 @@ pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Res
                 dim: 0,
             });
 
-            let mut output_with_grad = output;
-            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output_with_grad, Some(grad_fn))?;
-            return Ok(output_with_grad);
+            return with_grad_fn(output, grad_fn);
         }
 
         return Ok(output);
@@ -136,11 +133,7 @@ pub fn masked_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) -> Res
             dim,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -222,10 +215,7 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
                 dim: 0,
             });
 
-            let mut output_with_grad = output;
-            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output_with_grad, Some(grad_fn))?;
-            return Ok(output_with_grad);
+            return with_grad_fn(output, grad_fn);
         }
 
         return Ok(output);
@@ -269,11 +259,7 @@ pub fn masked_log_softmax(tensor: &Tensor, mask: &Tensor, dim: Option<usize>) ->
             dim,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }

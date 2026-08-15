@@ -20,7 +20,7 @@ use crate::autograd::SoftmaxBackward;
 use crate::autograd::SoftplusBackward;
 use crate::autograd::SoftsignBackward;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Tensor, TensorData},
 };
@@ -176,11 +176,7 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
             broadcast,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -279,10 +275,7 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -322,10 +315,7 @@ pub fn softplus(tensor: &Tensor, beta: f64, threshold: f64) -> Result<Tensor> {
             threshold,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -358,10 +348,7 @@ pub fn gelu(tensor: &Tensor, approximate: bool) -> Result<Tensor> {
             approximate,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -394,10 +381,7 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
             alpha,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -429,10 +413,7 @@ pub fn selu(tensor: &Tensor) -> Result<Tensor> {
             output: output.clone().detach(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -464,10 +445,7 @@ pub fn silu(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone().detach(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -499,10 +477,7 @@ pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
             input: tensor.clone().detach(),
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -549,10 +524,7 @@ pub fn relu(tensor: &Tensor) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -601,10 +573,7 @@ pub fn hardshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
             })?,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         debug_assert!(mask.is_none());
         Ok(output)
@@ -650,10 +619,7 @@ pub fn leaky_relu(tensor: &Tensor, negative_slope: f64) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -705,10 +671,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
                 dim: 0,
             });
 
-            let mut output_with_grad = output;
-            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output_with_grad, Some(grad_fn))?;
-            return Ok(output_with_grad);
+            return with_grad_fn(output, grad_fn);
         }
 
         return Ok(output);
@@ -756,10 +719,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
         });
 
         let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
+        output_with_grad = with_grad_fn(output_with_grad, grad_fn)?;
 
         Ok(output_with_grad)
     } else {
@@ -811,10 +771,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
                 dim: 0,
             });
 
-            let mut output_with_grad = output;
-            output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output_with_grad, Some(grad_fn))?;
-            return Ok(output_with_grad);
+            return with_grad_fn(output, grad_fn);
         }
 
         return Ok(output);
@@ -857,12 +814,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
             dim,
         });
 
-        let mut output_with_grad = output;
-        output_with_grad.set_grad_fn(Some(grad_fn.clone()));
-
-        add_to_graph(&output_with_grad, Some(grad_fn))?;
-
-        Ok(output_with_grad)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }

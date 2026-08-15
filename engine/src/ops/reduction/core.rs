@@ -5,9 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::autograd::with_grad_fn;
 
 use crate::{
-    autograd::{MedianBackward, QuantileBackward, add_to_graph},
+    autograd::{MedianBackward, QuantileBackward},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -283,10 +284,7 @@ fn attach_median_grad(
         keepdim,
         nan_aware,
     });
-    let mut values = values;
-    values.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&values, Some(grad_fn))?;
-    Ok(values)
+    with_grad_fn(values, grad_fn)
 }
 
 /// Compute the q-th quantile of the tensor data.
@@ -344,10 +342,7 @@ fn attach_quantile_grad(
         interpolation,
         nan_aware,
     });
-    let mut output = output;
-    output.set_grad_fn(Some(grad_fn.clone()));
-    add_to_graph(&output, Some(grad_fn))?;
-    Ok(output)
+    with_grad_fn(output, grad_fn)
 }
 
 /// Compute multiple quantiles of the tensor data in a single pass.

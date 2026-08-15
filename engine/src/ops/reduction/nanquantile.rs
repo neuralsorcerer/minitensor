@@ -8,7 +8,7 @@ use super::*;
 use crate::autograd::NanSumBackward;
 use crate::autograd::SumBackward;
 use crate::{
-    autograd::add_to_graph,
+    autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -454,10 +454,7 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
             dims: dims_clone,
             keepdim,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -532,10 +529,7 @@ pub fn nansum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result
             keepdim,
             mask,
         });
-        let mut result_with_grad = result;
-        result_with_grad.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&result_with_grad, Some(grad_fn))?;
-        Ok(result_with_grad)
+        with_grad_fn(result, grad_fn)
     } else {
         Ok(result)
     }

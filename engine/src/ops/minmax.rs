@@ -4,8 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{GradientFunction, MaximumBackward, MinimumBackward, add_to_graph},
+    autograd::{GradientFunction, MaximumBackward, MinimumBackward},
     error::{MinitensorError, Result},
     ops::{
         binary::{BinaryOpKind, coerce_binary_operands},
@@ -185,8 +186,7 @@ fn binary_minmax(lhs: &Tensor, rhs: &Tensor, op: BinaryOpKind) -> Result<Tensor>
             }),
             _ => unreachable!(),
         };
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

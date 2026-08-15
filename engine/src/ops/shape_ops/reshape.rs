@@ -4,10 +4,10 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
     autograd::{
         ConcatBackward, GatherBackward, IndexSelectBackward, RepeatBackward, ReshapeBackward,
-        add_to_graph,
     },
     device::Device,
     error::{MinitensorError, Result},
@@ -54,15 +54,13 @@ fn checked_repeat_numel(dims: &[usize]) -> Result<usize> {
 fn attach_repeat_backward(mut output: Tensor, input: &Tensor, repeats: &[usize]) -> Result<Tensor> {
     if input.requires_grad() && input.dtype().is_float() && crate::autograd::is_grad_enabled() {
         output.refresh_autograd_metadata();
-        let mut output = output.requires_grad_(true);
+        let output = output.requires_grad_(true);
         let grad_fn = Arc::new(RepeatBackward {
             input_id: input.id(),
             input_shape: input.shape().dims().to_vec(),
             repeats: repeats.to_vec(),
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        Ok(output)
+        with_grad_fn(output, grad_fn)
     } else {
         Ok(output)
     }
@@ -109,10 +107,7 @@ pub fn reshape(tensor: &Tensor, new_shape: Shape) -> Result<Tensor> {
             input_id: tensor.id(),
         });
 
-        reshaped.set_grad_fn(Some(grad_fn.clone()));
-
-        // Add to computation graph
-        add_to_graph(&reshaped, Some(grad_fn))?;
+        reshaped = with_grad_fn(reshaped, grad_fn)?;
 
         Ok(reshaped)
     } else {
@@ -459,10 +454,7 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             dim,
             input_requires_grad: tensors.iter().map(|t| t.requires_grad()).collect(),
         });
-        let mut output = output;
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -659,10 +651,7 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
             dim,
             indices: indices.to_vec(),
         });
-        let mut output = output;
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -790,10 +779,7 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
             dim,
             index: idx_slice.to_vec(),
         });
-        let mut output = output;
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -922,10 +908,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
             dim,
             indices,
         });
-        let mut output = output;
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -1104,14 +1087,12 @@ pub fn flip(tensor: &Tensor, dims: &[isize]) -> Result<Tensor> {
     if track_grad {
         let mut output = output;
         output.refresh_autograd_metadata();
-        let mut output = output.requires_grad_(true);
+        let output = output.requires_grad_(true);
         let grad_fn = Arc::new(crate::autograd::FlipBackward {
             input_id: tensor.id(),
             dims: normalized,
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)
@@ -1134,15 +1115,13 @@ pub fn roll(tensor: &Tensor, shifts: &[isize], dims: Option<&[isize]>) -> Result
     if track_grad {
         let mut output = output;
         output.refresh_autograd_metadata();
-        let mut output = output.requires_grad_(true);
+        let output = output.requires_grad_(true);
         let grad_fn = Arc::new(crate::autograd::RollBackward {
             input_id: tensor.id(),
             shifts: shifts.to_vec(),
             dims: dims.map(|d| d.to_vec()),
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
-        return Ok(output);
+        return with_grad_fn(output, grad_fn);
     }
 
     Ok(output)

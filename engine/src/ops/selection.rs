@@ -4,8 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{WhereBackward, add_to_graph},
+    autograd::WhereBackward,
     device::Device,
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
@@ -118,8 +119,7 @@ pub fn where_op(condition: &Tensor, input: &Tensor, other: &Tensor) -> Result<Te
             input_ids: [input.id(), other.id()],
         });
 
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)
@@ -261,8 +261,7 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
             inner,
             input_id: input.id(),
         });
-        output.set_grad_fn(Some(grad_fn.clone()));
-        add_to_graph(&output, Some(grad_fn))?;
+        output = with_grad_fn(output, grad_fn)?;
     }
 
     Ok(output)

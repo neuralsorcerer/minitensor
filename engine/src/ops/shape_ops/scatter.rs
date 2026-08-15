@@ -4,8 +4,9 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::autograd::with_grad_fn;
 use crate::{
-    autograd::{ScatterAddBackward, ScatterBackward, add_to_graph},
+    autograd::{ScatterAddBackward, ScatterBackward},
     error::{MinitensorError, Result},
     ops::util::normalize_dim,
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -233,8 +234,7 @@ fn scatter_impl(
                 dim: layout.dim,
                 indices: layout.indices,
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         } else {
             let winners = surviving_writers(&layout, outer);
             let grad_fn = Arc::new(ScatterBackward {
@@ -248,8 +248,7 @@ fn scatter_impl(
                 indices: layout.indices,
                 winners,
             });
-            output.set_grad_fn(Some(grad_fn.clone()));
-            add_to_graph(&output, Some(grad_fn))?;
+            output = with_grad_fn(output, grad_fn)?;
         }
         return Ok(output);
     }

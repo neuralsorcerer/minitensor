@@ -134,6 +134,27 @@ pub fn add_to_graph(tensor: &Tensor, grad_fn: Option<Arc<dyn GradientFunction>>)
     Ok(())
 }
 
+/// Record `grad_fn` as the operation that produced `output`, and hand the
+/// output back.
+///
+/// Every differentiable op ends the same two steps: set the gradient function
+/// on the output, and add the node to the graph — the same `Arc` in both.
+/// Written out at each of the seventy-odd call sites, they are two steps that
+/// have to agree, and doing only the first is not a compile error. It produces
+/// a tensor that reports `requires_grad` with nothing behind it, which a
+/// backward pass then walks straight past: the parameter simply receives no
+/// gradient, and an optimizer skips it in silence. `ops::reduction`'s unbiased
+/// single-sample variance carries a comment about exactly that failure, found
+/// after it had shipped.
+///
+/// Taking the output by value is what makes the pair inseparable — there is no
+/// half-attached tensor to hold.
+pub fn with_grad_fn(mut output: Tensor, grad_fn: Arc<dyn GradientFunction>) -> Result<Tensor> {
+    output.set_grad_fn(Some(grad_fn.clone()));
+    add_to_graph(&output, Some(grad_fn))?;
+    Ok(output)
+}
+
 fn implicit_gradient(tensor: &Tensor, grad_output: Option<Tensor>) -> Result<Tensor> {
     match grad_output {
         Some(g) => Ok(g),
@@ -1214,5 +1235,82 @@ impl GradientFunction for TransposeBackward {
 
     fn input_ids(&self) -> &[TensorId] {
         std::slice::from_ref(&self.input_id)
+    }
+}
+
+#[cfg(test)]
+mod with_grad_fn_tests {
+    use super::*;
+    use crate::device::Device;
+    use crate::ops::arithmetic::{add, mul};
+    use crate::tensor::{DataType, Shape};
+
+    fn leaf(v: f32, requires_grad: bool) -> Tensor {
+        let mut t = Tensor::zeros(
+            Shape::new(vec![2]),
+            DataType::Float32,
+            Device::cpu(),
+            requires_grad,
+        );
+        t.data_mut().as_f32_slice_mut().unwrap().fill(v);
+        t
+    }
+
+    /// The property [`with_grad_fn`] exists to hold: a differentiable output
+    /// carries *both* a gradient function and a node in the graph. Setting one
+    /// without the other is not a compile error, and the tensor it produces
+    /// claims `requires_grad` while a backward pass walks straight past it --
+    /// so the parameter silently receives nothing.
+    ///
+    /// Every op in the engine goes through this one function now, so checking
+    /// a representative few checks the shape of all of them.
+    #[test]
+    fn a_differentiable_output_has_both_a_function_and_a_node() {
+        let a = leaf(2.0, true);
+        let b = leaf(3.0, false);
+
+        for (name, out) in [("add", add(&a, &b).unwrap()), ("mul", mul(&a, &b).unwrap())] {
+            assert!(out.requires_grad(), "{name} lost requires_grad");
+            assert!(out.grad_fn().is_some(), "{name} has no gradient function");
+            assert!(
+                is_in_graph(out.id()),
+                "{name} has a gradient function but no graph node"
+            );
+        }
+    }
+
+    /// An output that needs no gradient gets neither, and in particular does
+    /// not leave a node behind: the graph should not grow for constants.
+    #[test]
+    fn a_constant_output_records_nothing() {
+        clear_graph();
+        let a = leaf(2.0, false);
+        let b = leaf(3.0, false);
+        let out = add(&a, &b).unwrap();
+        assert!(!out.requires_grad());
+        assert!(out.grad_fn().is_none());
+        assert!(!is_in_graph(out.id()));
+    }
+
+    /// Under `no_grad` nothing is recorded even for inputs that do require
+    /// gradients -- the guard is what makes an inference loop stay flat.
+    #[test]
+    fn no_grad_records_no_node() {
+        clear_graph();
+        let a = leaf(2.0, true);
+        let b = leaf(3.0, true);
+        let out = {
+            let _guard = NoGradGuard::new();
+            add(&a, &b).unwrap()
+        };
+        assert!(!is_in_graph(out.id()), "a node was recorded under no_grad");
+    }
+
+    fn is_in_graph(id: TensorId) -> bool {
+        GLOBAL_GRAPH.with(|g| g.borrow().contains_tensor(id))
+    }
+
+    fn clear_graph() {
+        GLOBAL_GRAPH.with(|g| *g.borrow_mut() = crate::autograd::ComputationGraph::new());
     }
 }
