@@ -125,6 +125,15 @@ macro_rules! binary_kernel_simd {
 }
 
 // Addition: `+` for numeric dtypes, logical OR for bool.
+//
+// The integer kernels here and below use the `wrapping_*` operators, as the
+// division and remainder ones already did. Plain `+`, `-` and `*` on integers
+// are a panic on overflow in a build with overflow checks and a two's-
+// complement wrap without them, so `i32::MAX + 1` aborted under `cargo test`
+// and returned `i32::MIN` from the released wheel -- the same tensor behaving
+// two ways depending on how the caller compiled. Wrapping is what the release
+// build was already doing, and what an integer tensor is expected to do; naming
+// it makes every build agree.
 binary_kernel_simd!(
     add_f32_direct,
     as_f32_slice,
@@ -143,10 +152,22 @@ binary_kernel_simd!(
     add_f64_blocks,
     |a, b| a + b
 );
-binary_kernel!(add_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
-    + b);
-binary_kernel!(add_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
-    + b);
+binary_kernel!(
+    add_i32_direct,
+    as_i32_slice,
+    i32,
+    Int32,
+    "i32",
+    |a: i32, b: i32| a.wrapping_add(b)
+);
+binary_kernel!(
+    add_i64_direct,
+    as_i64_slice,
+    i64,
+    Int64,
+    "i64",
+    |a: i64, b: i64| a.wrapping_add(b)
+);
 binary_kernel!(
     add_bool_direct,
     as_bool_slice,
@@ -175,10 +196,22 @@ binary_kernel_simd!(
     sub_f64_blocks,
     |a, b| a - b
 );
-binary_kernel!(sub_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
-    - b);
-binary_kernel!(sub_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
-    - b);
+binary_kernel!(
+    sub_i32_direct,
+    as_i32_slice,
+    i32,
+    Int32,
+    "i32",
+    |a: i32, b: i32| a.wrapping_sub(b)
+);
+binary_kernel!(
+    sub_i64_direct,
+    as_i64_slice,
+    i64,
+    Int64,
+    "i64",
+    |a: i64, b: i64| a.wrapping_sub(b)
+);
 
 // Multiplication: `*` for numeric dtypes, logical AND for bool.
 binary_kernel_simd!(
@@ -199,10 +232,22 @@ binary_kernel_simd!(
     mul_f64_blocks,
     |a, b| a * b
 );
-binary_kernel!(mul_i32_direct, as_i32_slice, i32, Int32, "i32", |a, b| a
-    * b);
-binary_kernel!(mul_i64_direct, as_i64_slice, i64, Int64, "i64", |a, b| a
-    * b);
+binary_kernel!(
+    mul_i32_direct,
+    as_i32_slice,
+    i32,
+    Int32,
+    "i32",
+    |a: i32, b: i32| a.wrapping_mul(b)
+);
+binary_kernel!(
+    mul_i64_direct,
+    as_i64_slice,
+    i64,
+    Int64,
+    "i64",
+    |a: i64, b: i64| a.wrapping_mul(b)
+);
 binary_kernel!(
     mul_bool_direct,
     as_bool_slice,
@@ -919,5 +964,68 @@ mod tests {
         let result = add(&a, &b).unwrap();
         assert_eq!(result.shape().dims(), &[0, 3]);
         assert_eq!(result.data().as_f32_slice().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod integer_wraparound_tests {
+    use super::*;
+    use crate::device::Device;
+    use crate::ops::activation::abs;
+    use crate::ops::arithmetic::{add, mul, neg, sub};
+    use std::sync::Arc;
+
+    fn i32_tensor(data: Vec<i32>) -> Tensor {
+        let shape = Shape::new(vec![data.len()]);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<i32>(
+                data,
+                DataType::Int32,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Int32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn out(t: &Tensor) -> Vec<i32> {
+        t.data().as_i32_slice().unwrap().to_vec()
+    }
+
+    /// Integer arithmetic wraps, and the point of this test is that it wraps
+    /// *here*, in the profile the test suite runs under.
+    ///
+    /// `+`, `-`, `*`, unary `-` and `abs` on integers all panic on overflow in
+    /// a build with overflow checks and wrap without them. Every one of these
+    /// cases therefore aborted under `cargo test` while the released wheel
+    /// returned a value — the same tensor behaving two ways depending on how
+    /// the caller compiled. So this test failing in debug and passing in
+    /// release is exactly the state it exists to rule out.
+    #[test]
+    fn integer_overflow_wraps_in_every_build_profile() {
+        let hi = i32_tensor(vec![i32::MAX, i32::MAX]);
+        let lo = i32_tensor(vec![i32::MIN, i32::MIN]);
+        let one = i32_tensor(vec![1, 1]);
+        let two = i32_tensor(vec![2, 2]);
+
+        assert_eq!(out(&add(&hi, &one).unwrap()), vec![i32::MIN, i32::MIN]);
+        assert_eq!(out(&sub(&lo, &one).unwrap()), vec![i32::MAX, i32::MAX]);
+        assert_eq!(out(&mul(&hi, &two).unwrap()), vec![-2, -2]);
+
+        // `-MIN` and `|MIN|` are both one past what the type holds, so two's
+        // complement leaves `MIN` as the only available answer for each.
+        assert_eq!(out(&neg(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
+        assert_eq!(out(&abs(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
+
+        // Everything away from the boundary is unaffected.
+        let a = i32_tensor(vec![-7, 3]);
+        let b = i32_tensor(vec![5, -2]);
+        assert_eq!(out(&add(&a, &b).unwrap()), vec![-2, 1]);
+        assert_eq!(out(&sub(&a, &b).unwrap()), vec![-12, 5]);
+        assert_eq!(out(&mul(&a, &b).unwrap()), vec![-35, -6]);
+        assert_eq!(out(&neg(&a).unwrap()), vec![7, -3]);
+        assert_eq!(out(&abs(&a).unwrap()), vec![7, 3]);
     }
 }

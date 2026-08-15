@@ -403,7 +403,14 @@ fn abs_i32(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get i32 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, |v: i32| v.abs());
+    // `wrapping_abs`, not `abs`: the magnitude of i32::MIN is one past
+    // what i32 can hold, so `abs` is a panic in a build with overflow
+    // checks and a wrap without them -- the same input aborting in
+    // development and returning a value in production. Wrapping says which
+    // of the two this is, everywhere: `abs(i32::MIN)` is `i32::MIN`, which
+    // is what the release build already produced and what two's complement
+    // leaves no alternative to.
+    let out = unary_map(input_data, |v: i32| v.wrapping_abs());
     Ok(TensorData::from_vec::<i32>(
         out,
         DataType::Int32,
@@ -416,7 +423,14 @@ fn abs_i64(tensor: &Tensor) -> Result<TensorData> {
         MinitensorError::internal_error("Failed to get i64 slice from input tensor")
     })?;
 
-    let out = unary_map(input_data, |v: i64| v.abs());
+    // `wrapping_abs`, not `abs`: the magnitude of i64::MIN is one past
+    // what i64 can hold, so `abs` is a panic in a build with overflow
+    // checks and a wrap without them -- the same input aborting in
+    // development and returning a value in production. Wrapping says which
+    // of the two this is, everywhere: `abs(i64::MIN)` is `i64::MIN`, which
+    // is what the release build already produced and what two's complement
+    // leaves no alternative to.
+    let out = unary_map(input_data, |v: i64| v.wrapping_abs());
     Ok(TensorData::from_vec::<i64>(
         out,
         DataType::Int64,

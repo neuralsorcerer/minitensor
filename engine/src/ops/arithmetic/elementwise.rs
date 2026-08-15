@@ -415,7 +415,7 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
     /// Applies negation for one dtype: fetch the input slice and map
     /// element-wise into a fresh buffer (parallel above `PAR_THRESHOLD`).
     macro_rules! neg_arm {
-        ($accessor:ident, $dtype:ident, $tyname:literal) => {{
+        ($accessor:ident, $dtype:ident, $tyname:literal, $negate:expr) => {{
             let input = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
                     "Failed to get ",
@@ -423,15 +423,21 @@ pub fn neg(tensor: &Tensor) -> Result<Tensor> {
                     " slice from tensor"
                 ))
             })?;
-            TensorData::from_vec(unary_map(input, |i| -i), DataType::$dtype, tensor.device())
+            TensorData::from_vec(unary_map(input, $negate), DataType::$dtype, tensor.device())
         }};
     }
 
+    // The integer arms negate with `wrapping_neg`. `-x` is a panic on
+    // `MIN` in a build with overflow checks and a wrap without them, so the
+    // same tensor aborted under `cargo test` and returned a value from the
+    // released wheel. Two's complement has no representation for `-MIN`, so
+    // wrapping is the only answer available; naming it makes the two builds
+    // agree on the one the release build was already giving.
     let output_data = match tensor.dtype() {
-        DataType::Float32 => neg_arm!(as_f32_slice, Float32, "f32"),
-        DataType::Float64 => neg_arm!(as_f64_slice, Float64, "f64"),
-        DataType::Int32 => neg_arm!(as_i32_slice, Int32, "i32"),
-        DataType::Int64 => neg_arm!(as_i64_slice, Int64, "i64"),
+        DataType::Float32 => neg_arm!(as_f32_slice, Float32, "f32", |v: f32| -v),
+        DataType::Float64 => neg_arm!(as_f64_slice, Float64, "f64", |v: f64| -v),
+        DataType::Int32 => neg_arm!(as_i32_slice, Int32, "i32", |v: i32| v.wrapping_neg()),
+        DataType::Int64 => neg_arm!(as_i64_slice, Int64, "i64", |v: i64| v.wrapping_neg()),
         DataType::Bool => {
             return Err(MinitensorError::invalid_operation(
                 "Negation not supported for boolean tensors",
