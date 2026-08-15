@@ -15,7 +15,6 @@ use crate::{
     ops::linalg::linear,
     tensor::{DataType, Shape, Tensor},
 };
-use std::collections::HashMap;
 
 /// DenseLayer (fully connected) layer
 ///
@@ -118,25 +117,6 @@ impl DenseLayer {
 }
 
 impl Layer for DenseLayer {
-    /// Get named parameters for this layer
-    fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &self.weight);
-        if let Some(ref bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-    /// Get named mutable parameters for this layer
-    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &mut self.weight);
-        if let Some(ref mut bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Validate input dimensions
         if input.ndim() < 2 {
@@ -161,23 +141,7 @@ impl Layer for DenseLayer {
         linear(input, &self.weight, self.bias.as_ref())
     }
 
-    fn parameters(&self) -> Vec<&Tensor> {
-        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
-        params.push(&self.weight);
-        if let Some(ref bias) = self.bias {
-            params.push(bias);
-        }
-        params
-    }
-
-    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
-        params.push(&mut self.weight);
-        if let Some(ref mut bias) = self.bias {
-            params.push(bias);
-        }
-        params
-    }
+    crate::weight_and_optional_bias_parameters!();
 }
 
 // Note: Module is blanket-implemented for all Layers; named_parameters helpers are available as inherent methods.

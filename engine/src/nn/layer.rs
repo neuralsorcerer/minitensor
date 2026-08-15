@@ -71,6 +71,67 @@ pub(crate) fn check_feature_dim(
 }
 
 /// Trait for neural network layers
+/// Emits the four `Layer` parameter accessors for a layer holding a `weight`
+/// and an optional `bias` — `parameters`, `parameters_mut`,
+/// `named_parameters` and `named_parameters_mut`.
+///
+/// The four are not merely repetitive, they have to agree: `state_dict` reads
+/// the named views and an optimizer steps the unnamed ones, so a layer that
+/// grows a parameter and updates only one pair gets trained on a set it does
+/// not save, or saves one it does not train. Neither is a compile error and
+/// neither shows up in a forward pass. Writing all four from one place is what
+/// makes them one decision instead of four.
+///
+/// Only the layers whose parameters are exactly this shape use it — `Conv1d`,
+/// `Conv2d` and `DenseLayer`. `Embedding` has no bias, `LayerNorm`'s is not
+/// optional, and `BatchNorm`'s weight is optional too; each of those writes its
+/// own, because pretending otherwise would need a macro with more cases than
+/// callers.
+#[macro_export]
+macro_rules! weight_and_optional_bias_parameters {
+    () => {
+        fn parameters(&self) -> Vec<&$crate::tensor::Tensor> {
+            let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+            params.push(&self.weight);
+            if let Some(ref bias) = self.bias {
+                params.push(bias);
+            }
+            params
+        }
+
+        fn parameters_mut(&mut self) -> Vec<&mut $crate::tensor::Tensor> {
+            let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
+            params.push(&mut self.weight);
+            if let Some(ref mut bias) = self.bias {
+                params.push(bias);
+            }
+            params
+        }
+
+        fn named_parameters(&self) -> std::collections::HashMap<String, &$crate::tensor::Tensor> {
+            let mut params =
+                std::collections::HashMap::with_capacity(1 + self.bias.is_some() as usize);
+            params.insert("weight".to_string(), &self.weight);
+            if let Some(ref bias) = self.bias {
+                params.insert("bias".to_string(), bias);
+            }
+            params
+        }
+
+        fn named_parameters_mut(
+            &mut self,
+        ) -> std::collections::HashMap<String, &mut $crate::tensor::Tensor> {
+            let mut params =
+                std::collections::HashMap::with_capacity(1 + self.bias.is_some() as usize);
+            params.insert("weight".to_string(), &mut self.weight);
+            if let Some(ref mut bias) = self.bias {
+                params.insert("bias".to_string(), bias);
+            }
+            params
+        }
+    };
+}
+
 pub trait Layer: Send + Sync {
     /// Forward pass through the layer
     fn forward(&mut self, input: &Tensor) -> Result<Tensor>;
@@ -335,3 +396,90 @@ fn check_loadable(
 
 /// Automatic implementation of Module for all Layer implementations
 impl<T: Layer> Module for T {}
+
+#[cfg(test)]
+mod parameter_view_tests {
+    use crate::nn::{Conv1d, Conv2d, DenseLayer, Layer};
+
+    /// A layer's four parameter accessors are four views of one set, and the
+    /// two pairs are read by different callers: `state_dict` saves the named
+    /// view, an optimizer steps the unnamed one. If they disagree, a parameter
+    /// is trained but never saved, or saved but never trained — and neither
+    /// shows up in a forward pass or in any gradient check.
+    ///
+    /// `weight_and_optional_bias_parameters!` is what keeps them one decision
+    /// for the three layers that share this shape; this says what that decision
+    /// has to produce, with and without a bias.
+    #[test]
+    fn the_named_and_unnamed_views_describe_the_same_parameters() {
+        let dev = crate::device::Device::cpu();
+        let dt = crate::tensor::DataType::Float32;
+        let mut layers: Vec<(&str, Box<dyn Layer>)> = vec![
+            (
+                "DenseLayer+bias",
+                Box::new(DenseLayer::new(4, 3, true, dev, dt).unwrap()),
+            ),
+            (
+                "DenseLayer-bias",
+                Box::new(DenseLayer::new(4, 3, false, dev, dt).unwrap()),
+            ),
+            (
+                "Conv1d+bias",
+                Box::new(Conv1d::new(2, 3, 3, None, None, true, dev, dt).unwrap()),
+            ),
+            (
+                "Conv1d-bias",
+                Box::new(Conv1d::new(2, 3, 3, None, None, false, dev, dt).unwrap()),
+            ),
+            (
+                "Conv2d+bias",
+                Box::new(Conv2d::new(2, 3, (3, 3), None, None, true, dev, dt).unwrap()),
+            ),
+            (
+                "Conv2d-bias",
+                Box::new(Conv2d::new(2, 3, (3, 3), None, None, false, dev, dt).unwrap()),
+            ),
+        ];
+
+        for (name, layer) in layers.iter_mut() {
+            let named: Vec<String> = {
+                let mut keys: Vec<String> = layer.named_parameters().keys().cloned().collect();
+                keys.sort();
+                keys
+            };
+            let expected: Vec<String> = if name.ends_with("+bias") {
+                vec!["bias".to_string(), "weight".to_string()]
+            } else {
+                vec!["weight".to_string()]
+            };
+            assert_eq!(named, expected, "{name}: named parameters");
+
+            assert_eq!(
+                layer.parameters().len(),
+                named.len(),
+                "{name}: the unnamed view has a different number of parameters than the named one"
+            );
+            assert_eq!(
+                layer.named_parameters_mut().len(),
+                named.len(),
+                "{name}: the mutable named view disagrees with the shared one"
+            );
+            assert_eq!(
+                layer.parameters_mut().len(),
+                named.len(),
+                "{name}: the mutable unnamed view disagrees"
+            );
+
+            // The two immutable views must point at the same tensors, not
+            // merely agree on how many there are.
+            let by_id: std::collections::HashSet<_> =
+                layer.parameters().iter().map(|t| t.id()).collect();
+            let named_by_id: std::collections::HashSet<_> =
+                layer.named_parameters().values().map(|t| t.id()).collect();
+            assert_eq!(
+                by_id, named_by_id,
+                "{name}: the two views name different tensors"
+            );
+        }
+    }
+}

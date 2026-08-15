@@ -13,7 +13,6 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},
 };
-use std::collections::HashMap;
 
 /// 2D Convolutional layer
 ///
@@ -175,25 +174,6 @@ impl Conv2d {
 }
 
 impl Layer for Conv2d {
-    /// Get named parameters for this layer
-    fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &self.weight);
-        if let Some(ref bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-    /// Get named mutable parameters for this layer
-    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &mut self.weight);
-        if let Some(ref mut bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         // Delegate actual computation to ops::conv::conv2d
         crate::ops::conv2d(
@@ -205,23 +185,7 @@ impl Layer for Conv2d {
         )
     }
 
-    fn parameters(&self) -> Vec<&Tensor> {
-        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
-        params.push(&self.weight);
-        if let Some(ref bias) = self.bias {
-            params.push(bias);
-        }
-        params
-    }
-
-    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        let mut params = Vec::with_capacity(1 + self.bias.is_some() as usize);
-        params.push(&mut self.weight);
-        if let Some(ref mut bias) = self.bias {
-            params.push(bias);
-        }
-        params
-    }
+    crate::weight_and_optional_bias_parameters!();
 }
 
 /// 1-D convolutional layer over `[N, C_in, L]` signals.
@@ -314,26 +278,6 @@ impl Conv1d {
 }
 
 impl Layer for Conv1d {
-    /// Get named parameters for this layer
-    fn named_parameters(&self) -> HashMap<String, &Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &self.weight);
-        if let Some(ref bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-
-    /// Get named mutable parameters for this layer
-    fn named_parameters_mut(&mut self) -> HashMap<String, &mut Tensor> {
-        let mut params = HashMap::with_capacity(1 + self.bias.is_some() as usize);
-        params.insert("weight".to_string(), &mut self.weight);
-        if let Some(ref mut bias) = self.bias {
-            params.insert("bias".to_string(), bias);
-        }
-        params
-    }
-
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
         crate::ops::conv1d(
             input,
@@ -344,19 +288,7 @@ impl Layer for Conv1d {
         )
     }
 
-    fn parameters(&self) -> Vec<&Tensor> {
-        match &self.bias {
-            Some(bias) => vec![&self.weight, bias],
-            None => vec![&self.weight],
-        }
-    }
-
-    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
-        match &mut self.bias {
-            Some(bias) => vec![&mut self.weight, bias],
-            None => vec![&mut self.weight],
-        }
-    }
+    crate::weight_and_optional_bias_parameters!();
 }
 
 #[cfg(test)]
