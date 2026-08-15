@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::util::Accumulate;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{Tensor, TensorData},
@@ -106,7 +107,7 @@ macro_rules! cumprod_forward {
                 dim_size,
                 inner,
                 false,
-                |acc: $t, v: $t| acc * v,
+                |acc: $t, v: $t| acc.acc_mul(v),
             );
             Ok(())
         }
@@ -404,7 +405,7 @@ macro_rules! cumsum_forward {
                 dim_size,
                 inner,
                 false,
-                |acc: $t, v: $t| acc + v,
+                |acc: $t, v: $t| acc.acc_add(v),
             );
             Ok(())
         }
@@ -442,7 +443,7 @@ macro_rules! cumsum_backward {
                 dim_size,
                 inner,
                 true,
-                |acc: $t, v: $t| acc + v,
+                |acc: $t, v: $t| acc.acc_add(v),
             );
             Ok(())
         }
@@ -470,6 +471,7 @@ cumsum_backward!(cumsum_backward_i64, as_i64_slice, as_i64_slice_mut, i64);
 #[cfg(test)]
 mod tests {
     use super::*;
+
     // Sibling reduction entry points under test; the non-test build of this
     // module does not reference them.
     use crate::device::Device;

@@ -344,17 +344,17 @@ pub fn simd_sum_i32(data: &[i32]) -> i32 {
     let chunks = data.chunks_exact(8);
     let rem = chunks.remainder();
     for chunk in chunks {
-        sums[0] += chunk[0];
-        sums[1] += chunk[1];
-        sums[2] += chunk[2];
-        sums[3] += chunk[3];
-        sums[4] += chunk[4];
-        sums[5] += chunk[5];
-        sums[6] += chunk[6];
-        sums[7] += chunk[7];
+        sums[0] = sums[0].wrapping_add(chunk[0]);
+        sums[1] = sums[1].wrapping_add(chunk[1]);
+        sums[2] = sums[2].wrapping_add(chunk[2]);
+        sums[3] = sums[3].wrapping_add(chunk[3]);
+        sums[4] = sums[4].wrapping_add(chunk[4]);
+        sums[5] = sums[5].wrapping_add(chunk[5]);
+        sums[6] = sums[6].wrapping_add(chunk[6]);
+        sums[7] = sums[7].wrapping_add(chunk[7]);
     }
-    let mut total: i32 = sums.iter().sum();
-    total += rem.iter().copied().sum::<i32>();
+    let mut total: i32 = sums.iter().fold(0, |a, &b| a.wrapping_add(b));
+    total = rem.iter().fold(total, |a, &b| a.wrapping_add(b));
     total
 }
 
@@ -364,13 +364,13 @@ pub fn simd_sum_i64(data: &[i64]) -> i64 {
     let chunks = data.chunks_exact(4);
     let rem = chunks.remainder();
     for chunk in chunks {
-        sums[0] += chunk[0];
-        sums[1] += chunk[1];
-        sums[2] += chunk[2];
-        sums[3] += chunk[3];
+        sums[0] = sums[0].wrapping_add(chunk[0]);
+        sums[1] = sums[1].wrapping_add(chunk[1]);
+        sums[2] = sums[2].wrapping_add(chunk[2]);
+        sums[3] = sums[3].wrapping_add(chunk[3]);
     }
-    let mut total: i64 = sums.iter().sum();
-    total += rem.iter().copied().sum::<i64>();
+    let mut total: i64 = sums.iter().fold(0, |a, &b| a.wrapping_add(b));
+    total = rem.iter().fold(total, |a, &b| a.wrapping_add(b));
     total
 }
 
@@ -416,17 +416,17 @@ pub fn simd_prod_i32(data: &[i32]) -> i32 {
     let chunks = data.chunks_exact(8);
     let rem = chunks.remainder();
     for chunk in chunks {
-        prods[0] *= chunk[0];
-        prods[1] *= chunk[1];
-        prods[2] *= chunk[2];
-        prods[3] *= chunk[3];
-        prods[4] *= chunk[4];
-        prods[5] *= chunk[5];
-        prods[6] *= chunk[6];
-        prods[7] *= chunk[7];
+        prods[0] = prods[0].wrapping_mul(chunk[0]);
+        prods[1] = prods[1].wrapping_mul(chunk[1]);
+        prods[2] = prods[2].wrapping_mul(chunk[2]);
+        prods[3] = prods[3].wrapping_mul(chunk[3]);
+        prods[4] = prods[4].wrapping_mul(chunk[4]);
+        prods[5] = prods[5].wrapping_mul(chunk[5]);
+        prods[6] = prods[6].wrapping_mul(chunk[6]);
+        prods[7] = prods[7].wrapping_mul(chunk[7]);
     }
-    let mut total: i32 = prods.iter().product();
-    total *= rem.iter().copied().product::<i32>();
+    let mut total: i32 = prods.iter().fold(1, |a, &b| a.wrapping_mul(b));
+    total = rem.iter().fold(total, |a, &b| a.wrapping_mul(b));
     total
 }
 
@@ -436,13 +436,13 @@ pub fn simd_prod_i64(data: &[i64]) -> i64 {
     let chunks = data.chunks_exact(4);
     let rem = chunks.remainder();
     for chunk in chunks {
-        prods[0] *= chunk[0];
-        prods[1] *= chunk[1];
-        prods[2] *= chunk[2];
-        prods[3] *= chunk[3];
+        prods[0] = prods[0].wrapping_mul(chunk[0]);
+        prods[1] = prods[1].wrapping_mul(chunk[1]);
+        prods[2] = prods[2].wrapping_mul(chunk[2]);
+        prods[3] = prods[3].wrapping_mul(chunk[3]);
     }
-    let mut total: i64 = prods.iter().product();
-    total *= rem.iter().copied().product::<i64>();
+    let mut total: i64 = prods.iter().fold(1, |a, &b| a.wrapping_mul(b));
+    total = rem.iter().fold(total, |a, &b| a.wrapping_mul(b));
     total
 }
 

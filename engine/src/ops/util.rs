@@ -79,6 +79,67 @@ where
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
 
+/// How a reduction or scan accumulates, per dtype.
+///
+/// Integer accumulation wraps; float accumulation is the ordinary operator.
+/// The distinction has to live somewhere, because the kernels that do the
+/// accumulating -- `sum_along_dim`, `prod_along_dim`, the cumulative scans, the
+/// lane folds -- are written once and instantiated for every dtype, so a bare
+/// `+` in one of them means two different things depending on which type it
+/// lands on and which profile it was built under.
+///
+/// Rust's `+`, `-` and `*` on integers panic on overflow when overflow checks
+/// are on and wrap when they are not, so `sum` of an int32 tensor that
+/// overflows aborted under `cargo test` and returned a wrapped value from the
+/// released wheel. Naming the wrap makes every build agree on the answer the
+/// release build was already giving, which is also what an integer tensor is
+/// expected to do.
+///
+/// The float impls are `self + other` and `self * other` exactly, so no
+/// summation order and no rounding changes anywhere -- which matters, because
+/// the order these kernels accumulate in is pinned by `tests/determinism.rs`.
+pub(crate) trait Accumulate: Copy {
+    /// `self + other`, wrapping for integers.
+    fn acc_add(self, other: Self) -> Self;
+    /// `self * other`, wrapping for integers.
+    fn acc_mul(self, other: Self) -> Self;
+}
+
+macro_rules! impl_accumulate_float {
+    ($ty:ty) => {
+        impl Accumulate for $ty {
+            #[inline(always)]
+            fn acc_add(self, other: Self) -> Self {
+                self + other
+            }
+            #[inline(always)]
+            fn acc_mul(self, other: Self) -> Self {
+                self * other
+            }
+        }
+    };
+}
+
+macro_rules! impl_accumulate_int {
+    ($ty:ty) => {
+        impl Accumulate for $ty {
+            #[inline(always)]
+            fn acc_add(self, other: Self) -> Self {
+                self.wrapping_add(other)
+            }
+            #[inline(always)]
+            fn acc_mul(self, other: Self) -> Self {
+                self.wrapping_mul(other)
+            }
+        }
+    };
+}
+
+impl_accumulate_float!(f32);
+impl_accumulate_float!(f64);
+impl_accumulate_int!(i32);
+impl_accumulate_int!(i64);
+
 /// Combine `values` with a fixed binary tree rather than a running total.
 ///
 /// The obvious way to finish `deterministic_par_sum` is a sequential fold over

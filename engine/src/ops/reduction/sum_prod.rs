@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::ops::simd::*;
+use crate::ops::util::Accumulate;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -153,7 +154,9 @@ macro_rules! sum_along_dim_kernel {
                 let cols = input_shape[1];
                 match dim {
                     0 => {
-                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| a + v);
+                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| {
+                            a.acc_add(v)
+                        });
                     }
                     1 => {
                         result_slice
@@ -183,7 +186,7 @@ macro_rules! sum_along_dim_kernel {
                         let mut sum_val = $zero;
                         let mut base = o * outer_stride + r;
                         for _ in 0..dim_size {
-                            sum_val += input_data[base];
+                            sum_val = sum_val.acc_add(input_data[base]);
                             base += inner;
                         }
                         *out = sum_val;
@@ -408,7 +411,7 @@ macro_rules! prod_along_dim_kernel {
                         let slab_base = block_base + k * inner;
                         let slab = &input_data[slab_base..slab_base + inner];
                         for (acc, &v) in out_chunk.iter_mut().zip(slab) {
-                            *acc *= v;
+                            *acc = acc.acc_mul(v);
                         }
                     }
                 });

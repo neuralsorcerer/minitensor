@@ -1019,6 +1019,41 @@ mod integer_wraparound_tests {
         assert_eq!(out(&neg(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
         assert_eq!(out(&abs(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
 
+        // Reductions accumulate through the same policy, so they wrap in
+        // every profile too rather than panicking in one of them. Each of
+        // these overflows partway along: `sum` and `cumsum` over a thousand
+        // values near `MAX / 500`, `prod` and `cumprod` over powers of three.
+        {
+            use crate::ops::reduction::{cumprod, cumsum, prod, sum};
+            let many = i32_tensor(vec![i32::MAX / 500; 1000]);
+            let threes = i32_tensor(vec![3; 40]);
+
+            let total = out(&sum(&many, None, false).unwrap())[0];
+            assert_eq!(total, (i32::MAX / 500).wrapping_mul(1000));
+            assert_eq!(*out(&cumsum(&many, 0).unwrap()).last().unwrap(), total);
+
+            let product = out(&prod(&threes, None, false).unwrap())[0];
+            assert_eq!(product, (0..40).fold(1i32, |a, _| a.wrapping_mul(3)));
+            assert_eq!(*out(&cumprod(&threes, 0).unwrap()).last().unwrap(), product);
+
+            // ...and along a dimension, which is a different kernel again.
+            let rows = Tensor::new(
+                Arc::new(TensorData::from_vec::<i32>(
+                    vec![i32::MAX / 500; 2000],
+                    DataType::Int32,
+                    Device::cpu(),
+                )),
+                Shape::new(vec![2, 1000]),
+                DataType::Int32,
+                Device::cpu(),
+                false,
+            );
+            assert_eq!(
+                out(&sum(&rows, Some(vec![1]), false).unwrap()),
+                vec![total; 2]
+            );
+        }
+
         // Everything away from the boundary is unaffected.
         let a = i32_tensor(vec![-7, 3]);
         let b = i32_tensor(vec![5, -2]);

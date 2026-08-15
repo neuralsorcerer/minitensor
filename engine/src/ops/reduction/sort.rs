@@ -7,7 +7,7 @@
 use super::*;
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
-use crate::ops::util::{deterministic_par_sum, pairwise_fold};
+use crate::ops::util::{Accumulate, deterministic_par_sum, pairwise_fold};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -778,7 +778,9 @@ pub(crate) fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
     let prod: i32 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_prod_i32).product::<i32>()
+        data.par_chunks(8192)
+            .map(simd_prod_i32)
+            .reduce(|| 1, |a, b| a.acc_mul(b))
     } else {
         simd_prod_i32(data)
     };
@@ -798,7 +800,9 @@ pub(crate) fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
     let prod: i64 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_prod_i64).product::<i64>()
+        data.par_chunks(8192)
+            .map(simd_prod_i64)
+            .reduce(|| 1, |a, b| a.acc_mul(b))
     } else {
         simd_prod_i64(data)
     };
@@ -874,7 +878,9 @@ pub(crate) fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
     let sum: i32 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_sum_i32).sum::<i32>()
+        data.par_chunks(8192)
+            .map(simd_sum_i32)
+            .reduce(|| 0, |a, b| a.acc_add(b))
     } else {
         simd_sum_i32(data)
     };
@@ -894,7 +900,9 @@ pub(crate) fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
 
     let sum: i64 = if data.len() >= 1024 {
-        data.par_chunks(8192).map(simd_sum_i64).sum::<i64>()
+        data.par_chunks(8192)
+            .map(simd_sum_i64)
+            .reduce(|| 0, |a, b| a.acc_add(b))
     } else {
         simd_sum_i64(data)
     };
