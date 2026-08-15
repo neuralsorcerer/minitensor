@@ -1241,28 +1241,6 @@ impl PyMSELoss {
         }
     }
 
-    /// Compute the MSE loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
-    }
-
     /// String representation
     fn __repr__(&self) -> String {
         format!("MSELoss(reduction='{}')", self.inner.reduction())
@@ -1285,28 +1263,6 @@ impl PyMAELoss {
         Self {
             inner: MAELoss::new(reduction),
         }
-    }
-
-    /// Compute the MAE loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// String representation
@@ -1334,32 +1290,10 @@ impl PyHuberLoss {
         }
     }
 
-    /// Compute the Huber loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
     /// Get the delta parameter
     #[getter]
     fn delta(&self) -> f64 {
         self.inner.delta()
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// String representation
@@ -1390,28 +1324,6 @@ impl PySmoothL1Loss {
         }
     }
 
-    /// Compute the Smooth L1 loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
-    }
-
     /// String representation
     fn __repr__(&self) -> String {
         format!("SmoothL1Loss(reduction='{}')", self.inner.reduction())
@@ -1434,28 +1346,6 @@ impl PyLogCoshLoss {
         Self {
             inner: LogCoshLoss::new(reduction),
         }
-    }
-
-    /// Compute the Log-cosh loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// String representation
@@ -1482,28 +1372,6 @@ impl PyCrossEntropyLoss {
         }
     }
 
-    /// Compute the Cross Entropy loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
-    }
-
     /// String representation
     fn __repr__(&self) -> String {
         format!("CrossEntropyLoss(reduction='{}')", self.inner.reduction())
@@ -1526,28 +1394,6 @@ impl PyBCELoss {
         Self {
             inner: BCELoss::new(reduction),
         }
-    }
-
-    /// Compute the BCE loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// String representation
@@ -1577,28 +1423,6 @@ impl PyBCEWithLogitsLoss {
             None => BCEWithLogitsLoss::new(reduction),
         };
         Ok(Self { inner })
-    }
-
-    /// Compute the loss from raw logits
-    fn forward(&self, logits: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let logits = borrow_tensor(logits)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(logits.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, logits: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(logits, targets)
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// Get the positive-class weight, if one was set
@@ -1641,22 +1465,6 @@ impl PyFocalLoss {
         }
     }
 
-    /// Compute the Focal loss
-    fn forward(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        let predictions = borrow_tensor(predictions)?;
-        let targets = borrow_tensor(targets)?;
-        let result = self
-            .inner
-            .forward(predictions.tensor(), targets.tensor())
-            .map_err(_convert_error)?;
-        Ok(PyTensor::from_tensor(result))
-    }
-
-    #[pyo3(name = "__call__")]
-    fn call(&self, predictions: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
-        self.forward(predictions, targets)
-    }
-
     /// Get the alpha parameter
     #[getter]
     fn alpha(&self) -> f64 {
@@ -1667,12 +1475,6 @@ impl PyFocalLoss {
     #[getter]
     fn gamma(&self) -> f64 {
         self.inner.gamma()
-    }
-
-    /// Get the reduction mode
-    #[getter]
-    fn reduction(&self) -> &str {
-        self.inner.reduction()
     }
 
     /// String representation
@@ -1770,3 +1572,56 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     parent_module.add_submodule(&nn_module)?;
     Ok(())
 }
+
+/// Emits the three methods every loss binding repeats verbatim: `forward`,
+/// its `__call__` alias, and the `reduction` getter.
+///
+/// All nine of them wrap an engine loss that takes two tensors and a reduction
+/// mode, so all nine spelled out the same borrow-both-operands-and-convert
+/// body. What differs between them -- the constructor's parameters, the extra
+/// getters, `__repr__` -- stays written out at each type.
+///
+/// This relies on pyo3's `multiple-pymethods`, which the workspace already
+/// enables: the generated block sits alongside the hand-written one for the
+/// same class rather than replacing it.
+///
+/// The first parameter is named per loss because it is visible from Python as
+/// a keyword: `BCEWithLogitsLoss` takes `logits`, the rest take `predictions`.
+macro_rules! loss_forward_methods {
+    ($py:ty, $first:ident) => {
+        #[pymethods]
+        impl $py {
+            /// Compute the loss.
+            fn forward(&self, $first: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+                let $first = borrow_tensor($first)?;
+                let targets = borrow_tensor(targets)?;
+                let result = self
+                    .inner
+                    .forward($first.tensor(), targets.tensor())
+                    .map_err(_convert_error)?;
+                Ok(PyTensor::from_tensor(result))
+            }
+
+            #[pyo3(name = "__call__")]
+            fn call(&self, $first: &Bound<PyAny>, targets: &Bound<PyAny>) -> PyResult<PyTensor> {
+                self.forward($first, targets)
+            }
+
+            /// Get the reduction mode
+            #[getter]
+            fn reduction(&self) -> &str {
+                self.inner.reduction()
+            }
+        }
+    };
+}
+
+loss_forward_methods!(PyMSELoss, predictions);
+loss_forward_methods!(PyMAELoss, predictions);
+loss_forward_methods!(PyHuberLoss, predictions);
+loss_forward_methods!(PySmoothL1Loss, predictions);
+loss_forward_methods!(PyLogCoshLoss, predictions);
+loss_forward_methods!(PyCrossEntropyLoss, predictions);
+loss_forward_methods!(PyBCELoss, predictions);
+loss_forward_methods!(PyBCEWithLogitsLoss, logits);
+loss_forward_methods!(PyFocalLoss, predictions);
