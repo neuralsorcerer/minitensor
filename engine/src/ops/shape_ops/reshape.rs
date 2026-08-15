@@ -11,7 +11,7 @@ use crate::{
     },
     device::Device,
     error::{MinitensorError, Result},
-    ops::map::PAR_THRESHOLD,
+    ops::map::{PAR_THRESHOLD, build_vec},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -412,20 +412,26 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             }
             let src_strides: Vec<usize> = dim_sizes.iter().map(|&d| d * inner).collect();
 
-            let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
             let chunk_size = output_shape_obj.dims()[dim] * inner;
-            out.par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(o, out_chunk)| {
-                    let mut dst_offset = 0;
-                    for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
-                        let src_start = o * src_stride;
-                        let src_len = src_stride;
-                        out_chunk[dst_offset..dst_offset + src_len]
-                            .copy_from_slice(&src[src_start..src_start + src_len]);
-                        dst_offset += src_len;
-                    }
-                });
+            // SAFETY: the chunks tile the output, and within a chunk the source
+            // strides sum to exactly `chunk_size` (the concatenated dimension is
+            // the sum of the inputs'), so every element is written once.
+            let out = unsafe {
+                build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
+                    spare
+                        .par_chunks_mut(chunk_size)
+                        .enumerate()
+                        .for_each(|(o, out_chunk)| {
+                            let mut dst_offset = 0;
+                            for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
+                                let src_start = o * src_stride;
+                                out_chunk[dst_offset..dst_offset + src_stride]
+                                    .write_copy_of_slice(&src[src_start..src_start + src_stride]);
+                                dst_offset += src_stride;
+                            }
+                        });
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -525,18 +531,24 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
                 let src = result.data().$slice().ok_or_else(|| {
                     MinitensorError::invalid_operation("Tensor data access failed for repeat")
                 })?;
-                let mut out = vec![<$ty>::default(); output_numel];
-                out.par_chunks_mut(chunk_size)
-                    .enumerate()
-                    .for_each(|(o, out_chunk)| {
-                        let src_start = o * src_chunk_size;
-                        let src_chunk = &src[src_start..src_start + src_chunk_size];
-                        for r in 0..rep {
-                            let dst_start = r * src_chunk_size;
-                            out_chunk[dst_start..dst_start + src_chunk_size]
-                                .copy_from_slice(src_chunk);
-                        }
-                    });
+                // SAFETY: the chunks tile the output and `rep * src_chunk_size`
+                // is exactly one chunk, so every element is written once.
+                let out = unsafe {
+                    build_vec::<$ty, _>(output_numel, |spare| {
+                        spare
+                            .par_chunks_mut(chunk_size)
+                            .enumerate()
+                            .for_each(|(o, out_chunk)| {
+                                let src_start = o * src_chunk_size;
+                                let src_chunk = &src[src_start..src_start + src_chunk_size];
+                                for r in 0..rep {
+                                    let dst_start = r * src_chunk_size;
+                                    out_chunk[dst_start..dst_start + src_chunk_size]
+                                        .write_copy_of_slice(src_chunk);
+                                }
+                            });
+                    })
+                };
                 TensorData::$from_vec(out, device)
             }};
         }
@@ -603,17 +615,23 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for index_select")
             })?;
-            let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            out.par_chunks_mut(output_shape_vec[dim] * inner)
-                .enumerate()
-                .for_each(|(o, out_chunk)| {
-                    for (i, &idx) in indices.iter().enumerate() {
-                        let src_start = o * dims[dim] * inner + idx * inner;
-                        let dst_start = i * inner;
-                        out_chunk[dst_start..dst_start + inner]
-                            .copy_from_slice(&src[src_start..src_start + inner]);
-                    }
-                });
+            // SAFETY: the chunks tile the output, and each covers exactly one
+            // run of `inner` per selected index, so every element is written.
+            let out = unsafe {
+                build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
+                    spare
+                        .par_chunks_mut(output_shape_vec[dim] * inner)
+                        .enumerate()
+                        .for_each(|(o, out_chunk)| {
+                            for (i, &idx) in indices.iter().enumerate() {
+                                let src_start = o * dims[dim] * inner + idx * inner;
+                                let dst_start = i * inner;
+                                out_chunk[dst_start..dst_start + inner]
+                                    .write_copy_of_slice(&src[src_start..src_start + inner]);
+                            }
+                        });
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -717,27 +735,34 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
                 MinitensorError::invalid_operation("Tensor data access failed for gather")
             })?;
             let idx = idx_slice;
-            let mut out = vec![<$ty>::default(); output_numel];
             let chunk_size = idx_dim * inner;
             if output_numel % chunk_size != 0 {
                 return Err(MinitensorError::internal_error(format!(
                     "gather output length ({output_numel}) is not divisible by chunk size ({chunk_size})"
                 )));
             }
-            out.par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(o, out_chunk)| {
-                    let base = o * dim_size * inner;
-                    let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
-                    for i in 0..idx_dim {
-                        let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
-                        let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
-                        for (j, &gather_val) in idx_row.iter().enumerate() {
-                            let gather_idx = gather_val as usize;
-                            dst_row[j] = src[base + gather_idx * inner + j];
-                        }
-                    }
-                });
+            // SAFETY: the chunks tile the output (the divisibility check above
+            // is what guarantees it), and each element of each chunk is written
+            // by the innermost loop.
+            let out = unsafe {
+                build_vec::<$ty, _>(output_numel, |spare| {
+                    spare
+                        .par_chunks_mut(chunk_size)
+                        .enumerate()
+                        .for_each(|(o, out_chunk)| {
+                            let base = o * dim_size * inner;
+                            let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
+                            for i in 0..idx_dim {
+                                let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
+                                let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
+                                for (j, &gather_val) in idx_row.iter().enumerate() {
+                                    let gather_idx = gather_val as usize;
+                                    dst_row[j].write(src[base + gather_idx * inner + j]);
+                                }
+                            }
+                        });
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -830,8 +855,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for slice")
             })?;
-            let mut out = vec![<$ty>::default(); output_shape_obj.numel()];
-            let fill = |o: usize, out_chunk: &mut [$ty]| {
+            let fill = |o: usize, out_chunk: &mut [std::mem::MaybeUninit<$ty>]| {
                 let block_start = o * outer_stride;
                 if step == 1 {
                     // A unit step selects a run that is contiguous with
@@ -841,25 +865,33 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
                     // every slice along the last dimension, and every slice of
                     // a 1-D tensor.
                     let src_start = block_start + start * inner;
-                    out_chunk.copy_from_slice(&src[src_start..src_start + out_chunk.len()]);
+                    out_chunk.write_copy_of_slice(&src[src_start..src_start + out_chunk.len()]);
                 } else {
                     for i in 0..count {
                         let src_start = block_start + (start + i * step) * inner;
                         let dst_start = i * inner;
                         out_chunk[dst_start..dst_start + inner]
-                            .copy_from_slice(&src[src_start..src_start + inner]);
+                            .write_copy_of_slice(&src[src_start..src_start + inner]);
                     }
                 }
             };
-            if out.len() < PAR_THRESHOLD {
-                out.chunks_mut(block)
-                    .enumerate()
-                    .for_each(|(o, out_chunk)| fill(o, out_chunk));
-            } else {
-                out.par_chunks_mut(block)
-                    .enumerate()
-                    .for_each(|(o, out_chunk)| fill(o, out_chunk));
-            }
+            // SAFETY: the chunks tile the output, and `fill` covers a whole
+            // chunk either as one run (unit step) or as `count` runs of `inner`.
+            let out = unsafe {
+                build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
+                    if spare.len() < PAR_THRESHOLD {
+                        spare
+                            .chunks_mut(block)
+                            .enumerate()
+                            .for_each(|(o, out_chunk)| fill(o, out_chunk));
+                    } else {
+                        spare
+                            .par_chunks_mut(block)
+                            .enumerate()
+                            .for_each(|(o, out_chunk)| fill(o, out_chunk));
+                    }
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -989,27 +1021,34 @@ fn flip_rows(tensor: &Tensor, flipped: &[bool]) -> Result<Tensor> {
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::internal_error("Tensor data access failed for flip")
             })?;
-            let mut out = vec![<$ty>::default(); src.len()];
-            let copy_row = |r: usize, dst: &mut [$ty]| {
+            let copy_row = |r: usize, dst: &mut [std::mem::MaybeUninit<$ty>]| {
                 let base = source_row(r) * row_len;
                 let row = &src[base..base + row_len];
                 if reverse_row {
                     for (slot, value) in dst.iter_mut().zip(row.iter().rev()) {
-                        *slot = *value;
+                        slot.write(*value);
                     }
                 } else {
-                    dst.copy_from_slice(row);
+                    dst.write_copy_of_slice(row);
                 }
             };
-            if out.len() < PAR_THRESHOLD {
-                out.chunks_mut(row_len)
-                    .enumerate()
-                    .for_each(|(r, dst)| copy_row(r, dst));
-            } else {
-                out.par_chunks_mut(row_len)
-                    .enumerate()
-                    .for_each(|(r, dst)| copy_row(r, dst));
-            }
+            // SAFETY: the row chunks tile the output and `copy_row` writes a
+            // whole row, forwards or reversed.
+            let out = unsafe {
+                build_vec::<$ty, _>(src.len(), |spare| {
+                    if spare.len() < PAR_THRESHOLD {
+                        spare
+                            .chunks_mut(row_len)
+                            .enumerate()
+                            .for_each(|(r, dst)| copy_row(r, dst));
+                    } else {
+                        spare
+                            .par_chunks_mut(row_len)
+                            .enumerate()
+                            .for_each(|(r, dst)| copy_row(r, dst));
+                    }
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -1173,21 +1212,28 @@ fn roll_rows(tensor: &Tensor, shifts: &[usize]) -> Result<Tensor> {
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for roll")
             })?;
-            let mut out = vec![<$ty>::default(); src.len()];
-            let copy_row = |r: usize, dst: &mut [$ty]| {
+            let copy_row = |r: usize, dst: &mut [std::mem::MaybeUninit<$ty>]| {
                 let base = source_row(r) * row_len;
-                dst[..head].copy_from_slice(&src[base + split..base + row_len]);
-                dst[head..].copy_from_slice(&src[base..base + split]);
+                dst[..head].write_copy_of_slice(&src[base + split..base + row_len]);
+                dst[head..].write_copy_of_slice(&src[base..base + split]);
             };
-            if out.len() < PAR_THRESHOLD {
-                out.chunks_mut(row_len)
-                    .enumerate()
-                    .for_each(|(r, dst)| copy_row(r, dst));
-            } else {
-                out.par_chunks_mut(row_len)
-                    .enumerate()
-                    .for_each(|(r, dst)| copy_row(r, dst));
-            }
+            // SAFETY: the row chunks tile the output and `copy_row` writes both
+            // halves of a whole row.
+            let out = unsafe {
+                build_vec::<$ty, _>(src.len(), |spare| {
+                    if spare.len() < PAR_THRESHOLD {
+                        spare
+                            .chunks_mut(row_len)
+                            .enumerate()
+                            .for_each(|(r, dst)| copy_row(r, dst));
+                    } else {
+                        spare
+                            .par_chunks_mut(row_len)
+                            .enumerate()
+                            .for_each(|(r, dst)| copy_row(r, dst));
+                    }
+                })
+            };
             TensorData::$from_vec(out, device)
         }};
     }
@@ -1464,5 +1510,102 @@ mod reshape_tests {
         // Bounds that exceed the dimension are still rejected.
         assert!(slice(&tensor, 0, 0, 5, 1).is_err());
         assert!(slice(&tensor, 0, 5, 5, 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod uninit_fill_tests {
+    use super::*;
+    use crate::device::Device;
+
+    /// A value that never appears in any test input, so a slot the kernel
+    /// failed to write would have to come back as something else.
+    const SENTINEL: i64 = i64::MIN;
+
+    fn t(data: Vec<i64>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<i64>(
+                data,
+                DataType::Int64,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn out(t: &Tensor) -> Vec<i64> {
+        t.data().as_i64_slice().unwrap().to_vec()
+    }
+
+    /// Every kernel here writes into raw, uninitialized capacity, so "did it
+    /// write all of it" is a soundness question and not only a correctness one.
+    /// A slot left untouched holds whatever the allocator last had there.
+    ///
+    /// These inputs are all distinct positive integers, so any output element
+    /// that is not one of them -- zero included -- is a slot that was missed.
+    /// The awkward shapes are the point: an odd `inner`, a `dim_size` that does
+    /// not divide the output, and a stepped slice whose runs do not tile a
+    /// chunk.
+    #[test]
+    fn every_movement_kernel_fills_its_whole_output() {
+        let shapes: &[Vec<usize>] = &[
+            vec![7],
+            vec![3, 5],
+            vec![2, 3, 5],
+            vec![5, 1, 3],
+            vec![1, 7],
+        ];
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            let src = t((1..=n as i64).collect(), shape.clone());
+            let ndim = shape.len();
+
+            let check = |label: &str, produced: &Tensor| {
+                for (i, &v) in out(produced).iter().enumerate() {
+                    assert!(
+                        v >= 1 && v <= n as i64,
+                        "{label} {shape:?}: element {i} is {v}, which is not one of \
+                         the {n} inputs -- that slot was never written"
+                    );
+                }
+                assert_ne!(produced.numel(), 0, "{label} {shape:?} produced nothing");
+            };
+
+            for dim in 0..ndim {
+                check("cat", &concatenate(&[&src, &src], dim as isize).unwrap());
+                check("flip", &flip(&src, &[dim as isize]).unwrap());
+                check("roll", &roll(&src, &[3], Some(&[dim as isize])).unwrap());
+
+                let idx: Vec<usize> = (0..shape[dim]).rev().collect();
+                check(
+                    "index_select",
+                    &index_select(&src, dim as isize, &idx).unwrap(),
+                );
+
+                // Unit and non-unit steps take different paths inside `slice`.
+                for step in 1..=3usize {
+                    check(
+                        "slice",
+                        &slice(&src, dim as isize, 0, shape[dim], step).unwrap(),
+                    );
+                }
+            }
+
+            let reps: Vec<usize> = (0..ndim).map(|i| i % 2 + 2).collect();
+            check("repeat", &repeat(&src, &reps).unwrap());
+        }
+    }
+
+    /// `SENTINEL` exists to make the intent above explicit even though the
+    /// range check is what does the work; this keeps it referenced rather than
+    /// leaving a constant nothing reads.
+    #[test]
+    fn a_value_outside_the_input_range_is_detectable() {
+        let one = t(vec![SENTINEL], vec![1]);
+        assert_eq!(out(&flip(&one, &[0]).unwrap()), vec![SENTINEL]);
     }
 }

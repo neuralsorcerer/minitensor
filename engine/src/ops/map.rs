@@ -177,6 +177,34 @@ where
     Ok(out)
 }
 
+/// Build a `Vec<U>` of exactly `len` elements, handing the raw capacity to
+/// `fill`, which must write all of it.
+///
+/// The infallible form of [`build_vec_with`], and the one the data-movement
+/// kernels want. Those relocate elements rather than computing them, so they
+/// have no `Result` to thread through, but they were paying the cost this
+/// module exists to remove all the same: `vec![T::default(); n]` zeroes the
+/// whole output and then `copy_from_slice` overwrites every byte of it. Two
+/// passes to move data once, which on a concatenation of two million-element
+/// float32 arrays was most of the difference against NumPy.
+///
+/// # Safety
+///
+/// `fill` must initialize **every** element of the slice it is given.
+pub(crate) unsafe fn build_vec<U, F>(len: usize, fill: F) -> Vec<U>
+where
+    F: FnOnce(&mut [MaybeUninit<U>]),
+{
+    // SAFETY: forwarded to the caller by this function's own contract.
+    unsafe {
+        build_vec_with::<U, std::convert::Infallible, _>(len, |spare| {
+            fill(spare);
+            Ok(())
+        })
+    }
+    .unwrap_or_else(|e| match e {})
+}
+
 /// Sequential core: write `op(input[i])` into every element of `out`.
 #[inline(always)]
 fn map_into<T, U, F>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
