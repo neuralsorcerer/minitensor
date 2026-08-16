@@ -9,13 +9,13 @@ use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
+use crate::ops::map::par_out_chunks;
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Numerically stable log-sum-exp reduction along specified dimensions
@@ -150,41 +150,39 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                 .$accessor_mut()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             if inner != 0 {
-                out.par_chunks_mut(inner)
-                    .enumerate()
-                    .for_each(|(o, out_chunk)| {
-                        let block_base = o * outer_stride;
-                        // Column max with NaN propagation (matches max_along_dim).
-                        let mut col_max = vec![<$ty>::NEG_INFINITY; inner];
-                        for k in 0..dim_size {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
-                            for (m, &v) in col_max.iter_mut().zip(slab) {
-                                if v.is_nan() {
-                                    *m = v;
-                                } else if v > *m {
-                                    *m = v;
-                                }
+                par_out_chunks(out, inner, &|start, out_chunk| {
+                    let block_base = (start / inner) * outer_stride;
+                    // Column max with NaN propagation (matches max_along_dim).
+                    let mut col_max = vec![<$ty>::NEG_INFINITY; inner];
+                    for k in 0..dim_size {
+                        let base = block_base + k * inner;
+                        let slab = &input[base..base + inner];
+                        for (m, &v) in col_max.iter_mut().zip(slab) {
+                            if v.is_nan() {
+                                *m = v;
+                            } else if v > *m {
+                                *m = v;
                             }
                         }
-                        // Sum of exp(x - max), skipping non-finite-max columns
-                        // (their result is the max itself).
-                        let mut col_sum = vec![0.0 as $ty; inner];
-                        for k in 0..dim_size {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
-                            for ((s, &v), &m) in col_sum.iter_mut().zip(slab).zip(col_max.iter()) {
-                                if m.is_finite() {
-                                    *s += (v - m).exp();
-                                }
+                    }
+                    // Sum of exp(x - max), skipping non-finite-max columns
+                    // (their result is the max itself).
+                    let mut col_sum = vec![0.0 as $ty; inner];
+                    for k in 0..dim_size {
+                        let base = block_base + k * inner;
+                        let slab = &input[base..base + inner];
+                        for ((s, &v), &m) in col_sum.iter_mut().zip(slab).zip(col_max.iter()) {
+                            if m.is_finite() {
+                                *s += (v - m).exp();
                             }
                         }
-                        for ((dst, &m), &s) in
-                            out_chunk.iter_mut().zip(col_max.iter()).zip(col_sum.iter())
-                        {
-                            *dst = if m.is_finite() { m + s.ln() } else { m };
-                        }
-                    });
+                    }
+                    for ((dst, &m), &s) in
+                        out_chunk.iter_mut().zip(col_max.iter()).zip(col_sum.iter())
+                    {
+                        *dst = if m.is_finite() { m + s.ln() } else { m };
+                    }
+                });
             }
         }};
     }

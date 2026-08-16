@@ -7,12 +7,11 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::{binary_map, ternary_map},
+    ops::map::{binary_map, outputs_per_task, par_out_chunks, ternary_map, unary_map},
     ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction, shape_ops},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -131,52 +130,36 @@ fn sanitize_grad_for_nanmean(grad: &Tensor, count: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    let numel = grad.numel();
-    let mut new_data = TensorData::zeros_on_device(numel, grad.dtype(), grad.device());
+    // A count of zero means the whole reduced axis was NaN, so nothing flows
+    // back through that position.
+    macro_rules! sanitize {
+        ($accessor:ident, $ty:ty, $tyname:literal, $from_vec:ident) => {{
+            let missing =
+                || MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"));
+            let grad_src = grad.data().$accessor().ok_or_else(missing)?;
+            let count_src = count.data().$accessor().ok_or_else(missing)?;
+            TensorData::$from_vec(
+                binary_map(
+                    grad_src,
+                    count_src,
+                    |g: $ty, c: $ty| {
+                        if c == 0.0 { 0.0 } else { g }
+                    },
+                ),
+                grad.device(),
+            )
+        }};
+    }
 
-    match grad.dtype() {
-        DataType::Float32 => {
-            let grad_src = grad
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let count_src = count
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let dst = new_data
-                .as_f32_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            dst.par_iter_mut()
-                .zip(grad_src.par_iter().zip(count_src.par_iter()))
-                .for_each(|(out, (&g, &c))| {
-                    *out = if c == 0.0 { 0.0 } else { g };
-                });
-        }
-        DataType::Float64 => {
-            let grad_src = grad
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let count_src = count
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let dst = new_data
-                .as_f64_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            dst.par_iter_mut()
-                .zip(grad_src.par_iter().zip(count_src.par_iter()))
-                .for_each(|(out, (&g, &c))| {
-                    *out = if c == 0.0 { 0.0 } else { g };
-                });
-        }
+    let new_data = match grad.dtype() {
+        DataType::Float32 => sanitize!(as_f32_slice, f32, "f32", from_vec_f32),
+        DataType::Float64 => sanitize!(as_f64_slice, f64, "f64", from_vec_f64),
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "nanmean backward only supports floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(new_data),
@@ -188,44 +171,29 @@ fn sanitize_grad_for_nanmean(grad: &Tensor, count: &Tensor) -> Result<Tensor> {
 }
 
 fn safe_count_for_nanmean(count: &Tensor) -> Result<Tensor> {
-    let numel = count.numel();
-    let mut new_data = TensorData::zeros_on_device(numel, count.dtype(), count.device());
+    // Divide-by-zero guard: a zero count pairs with a zero gradient (see
+    // `sanitize_grad_for_nanmean`), so the substituted 1 never reaches a result.
+    macro_rules! safe_count {
+        ($accessor:ident, $ty:ty, $tyname:literal, $from_vec:ident) => {{
+            let src = count.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
+            })?;
+            TensorData::$from_vec(
+                unary_map(src, |c: $ty| if c == 0.0 { 1.0 } else { c }),
+                count.device(),
+            )
+        }};
+    }
 
-    match count.dtype() {
-        DataType::Float32 => {
-            let src = count
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let dst = new_data
-                .as_f32_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            dst.par_iter_mut()
-                .zip(src.par_iter())
-                .for_each(|(out, &c)| {
-                    *out = if c == 0.0 { 1.0 } else { c };
-                });
-        }
-        DataType::Float64 => {
-            let src = count
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let dst = new_data
-                .as_f64_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            dst.par_iter_mut()
-                .zip(src.par_iter())
-                .for_each(|(out, &c)| {
-                    *out = if c == 0.0 { 1.0 } else { c };
-                });
-        }
+    let new_data = match count.dtype() {
+        DataType::Float32 => safe_count!(as_f32_slice, f32, "f32", from_vec_f32),
+        DataType::Float64 => safe_count!(as_f64_slice, f64, "f64", from_vec_f64),
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "nanmean backward only supports floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(new_data),
@@ -1044,12 +1012,16 @@ where
             };
         }
     } else {
-        grad.par_iter()
-            .zip(output.par_iter_mut())
-            .zip(finite_mask.par_iter())
-            .for_each(|((g, out), is_finite)| {
-                *out = if *is_finite { *g } else { T::default() };
-            });
+        par_out_chunks(output, outputs_per_task(1), &|start, chunk| {
+            for (offset, out) in chunk.iter_mut().enumerate() {
+                let i = start + offset;
+                *out = if finite_mask[i] {
+                    grad[i]
+                } else {
+                    T::default()
+                };
+            }
+        });
     }
 }
 /// Gradient function for the element-wise absolute value.
@@ -1066,54 +1038,39 @@ impl GradientFunction for AbsBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
         macro_rules! abs_grad {
-            ($slice:ident, $mut_slice:ident, $ty:ty) => {{
+            ($slice:ident, $ty:ty, $from_vec:ident) => {{
                 let x = self.input.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to read input for abs backward")
                 })?;
                 let go = grad_output.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to read grad_output for abs backward")
                 })?;
-                let gi = grad_data.$mut_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to write grad for abs backward")
-                })?;
-                let sign = |v: $ty| -> $ty {
-                    if v > 0.0 {
-                        1.0
-                    } else if v < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                };
-                if gi.len() < PAR_THRESHOLD {
-                    for i in 0..gi.len() {
-                        gi[i] = go[i] * sign(x[i]);
-                    }
-                } else {
-                    gi.par_iter_mut()
-                        .zip(go.par_iter())
-                        .zip(x.par_iter())
-                        .for_each(|((g, &o), &v)| *g = o * sign(v));
-                }
+                TensorData::$from_vec(
+                    binary_map(go, x, |o: $ty, v: $ty| {
+                        let sign: $ty = if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                        o * sign
+                    }),
+                    grad_output.device(),
+                )
             }};
         }
 
-        match grad_output.dtype() {
-            DataType::Float32 => abs_grad!(as_f32_slice, as_f32_slice_mut, f32),
-            DataType::Float64 => abs_grad!(as_f64_slice, as_f64_slice_mut, f64),
+        let grad_data = match grad_output.dtype() {
+            DataType::Float32 => abs_grad!(as_f32_slice, f32, from_vec_f32),
+            DataType::Float64 => abs_grad!(as_f64_slice, f64, from_vec_f64),
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "abs backward only supported for floating point tensors",
                 ));
             }
-        }
+        };
 
         let grad_input = Tensor::new(
             Arc::new(grad_data),
@@ -1147,50 +1104,35 @@ impl GradientFunction for ClampBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let mut grad_data = TensorData::zeros_on_device(
-            grad_output.numel(),
-            grad_output.dtype(),
-            grad_output.device(),
-        );
-
         macro_rules! clamp_grad {
-            ($slice:ident, $mut_slice:ident, $ty:ty) => {{
+            ($slice:ident, $ty:ty, $from_vec:ident) => {{
                 let x = self.input.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to read input for clamp backward")
                 })?;
                 let go = grad_output.data().$slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to read grad_output for clamp backward")
                 })?;
-                let gi = grad_data.$mut_slice().ok_or_else(|| {
-                    MinitensorError::internal_error("Failed to write grad for clamp backward")
-                })?;
                 let min = self.min.map(|m| m as $ty);
                 let max = self.max.map(|m| m as $ty);
-                let passes = move |v: $ty| -> bool {
-                    min.map_or(true, |m| v >= m) && max.map_or(true, |m| v <= m)
-                };
-                if gi.len() < PAR_THRESHOLD {
-                    for i in 0..gi.len() {
-                        gi[i] = if passes(x[i]) { go[i] } else { 0.0 };
-                    }
-                } else {
-                    gi.par_iter_mut()
-                        .zip(go.par_iter())
-                        .zip(x.par_iter())
-                        .for_each(|((g, &o), &v)| *g = if passes(v) { o } else { 0.0 });
-                }
+                TensorData::$from_vec(
+                    binary_map(go, x, move |o: $ty, v: $ty| {
+                        let passes = min.map_or(true, |m| v >= m) && max.map_or(true, |m| v <= m);
+                        if passes { o } else { 0.0 }
+                    }),
+                    grad_output.device(),
+                )
             }};
         }
 
-        match grad_output.dtype() {
-            DataType::Float32 => clamp_grad!(as_f32_slice, as_f32_slice_mut, f32),
-            DataType::Float64 => clamp_grad!(as_f64_slice, as_f64_slice_mut, f64),
+        let grad_data = match grad_output.dtype() {
+            DataType::Float32 => clamp_grad!(as_f32_slice, f32, from_vec_f32),
+            DataType::Float64 => clamp_grad!(as_f64_slice, f64, from_vec_f64),
             _ => {
                 return Err(MinitensorError::invalid_operation(
                     "clamp backward only supported for floating point tensors",
                 ));
             }
-        }
+        };
 
         let grad_input = Tensor::new(
             Arc::new(grad_data),

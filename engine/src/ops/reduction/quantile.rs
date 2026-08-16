@@ -7,10 +7,9 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::PAR_CHUNK,
+    ops::map::{PAR_CHUNK, par_out_chunks},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 pub(crate) fn quantiles_all(
@@ -348,39 +347,36 @@ fn quantile_along_dim_core<T: TotalCmp + Send + Sync>(
 
     // A slot's column is `dim_size` elements strided by `inner`; grouping slots
     // into chunks amortizes the buffer allocation over `PAR_CHUNK` of them.
-    values
-        .par_chunks_mut(PAR_CHUNK)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
-            for (local, slot) in chunk.iter_mut().enumerate() {
-                let out_idx = chunk_idx * PAR_CHUNK + local;
-                let o = out_idx / inner;
-                let r = out_idx % inner;
-                buffer.clear();
+    par_out_chunks(values, PAR_CHUNK, &|start, chunk| {
+        let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
+        for (local, slot) in chunk.iter_mut().enumerate() {
+            let out_idx = start + local;
+            let o = out_idx / inner;
+            let r = out_idx % inner;
+            buffer.clear();
 
-                let mut saw_nan = false;
-                let mut idx = o * outer_stride + r;
-                for _ in 0..dim_size {
-                    let value = input[idx];
-                    if value.is_nan() {
-                        if !nan_aware {
-                            saw_nan = true;
-                            break;
-                        }
-                    } else {
-                        buffer.push(value);
+            let mut saw_nan = false;
+            let mut idx = o * outer_stride + r;
+            for _ in 0..dim_size {
+                let value = input[idx];
+                if value.is_nan() {
+                    if !nan_aware {
+                        saw_nan = true;
+                        break;
                     }
-                    idx += inner;
-                }
-
-                *slot = if saw_nan || buffer.is_empty() {
-                    T::nan()
                 } else {
-                    quantile_from_unsorted(&mut buffer, q, interpolation)
-                };
+                    buffer.push(value);
+                }
+                idx += inner;
             }
-        });
+
+            *slot = if saw_nan || buffer.is_empty() {
+                T::nan()
+            } else {
+                quantile_from_unsorted(&mut buffer, q, interpolation)
+            };
+        }
+    });
 }
 
 /// Entry points for one quantile along a dimension, per dtype and NaN mode.
@@ -470,69 +466,64 @@ fn quantiles_along_dim_core<T: TotalCmp + Send + Sync>(
     }
 
     let mut slot_major: Vec<T> = vec![T::nan(); slot_count * q_len];
-    slot_major
-        .par_chunks_mut(PAR_CHUNK * q_len)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
-            // Positions depend only on the column length, which is constant
-            // unless NaNs are being dropped.
-            let mut cached: Option<(usize, Vec<QuantilePosition>)> = None;
-            for (local, out) in chunk.chunks_mut(q_len).enumerate() {
-                let slot = chunk_idx * PAR_CHUNK + local;
-                let o = slot / inner;
-                let r = slot % inner;
-                buffer.clear();
+    par_out_chunks(&mut slot_major, PAR_CHUNK * q_len, &|start, chunk| {
+        let mut buffer: Vec<T> = Vec::with_capacity(dim_size);
+        // Positions depend only on the column length, which is constant
+        // unless NaNs are being dropped.
+        let mut cached: Option<(usize, Vec<QuantilePosition>)> = None;
+        for (local, out) in chunk.chunks_mut(q_len).enumerate() {
+            let slot = start / q_len + local;
+            let o = slot / inner;
+            let r = slot % inner;
+            buffer.clear();
 
-                let mut poisoned = false;
-                let mut idx = o * outer_stride + r;
-                for _ in 0..dim_size {
-                    let value = input[idx];
-                    if value.is_nan() {
-                        if !nan_aware {
-                            poisoned = true;
-                            break;
-                        }
-                    } else {
-                        buffer.push(value);
+            let mut poisoned = false;
+            let mut idx = o * outer_stride + r;
+            for _ in 0..dim_size {
+                let value = input[idx];
+                if value.is_nan() {
+                    if !nan_aware {
+                        poisoned = true;
+                        break;
                     }
-                    idx += inner;
+                } else {
+                    buffer.push(value);
                 }
-
-                if poisoned || buffer.is_empty() {
-                    out.fill(T::nan());
-                    continue;
-                }
-
-                if q_len == 1 {
-                    out[0] = quantile_from_unsorted(&mut buffer, qs[0], interpolation);
-                    continue;
-                }
-
-                buffer.sort_by(|a, b| a.total_order(b));
-                let positions = match cached {
-                    Some((len, ref positions)) if len == buffer.len() => positions,
-                    _ => {
-                        cached = Some((buffer.len(), quantile_positions_for_len(buffer.len(), qs)));
-                        &cached.as_ref().expect("positions just cached").1
-                    }
-                };
-                for (slot_out, position) in out.iter_mut().zip(positions.iter()) {
-                    *slot_out = quantile_from_sorted_position(&buffer, position, interpolation);
-                }
+                idx += inner;
             }
-        });
+
+            if poisoned || buffer.is_empty() {
+                out.fill(T::nan());
+                continue;
+            }
+
+            if q_len == 1 {
+                out[0] = quantile_from_unsorted(&mut buffer, qs[0], interpolation);
+                continue;
+            }
+
+            buffer.sort_by(|a, b| a.total_order(b));
+            let positions = match cached {
+                Some((len, ref positions)) if len == buffer.len() => positions,
+                _ => {
+                    cached = Some((buffer.len(), quantile_positions_for_len(buffer.len(), qs)));
+                    &cached.as_ref().expect("positions just cached").1
+                }
+            };
+            for (slot_out, position) in out.iter_mut().zip(positions.iter()) {
+                *slot_out = quantile_from_sorted_position(&buffer, position, interpolation);
+            }
+        }
+    });
 
     // Slot-major -> q-major. Each destination chunk is one q's full output, so
     // the writes stay contiguous.
-    values
-        .par_chunks_mut(slot_count)
-        .enumerate()
-        .for_each(|(qi, out_q)| {
-            for (slot, out) in out_q.iter_mut().enumerate() {
-                *out = slot_major[slot * q_len + qi];
-            }
-        });
+    par_out_chunks(values, slot_count, &|start, out_q| {
+        let qi = start / slot_count;
+        for (slot, out) in out_q.iter_mut().enumerate() {
+            *out = slot_major[slot * q_len + qi];
+        }
+    });
 }
 
 /// Entry points for several quantiles along a dimension, per NaN mode.

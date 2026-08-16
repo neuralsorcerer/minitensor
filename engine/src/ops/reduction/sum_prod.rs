@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::map::{outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks};
 use crate::ops::simd::*;
 use crate::ops::util::Accumulate;
 use crate::{
@@ -63,20 +64,21 @@ where
     let band = rows.div_ceil(DIM0_TARGET_BANDS).max(DIM0_MIN_ROW_BAND);
     let bands = rows.div_ceil(band);
     if bands >= DIM0_MIN_BANDS {
-        let partials: Vec<Vec<T>> = (0..bands)
-            .into_par_iter()
-            .map(|index| {
-                let start = index * band;
-                let end = ((index + 1) * band).min(rows);
-                let mut acc = vec![init; cols];
-                for row in input[start * cols..end * cols].chunks_exact(cols) {
-                    for (slot, &value) in acc.iter_mut().zip(row) {
-                        *slot = combine(*slot, value);
-                    }
+        // Only the split is erased; `combine` stays a concrete closure type
+        // inside the band body, so the accumulate loop still inlines and
+        // vectorizes. Erasing it here instead would put an indirect call on
+        // every element.
+        let partials: Vec<Vec<T>> = par_map_indexed(bands, &|index| {
+            let start = index * band;
+            let end = ((index + 1) * band).min(rows);
+            let mut acc = vec![init; cols];
+            for row in input[start * cols..end * cols].chunks_exact(cols) {
+                for (slot, &value) in acc.iter_mut().zip(row) {
+                    *slot = combine(*slot, value);
                 }
-                acc
-            })
-            .collect();
+            }
+            acc
+        });
 
         out.copy_from_slice(&partials[0]);
         for partial in &partials[1..] {
@@ -94,21 +96,18 @@ where
     let block = cols
         .div_ceil(rayon::current_num_threads().max(1))
         .max(DIM0_MIN_BLOCK);
-    out.par_chunks_mut(block)
-        .enumerate()
-        .for_each(|(index, out_block)| {
-            let start = index * block;
-            let width = out_block.len();
-            for slot in out_block.iter_mut() {
-                *slot = init;
+    par_out_chunks(out, block, &|start, out_block| {
+        let width = out_block.len();
+        for slot in out_block.iter_mut() {
+            *slot = init;
+        }
+        for row in input.chunks_exact(cols) {
+            let segment = &row[start..start + width];
+            for (slot, &value) in out_block.iter_mut().zip(segment) {
+                *slot = combine(*slot, value);
             }
-            for row in input.chunks_exact(cols) {
-                let segment = &row[start..start + width];
-                for (slot, &value) in out_block.iter_mut().zip(segment) {
-                    *slot = combine(*slot, value);
-                }
-            }
-        });
+        }
+    });
 }
 
 /// Generates a sum-along-dim reduction kernel. The body is identical across
@@ -159,12 +158,12 @@ macro_rules! sum_along_dim_kernel {
                         });
                     }
                     1 => {
-                        result_slice
-                            .par_iter_mut()
-                            .zip(input_data.par_chunks_exact(cols))
-                            .for_each(|(out, row)| {
-                                *out = $simd_sum(row);
-                            });
+                        par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
+                            for (offset, out) in chunk.iter_mut().enumerate() {
+                                let base = (start + offset) * cols;
+                                *out = $simd_sum(&input_data[base..base + cols]);
+                            }
+                        });
                     }
                     _ => {
                         return Err(MinitensorError::dim_out_of_range(
@@ -177,10 +176,9 @@ macro_rules! sum_along_dim_kernel {
                 let dim_size = input_shape[dim];
                 let inner = input_shape[dim + 1..].iter().product::<usize>();
                 let outer_stride = dim_size * inner;
-                result_slice
-                    .par_iter_mut()
-                    .enumerate()
-                    .for_each(|(idx, out)| {
+                par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
+                    for (offset, out) in chunk.iter_mut().enumerate() {
+                        let idx = start + offset;
                         let o = idx / inner;
                         let r = idx % inner;
                         let mut sum_val = $zero;
@@ -190,7 +188,8 @@ macro_rules! sum_along_dim_kernel {
                             base += inner;
                         }
                         *out = sum_val;
-                    });
+                    }
+                });
             }
             Ok(())
         }
@@ -241,12 +240,15 @@ macro_rules! nansum_along_dim_kernel {
                         });
                     }
                     1 => {
-                        result_slice
-                            .par_iter_mut()
-                            .zip(input_data.par_chunks_exact(cols))
-                            .for_each(|(out, row)| {
-                                *out = row.iter().filter(|v| !v.is_nan()).sum::<$ty>();
-                            });
+                        par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
+                            for (offset, out) in chunk.iter_mut().enumerate() {
+                                let base = (start + offset) * cols;
+                                *out = input_data[base..base + cols]
+                                    .iter()
+                                    .filter(|v| !v.is_nan())
+                                    .sum::<$ty>();
+                            }
+                        });
                     }
                     _ => {
                         return Err(MinitensorError::dim_out_of_range(
@@ -259,10 +261,9 @@ macro_rules! nansum_along_dim_kernel {
                 let dim_size = input_shape[dim];
                 let inner = input_shape[dim + 1..].iter().product::<usize>();
                 let outer_stride = dim_size * inner;
-                result_slice
-                    .par_iter_mut()
-                    .enumerate()
-                    .for_each(|(idx, out)| {
+                par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
+                    for (offset, out) in chunk.iter_mut().enumerate() {
+                        let idx = start + offset;
                         let o = idx / inner;
                         let r = idx % inner;
                         let mut sum_val = $zero;
@@ -275,7 +276,8 @@ macro_rules! nansum_along_dim_kernel {
                             base += inner;
                         }
                         *out = sum_val;
-                    });
+                    }
+                });
             }
             Ok(())
         }
@@ -401,20 +403,17 @@ macro_rules! prod_along_dim_kernel {
             // every read and write is sequential (cache-friendly) rather than
             // striding by `inner` per output element. Parallel over the outer
             // index.
-            result_slice
-                .par_chunks_mut(inner)
-                .enumerate()
-                .for_each(|(o, out_chunk)| {
-                    out_chunk.fill($one);
-                    let block_base = o * outer_stride;
-                    for k in 0..dim_size {
-                        let slab_base = block_base + k * inner;
-                        let slab = &input_data[slab_base..slab_base + inner];
-                        for (acc, &v) in out_chunk.iter_mut().zip(slab) {
-                            *acc = acc.acc_mul(v);
-                        }
+            par_out_chunks(result_slice, inner, &|start, out_chunk| {
+                out_chunk.fill($one);
+                let block_base = (start / inner) * outer_stride;
+                for k in 0..dim_size {
+                    let slab_base = block_base + k * inner;
+                    let slab = &input_data[slab_base..slab_base + inner];
+                    for (acc, &v) in out_chunk.iter_mut().zip(slab) {
+                        *acc = acc.acc_mul(v);
                     }
-                });
+                }
+            });
             Ok(())
         }
     };
@@ -464,10 +463,9 @@ fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize
     let dim_size = input_shape[dim];
     let inner = input_shape[dim + 1..].iter().product::<usize>();
     let outer_stride = dim_size * inner;
-    result_slice
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, out)| {
+    par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
+        for (offset, out) in chunk.iter_mut().enumerate() {
+            let idx = start + offset;
             let o = idx / inner;
             let r = idx % inner;
             let mut val = true;
@@ -480,7 +478,8 @@ fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize
                 base += inner;
             }
             *out = val;
-        });
+        }
+    });
 
     Ok(())
 }
@@ -519,9 +518,11 @@ macro_rules! float_extremum_all {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
 
-            let (value, has_nan) = data
-                .par_chunks(MINMAX_CHUNK)
-                .map(|chunk| {
+            let (value, has_nan) = par_fold_chunks(
+                data,
+                MINMAX_CHUNK,
+                ($identity, false),
+                &|chunk| {
                     const LANES: usize = $lanes;
                     let mut bests = [$identity; LANES];
                     let mut nans = [0u32; LANES];
@@ -553,13 +554,9 @@ macro_rules! float_extremum_all {
                         nan |= (v != v) as u32;
                     }
                     (best, nan != 0)
-                })
-                .reduce(
-                    || ($identity, false),
-                    |a, b| {
-                        (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1)
-                    },
-                );
+                },
+                &|a, b| (if b.0 $better a.0 { b.0 } else { a.0 }, a.1 | b.1),
+            );
 
             let result_slice = result_data.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(
@@ -585,9 +582,11 @@ macro_rules! int_extremum_all {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
             })?;
 
-            let value = data
-                .par_chunks(MINMAX_CHUNK)
-                .map(|chunk| {
+            let value = par_fold_chunks(
+                data,
+                MINMAX_CHUNK,
+                $identity,
+                &|chunk| {
                     const LANES: usize = $lanes;
                     let mut bests = [$identity; LANES];
                     let mut blocks = chunk.chunks_exact(LANES);
@@ -610,8 +609,9 @@ macro_rules! int_extremum_all {
                         }
                     }
                     best
-                })
-                .reduce(|| $identity, |a, b| if b $better a { b } else { a });
+                },
+                &|a, b| if b $better a { b } else { a },
+            );
 
             let result_slice = result_data.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error(concat!(

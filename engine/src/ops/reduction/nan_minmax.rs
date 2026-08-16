@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::ops::map::{outputs_per_task, par_map_indexed, par_out_chunks, par_out_chunks2};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -108,19 +109,16 @@ fn reduce_along_dim_par<T, C, S>(
             input.len() / outer_stride.max(1)
         };
         if outer > 1 {
-            output
-                .par_chunks_mut(inner)
-                .enumerate()
-                .for_each(|(o, row)| {
-                    let base = o * outer_stride;
-                    row.fill(init);
-                    for step in 0..dim_size {
-                        let slab = &input[base + step * inner..][..inner];
-                        for (acc, &value) in row.iter_mut().zip(slab) {
-                            *acc = combine(*acc, value);
-                        }
+            par_out_chunks(output, inner, &|start, row| {
+                let base = (start / inner) * outer_stride;
+                row.fill(init);
+                for step in 0..dim_size {
+                    let slab = &input[base + step * inner..][..inner];
+                    for (acc, &value) in row.iter_mut().zip(slab) {
+                        *acc = combine(*acc, value);
                     }
-                });
+                }
+            });
         } else {
             // A single slab has no outer parallelism, so split the accumulator
             // range into column bands instead; each band still streams its own
@@ -128,28 +126,23 @@ fn reduce_along_dim_par<T, C, S>(
             let band = inner
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(BLOCKED_MIN_BAND);
-            output
-                .par_chunks_mut(band)
-                .enumerate()
-                .for_each(|(index, cols)| {
-                    let start = index * band;
-                    let width = cols.len();
-                    cols.fill(init);
-                    for step in 0..dim_size {
-                        let slab = &input[step * inner + start..][..width];
-                        for (acc, &value) in cols.iter_mut().zip(slab) {
-                            *acc = combine(*acc, value);
-                        }
+            par_out_chunks(output, band, &|start, cols| {
+                let width = cols.len();
+                cols.fill(init);
+                for step in 0..dim_size {
+                    let slab = &input[step * inner + start..][..width];
+                    for (acc, &value) in cols.iter_mut().zip(slab) {
+                        *acc = combine(*acc, value);
                     }
-                });
+                }
+            });
         }
         return;
     }
 
-    output
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(out_idx, out)| {
+    par_out_chunks(output, outputs_per_task(dim_size), &|start, chunk| {
+        for (offset, out) in chunk.iter_mut().enumerate() {
+            let out_idx = start + offset;
             let o = out_idx / inner;
             let r = out_idx % inner;
             let mut acc = init;
@@ -164,7 +157,8 @@ fn reduce_along_dim_par<T, C, S>(
                 idx += inner;
             }
             *out = acc;
-        });
+        }
+    });
 }
 
 /// Like [`reduce_along_dim_par`] but also records the index (along the reduced
@@ -207,57 +201,56 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
                 .div_ceil(rayon::current_num_threads().max(1))
                 .max(BLOCKED_MIN_BAND)
         };
-        values
-            .par_chunks_mut(band)
-            .zip(indices.par_chunks_mut(band))
-            .enumerate()
-            .for_each(|(index, (vals, idxs))| {
-                let flat = index * band;
-                let o = flat / inner;
-                let start = flat % inner;
-                let width = vals.len();
-                let base = o * outer_stride + start;
-                vals.fill(init);
-                idxs.fill(0);
-                for step in 0..dim_size {
-                    let slab = &input[base + step * inner..][..width];
-                    for (lane, &value) in slab.iter().enumerate() {
-                        if better(value, vals[lane]) {
-                            vals[lane] = value;
-                            idxs[lane] = step as i64;
-                        }
+        par_out_chunks2(values, indices, band, &|flat, vals, idxs| {
+            let o = flat / inner;
+            let start = flat % inner;
+            let width = vals.len();
+            let base = o * outer_stride + start;
+            vals.fill(init);
+            idxs.fill(0);
+            for step in 0..dim_size {
+                let slab = &input[base + step * inner..][..width];
+                for (lane, &value) in slab.iter().enumerate() {
+                    if better(value, vals[lane]) {
+                        vals[lane] = value;
+                        idxs[lane] = step as i64;
                     }
                 }
-            });
+            }
+        });
         return;
     }
 
-    values
-        .par_iter_mut()
-        .zip(indices.par_iter_mut())
-        .enumerate()
-        .for_each(|(out_idx, (vout, iout))| {
-            let o = out_idx / inner;
-            let r = out_idx % inner;
-            let mut best = init;
-            let mut best_i = 0usize;
-            let mut idx = o * outer_stride + r;
-            for d in 0..dim_size {
-                let val = input[idx];
-                if let Some(fin) = short(val) {
-                    best = fin;
-                    best_i = d;
-                    break;
+    par_out_chunks2(
+        values,
+        indices,
+        outputs_per_task(dim_size),
+        &|start, vchunk, ichunk| {
+            for (offset, (vout, iout)) in vchunk.iter_mut().zip(ichunk.iter_mut()).enumerate() {
+                let out_idx = start + offset;
+                let o = out_idx / inner;
+                let r = out_idx % inner;
+                let mut best = init;
+                let mut best_i = 0usize;
+                let mut idx = o * outer_stride + r;
+                for d in 0..dim_size {
+                    let val = input[idx];
+                    if let Some(fin) = short(val) {
+                        best = fin;
+                        best_i = d;
+                        break;
+                    }
+                    if better(val, best) {
+                        best = val;
+                        best_i = d;
+                    }
+                    idx += inner;
                 }
-                if better(val, best) {
-                    best = val;
-                    best_i = d;
-                }
-                idx += inner;
+                *vout = best;
+                *iout = best_i as i64;
             }
-            *vout = best;
-            *iout = best_i as i64;
-        });
+        },
+    );
 }
 
 /// Global min/max over the non-NaN elements.
@@ -560,9 +553,11 @@ fn extremum_along_dim(
             // than the general strided walk.
             if layout.inner == 1 {
                 let dim_size = layout.dim_size;
-                output.par_iter_mut().enumerate().for_each(|(o, out)| {
-                    let row = &input[o * dim_size..][..dim_size];
-                    *out = if is_max { $row_max(row) } else { $row_min(row) };
+                par_out_chunks(output, outputs_per_task(dim_size), &|start, chunk| {
+                    for (offset, out) in chunk.iter_mut().enumerate() {
+                        let row = &input[(start + offset) * dim_size..][..dim_size];
+                        *out = if is_max { $row_max(row) } else { $row_min(row) };
+                    }
                 });
             } else if layout.inner >= BLOCKED_INNER_MIN {
                 // Wide reduced axis: stream the slabs in memory order with the
@@ -577,17 +572,14 @@ fn extremum_along_dim(
                     input.len() / outer_stride.max(1)
                 };
                 if outer > 1 {
-                    output
-                        .par_chunks_mut(inner)
-                        .enumerate()
-                        .for_each(|(o, row)| {
-                            let base = o * outer_stride;
-                            if is_max {
-                                $col_max(input, base, 0, 0, dim_size, inner, row);
-                            } else {
-                                $col_min(input, base, 0, 0, dim_size, inner, row);
-                            }
-                        });
+                    par_out_chunks(output, inner, &|start, row| {
+                        let base = (start / inner) * outer_stride;
+                        if is_max {
+                            $col_max(input, base, 0, 0, dim_size, inner, row);
+                        } else {
+                            $col_min(input, base, 0, 0, dim_size, inner, row);
+                        }
+                    });
                 } else {
                     // One slab, so there is no outer work to hand out. Banding
                     // the columns gives each thread a narrow stripe of every
@@ -598,20 +590,17 @@ fn extremum_along_dim(
                     // the answer.
                     let bands = rayon::current_num_threads().max(1);
                     let band = dim_size.div_ceil(bands).max(1);
-                    let partials: Vec<Vec<$ty>> = (0..dim_size.div_ceil(band))
-                        .into_par_iter()
-                        .map(|b| {
-                            let mut acc = vec![seed; inner];
-                            let from = b * band;
-                            let to = ((b + 1) * band).min(dim_size);
-                            if is_max {
-                                $col_max(input, 0, 0, from, to, inner, &mut acc);
-                            } else {
-                                $col_min(input, 0, 0, from, to, inner, &mut acc);
-                            }
-                            acc
-                        })
-                        .collect();
+                    let partials: Vec<Vec<$ty>> = par_map_indexed(dim_size.div_ceil(band), &|b| {
+                        let mut acc = vec![seed; inner];
+                        let from = b * band;
+                        let to = ((b + 1) * band).min(dim_size);
+                        if is_max {
+                            $col_max(input, 0, 0, from, to, inner, &mut acc);
+                        } else {
+                            $col_min(input, 0, 0, from, to, inner, &mut acc);
+                        }
+                        acc
+                    });
                     output.copy_from_slice(&partials[0]);
                     for partial in &partials[1..] {
                         for (slot, &v) in output.iter_mut().zip(partial) {

@@ -10,9 +10,9 @@ use crate::autograd::with_grad_fn;
 use crate::{
     autograd::{MedianBackward, QuantileBackward},
     error::{MinitensorError, Result},
+    ops::map::unary_map,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -70,38 +70,30 @@ pub(crate) fn normalize_reduction_dims(
 }
 
 pub(crate) fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
-    let numel = tensor.numel();
-    let mut mask = vec![false; numel];
-
-    match tensor.dtype() {
+    // Plain element map, so it goes through the shared `unary_map` pipeline
+    // rather than a hand-written `par_iter_mut().zip(..)` — which handed rayon
+    // one work item per element for a single `is_nan` test.
+    let mask: Vec<bool> = match tensor.dtype() {
         DataType::Float32 => {
             let data = tensor
                 .data()
                 .as_f32_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            mask.par_iter_mut()
-                .zip(data.par_iter())
-                .for_each(|(out, &v)| {
-                    *out = !v.is_nan();
-                });
+            unary_map(data, |v: f32| !v.is_nan())
         }
         DataType::Float64 => {
             let data = tensor
                 .data()
                 .as_f64_slice()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            mask.par_iter_mut()
-                .zip(data.par_iter())
-                .for_each(|(out, &v)| {
-                    *out = !v.is_nan();
-                });
+            unary_map(data, |v: f64| !v.is_nan())
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "nan reductions are only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(TensorData::from_vec_bool(mask, tensor.device())),

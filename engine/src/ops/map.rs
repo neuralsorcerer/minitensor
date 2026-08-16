@@ -285,6 +285,133 @@ fn par_zip_chunks3<A, B, C, U>(
         .for_each(|(((ac, bc), cc), oc)| work(ac, bc, cc, oc));
 }
 
+/// How many outputs to give one parallel task, when producing each output costs
+/// `width` element reads.
+///
+/// Reduction kernels vary enormously in how much work one output is: a row sum
+/// over a 4096-wide matrix is thousands of reads, a reduction over a length-2
+/// axis is two. A fixed chunk width is wrong for one end or the other, so scale
+/// it to hold the *work* per task roughly constant instead.
+#[inline]
+pub(crate) fn outputs_per_task(width: usize) -> usize {
+    /// Element reads per task. Large enough to bury the split bookkeeping,
+    /// small enough that a few thousand outputs still fill every core.
+    const TARGET: usize = 1 << 14;
+    (TARGET / width.max(1)).max(1)
+}
+
+/// The type-erased body of an output-partitioned parallel loop: the index of
+/// the chunk's first output element, and the chunk itself.
+type OutWork<'a, T> = &'a (dyn Fn(usize, &mut [T]) + Sync);
+
+/// [`OutWork`] for kernels that fill two outputs in step — values and indices,
+/// as `sort`, `topk` and the quantile kernels do.
+type OutWork2<'a, T, U> = &'a (dyn Fn(usize, &mut [T], &mut [U]) + Sync);
+
+/// Split `out` into contiguous chunks of `chunk` elements and run `work` on
+/// each in parallel, passing the index of the chunk's first element.
+///
+/// This is the reduction-shaped sibling of [`par_zip_chunks`], and it is erased
+/// for the same reason: a `par_chunks_mut(..).enumerate().for_each(..)` pipeline
+/// instantiates rayon's splitter, `StackJob` and bridge afresh for every
+/// distinct closure type, and the engine writes that pipeline by hand at over
+/// two hundred sites. Erased, they share one instantiation per output element
+/// type.
+///
+/// It also fixes a granularity bug the hand-written form kept making. Many of
+/// those sites were `out.par_iter_mut().enumerate()`, which hands rayon *one
+/// work item per output element* — for a reduction whose per-element body is a
+/// short strided walk, the split bookkeeping can cost more than the arithmetic.
+/// Here the unit of work is a chunk, and the caller picks its width.
+///
+/// Every output chunk is computed independently of the others, so the partition
+/// cannot affect the result: this is safe to use in kernels that must stay
+/// bitwise stable across thread counts, and unsafe to use where the partition
+/// decides how values are *grouped* into an accumulation (see
+/// `reduce_along_dim0`, which fixes its row bands to constants for exactly that
+/// reason).
+pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork<T>) {
+    // No output means no chunks and so no calls, matching `par_chunks_mut`
+    // exactly. This is load-bearing: several kernels have a `work` that assumes
+    // its chunk is non-empty (it indexes the first row), and would panic rather
+    // than do nothing on a zero-sized tensor. It also covers `chunk == 0`,
+    // which only arises when some axis inside the reduced one is empty — and
+    // that empties the output too.
+    if out.is_empty() {
+        return;
+    }
+    // A single chunk is the common small-tensor case; running it here skips the
+    // rayon dispatch entirely.
+    if out.len() <= chunk || chunk == 0 {
+        work(0, out);
+        return;
+    }
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
+}
+
+/// Fold `data` in parallel chunk by chunk, then combine the per-chunk results.
+///
+/// The erased form of `data.par_chunks(n).map(fold).reduce(|| id, combine)`.
+/// Both closures are charged once per chunk, so the fold body itself — the part
+/// that actually touches every element — stays a concrete type and inlines.
+///
+/// `combine` must be associative and commutative for the result to be
+/// independent of the split; rayon does not promise a grouping. Exact
+/// operations (min, max, boolean and, bitwise or) qualify. Float addition does
+/// not: `deterministic_par_sum` exists for that case.
+pub(crate) fn par_fold_chunks<T, A>(
+    data: &[T],
+    chunk: usize,
+    identity: A,
+    fold: &(dyn Fn(&[T]) -> A + Sync),
+    combine: &(dyn Fn(A, A) -> A + Sync),
+) -> A
+where
+    T: Sync,
+    A: Copy + Send + Sync,
+{
+    data.par_chunks(chunk.max(1))
+        .map(fold)
+        .reduce(|| identity, combine)
+}
+
+/// Run `work(0..count)` in parallel and collect the results in index order.
+///
+/// The erased counterpart of `(0..count).into_par_iter().map(..).collect()`,
+/// for kernels that build one partial buffer per band. `count` is small — a
+/// band count, not an element count — so the indirect call is charged once per
+/// task and the buffer each call fills is thousands of elements.
+pub(crate) fn par_map_indexed<T: Send>(count: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    (0..count).into_par_iter().map(work).collect()
+}
+
+/// [`par_out_chunks`] over two outputs partitioned in step. Both slices must be
+/// the same length and are cut at the same offsets.
+pub(crate) fn par_out_chunks2<T: Send, U: Send>(
+    values: &mut [T],
+    indices: &mut [U],
+    chunk: usize,
+    work: OutWork2<T, U>,
+) {
+    debug_assert_eq!(values.len(), indices.len());
+    if values.is_empty() {
+        return;
+    }
+    if values.len() <= chunk || chunk == 0 {
+        work(0, values, indices);
+        return;
+    }
+    values
+        .par_chunks_mut(chunk)
+        .zip(indices.par_chunks_mut(chunk))
+        .enumerate()
+        .for_each(|(index, (value_chunk, index_chunk))| {
+            work(index * chunk, value_chunk, index_chunk)
+        });
+}
+
 /// Sequential core: write `op(input[i])` into every element of `out`.
 #[inline(always)]
 fn map_into<T, U, F>(input: &[T], out: &mut [MaybeUninit<U>], op: &F)
@@ -623,6 +750,76 @@ mod tests {
             let expected: Vec<f32> = input.iter().map(|x| x * 2.0 + 1.0).collect();
             assert_eq!(unary_map(&input, |x: f32| x * 2.0 + 1.0), expected, "{len}");
         }
+    }
+
+    #[test]
+    fn par_out_chunks_partitions_the_output_exactly_once() {
+        for len in [0usize, 1, 7, 64, 1000, 4096, 100_000] {
+            for chunk in [1usize, 3, 64, 4096] {
+                let mut out = vec![usize::MAX; len];
+                par_out_chunks(&mut out, chunk, &|start, c| {
+                    for (i, slot) in c.iter_mut().enumerate() {
+                        *slot = start + i;
+                    }
+                });
+                let expected: Vec<usize> = (0..len).collect();
+                assert_eq!(out, expected, "len={len} chunk={chunk}");
+            }
+        }
+    }
+
+    /// `par_chunks_mut` yields nothing for an empty slice, and the kernels rely
+    /// on it: several index their chunk's first row unconditionally, so calling
+    /// them once with an empty chunk panics. A zero-sized `cumsum` did exactly
+    /// that.
+    #[test]
+    fn par_out_chunks_never_runs_on_an_empty_output() {
+        let mut empty: Vec<f32> = Vec::new();
+        par_out_chunks(&mut empty, 8, &|_, _| panic!("must not be called"));
+        par_out_chunks(&mut empty, 0, &|_, _| panic!("must not be called"));
+
+        let (mut v, mut i): (Vec<f32>, Vec<i64>) = (Vec::new(), Vec::new());
+        par_out_chunks2(&mut v, &mut i, 8, &|_, _, _| panic!("must not be called"));
+        par_out_chunks2(&mut v, &mut i, 0, &|_, _, _| panic!("must not be called"));
+    }
+
+    #[test]
+    fn par_out_chunks2_cuts_both_outputs_at_the_same_offsets() {
+        for len in [0usize, 1, 5, 4096, 20_000] {
+            let (mut values, mut indices) = (vec![0u32; len], vec![0i64; len]);
+            par_out_chunks2(&mut values, &mut indices, 64, &|start, v, i| {
+                assert_eq!(v.len(), i.len());
+                for (offset, (value, index)) in v.iter_mut().zip(i.iter_mut()).enumerate() {
+                    *value = (start + offset) as u32;
+                    *index = (start + offset) as i64;
+                }
+            });
+            assert_eq!(values, (0..len as u32).collect::<Vec<_>>(), "{len}");
+            assert_eq!(indices, (0..len as i64).collect::<Vec<_>>(), "{len}");
+        }
+    }
+
+    #[test]
+    fn par_fold_chunks_and_par_map_indexed_match_their_sequential_forms() {
+        for len in [0usize, 1, 1000, 50_000] {
+            let data: Vec<i64> = (0..len as i64).collect();
+            let total = par_fold_chunks(&data, 128, 0i64, &|c| c.iter().sum(), &|a, b| a + b);
+            assert_eq!(total, data.iter().sum::<i64>(), "{len}");
+        }
+        assert_eq!(par_map_indexed(0, &|i: usize| i), Vec::<usize>::new());
+        assert_eq!(
+            par_map_indexed(37, &|i: usize| i * i),
+            (0..37).map(|i| i * i).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn outputs_per_task_scales_with_the_cost_of_one_output() {
+        assert!(outputs_per_task(1) > outputs_per_task(1024));
+        // A single output can cost more than a whole task's budget; the floor
+        // keeps the chunk width usable rather than zero.
+        assert_eq!(outputs_per_task(usize::MAX), 1);
+        assert_eq!(outputs_per_task(0), outputs_per_task(1));
     }
 
     #[test]

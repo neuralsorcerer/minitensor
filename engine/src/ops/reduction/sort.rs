@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::ops::map::{outputs_per_task, par_out_chunks, par_out_chunks2};
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
 use crate::ops::util::{Accumulate, deterministic_par_sum, pairwise_fold};
@@ -52,30 +53,30 @@ fn sort_along_dim_par<T, C>(
 {
     debug_assert_eq!(values.len(), outer * outer_stride);
     debug_assert_eq!(indices.len(), outer * outer_stride);
-    values
-        .par_chunks_mut(outer_stride)
-        .zip(indices.par_chunks_mut(outer_stride))
-        .enumerate()
-        .for_each(|(o, (vchunk, ichunk))| {
-            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
-            for r in 0..inner {
-                entries.clear();
-                let base = o * outer_stride + r;
-                for d in 0..dim_size {
-                    entries.push((d, input[base + d * inner]));
-                }
-                if stable {
-                    entries.sort_by(cmp);
-                } else {
-                    entries.sort_unstable_by(cmp);
-                }
-                for (j, (index, value)) in entries.iter().enumerate() {
-                    let off = r + j * inner;
-                    vchunk[off] = *value;
-                    ichunk[off] = *index as i64;
-                }
+    // Erased at the chunk boundary only: `cmp` stays a concrete type inside the
+    // body, so the sort still monomorphizes against it. Erasing the comparator
+    // itself would put an indirect call on every comparison.
+    par_out_chunks2(values, indices, outer_stride, &|start, vchunk, ichunk| {
+        let o = start / outer_stride;
+        let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+        for r in 0..inner {
+            entries.clear();
+            let base = o * outer_stride + r;
+            for d in 0..dim_size {
+                entries.push((d, input[base + d * inner]));
             }
-        });
+            if stable {
+                entries.sort_by(cmp);
+            } else {
+                entries.sort_unstable_by(cmp);
+            }
+            for (j, (index, value)) in entries.iter().enumerate() {
+                let off = r + j * inner;
+                vchunk[off] = *value;
+                ichunk[off] = *index as i64;
+            }
+        }
+    });
 }
 
 /// The same sort, but parallel *within* each slice rather than across them.
@@ -653,46 +654,39 @@ fn var_fused_single_axis(
                 } else {
                     // Rows per task, not elements: a task is `VAR_ROW_BAND`
                     // whole rows of `dim_size` work each.
-                    let band = VAR_ROW_BAND;
-                    out.par_chunks_mut(band)
-                        .enumerate()
-                        .for_each(|(b, chunk)| run(b * band, chunk));
+                    par_out_chunks(out, VAR_ROW_BAND, &run);
                 }
             } else if inner != 0 {
                 // The reduced axis is not the last one, so each output's
                 // elements are `inner` apart. Accumulate whole slabs instead,
                 // which reads the input in memory order; the running means are
                 // a vector of `inner`, allocated once per outer position.
-                out.par_chunks_mut(inner)
-                    .enumerate()
-                    .for_each(|(o, out_chunk)| {
-                        let block_base = o * outer_stride;
-                        let mut col_mean = vec![0.0 as $ty; inner];
-                        for k in 0..dim_size {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
-                            for (m, &v) in col_mean.iter_mut().zip(slab) {
-                                *m += v;
-                            }
+                par_out_chunks(out, inner, &|start, out_chunk| {
+                    let block_base = (start / inner) * outer_stride;
+                    let mut col_mean = vec![0.0 as $ty; inner];
+                    for k in 0..dim_size {
+                        let base = block_base + k * inner;
+                        let slab = &input[base..base + inner];
+                        for (m, &v) in col_mean.iter_mut().zip(slab) {
+                            *m += v;
                         }
-                        for m in col_mean.iter_mut() {
-                            *m /= n;
+                    }
+                    for m in col_mean.iter_mut() {
+                        *m /= n;
+                    }
+                    out_chunk.fill(0.0 as $ty);
+                    for k in 0..dim_size {
+                        let base = block_base + k * inner;
+                        let slab = &input[base..base + inner];
+                        for ((acc, &v), &m) in out_chunk.iter_mut().zip(slab).zip(col_mean.iter()) {
+                            let d = v - m;
+                            *acc += d * d;
                         }
-                        out_chunk.fill(0.0 as $ty);
-                        for k in 0..dim_size {
-                            let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
-                            for ((acc, &v), &m) in
-                                out_chunk.iter_mut().zip(slab).zip(col_mean.iter())
-                            {
-                                let d = v - m;
-                                *acc += d * d;
-                            }
-                        }
-                        for acc in out_chunk.iter_mut() {
-                            *acc /= divisor;
-                        }
-                    });
+                    }
+                    for acc in out_chunk.iter_mut() {
+                        *acc /= divisor;
+                    }
+                });
             }
         }};
     }
@@ -1037,43 +1031,31 @@ pub(crate) fn nanmean_from_sum_count(
     let numel = sum.numel();
     let mut result_data = TensorData::zeros_on_device(numel, sum.dtype(), sum.device());
 
+    // `count == 0` means every element along the axis was NaN, so there is no
+    // mean to report and NaN is the answer rather than a division by zero.
+    macro_rules! divide {
+        ($accessor:ident, $accessor_mut:ident, $ty:ty, $tyname:literal) => {{
+            let missing =
+                || MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"));
+            let sum_slice = sum.data().$accessor().ok_or_else(missing)?;
+            let count_slice = count.data().$accessor().ok_or_else(missing)?;
+            let out = result_data.$accessor_mut().ok_or_else(missing)?;
+            par_out_chunks(out, outputs_per_task(1), &|start, chunk| {
+                let span = start..start + chunk.len();
+                for ((dst, &s), &c) in chunk
+                    .iter_mut()
+                    .zip(&sum_slice[span.clone()])
+                    .zip(&count_slice[span])
+                {
+                    *dst = if c == 0.0 { <$ty>::NAN } else { s / c };
+                }
+            });
+        }};
+    }
+
     match sum.dtype() {
-        DataType::Float32 => {
-            let sum_slice = sum
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let count_slice = count
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let out = result_data
-                .as_f32_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            out.par_iter_mut()
-                .zip(sum_slice.par_iter().zip(count_slice.par_iter()))
-                .for_each(|(dst, (&s, &c))| {
-                    *dst = if c == 0.0 { f32::NAN } else { s / c };
-                });
-        }
-        DataType::Float64 => {
-            let sum_slice = sum
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let count_slice = count
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let out = result_data
-                .as_f64_slice_mut()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            out.par_iter_mut()
-                .zip(sum_slice.par_iter().zip(count_slice.par_iter()))
-                .for_each(|(dst, (&s, &c))| {
-                    *dst = if c == 0.0 { f64::NAN } else { s / c };
-                });
-        }
+        DataType::Float32 => divide!(as_f32_slice, as_f32_slice_mut, f32, "f32"),
+        DataType::Float64 => divide!(as_f64_slice, as_f64_slice_mut, f64, "f64"),
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "nanmean only supports floating point tensors",

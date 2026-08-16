@@ -7,13 +7,13 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
+use crate::ops::map::par_out_chunks;
 use crate::ops::util::{broadcast_mask_index, stable_sigmoid_f64};
 use crate::tensor::DataType;
 use crate::tensor::Shape;
 use crate::tensor::Strides;
 use crate::tensor::Tensor;
 use crate::tensor::TensorData;
-use rayon::prelude::*;
 
 use num_traits::Float;
 
@@ -459,40 +459,38 @@ fn softmax_core<T: Float + Send + Sync>(
     };
     let neg_inf = T::neg_infinity();
 
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .for_each(|(in_block, out_block)| {
-            if after == 1 {
-                // Softmax over the last (contiguous) dimension: each block is a
-                // single slice laid out contiguously.
-                let mut max_val = neg_inf;
-                for &v in in_block.iter() {
-                    if v > max_val {
-                        max_val = v;
-                    }
+    par_out_chunks(output_slice, group, &|block_offset, out_block| {
+        let in_block = &input_data[block_offset..block_offset + out_block.len()];
+        if after == 1 {
+            // Softmax over the last (contiguous) dimension: each block is a
+            // single slice laid out contiguously.
+            let mut max_val = neg_inf;
+            for &v in in_block.iter() {
+                if v > max_val {
+                    max_val = v;
                 }
-                if max_val == neg_inf {
-                    out_block.fill(T::zero());
-                    return;
-                }
-                let mut sum = T::zero();
-                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                    let e = (v - max_val).exp();
-                    *o = e;
-                    sum = sum + e;
-                }
-                for o in out_block.iter_mut() {
-                    *o = *o / sum;
-                }
-            } else {
-                // Softmax over a non-last dimension: the block is a
-                // `[dim_size, after]` row-major matrix and the reduction runs
-                // down the rows. Column accumulators keep every pass contiguous
-                // instead of striding by `after` per element.
-                softmax_block_columnwise(in_block, out_block, dim_size, after);
             }
-        });
+            if max_val == neg_inf {
+                out_block.fill(T::zero());
+                return;
+            }
+            let mut sum = T::zero();
+            for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                let e = (v - max_val).exp();
+                *o = e;
+                sum = sum + e;
+            }
+            for o in out_block.iter_mut() {
+                *o = *o / sum;
+            }
+        } else {
+            // Softmax over a non-last dimension: the block is a
+            // `[dim_size, after]` row-major matrix and the reduction runs
+            // down the rows. Column accumulators keep every pass contiguous
+            // instead of striding by `after` per element.
+            softmax_block_columnwise(in_block, out_block, dim_size, after);
+        }
+    });
 
     Ok(())
 }
@@ -534,50 +532,46 @@ fn masked_softmax_core<T: Float + Send + Sync>(
         None => mask_data[linear_idx],
     };
 
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .enumerate()
-        .for_each(|(block_idx, (in_block, out_block))| {
-            let block_offset = block_idx * group;
-            for base in 0..after {
-                let mut max_val = neg_inf;
-                let mut has_unmasked = false;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    if !is_masked(block_offset + idx) {
-                        has_unmasked = true;
-                        let v = in_block[idx];
-                        if v > max_val {
-                            max_val = v;
-                        }
-                    }
-                }
-                if !has_unmasked || max_val == neg_inf {
-                    for k in 0..dim_size {
-                        out_block[base + k * after] = T::zero();
-                    }
-                    continue;
-                }
-                let mut sum = T::zero();
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    if is_masked(block_offset + idx) {
-                        out_block[idx] = T::zero();
-                    } else {
-                        let e = (in_block[idx] - max_val).exp();
-                        out_block[idx] = e;
-                        sum = sum + e;
-                    }
-                }
-                if sum != T::zero() {
-                    for k in 0..dim_size {
-                        let idx = base + k * after;
-                        out_block[idx] = out_block[idx] / sum;
+    par_out_chunks(output_slice, group, &|block_offset, out_block| {
+        let in_block = &input_data[block_offset..block_offset + out_block.len()];
+        for base in 0..after {
+            let mut max_val = neg_inf;
+            let mut has_unmasked = false;
+            for k in 0..dim_size {
+                let idx = base + k * after;
+                if !is_masked(block_offset + idx) {
+                    has_unmasked = true;
+                    let v = in_block[idx];
+                    if v > max_val {
+                        max_val = v;
                     }
                 }
             }
-        });
+            if !has_unmasked || max_val == neg_inf {
+                for k in 0..dim_size {
+                    out_block[base + k * after] = T::zero();
+                }
+                continue;
+            }
+            let mut sum = T::zero();
+            for k in 0..dim_size {
+                let idx = base + k * after;
+                if is_masked(block_offset + idx) {
+                    out_block[idx] = T::zero();
+                } else {
+                    let e = (in_block[idx] - max_val).exp();
+                    out_block[idx] = e;
+                    sum = sum + e;
+                }
+            }
+            if sum != T::zero() {
+                for k in 0..dim_size {
+                    let idx = base + k * after;
+                    out_block[idx] = out_block[idx] / sum;
+                }
+            }
+        }
+    });
 
     Ok(())
 }
@@ -656,74 +650,72 @@ fn log_softmax_core<T: Float + Send + Sync>(
         return Ok(());
     };
     let neg_inf = T::neg_infinity();
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .for_each(|(in_block, out_block)| {
-            if after == 1 {
-                // Log-softmax over the last (contiguous) dimension.
-                let mut max_val = neg_inf;
-                for &v in in_block.iter() {
-                    if v > max_val {
-                        max_val = v;
-                    }
+    par_out_chunks(output_slice, group, &|block_offset, out_block| {
+        let in_block = &input_data[block_offset..block_offset + out_block.len()];
+        if after == 1 {
+            // Log-softmax over the last (contiguous) dimension.
+            let mut max_val = neg_inf;
+            for &v in in_block.iter() {
+                if v > max_val {
+                    max_val = v;
                 }
-                if max_val == neg_inf {
-                    out_block.fill(neg_inf);
-                    return;
-                }
-                let mut sum = T::zero();
-                for &v in in_block.iter() {
-                    sum = sum + (v - max_val).exp();
-                }
-                let logsum = sum.ln() + max_val;
-                for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                    *o = v - logsum;
-                }
-            } else {
-                // Non-last dimension: process the `[dim_size, after]` block
-                // column-wise with `after`-sized accumulators so every pass is
-                // contiguous instead of striding by `after`.
-                let mut col_logsum = vec![neg_inf; after];
-                for k in 0..dim_size {
-                    let row = &in_block[k * after..k * after + after];
-                    for (m, &v) in col_logsum.iter_mut().zip(row) {
-                        if v > *m {
-                            *m = v;
-                        }
-                    }
-                }
-                let mut col_sum = vec![T::zero(); after];
-                for k in 0..dim_size {
-                    let in_row = &in_block[k * after..k * after + after];
-                    for a in 0..after {
-                        let m = col_logsum[a];
-                        if m != neg_inf {
-                            col_sum[a] = col_sum[a] + (in_row[a] - m).exp();
-                        }
-                    }
-                }
-                // Fold each column's max into log(sum) + max; -inf columns stay
-                // -inf so their outputs are all -inf.
-                for a in 0..after {
-                    if col_logsum[a] != neg_inf {
-                        col_logsum[a] = col_sum[a].ln() + col_logsum[a];
-                    }
-                }
-                for k in 0..dim_size {
-                    let in_row = &in_block[k * after..k * after + after];
-                    let out_row = &mut out_block[k * after..k * after + after];
-                    for a in 0..after {
-                        let ls = col_logsum[a];
-                        out_row[a] = if ls == neg_inf {
-                            neg_inf
-                        } else {
-                            in_row[a] - ls
-                        };
+            }
+            if max_val == neg_inf {
+                out_block.fill(neg_inf);
+                return;
+            }
+            let mut sum = T::zero();
+            for &v in in_block.iter() {
+                sum = sum + (v - max_val).exp();
+            }
+            let logsum = sum.ln() + max_val;
+            for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
+                *o = v - logsum;
+            }
+        } else {
+            // Non-last dimension: process the `[dim_size, after]` block
+            // column-wise with `after`-sized accumulators so every pass is
+            // contiguous instead of striding by `after`.
+            let mut col_logsum = vec![neg_inf; after];
+            for k in 0..dim_size {
+                let row = &in_block[k * after..k * after + after];
+                for (m, &v) in col_logsum.iter_mut().zip(row) {
+                    if v > *m {
+                        *m = v;
                     }
                 }
             }
-        });
+            let mut col_sum = vec![T::zero(); after];
+            for k in 0..dim_size {
+                let in_row = &in_block[k * after..k * after + after];
+                for a in 0..after {
+                    let m = col_logsum[a];
+                    if m != neg_inf {
+                        col_sum[a] = col_sum[a] + (in_row[a] - m).exp();
+                    }
+                }
+            }
+            // Fold each column's max into log(sum) + max; -inf columns stay
+            // -inf so their outputs are all -inf.
+            for a in 0..after {
+                if col_logsum[a] != neg_inf {
+                    col_logsum[a] = col_sum[a].ln() + col_logsum[a];
+                }
+            }
+            for k in 0..dim_size {
+                let in_row = &in_block[k * after..k * after + after];
+                let out_row = &mut out_block[k * after..k * after + after];
+                for a in 0..after {
+                    let ls = col_logsum[a];
+                    out_row[a] = if ls == neg_inf {
+                        neg_inf
+                    } else {
+                        in_row[a] - ls
+                    };
+                }
+            }
+        }
+    });
 
     Ok(())
 }
@@ -766,49 +758,45 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
         None => mask_data[linear_idx],
     };
 
-    input_data
-        .par_chunks(group)
-        .zip(output_slice.par_chunks_mut(group))
-        .enumerate()
-        .for_each(|(block_idx, (in_block, out_block))| {
-            let block_offset = block_idx * group;
-            for base in 0..after {
-                let mut max_val = neg_inf;
-                let mut has_unmasked = false;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    if !is_masked(block_offset + idx) {
-                        has_unmasked = true;
-                        let v = in_block[idx];
-                        if v > max_val {
-                            max_val = v;
-                        }
+    par_out_chunks(output_slice, group, &|block_offset, out_block| {
+        let in_block = &input_data[block_offset..block_offset + out_block.len()];
+        for base in 0..after {
+            let mut max_val = neg_inf;
+            let mut has_unmasked = false;
+            for k in 0..dim_size {
+                let idx = base + k * after;
+                if !is_masked(block_offset + idx) {
+                    has_unmasked = true;
+                    let v = in_block[idx];
+                    if v > max_val {
+                        max_val = v;
                     }
-                }
-                if !has_unmasked || max_val == neg_inf {
-                    for k in 0..dim_size {
-                        out_block[base + k * after] = neg_inf;
-                    }
-                    continue;
-                }
-                let mut sum = T::zero();
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    if !is_masked(block_offset + idx) {
-                        sum = sum + (in_block[idx] - max_val).exp();
-                    }
-                }
-                let logsum = sum.ln() + max_val;
-                for k in 0..dim_size {
-                    let idx = base + k * after;
-                    out_block[idx] = if is_masked(block_offset + idx) {
-                        neg_inf
-                    } else {
-                        in_block[idx] - logsum
-                    };
                 }
             }
-        });
+            if !has_unmasked || max_val == neg_inf {
+                for k in 0..dim_size {
+                    out_block[base + k * after] = neg_inf;
+                }
+                continue;
+            }
+            let mut sum = T::zero();
+            for k in 0..dim_size {
+                let idx = base + k * after;
+                if !is_masked(block_offset + idx) {
+                    sum = sum + (in_block[idx] - max_val).exp();
+                }
+            }
+            let logsum = sum.ln() + max_val;
+            for k in 0..dim_size {
+                let idx = base + k * after;
+                out_block[idx] = if is_masked(block_offset + idx) {
+                    neg_inf
+                } else {
+                    in_block[idx] - logsum
+                };
+            }
+        }
+    });
 
     Ok(())
 }

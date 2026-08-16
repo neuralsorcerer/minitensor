@@ -10,12 +10,11 @@ use crate::{
     error::{MinitensorError, Result},
     ops::{
         activation, arithmetic,
-        map::{EXPENSIVE_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, unary_map},
+        map::{EXPENSIVE_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, par_out_chunks, unary_map},
         reduction,
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Normalise `dim` into a sorted, deduplicated list of axes. `None` means every
@@ -216,15 +215,13 @@ fn scaled_powers(input: &Tensor, scale: &Tensor, p: f64, dims: &[usize]) -> Resu
                             if src.len() < $threshold {
                                 run(0, &mut out);
                             } else {
-                                let grain = PAR_CHUNK.max(1);
-                                out.par_chunks_mut(grain)
-                                    .enumerate()
-                                    .for_each(|(c, chunk)| run(c * grain, chunk));
+                                par_out_chunks(&mut out, PAR_CHUNK.max(1), &run);
                             }
                         }
                         ScaleLayout::Axis { dim_size, inner } => {
                             let block = dim_size * inner;
-                            let run = |o: usize, chunk: &mut [$ty]| {
+                            let run = |first: usize, chunk: &mut [$ty]| {
+                                let o = first / block;
                                 let base = o * block;
                                 for i in 0..dim_size {
                                     let row = i * inner;
@@ -237,11 +234,9 @@ fn scaled_powers(input: &Tensor, scale: &Tensor, p: f64, dims: &[usize]) -> Resu
                             if src.len() < $threshold {
                                 out.chunks_mut(block)
                                     .enumerate()
-                                    .for_each(|(o, chunk)| run(o, chunk));
+                                    .for_each(|(o, chunk)| run(o * block, chunk));
                             } else {
-                                out.par_chunks_mut(block)
-                                    .enumerate()
-                                    .for_each(|(o, chunk)| run(o, chunk));
+                                par_out_chunks(&mut out, block, &run);
                             }
                         }
                     }

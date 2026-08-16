@@ -4,12 +4,12 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::map::par_out_chunks;
 use crate::ops::util::Accumulate;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{Tensor, TensorData},
 };
-use rayon::prelude::*;
 
 /// Inclusive scan of `input` into `output` along one dimension.
 ///
@@ -66,14 +66,9 @@ fn scan_along_dim<T, F>(
         }
     };
 
-    if output.len() == slab {
-        run(output, input);
-    } else {
-        output
-            .par_chunks_mut(slab)
-            .zip(input.par_chunks(slab))
-            .for_each(|(out_slab, in_slab)| run(out_slab, in_slab));
-    }
+    par_out_chunks(output, slab, &|start, out_slab| {
+        run(out_slab, &input[start..start + out_slab.len()])
+    });
 }
 
 macro_rules! cumprod_forward {

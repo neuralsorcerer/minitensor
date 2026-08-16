@@ -7,12 +7,12 @@
 use super::*;
 use crate::autograd::NanSumBackward;
 use crate::autograd::SumBackward;
+use crate::ops::map::par_out_chunks2;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -164,11 +164,9 @@ fn median_along_dim_par<T>(
 ) where
     T: Copy + Send + Sync,
 {
-    values
-        .par_chunks_mut(inner)
-        .zip(indices.par_chunks_mut(inner))
-        .enumerate()
-        .for_each(|(o, (vchunk, ichunk))| {
+    par_out_chunks2(values, indices, inner, &|start, vchunk, ichunk| {
+        let o = start / inner;
+        {
             let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
             for r in 0..inner {
                 entries.clear();
@@ -195,7 +193,8 @@ fn median_along_dim_par<T>(
                 vchunk[r] = value;
                 ichunk[r] = index as i64;
             }
-        });
+        }
+    });
 }
 
 pub(crate) fn median_along_dim(

@@ -7,6 +7,7 @@
 use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
+use crate::ops::map::{par_out_chunks, par_out_chunks2};
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
@@ -210,11 +211,7 @@ fn bool_fold_along_dim(
                 if numel < PAR_THRESHOLD {
                     run(0, output);
                 } else {
-                    let band = BOOL_FOLD_BAND;
-                    output
-                        .par_chunks_mut(band)
-                        .enumerate()
-                        .for_each(|(b, chunk)| run(b * band, chunk));
+                    par_out_chunks(output, BOOL_FOLD_BAND, &run);
                 }
             } else {
                 // Slab accumulation. `band` divides `inner` so every task stays
@@ -222,7 +219,8 @@ fn bool_fold_along_dim(
                 // chunk index alone.
                 let band = column_band(inner);
                 let bands_per_slab = inner / band;
-                let run = |chunk_index: usize, chunk: &mut [bool]| {
+                let run = |first: usize, chunk: &mut [bool]| {
+                    let chunk_index = first / band;
                     let o = chunk_index / bands_per_slab;
                     let col0 = (chunk_index % bands_per_slab) * band;
                     let width = chunk.len();
@@ -253,12 +251,9 @@ fn bool_fold_along_dim(
                     output
                         .chunks_mut(band)
                         .enumerate()
-                        .for_each(|(c, chunk)| run(c, chunk));
+                        .for_each(|(c, chunk)| run(c * band, chunk));
                 } else {
-                    output
-                        .par_chunks_mut(band)
-                        .enumerate()
-                        .for_each(|(c, chunk)| run(c, chunk));
+                    par_out_chunks(output, band, &run);
                 }
             }
         });
@@ -710,30 +705,28 @@ fn topk_along_dim_par<T>(
 ) where
     T: Copy + Send + Sync,
 {
-    values
-        .par_chunks_mut(k * inner)
-        .zip(indices.par_chunks_mut(k * inner))
-        .enumerate()
-        .for_each(|(o, (vchunk, ichunk))| {
-            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
-            for r in 0..inner {
-                entries.clear();
-                let base = o * outer_stride + r;
-                for d in 0..dim_size {
-                    entries.push((d, input[base + d * inner]));
-                }
-
-                select_topk_entries(&mut entries, k, sorted, compare);
-
-                // Output shape is (outer, k, inner); write row-major so a
-                // non-trailing reduction axis (inner > 1) lands correctly.
-                for (j, &(index, value)) in entries.iter().take(k).enumerate() {
-                    let off = j * inner + r;
-                    vchunk[off] = value;
-                    ichunk[off] = index as i64;
-                }
+    let span = k * inner;
+    par_out_chunks2(values, indices, span, &|start, vchunk, ichunk| {
+        let o = start / span;
+        let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+        for r in 0..inner {
+            entries.clear();
+            let base = o * outer_stride + r;
+            for d in 0..dim_size {
+                entries.push((d, input[base + d * inner]));
             }
-        });
+
+            select_topk_entries(&mut entries, k, sorted, compare);
+
+            // Output shape is (outer, k, inner); write row-major so a
+            // non-trailing reduction axis (inner > 1) lands correctly.
+            for (j, &(index, value)) in entries.iter().take(k).enumerate() {
+                let off = j * inner + r;
+                vchunk[off] = value;
+                ichunk[off] = index as i64;
+            }
+        }
+    });
 }
 
 /// Return the top-``k`` values and their indices along ``dim``
