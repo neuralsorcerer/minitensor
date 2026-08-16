@@ -10,6 +10,7 @@ use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::map::par_out_chunks;
+use crate::ops::util::accumulating_dtype;
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
     autograd::with_grad_fn,
@@ -221,6 +222,12 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
 
 /// Product reduction along specified dimensions
 pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
+    // As `sum` does: `bool` has no multiplication to accumulate in, so the
+    // running product goes to `Int64` and the integer path takes it from there.
+    if tensor.dtype() == DataType::Bool {
+        return prod(&tensor.astype(DataType::Int64)?, dim, keepdim);
+    }
+
     // Normalise negative dimensions and deduplicate
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
     let dims_clone = dim.clone();
@@ -233,22 +240,22 @@ pub fn prod(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<T
                 Shape::scalar()
             };
 
-            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+            let out_dtype = accumulating_dtype(tensor.dtype());
+            let mut result_data = TensorData::zeros_on_device(1, out_dtype, tensor.device());
             match tensor.dtype() {
                 DataType::Float32 => prod_all_f32(tensor, &mut result_data)?,
                 DataType::Float64 => prod_all_f64(tensor, &mut result_data)?,
                 DataType::Int32 => prod_all_i32(tensor, &mut result_data)?,
                 DataType::Int64 => prod_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => prod_all_bool(tensor, &mut result_data)?,
+                DataType::Bool => unreachable!("bool was promoted above"),
             }
 
-            let requires_grad = tensor.requires_grad() && tensor.dtype() != DataType::Bool;
             Tensor::new(
                 Arc::new(result_data),
                 result_shape,
-                tensor.dtype(),
+                out_dtype,
                 tensor.device(),
-                requires_grad,
+                tensor.requires_grad(),
             )
         }
         Some(dims) => {
@@ -294,8 +301,9 @@ pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
 
     let dim = normalize_dim(dim, tensor.ndim())?;
 
+    let out_dtype = accumulating_dtype(tensor.dtype());
     let mut result_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), out_dtype, tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => cumsum_f32(tensor, &mut result_data, dim)?,
@@ -312,7 +320,7 @@ pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     let result = Tensor::new(
         Arc::new(result_data),
         tensor.shape().clone(),
-        tensor.dtype(),
+        out_dtype,
         tensor.device(),
         tensor.requires_grad(),
     );
@@ -363,21 +371,24 @@ pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
 
 /// Cumulative product along a specified dimension
 pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
+    // As in `cumsum`: `bool` has no multiplication to accumulate in, so the
+    // running product goes to `int64` and the integer path takes it from there.
+    if tensor.dtype() == DataType::Bool {
+        return cumprod(&tensor.astype(DataType::Int64)?, dim);
+    }
+
     let dim = normalize_dim(dim, tensor.ndim())?;
 
+    let out_dtype = accumulating_dtype(tensor.dtype());
     let mut result_data =
-        TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());
+        TensorData::uninitialized_on_device(tensor.numel(), out_dtype, tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => cumprod_f32(tensor, &mut result_data, dim)?,
         DataType::Float64 => cumprod_f64(tensor, &mut result_data, dim)?,
         DataType::Int32 => cumprod_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => cumprod_i64(tensor, &mut result_data, dim)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Cumprod not supported for boolean tensors",
-            ));
-        }
+        DataType::Bool => unreachable!("bool was promoted above"),
     }
 
     let requires_grad =
@@ -386,7 +397,7 @@ pub fn cumprod(tensor: &Tensor, dim: isize) -> Result<Tensor> {
     let result = Tensor::new(
         Arc::new(result_data),
         tensor.shape().clone(),
-        tensor.dtype(),
+        out_dtype,
         tensor.device(),
         requires_grad,
     );

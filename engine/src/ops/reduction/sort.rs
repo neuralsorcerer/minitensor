@@ -5,10 +5,10 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::ops::map::{outputs_per_task, par_out_chunks, par_out_chunks2};
+use crate::ops::map::{outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2};
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
-use crate::ops::util::{Accumulate, deterministic_par_sum, pairwise_fold};
+use crate::ops::util::{Accumulate, accumulating_dtype, deterministic_par_sum, pairwise_fold};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -771,17 +771,18 @@ pub(crate) fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let prod: i32 = if data.len() >= 1024 {
-        data.par_chunks(8192)
-            .map(simd_prod_i32)
-            .reduce(|| 1, |a, b| a.acc_mul(b))
+    // Reads i32, multiplies in i64 -- see `accumulating_dtype`.
+    let prod: i64 = if data.len() >= 1024 {
+        par_fold_chunks(data, 8192, 1i64, &simd_prod_i32_to_i64, &|a: i64, b| {
+            a.acc_mul(b)
+        })
     } else {
-        simd_prod_i32(data)
+        simd_prod_i32_to_i64(data)
     };
 
     let result_slice = result_data
-        .as_i32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
 
     result_slice[0] = prod;
     Ok(())
@@ -804,22 +805,6 @@ pub(crate) fn prod_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Res
     let result_slice = result_data
         .as_i64_slice_mut()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
-
-    result_slice[0] = prod;
-    Ok(())
-}
-
-pub(crate) fn prod_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
-    let data = tensor
-        .data()
-        .as_bool_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-
-    let prod = data.par_iter().all(|&x| x);
-
-    let result_slice = result_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
 
     result_slice[0] = prod;
     Ok(())
@@ -871,17 +856,18 @@ pub(crate) fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Resu
         .as_i32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
 
-    let sum: i32 = if data.len() >= 1024 {
-        data.par_chunks(8192)
-            .map(simd_sum_i32)
-            .reduce(|| 0, |a, b| a.acc_add(b))
+    // Reads i32, totals in i64 -- see `accumulating_dtype`.
+    let sum: i64 = if data.len() >= 1024 {
+        par_fold_chunks(data, 8192, 0i64, &simd_sum_i32_to_i64, &|a: i64, b| {
+            a.acc_add(b)
+        })
     } else {
-        simd_sum_i32(data)
+        simd_sum_i32_to_i64(data)
     };
 
     let result_slice = result_data
-        .as_i32_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i32 slice"))?;
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
 
     result_slice[0] = sum;
     Ok(())
@@ -1132,8 +1118,9 @@ pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tenso
     }
 
     let output_shape_obj = Shape::new(output_shape);
+    let out_dtype = accumulating_dtype(tensor.dtype());
     let mut result_data =
-        TensorData::zeros_on_device(output_shape_obj.numel(), tensor.dtype(), tensor.device());
+        TensorData::zeros_on_device(output_shape_obj.numel(), out_dtype, tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => sum_along_dim_f32(tensor, &mut result_data, dim)?,
@@ -1150,7 +1137,7 @@ pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tenso
     Ok(Tensor::new(
         Arc::new(result_data),
         output_shape_obj,
-        tensor.dtype(),
+        out_dtype,
         tensor.device(),
         tensor.requires_grad(),
     ))

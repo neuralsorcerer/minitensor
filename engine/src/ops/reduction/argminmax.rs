@@ -27,16 +27,19 @@ use crate::{
 ///
 /// `reverse` scans from the last index toward the first (the `cumsum`
 /// backward pass).
-fn scan_along_dim<T, F>(
-    output: &mut [T],
-    input: &[T],
+fn scan_along_dim<I, A, W, F>(
+    output: &mut [A],
+    input: &[I],
     dim_size: usize,
     inner: usize,
     reverse: bool,
+    widen: W,
     combine: F,
 ) where
-    T: Copy + Send + Sync,
-    F: Fn(T, T) -> T + Send + Sync,
+    I: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    W: Fn(I) -> A + Send + Sync,
+    F: Fn(A, A) -> A + Send + Sync,
 {
     let slab = dim_size * inner;
     if slab == 0 {
@@ -45,22 +48,28 @@ fn scan_along_dim<T, F>(
     debug_assert_eq!(output.len(), input.len());
     debug_assert_eq!(output.len() % slab, 0);
 
-    let run = |out: &mut [T], inp: &[T]| {
+    // `widen` is the identity for every dtype but `i32`, which scans into
+    // `i64` (see `accumulating_dtype`) -- so the seeding copy becomes a map.
+    let run = |out: &mut [A], inp: &[I]| {
         if reverse {
             let last = (dim_size - 1) * inner;
-            out[last..].copy_from_slice(&inp[last..]);
+            for i in 0..inner {
+                out[last + i] = widen(inp[last + i]);
+            }
             for d in (0..dim_size.saturating_sub(1)).rev() {
                 let (cur, next) = out[d * inner..(d + 2) * inner].split_at_mut(inner);
                 for i in 0..inner {
-                    cur[i] = combine(next[i], inp[d * inner + i]);
+                    cur[i] = combine(next[i], widen(inp[d * inner + i]));
                 }
             }
         } else {
-            out[..inner].copy_from_slice(&inp[..inner]);
+            for i in 0..inner {
+                out[i] = widen(inp[i]);
+            }
             for d in 1..dim_size {
                 let (prev, cur) = out[(d - 1) * inner..(d + 1) * inner].split_at_mut(inner);
                 for i in 0..inner {
-                    cur[i] = combine(prev[i], inp[d * inner + i]);
+                    cur[i] = combine(prev[i], widen(inp[d * inner + i]));
                 }
             }
         }
@@ -72,7 +81,7 @@ fn scan_along_dim<T, F>(
 }
 
 macro_rules! cumprod_forward {
-    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty, $acc:ty) => {
         pub(crate) fn $name(
             tensor: &Tensor,
             result_data: &mut TensorData,
@@ -102,7 +111,8 @@ macro_rules! cumprod_forward {
                 dim_size,
                 inner,
                 false,
-                |acc: $t, v: $t| acc.acc_mul(v),
+                |v: $t| v as $acc,
+                |acc: $acc, v: $acc| acc.acc_mul(v),
             );
             Ok(())
         }
@@ -370,7 +380,7 @@ macro_rules! cumprod_backward {
 }
 
 macro_rules! cumsum_forward {
-    ($name:ident, $get:ident, $get_mut:ident, $t:ty) => {
+    ($name:ident, $get:ident, $get_mut:ident, $t:ty, $acc:ty) => {
         pub(crate) fn $name(
             tensor: &Tensor,
             result_data: &mut TensorData,
@@ -400,7 +410,8 @@ macro_rules! cumsum_forward {
                 dim_size,
                 inner,
                 false,
-                |acc: $t, v: $t| acc.acc_add(v),
+                |v: $t| v as $acc,
+                |acc: $acc, v: $acc| acc.acc_add(v),
             );
             Ok(())
         }
@@ -438,6 +449,7 @@ macro_rules! cumsum_backward {
                 dim_size,
                 inner,
                 true,
+                |v: $t| v,
                 |acc: $t, v: $t| acc.acc_add(v),
             );
             Ok(())
@@ -445,18 +457,18 @@ macro_rules! cumsum_backward {
     };
 }
 
-cumprod_forward!(cumprod_f32, as_f32_slice, as_f32_slice_mut, f32);
-cumprod_forward!(cumprod_f64, as_f64_slice, as_f64_slice_mut, f64);
-cumprod_forward!(cumprod_i32, as_i32_slice, as_i32_slice_mut, i32);
-cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64);
+cumprod_forward!(cumprod_f32, as_f32_slice, as_f32_slice_mut, f32, f32);
+cumprod_forward!(cumprod_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
+cumprod_forward!(cumprod_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
+cumprod_forward!(cumprod_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 
 cumprod_backward!(cumprod_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
 cumprod_backward!(cumprod_backward_f64, as_f64_slice, as_f64_slice_mut, f64);
 
-cumsum_forward!(cumsum_f32, as_f32_slice, as_f32_slice_mut, f32);
-cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64);
-cumsum_forward!(cumsum_i32, as_i32_slice, as_i32_slice_mut, i32);
-cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64);
+cumsum_forward!(cumsum_f32, as_f32_slice, as_f32_slice_mut, f32, f32);
+cumsum_forward!(cumsum_f64, as_f64_slice, as_f64_slice_mut, f64, f64);
+cumsum_forward!(cumsum_i32, as_i32_slice, as_i64_slice_mut, i32, i64);
+cumsum_forward!(cumsum_i64, as_i64_slice, as_i64_slice_mut, i64, i64);
 
 cumsum_backward!(cumsum_backward_f32, as_f32_slice, as_f32_slice_mut, f32);
 cumsum_backward!(cumsum_backward_f64, as_f64_slice, as_f64_slice_mut, f64);

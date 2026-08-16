@@ -98,6 +98,35 @@ where
 /// The float impls are `self + other` and `self * other` exactly, so no
 /// summation order and no rounding changes anywhere -- which matters, because
 /// the order these kernels accumulate in is pinned by `tests/determinism.rs`.
+/// The dtype an *accumulating* reduction reports.
+///
+/// `sum`, `nansum`, `prod`, `cumsum` and `cumprod` build a running total, so
+/// the output can leave the range of the input long before the input itself is
+/// remarkable: summing three billion-ish `int32` values overflows, and the
+/// answer that came back was `1705032704` rather than `6000000000`. NumPy and
+/// PyTorch both widen narrow integers to 64 bits for exactly these operations,
+/// and this matches them.
+///
+/// It is only the accumulating reductions. `max`, `min`, `argmax` and the
+/// quantiles report a value that was already in the input, so widening them
+/// would be noise -- NumPy keeps the input dtype there too.
+///
+/// Floats are unchanged. Promoting `f32` to `f64` would silently alter every
+/// existing result and double the memory of the most common reduction in the
+/// library; NumPy does not do it either.
+///
+/// `Bool` was already handled this way for `sum` and `cumsum` before this
+/// existed, by casting to `Int64` up front -- counting a mask is the usual
+/// reason to sum one. `prod` and `cumprod` had been left behind, so
+/// `mask.prod()` came back as `Bool`; routing every accumulating reduction
+/// through here is what makes them agree.
+pub(crate) fn accumulating_dtype(dtype: DataType) -> DataType {
+    match dtype {
+        DataType::Int32 | DataType::Bool => DataType::Int64,
+        other => other,
+    }
+}
+
 pub(crate) trait Accumulate: Copy {
     /// `self + other`, wrapping for integers.
     fn acc_add(self, other: Self) -> Self;

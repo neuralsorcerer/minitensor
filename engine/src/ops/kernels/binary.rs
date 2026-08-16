@@ -1019,22 +1019,37 @@ mod integer_wraparound_tests {
         assert_eq!(out(&neg(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
         assert_eq!(out(&abs(&lo).unwrap()), vec![i32::MIN, i32::MIN]);
 
-        // Reductions accumulate through the same policy, so they wrap in
-        // every profile too rather than panicking in one of them. Each of
-        // these overflows partway along: `sum` and `cumsum` over a thousand
-        // values near `MAX / 500`, `prod` and `cumprod` over powers of three.
+        // Reductions are the exception, and deliberately so: they report a
+        // wider integer than they read (see `accumulating_dtype`), so the
+        // totals that used to wrap now come back exact in `Int64`. The
+        // elementwise operations above still wrap, which is also what NumPy
+        // does -- `int32 + int32` is `int32` there too.
         {
             use crate::ops::reduction::{cumprod, cumsum, prod, sum};
+            let wide = |t: &Tensor| t.data().as_i64_slice().unwrap().to_vec();
             let many = i32_tensor(vec![i32::MAX / 500; 1000]);
-            let threes = i32_tensor(vec![3; 40]);
+            let threes = i32_tensor(vec![3; 30]);
 
-            let total = out(&sum(&many, None, false).unwrap())[0];
-            assert_eq!(total, (i32::MAX / 500).wrapping_mul(1000));
-            assert_eq!(*out(&cumsum(&many, 0).unwrap()).last().unwrap(), total);
+            // 1000 * 4294967 overflows i32 by three orders of magnitude.
+            let exact_total = (i32::MAX / 500) as i64 * 1000;
+            let summed = sum(&many, None, false).unwrap();
+            assert_eq!(summed.dtype(), DataType::Int64);
+            assert_eq!(wide(&summed)[0], exact_total);
+            assert_eq!(
+                *wide(&cumsum(&many, 0).unwrap()).last().unwrap(),
+                exact_total
+            );
 
-            let product = out(&prod(&threes, None, false).unwrap())[0];
-            assert_eq!(product, (0..40).fold(1i32, |a, _| a.wrapping_mul(3)));
-            assert_eq!(*out(&cumprod(&threes, 0).unwrap()).last().unwrap(), product);
+            // 3^30 is ~2.1e14: far past i32, comfortably inside i64. It
+            // wrapped to a small negative before.
+            let exact_product = 3i64.pow(30);
+            let multiplied = prod(&threes, None, false).unwrap();
+            assert_eq!(multiplied.dtype(), DataType::Int64);
+            assert_eq!(wide(&multiplied)[0], exact_product);
+            assert_eq!(
+                *wide(&cumprod(&threes, 0).unwrap()).last().unwrap(),
+                exact_product
+            );
 
             // ...and along a dimension, which is a different kernel again.
             let rows = Tensor::new(
@@ -1049,9 +1064,24 @@ mod integer_wraparound_tests {
                 false,
             );
             assert_eq!(
-                out(&sum(&rows, Some(vec![1]), false).unwrap()),
-                vec![total; 2]
+                wide(&sum(&rows, Some(vec![1]), false).unwrap()),
+                vec![exact_total; 2]
             );
+
+            // i64 still wraps -- the widening stops there, so overflow past
+            // 64 bits stays two's-complement rather than panicking in debug.
+            let huge = Tensor::new(
+                Arc::new(TensorData::from_vec::<i64>(
+                    vec![i64::MAX, 2],
+                    DataType::Int64,
+                    Device::cpu(),
+                )),
+                Shape::new(vec![2]),
+                DataType::Int64,
+                Device::cpu(),
+                false,
+            );
+            assert_eq!(wide(&sum(&huge, None, false).unwrap())[0], i64::MIN + 1);
         }
 
         // Everything away from the boundary is unaffected.

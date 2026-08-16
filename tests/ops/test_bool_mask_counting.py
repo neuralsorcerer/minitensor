@@ -17,10 +17,18 @@ was to spell the cast out by hand:
 `bool` genuinely has no addition to accumulate in, which is what the rejection
 was about, but that is an argument for widening the accumulator rather than for
 refusing. The count goes into `int64`, and so does this now, with
-`cumsum` following for the running count. The rest of the boolean surface is
-deliberately untouched: `prod` stays `bool` (it is `all` by another name),
-`mean`, `var`, `std`, `cumprod`, `norm` and `logsumexp` still raise, since what
-they should return for a mask is a design question rather than an obvious one.
+`cumsum` following for the running count.
+
+That widening is now the rule for every *accumulating* reduction rather than a
+special case for masks: `sum`, `prod`, `cumsum` and `cumprod` all report
+`int64` for a `bool` or `int32` input, which is what NumPy and PyTorch do. It
+covers a real defect, not only a tidiness one -- summing three billion-ish
+`int32` values used to return `1705032704`.
+
+`max`, `min`, `argmax`, `argmin`, `sort` and `topk` are untouched: they report
+a value that was already in the input, so there is nothing to widen. `mean`,
+`var`, `std`, `norm` and `logsumexp` still raise on a mask, since what they
+should return for one is a design question rather than an obvious one.
 """
 
 from __future__ import annotations
@@ -117,12 +125,17 @@ def test_the_ambiguous_reductions_still_raise(name):
     assert "boolean" in str(excinfo.value) or "float" in str(excinfo.value)
 
 
-def test_prod_still_returns_bool():
-    """`prod` over a mask is `all` written differently, and it already had a
-    boolean answer."""
+def test_prod_counts_in_int64_like_the_rest():
+    """`prod` over a mask is `all` written differently, and it used to answer in
+    `bool` while `sum` answered in `int64` -- the same operation family
+    disagreeing with itself. Both widen now, and both match NumPy."""
     result = _mask(MASK).prod()
-    assert str(result.dtype) == "bool"
-    assert bool(result.item()) == bool(MASK.prod())
+    assert str(result.dtype) == "int64"
+    assert result.item() == int(MASK.prod())
+
+    running = _mask(MASK).cumprod(0)
+    assert str(running.dtype) == "int64"
+    np.testing.assert_array_equal(running.numpy(), MASK.cumprod(axis=0))
 
 
 @pytest.mark.parametrize("name", ["max", "min", "all", "any"])
@@ -132,14 +145,24 @@ def test_the_reductions_that_already_worked_are_unchanged(name):
     assert bool(result.item()) == bool(getattr(np, name)(MASK))
 
 
-@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
-def test_non_boolean_sums_keep_their_dtype(dtype):
-    """Only `bool` is widened. Everything else reduces in its own dtype, which
-    is the rule this leaves alone."""
+@pytest.mark.parametrize(
+    "dtype,accumulated",
+    [
+        ("int32", "int64"),
+        ("int64", "int64"),
+        ("float32", "float32"),
+        ("float64", "float64"),
+    ],
+)
+def test_accumulating_reductions_report_the_accumulator_dtype(dtype, accumulated):
+    """Narrow integers widen; floats do not. Promoting `float32` to `float64`
+    would change every existing result and double the memory of the most common
+    reduction in the library, and NumPy does not do it either."""
     array = np.arange(6).astype(dtype).reshape(2, 3)
     tensor = mt.Tensor(array, dtype=dtype)
 
-    assert str(tensor.sum().dtype) == dtype
-    assert str(tensor.sum(0).dtype) == dtype
-    assert str(tensor.cumsum(0).dtype) == dtype
+    for got in (tensor.sum(), tensor.sum(0), tensor.cumsum(0), tensor.prod()):
+        assert str(got.dtype) == accumulated
     np.testing.assert_array_equal(tensor.sum(1).numpy(), array.sum(axis=1))
+    # ...and the dtype is the one NumPy reports for the same call.
+    assert str(tensor.sum().dtype) == array.sum().dtype.name

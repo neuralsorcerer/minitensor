@@ -9,7 +9,7 @@ use crate::ops::map::{
     par_out_chunks,
 };
 use crate::ops::simd::*;
-use crate::ops::util::Accumulate;
+use crate::ops::util::{Accumulate, accumulating_dtype};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -47,10 +47,24 @@ const DIM0_MIN_BANDS: usize = 4;
 /// chosen purely for locality -- one wide contiguous run per thread rather than
 /// many narrow interleaved ones -- including from the thread count, without
 /// costing reproducibility.
-fn reduce_along_dim0<T, F>(input: &[T], out: &mut [T], cols: usize, init: T, combine: F)
-where
-    T: Copy + Send + Sync,
-    F: Fn(T, T) -> T + Send + Sync + Copy,
+///
+/// `combine` folds one input value into an accumulator and `merge` joins two
+/// accumulators. They are separate because the two are no longer the same
+/// function: an accumulating reduction may gather a narrower input into a wider
+/// total (see `accumulating_dtype`), so `combine` crosses types where `merge`
+/// does not.
+fn reduce_along_dim0<I, A, F, M>(
+    input: &[I],
+    out: &mut [A],
+    cols: usize,
+    init: A,
+    combine: F,
+    merge: M,
+) where
+    I: Copy + Send + Sync,
+    A: Copy + Send + Sync,
+    F: Fn(A, I) -> A + Send + Sync + Copy,
+    M: Fn(A, A) -> A + Send + Sync + Copy,
 {
     if cols == 0 || out.is_empty() {
         return;
@@ -70,7 +84,7 @@ where
         // inside the band body, so the accumulate loop still inlines and
         // vectorizes. Erasing it here instead would put an indirect call on
         // every element.
-        let partials: Vec<Vec<T>> = par_map_indexed(bands, &|index| {
+        let partials: Vec<Vec<A>> = par_map_indexed(bands, &|index| {
             let start = index * band;
             let end = ((index + 1) * band).min(rows);
             let mut acc = vec![init; cols];
@@ -85,7 +99,7 @@ where
         out.copy_from_slice(&partials[0]);
         for partial in &partials[1..] {
             for (slot, &value) in out.iter_mut().zip(partial) {
-                *slot = combine(*slot, value);
+                *slot = merge(*slot, value);
             }
         }
         return;
@@ -116,7 +130,8 @@ where
 /// numeric dtypes; only the element type, the additive identity, and the SIMD
 /// row-sum helper differ.
 macro_rules! sum_along_dim_kernel {
-    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $zero:expr, $simd_sum:ident) => {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $acc:ty, $zero:expr,
+     $simd_sum:ident) => {
         pub(crate) fn $name(
             tensor: &Tensor,
             result_data: &mut TensorData,
@@ -155,9 +170,14 @@ macro_rules! sum_along_dim_kernel {
                 let cols = input_shape[1];
                 match dim {
                     0 => {
-                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| {
-                            a.acc_add(v)
-                        });
+                        reduce_along_dim0(
+                            input_data,
+                            result_slice,
+                            cols,
+                            $zero,
+                            |a: $acc, v| a.acc_add(v as $acc),
+                            |a: $acc, b| a.acc_add(b),
+                        );
                     }
                     1 => {
                         par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
@@ -183,10 +203,10 @@ macro_rules! sum_along_dim_kernel {
                         let idx = start + offset;
                         let o = idx / inner;
                         let r = idx % inner;
-                        let mut sum_val = $zero;
+                        let mut sum_val: $acc = $zero;
                         let mut base = o * outer_stride + r;
                         for _ in 0..dim_size {
-                            sum_val = sum_val.acc_add(input_data[base]);
+                            sum_val = sum_val.acc_add(input_data[base] as $acc);
                             base += inner;
                         }
                         *out = sum_val;
@@ -237,9 +257,14 @@ macro_rules! nansum_along_dim_kernel {
                 let cols = input_shape[1];
                 match dim {
                     0 => {
-                        reduce_along_dim0(input_data, result_slice, cols, $zero, |a, v| {
-                            if v.is_nan() { a } else { a + v }
-                        });
+                        reduce_along_dim0(
+                            input_data,
+                            result_slice,
+                            cols,
+                            $zero,
+                            |a, v| if v.is_nan() { a } else { a + v },
+                            |a, b| a + b,
+                        );
                     }
                     1 => {
                         par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
@@ -291,6 +316,7 @@ sum_along_dim_kernel!(
     as_f32_slice,
     as_f32_slice_mut,
     "f32",
+    f32,
     0f32,
     simd_sum_f32
 );
@@ -309,6 +335,7 @@ sum_along_dim_kernel!(
     as_f64_slice,
     as_f64_slice_mut,
     "f64",
+    f64,
     0f64,
     simd_sum_f64
 );
@@ -325,10 +352,11 @@ nansum_along_dim_kernel!(
 sum_along_dim_kernel!(
     sum_along_dim_i32,
     as_i32_slice,
-    as_i32_slice_mut,
+    as_i64_slice_mut,
     "i32",
-    0i32,
-    simd_sum_i32
+    i64,
+    0i64,
+    simd_sum_i32_to_i64
 );
 
 sum_along_dim_kernel!(
@@ -336,6 +364,7 @@ sum_along_dim_kernel!(
     as_i64_slice,
     as_i64_slice_mut,
     "i64",
+    i64,
     0i64,
     simd_sum_i64
 );
@@ -357,31 +386,36 @@ pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tens
         output_shape.remove(dim);
     }
     let output_shape_obj = Shape::new(output_shape);
+    // `bool` has no multiplication to accumulate in, so -- like `sum` -- the
+    // result lands in `Int64` and the integer path takes it from there.
+    if tensor.dtype() == DataType::Bool {
+        return prod_along_dim(&tensor.astype(DataType::Int64)?, dim, keepdim);
+    }
+    let out_dtype = accumulating_dtype(tensor.dtype());
     let mut result_data =
-        TensorData::zeros_on_device(output_shape_obj.numel(), tensor.dtype(), tensor.device());
+        TensorData::zeros_on_device(output_shape_obj.numel(), out_dtype, tensor.device());
 
     match tensor.dtype() {
         DataType::Float32 => prod_along_dim_f32(tensor, &mut result_data, dim)?,
         DataType::Float64 => prod_along_dim_f64(tensor, &mut result_data, dim)?,
         DataType::Int32 => prod_along_dim_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => prod_along_dim_i64(tensor, &mut result_data, dim)?,
-        DataType::Bool => prod_along_dim_bool(tensor, &mut result_data, dim)?,
+        DataType::Bool => unreachable!("bool was promoted above"),
     }
 
-    let requires_grad = tensor.requires_grad() && tensor.dtype() != DataType::Bool;
     Ok(Tensor::new(
         Arc::new(result_data),
         output_shape_obj,
-        tensor.dtype(),
+        out_dtype,
         tensor.device(),
-        requires_grad,
+        tensor.requires_grad(),
     ))
 }
 
 /// Generates a product-along-dim reduction kernel. Body is identical across
 /// numeric dtypes; only the element type and multiplicative identity differ.
 macro_rules! prod_along_dim_kernel {
-    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $one:expr) => {
+    ($name:ident, $accessor:ident, $accessor_mut:ident, $tyname:literal, $acc:ty, $one:expr) => {
         fn $name(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
             let input_data = tensor.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $tyname, " slice"))
@@ -412,7 +446,7 @@ macro_rules! prod_along_dim_kernel {
                     let slab_base = block_base + k * inner;
                     let slab = &input_data[slab_base..slab_base + inner];
                     for (acc, &v) in out_chunk.iter_mut().zip(slab) {
-                        *acc = acc.acc_mul(v);
+                        *acc = acc.acc_mul(v as $acc);
                     }
                 }
             });
@@ -426,6 +460,7 @@ prod_along_dim_kernel!(
     as_f32_slice,
     as_f32_slice_mut,
     "f32",
+    f32,
     1f32
 );
 
@@ -434,15 +469,17 @@ prod_along_dim_kernel!(
     as_f64_slice,
     as_f64_slice_mut,
     "f64",
+    f64,
     1f64
 );
 
 prod_along_dim_kernel!(
     prod_along_dim_i32,
     as_i32_slice,
-    as_i32_slice_mut,
+    as_i64_slice_mut,
     "i32",
-    1i32
+    i64,
+    1i64
 );
 
 prod_along_dim_kernel!(
@@ -450,41 +487,9 @@ prod_along_dim_kernel!(
     as_i64_slice,
     as_i64_slice_mut,
     "i64",
+    i64,
     1i64
 );
-
-fn prod_along_dim_bool(tensor: &Tensor, result_data: &mut TensorData, dim: usize) -> Result<()> {
-    let input_data = tensor
-        .data()
-        .as_bool_slice()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-    let result_slice = result_data
-        .as_bool_slice_mut()
-        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable bool slice"))?;
-    let input_shape = tensor.shape().dims();
-    let dim_size = input_shape[dim];
-    let inner = input_shape[dim + 1..].iter().product::<usize>();
-    let outer_stride = dim_size * inner;
-    par_out_chunks(result_slice, outputs_per_task(dim_size), &|start, chunk| {
-        for (offset, out) in chunk.iter_mut().enumerate() {
-            let idx = start + offset;
-            let o = idx / inner;
-            let r = idx % inner;
-            let mut val = true;
-            let mut base = o * outer_stride + r;
-            for _ in 0..dim_size {
-                val &= input_data[base];
-                if !val {
-                    break;
-                }
-                base += inner;
-            }
-            *out = val;
-        }
-    });
-
-    Ok(())
-}
 
 // Helper implementations for max/min operations
 //

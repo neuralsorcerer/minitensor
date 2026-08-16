@@ -935,11 +935,18 @@ def test_prod_all():
 
 
 def test_bool_prod():
-    t = mt.Tensor([[True, True], [True, False]], dtype="bool")
+    """`prod` accumulates, so a mask widens to int64 the way `sum` does --
+    NumPy reports int64 here too."""
+    values = np.array([[True, True], [True, False]])
+    t = mt.Tensor(values, dtype="bool")
+
     p_all = t.prod()
-    np.testing.assert_array_equal(p_all.numpy(), np.array(False))
+    assert str(p_all.dtype) == "int64"
+    np.testing.assert_array_equal(p_all.numpy(), values.prod())
+
     p_dim = t.prod(dim=[1], keepdim=False)
-    np.testing.assert_array_equal(p_dim.numpy(), np.array([True, False]))
+    assert str(p_dim.dtype) == "int64"
+    np.testing.assert_array_equal(p_dim.numpy(), values.prod(axis=1))
 
 
 def test_prod_negative_dim():

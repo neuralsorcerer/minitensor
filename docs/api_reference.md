@@ -581,37 +581,46 @@ substitution does not have to be worked out from the rule.
 
 #### What dtype a reduction comes back in
 
-Reductions keep the input's dtype, with two exceptions.
+The rule turns on whether a reduction *accumulates*.
 
-`sum`, `nansum` and `cumsum` over a `bool` tensor count its true entries and
-return `int64` — `mask.sum()` is how many elements passed, matching NumPy and
-PyTorch. `bool` has no addition of its own, so there is no narrower answer.
-The other boolean reductions are unchanged: `prod`, `max`, `min`, `all` and
-`any` return `bool`; `argmax`/`argmin` return `int64`; `mean`, `var`, `std`,
-`cumprod`, `norm` and `logsumexp` raise.
+`sum`, `nansum`, `prod`, `cumsum` and `cumprod` build a running total, so the
+result can leave the range of the input even when the input is unremarkable.
+These widen a narrow integer to `int64`: `bool` and `int32` inputs come back as
+`int64`, matching NumPy and PyTorch. Floats are unchanged — `float32` sums in
+`float32` — because promoting to `float64` would alter every existing result
+and double the memory of the most common reduction in the library, which is
+also NumPy's reasoning.
+
+Reductions that *select* keep the input dtype, because they report a value that
+was already there: `max`, `min`, `sort`, `topk` and the quantiles. `argmax` and
+`argmin` return `int64` positions.
 
 `mean` over an integer tensor returns a float: `float32` for `int32`,
-`float64` for `int64`.
+`float64` for `int64`. On a `bool` tensor `mean`, `var`, `std`, `norm` and
+`logsumexp` raise — what they should return for a mask is a design question
+rather than an obvious one.
 
-Everywhere else the input dtype is kept, **including for integer accumulation**,
-which is narrower than NumPy and PyTorch — both widen an integer reduction to
-`int64`. Summing an `int32` tensor accumulates in `int32` and wraps on
-overflow rather than raising, exactly as `int32 + int32` does elementwise. It
-takes a large input to reach: summing pixel values in `0..=255` overflows past
-about 8.4 million elements. Cast first when the total may not fit.
+The widening is what makes an integer total trustworthy. Accumulation is still
+two's-complement once it reaches `int64`, so an extreme input can still wrap,
+but the everyday case no longer does: summing pixel values in `0..=255` used to
+overflow past about 8.4 million elements.
 
 ```python
 import minitensor as mt
 
 counts = mt.Tensor([[1, 2], [3, 4]], dtype="int32")
-print(counts.sum().dtype, counts.astype("int64").sum().dtype)
+print(counts.sum().dtype, counts.sum().item())
 
-mask = counts.gt(2)                      # a mask counts into int64 on its own
+big = mt.full((3,), 2_000_000_000, dtype="int32")
+print(big.sum().item())                  # exact, not 1705032704
+
+mask = counts.gt(2)                      # a mask counts into int64 too
 print(mask.sum().item(), mask.sum().dtype)
 ```
 
 ```text
-int32 int64
+int64 10
+6000000000
 2 int64
 ```
 

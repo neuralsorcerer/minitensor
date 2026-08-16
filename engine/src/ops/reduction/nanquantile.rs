@@ -377,6 +377,7 @@ pub(crate) fn median_along_dim(
     Ok((values, indices))
 }
 
+use crate::ops::util::accumulating_dtype;
 pub(crate) use crate::ops::util::normalize_dim;
 
 /// Sum reduction along specified dimensions
@@ -404,7 +405,8 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
                 Shape::scalar()
             };
 
-            let mut result_data = TensorData::zeros_on_device(1, tensor.dtype(), tensor.device());
+            let out_dtype = accumulating_dtype(tensor.dtype());
+            let mut result_data = TensorData::zeros_on_device(1, out_dtype, tensor.device());
 
             match tensor.dtype() {
                 DataType::Float32 => sum_all_f32(tensor, &mut result_data)?,
@@ -421,7 +423,7 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
             Tensor::new(
                 Arc::new(result_data),
                 result_shape,
-                tensor.dtype(),
+                out_dtype,
                 tensor.device(),
                 tensor.requires_grad(),
             )
