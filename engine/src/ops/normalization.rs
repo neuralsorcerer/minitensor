@@ -8,8 +8,8 @@ use crate::autograd::with_grad_fn;
 use crate::autograd::{LayerNormBackward, RmsNormBackward, TensorId};
 use crate::device::Device;
 use crate::error::{MinitensorError, Result};
+use crate::ops::map::{outputs_per_task, par_row_outputs};
 use crate::tensor::{DataType, Shape, Tensor, TensorData};
-use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -263,51 +263,74 @@ macro_rules! layer_norm_rows {
 
             // The normalized values are saved for the backward, so a forward
             // that will not be differentiated should not pay to write them --
-            // a second full-size buffer, filled and then dropped.
-            match normalized {
-                Some(normalized) => {
-                    out.par_chunks_mut(norm)
-                        .zip(normalized.par_chunks_mut(norm))
-                        .zip(inv_std.par_iter_mut())
-                        .zip(input.par_chunks(norm))
-                        .for_each(|(((o, n), is), row)| {
-                            let (mean, scale) = stats(row, recip, eps);
-                            *is = scale as $ty;
-                            for i in 0..norm {
-                                let z = (row[i] as f64 - mean) * scale;
-                                n[i] = z as $ty;
-                                let mut y = z;
-                                if let Some(w) = weight {
-                                    y *= w[i] as f64;
-                                }
-                                if let Some(b) = bias {
-                                    y += b[i] as f64;
-                                }
-                                o[i] = y as $ty;
-                            }
-                        });
-                }
-                None => {
-                    out.par_chunks_mut(norm)
-                        .zip(inv_std.par_iter_mut())
-                        .zip(input.par_chunks(norm))
-                        .for_each(|((o, is), row)| {
-                            let (mean, scale) = stats(row, recip, eps);
-                            *is = scale as $ty;
-                            for i in 0..norm {
-                                let z = (row[i] as f64 - mean) * scale;
-                                let mut y = z;
-                                if let Some(w) = weight {
-                                    y *= w[i] as f64;
-                                }
-                                if let Some(b) = bias {
-                                    y += b[i] as f64;
-                                }
-                                o[i] = y as $ty;
-                            }
-                        });
-                }
+            // a second full-size buffer, filled and then dropped. It is simply
+            // absent from the buffer set when it is not wanted, and the arity
+            // `work` unpacks says which case this is.
+            let rows = inv_std.len();
+            let mut buffers: SmallVec<[&mut [$ty]; 3]> = SmallVec::new();
+            let mut widths: SmallVec<[usize; 3]> = SmallVec::new();
+            buffers.push(out);
+            widths.push(norm);
+            buffers.push(inv_std);
+            widths.push(1);
+            if let Some(normalized) = normalized {
+                buffers.push(normalized);
+                widths.push(norm);
             }
+
+            par_row_outputs(
+                rows,
+                outputs_per_task(norm),
+                &mut buffers,
+                &widths,
+                &|first_row, buffers| {
+                    let (out, rest) = buffers.split_first_mut().expect("out is buffer 0");
+                    let (inv_std, rest) = rest.split_first_mut().expect("inv_std is buffer 1");
+                    let mut normalized = rest.first_mut();
+
+                    // Applying the affine parameters in f64 and rounding once
+                    // is deliberate: rounding `z` to `$ty` first and scaling the
+                    // rounded value costs a second rounding on every element,
+                    // in the one layer whose whole job is numerical stability.
+                    let apply = |i: usize, z: f64| -> $ty {
+                        let mut y = z;
+                        if let Some(w) = weight {
+                            y *= w[i] as f64;
+                        }
+                        if let Some(b) = bias {
+                            y += b[i] as f64;
+                        }
+                        y as $ty
+                    };
+
+                    for r in 0..inv_std.len() {
+                        let row = &input[(first_row + r) * norm..][..norm];
+                        let (mean, scale) = stats(row, recip, eps);
+                        inv_std[r] = scale as $ty;
+                        let o = &mut out[r * norm..][..norm];
+                        // The two loops differ by one store. Testing the option
+                        // per element instead would put a branch inside the
+                        // vectorizable body; it is loop-invariant, so it is
+                        // hoisted here by hand rather than left to the optimizer.
+                        match normalized.as_deref_mut() {
+                            Some(normalized) => {
+                                let n = &mut normalized[r * norm..][..norm];
+                                for i in 0..norm {
+                                    let z = (row[i] as f64 - mean) * scale;
+                                    n[i] = z as $ty;
+                                    o[i] = apply(i, z);
+                                }
+                            }
+                            None => {
+                                for i in 0..norm {
+                                    let z = (row[i] as f64 - mean) * scale;
+                                    o[i] = apply(i, z);
+                                }
+                            }
+                        }
+                    }
+                },
+            );
         }
     };
 }
@@ -584,25 +607,36 @@ macro_rules! rms_norm_rows {
                 return;
             }
             let recip = 1.0 / norm as f64;
-            out.par_chunks_mut(norm)
-                .zip(inv_rms.par_iter_mut())
-                .zip(input.par_chunks(norm))
-                .for_each(|((o, ir), row)| {
-                    let mut sq = 0.0f64;
-                    for &v in row {
-                        let d = v as f64;
-                        sq += d * d;
-                    }
-                    let scale = 1.0 / (sq * recip + eps).sqrt();
-                    *ir = scale as $ty;
-                    for i in 0..norm {
-                        let mut y = row[i] as f64 * scale;
-                        if let Some(w) = weight {
-                            y *= w[i] as f64;
+            let rows = inv_rms.len();
+            par_row_outputs(
+                rows,
+                outputs_per_task(norm),
+                &mut [out, inv_rms],
+                &[norm, 1],
+                &|first_row, buffers| {
+                    let [out, inv_rms] = buffers else {
+                        unreachable!("rms norm writes the output and the scale")
+                    };
+                    for r in 0..inv_rms.len() {
+                        let row = &input[(first_row + r) * norm..][..norm];
+                        let mut sq = 0.0f64;
+                        for &v in row {
+                            let d = v as f64;
+                            sq += d * d;
                         }
-                        o[i] = y as $ty;
+                        let scale = 1.0 / (sq * recip + eps).sqrt();
+                        inv_rms[r] = scale as $ty;
+                        let o = &mut out[r * norm..][..norm];
+                        for i in 0..norm {
+                            let mut y = row[i] as f64 * scale;
+                            if let Some(w) = weight {
+                                y *= w[i] as f64;
+                            }
+                            o[i] = y as $ty;
+                        }
                     }
-                });
+                },
+            );
         }
     };
 }

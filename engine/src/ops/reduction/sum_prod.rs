@@ -4,14 +4,16 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use crate::ops::map::{outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks};
+use crate::ops::map::{
+    PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks, par_map_indexed,
+    par_out_chunks,
+};
 use crate::ops::simd::*;
 use crate::ops::util::Accumulate;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Floor on the width of a `dim == 0` column block: at least a cache line
@@ -674,7 +676,7 @@ pub(crate) fn max_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let max_val = data.par_iter().any(|&x| x);
+    let max_val = par_any_chunk(data, PAR_CHUNK, &|chunk| chunk.iter().any(|&x| x));
 
     let result_slice = result_data
         .as_bool_slice_mut()
@@ -732,7 +734,7 @@ pub(crate) fn min_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Res
         .as_bool_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
 
-    let min_val = data.par_iter().all(|&x| x);
+    let min_val = par_all_chunk(data, PAR_CHUNK, &|chunk| chunk.iter().all(|&x| x));
 
     let result_slice = result_data
         .as_bool_slice_mut()

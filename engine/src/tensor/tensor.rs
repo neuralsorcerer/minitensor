@@ -15,7 +15,8 @@ pub use crate::tensor::shape::{Shape, Strides};
 pub use crate::tensor::storage::{DataMut, TensorData};
 
 use crate::ops::map::{
-    BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, PAR_THRESHOLD, unary_map, unary_map_threshold,
+    BINARY_PAR_THRESHOLD as CAST_PAR_THRESHOLD, PAR_CHUNK, PAR_THRESHOLD, par_all_chunks,
+    par_any_chunk, par_out_chunks, unary_map, unary_map_threshold,
 };
 use crate::{
     autograd::{self, CloneBackward, GradientFunction, TensorId},
@@ -23,7 +24,6 @@ use crate::{
     error::{MinitensorError, Result},
     ops::{arithmetic::add, reduction::QuantileInterpolation},
 };
-use rayon::prelude::*;
 
 /// Output elements above which a selection copy is worth spreading across the
 /// pool. Matches the elementwise map threshold: the work per element is a copy
@@ -227,10 +227,10 @@ impl SelectionPlan {
         // decomposition; every run after that is reached by addition.
         let bands = rayon::current_num_threads().max(1);
         let per_band = self.runs.div_ceil(bands).max(1);
-        output
-            .par_chunks_mut(per_band * self.contig)
-            .enumerate()
-            .for_each(|(band, dst)| self.copy_runs(input, dst, band * per_band));
+        let band_width = per_band * self.contig;
+        par_out_chunks(output, band_width, &|start, dst| {
+            self.copy_runs(input, dst, (start / band_width) * per_band)
+        });
     }
 }
 
@@ -1971,7 +1971,7 @@ impl Tensor {
             if data.len() < PAR_THRESHOLD {
                 data.iter().any(|&x| test(x))
             } else {
-                data.par_iter().any(|&x| test(x))
+                par_any_chunk(data, PAR_CHUNK, &|chunk| chunk.iter().any(|&x| test(x)))
             }
         }
         match self.dtype {
@@ -2762,45 +2762,30 @@ impl Tensor {
         }
 
         let numel = self.numel();
+        macro_rules! arm {
+            ($accessor:ident, $close:ident, $rtol:expr, $atol:expr) => {{
+                let (Some(mine), Some(theirs)) = (self.data.$accessor(), other.data.$accessor())
+                else {
+                    return false;
+                };
+                // The comparison itself is the work here, unlike `array_equal`,
+                // so it is worth splitting -- but by chunk, so the tolerance
+                // test stays a concrete type inside a vectorizable loop.
+                let close = |a: &[_], b: &[_]| {
+                    a.iter()
+                        .zip(b)
+                        .all(|(&a, &b)| $close(a, b, $rtol, $atol, equal_nan))
+                };
+                if numel >= 1024 {
+                    par_all_chunks(mine, theirs, PAR_CHUNK, &close)
+                } else {
+                    close(mine, theirs)
+                }
+            }};
+        }
         match self.dtype {
-            DataType::Float32 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_f32_slice(), other.data.as_f32_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| allclose_f32(a, b, rtol as f32, atol as f32, equal_nan))
-                    } else {
-                        self_data
-                            .iter()
-                            .zip(other_data.iter())
-                            .all(|(&a, &b)| allclose_f32(a, b, rtol as f32, atol as f32, equal_nan))
-                    }
-                } else {
-                    false
-                }
-            }
-            DataType::Float64 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_f64_slice(), other.data.as_f64_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| allclose_f64(a, b, rtol, atol, equal_nan))
-                    } else {
-                        self_data
-                            .iter()
-                            .zip(other_data.iter())
-                            .all(|(&a, &b)| allclose_f64(a, b, rtol, atol, equal_nan))
-                    }
-                } else {
-                    false
-                }
-            }
+            DataType::Float32 => arm!(as_f32_slice, allclose_f32, rtol as f32, atol as f32),
+            DataType::Float64 => arm!(as_f64_slice, allclose_f64, rtol, atol),
             _ => self.array_equal(other),
         }
     }
@@ -2830,88 +2815,25 @@ impl Tensor {
             return a == b;
         }
 
-        let numel = self.numel();
+        // Slice equality, not a parallel element-by-element scan. `[T] == [T]`
+        // compares with exactly the same semantics (NaN never equals NaN either
+        // way) and lowers to a vectorized compare -- or a plain `memcmp` for the
+        // integer and boolean dtypes -- where the parallel version handed rayon
+        // one work item per element to run a single `==` behind a closure.
+        macro_rules! arm {
+            ($accessor:ident) => {
+                match (self.data.$accessor(), other.data.$accessor()) {
+                    (Some(mine), Some(theirs)) => mine == theirs,
+                    _ => false,
+                }
+            };
+        }
         match self.dtype {
-            DataType::Float32 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_f32_slice(), other.data.as_f32_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| a == b)
-                    } else {
-                        self_data == other_data
-                    }
-                } else {
-                    false
-                }
-            }
-            DataType::Float64 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_f64_slice(), other.data.as_f64_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| a == b)
-                    } else {
-                        self_data == other_data
-                    }
-                } else {
-                    false
-                }
-            }
-            DataType::Int32 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_i32_slice(), other.data.as_i32_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| a == b)
-                    } else {
-                        self_data == other_data
-                    }
-                } else {
-                    false
-                }
-            }
-            DataType::Int64 => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_i64_slice(), other.data.as_i64_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| a == b)
-                    } else {
-                        self_data == other_data
-                    }
-                } else {
-                    false
-                }
-            }
-            DataType::Bool => {
-                if let (Some(self_data), Some(other_data)) =
-                    (self.data.as_bool_slice(), other.data.as_bool_slice())
-                {
-                    if numel >= 1024 {
-                        self_data
-                            .par_iter()
-                            .zip(other_data.par_iter())
-                            .all(|(&a, &b)| a == b)
-                    } else {
-                        self_data == other_data
-                    }
-                } else {
-                    false
-                }
-            }
+            DataType::Float32 => arm!(as_f32_slice),
+            DataType::Float64 => arm!(as_f64_slice),
+            DataType::Int32 => arm!(as_i32_slice),
+            DataType::Int64 => arm!(as_i64_slice),
+            DataType::Bool => arm!(as_bool_slice),
         }
     }
 }

@@ -13,10 +13,9 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// Adam optimizer with bias correction and parameter groups
@@ -281,25 +280,31 @@ impl Adam {
                         if len < PAR_THRESHOLD {
                             step_chunk(p, g, m_buf, v_buf, Some(vhat));
                         } else {
-                            p.par_chunks_mut(PAR_CHUNK)
-                                .zip(g.par_chunks(PAR_CHUNK))
-                                .zip(m_buf.par_chunks_mut(PAR_CHUNK))
-                                .zip(v_buf.par_chunks_mut(PAR_CHUNK))
-                                .zip(vhat.par_chunks_mut(PAR_CHUNK))
-                                .for_each(|((((p, g), m), v), vhat)| {
-                                    step_chunk(p, g, m, v, Some(vhat))
-                                });
+                            let state = &mut [m_buf, v_buf, vhat];
+                            par_param_update(p, g, state, PAR_CHUNK, &|p, g, state| {
+                                let [m, v, vhat] = state else {
+                                    unreachable!("three state buffers")
+                                };
+                                step_chunk(p, g, m, v, Some(vhat))
+                            });
                         }
                     }
                     None => {
                         if len < PAR_THRESHOLD {
                             step_chunk(p, g, m_buf, v_buf, None);
                         } else {
-                            p.par_chunks_mut(PAR_CHUNK)
-                                .zip(g.par_chunks(PAR_CHUNK))
-                                .zip(m_buf.par_chunks_mut(PAR_CHUNK))
-                                .zip(v_buf.par_chunks_mut(PAR_CHUNK))
-                                .for_each(|(((p, g), m), v)| step_chunk(p, g, m, v, None));
+                            par_param_update(
+                                p,
+                                g,
+                                &mut [m_buf, v_buf],
+                                PAR_CHUNK,
+                                &|p, g, state| {
+                                    let [m, v] = state else {
+                                        unreachable!("two state buffers")
+                                    };
+                                    step_chunk(p, g, m, v, None)
+                                },
+                            );
                         }
                     }
                 }

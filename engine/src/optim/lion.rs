@@ -13,10 +13,9 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// Lion optimizer (EvoLved Sign Momentum; Chen et al., "Symbolic Discovery of
@@ -170,10 +169,12 @@ impl Lion {
                 if p.len() < PAR_THRESHOLD {
                     step_chunk(p, g, m_buf);
                 } else {
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .zip(m_buf.par_chunks_mut(PAR_CHUNK))
-                        .for_each(|((p, g), m)| step_chunk(p, g, m));
+                    par_param_update(p, g, &mut [m_buf], PAR_CHUNK, &|p, g, state| {
+                        let [m] = state else {
+                            unreachable!("one state buffer")
+                        };
+                        step_chunk(p, g, m)
+                    });
                 }
             }};
         }

@@ -1430,4 +1430,108 @@ mod tests {
         let mut params = vec![&mut p];
         assert!(opt.step(&mut params).is_err());
     }
+
+    /// Every optimizer takes a different path above `PAR_THRESHOLD`: below it
+    /// the update runs inline on one thread, above it `par_param_update`
+    /// recurses and splits the parameter, the gradient and the state buffers
+    /// together. Nothing else in the suite reaches that size, so the parallel
+    /// path went untested — and a driver that mis-aligned one state buffer
+    /// against the parameter would still have passed everything.
+    ///
+    /// Runs each optimizer over a parameter either side of the threshold and
+    /// requires the two to agree bit for bit on the overlapping prefix. They
+    /// must: every element's update depends only on its own slot.
+    #[test]
+    fn optimizers_agree_either_side_of_the_parallel_threshold() {
+        use crate::ops::map::PAR_THRESHOLD;
+
+        // A value per index that is stable across lengths, so the prefix of the
+        // long run holds exactly the inputs of the short one.
+        fn seeded(len: usize, requires_grad: bool) -> Tensor {
+            let mut t = Tensor::zeros(
+                Shape::new(vec![len]),
+                DataType::Float32,
+                Device::cpu(),
+                requires_grad,
+            );
+            let slice = t.data_mut().as_f32_slice_mut().unwrap();
+            for (i, slot) in slice.iter_mut().enumerate() {
+                *slot = ((i % 97) as f32 - 48.0) / 64.0;
+            }
+            t
+        }
+
+        fn run(build: &dyn Fn() -> Box<dyn Optimizer>, len: usize) -> Vec<f32> {
+            let mut optimizer = build();
+            let mut param = seeded(len, true);
+            for _ in 0..3 {
+                param.set_grad(Some(seeded(len, false)));
+                let mut params = vec![&mut param];
+                optimizer.step(&mut params).unwrap();
+            }
+            param.data().as_f32_slice().unwrap().to_vec()
+        }
+
+        let short = 4096;
+        let long = PAR_THRESHOLD + 1023;
+        assert!(short < PAR_THRESHOLD);
+
+        type Build = Box<dyn Fn() -> Box<dyn Optimizer>>;
+        let builders: Vec<(&str, Build)> = vec![
+            (
+                "sgd",
+                Box::new(|| Box::new(SGD::new(0.01, None, Some(1e-4)))),
+            ),
+            (
+                "sgd+momentum",
+                Box::new(|| Box::new(SGD::new(0.01, Some(0.9), Some(1e-4)).with_nesterov(true))),
+            ),
+            (
+                "adam",
+                Box::new(|| Box::new(Adam::new(0.01, None, None, None, Some(1e-2)))),
+            ),
+            (
+                "adam+amsgrad",
+                Box::new(|| Box::new(Adam::new(0.01, None, None, None, None).with_amsgrad(true))),
+            ),
+            (
+                "adamw",
+                Box::new(|| Box::new(AdamW::new(0.01, None, None, None, Some(1e-2)))),
+            ),
+            (
+                "nadam",
+                Box::new(|| Box::new(NAdam::new(0.01, None, None, None, Some(1e-2), None))),
+            ),
+            (
+                "adagrad",
+                Box::new(|| Box::new(Adagrad::new(0.01, None, None, Some(1e-4), None))),
+            ),
+            (
+                "rmsprop",
+                Box::new(|| Box::new(RMSprop::new(0.01, None, None, Some(1e-4), None))),
+            ),
+            (
+                "rmsprop+momentum",
+                Box::new(|| Box::new(RMSprop::new(0.01, None, None, Some(1e-4), Some(0.9)))),
+            ),
+            (
+                "rmsprop+centered",
+                Box::new(|| {
+                    Box::new(
+                        RMSprop::new(0.01, None, None, Some(1e-4), Some(0.9)).with_centered(true),
+                    )
+                }),
+            ),
+        ];
+
+        for (name, build) in &builders {
+            let sequential = run(build.as_ref(), short);
+            let parallel = run(build.as_ref(), long);
+            assert_eq!(
+                &parallel[..short],
+                &sequential[..],
+                "{name} disagrees across the parallel threshold"
+            );
+        }
+    }
 }

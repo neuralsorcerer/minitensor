@@ -13,10 +13,9 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
@@ -144,9 +143,7 @@ impl SGD {
                 if p.len() < PAR_THRESHOLD {
                     step_chunk(p, g);
                 } else {
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .for_each(|(p, g)| step_chunk(p, g));
+                    par_param_update(p, g, &mut [], PAR_CHUNK, &|p, g, _| step_chunk(p, g));
                 }
             }};
         }
@@ -243,10 +240,12 @@ impl SGD {
                 if p.len() < PAR_THRESHOLD {
                     step_chunk(p, g, v);
                 } else {
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .zip(v.par_chunks_mut(PAR_CHUNK))
-                        .for_each(|((p, g), v)| step_chunk(p, g, v));
+                    par_param_update(p, g, &mut [v], PAR_CHUNK, &|p, g, state| {
+                        let [v] = state else {
+                            unreachable!("one state buffer")
+                        };
+                        step_chunk(p, g, v)
+                    });
                 }
             }};
         }

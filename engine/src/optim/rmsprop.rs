@@ -13,11 +13,11 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 /// RMSprop optimizer with parameter groups
 pub struct RMSprop {
@@ -42,16 +42,6 @@ pub struct RMSprop {
     step_count: usize,
     /// Gradient clipping configuration
     gradient_clipping: GradientClipping,
-}
-
-/// Split an optional optimizer-state buffer on the same `PAR_CHUNK`
-/// boundaries as the required buffers, yielding a `None` per chunk when the
-/// state is not in use, so a single zipped pipeline covers every combination.
-fn optional_chunks<T>(buf: Option<&mut [T]>, n_chunks: usize) -> Vec<Option<&mut [T]>> {
-    match buf {
-        Some(buf) => buf.chunks_mut(PAR_CHUNK).map(Some).collect(),
-        None => (0..n_chunks).map(|_| None).collect(),
-    }
 }
 
 impl RMSprop {
@@ -246,19 +236,28 @@ impl RMSprop {
                 if len < PAR_THRESHOLD {
                     step_chunk(p, g, sq, mb.as_deref_mut(), ga.as_deref_mut());
                 } else {
-                    // Pre-split every buffer on the same boundaries so each
-                    // task sees one aligned element range; the optional state
-                    // becomes a per-chunk `None` when it is not in use.
-                    let n_chunks = len.div_ceil(PAR_CHUNK);
-                    let mb_chunks = optional_chunks(mb.as_deref_mut(), n_chunks);
-                    let ga_chunks = optional_chunks(ga.as_deref_mut(), n_chunks);
-
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .zip(sq.par_chunks_mut(PAR_CHUNK))
-                        .zip(mb_chunks)
-                        .zip(ga_chunks)
-                        .for_each(|((((p, g), sq), mb), ga)| step_chunk(p, g, sq, mb, ga));
+                    // Only the buffers actually in use are handed over, so the
+                    // arity of `state` names the configuration. This used to
+                    // build a `Vec<Option<&mut [T]>>` of one entry per chunk
+                    // per optional buffer -- thousands of allocations per step
+                    // on a large parameter -- purely so a single zipped
+                    // pipeline could cover all four combinations.
+                    let centered = ga.is_some();
+                    let mut state: SmallVec<[&mut [$ty]; 3]> = SmallVec::new();
+                    state.push(sq);
+                    if let Some(mb) = mb.as_deref_mut() {
+                        state.push(mb);
+                    }
+                    if let Some(ga) = ga.as_deref_mut() {
+                        state.push(ga);
+                    }
+                    par_param_update(p, g, &mut state, PAR_CHUNK, &|p, g, state| match state {
+                        [sq] => step_chunk(p, g, sq, None, None),
+                        [sq, ga] if centered => step_chunk(p, g, sq, None, Some(ga)),
+                        [sq, mb] => step_chunk(p, g, sq, Some(mb), None),
+                        [sq, mb, ga] => step_chunk(p, g, sq, Some(mb), Some(ga)),
+                        _ => unreachable!("rmsprop passes one to three state buffers"),
+                    });
                 }
             }};
         }

@@ -351,6 +351,118 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
 }
 
+/// The state buffers one optimizer step writes, split to match a parameter
+/// chunk. Four is past every optimizer in the engine (Adam's widest is `m`,
+/// `v`, `v_hat`), so the split never reaches the heap.
+type StateChunks<'a, T> = SmallVec<[&'a mut [T]; 4]>;
+
+/// The type-erased body of a row-partitioned kernel: the first row's index and
+/// one window per output buffer.
+type RowWork<'a, T> = &'a (dyn Fn(usize, &mut [&mut [T]]) + Sync);
+
+/// [`RowWork`] for an optimizer step, which also gets its gradient window.
+type UpdateWork<'a, T> = &'a (dyn Fn(&mut [T], &[T], &mut [&mut [T]]) + Sync);
+
+/// Split `rows` rows of work across threads, cutting **several output buffers
+/// at the same row boundary** — each with its own number of elements per row.
+///
+/// This is the shape the zipped pipelines could not express. A layer norm
+/// writes three things per row: `norm` normalized values, `norm` scaled-and-
+/// shifted outputs, and one reciprocal standard deviation. Zipping them means a
+/// four-deep `Zip` of `par_chunks_mut(norm)`, `par_chunks_mut(norm)`,
+/// `par_iter_mut()` and `par_chunks(norm)`, written once per dtype per variant,
+/// because a `Zip` needs every side to yield the same number of items and these
+/// have different widths. Here the widths are data: buffer `i` gives each row
+/// `widths[i]` elements, and the split divides all of them at the same row.
+///
+/// Inputs do not appear at all. They are shared references, so `work` captures
+/// them and indexes from the starting row — which is what removed the need for
+/// a driver taking both a mutable and an immutable buffer set.
+///
+/// `work` receives the first row's index and one window per buffer. Rows are
+/// independent by construction, so the partition cannot change the result.
+pub(crate) fn par_row_outputs<T: Send + Sync>(
+    rows: usize,
+    row_chunk: usize,
+    outputs: &mut [&mut [T]],
+    widths: &[usize],
+    work: RowWork<T>,
+) {
+    debug_assert_eq!(outputs.len(), widths.len());
+    debug_assert!(
+        outputs
+            .iter()
+            .zip(widths)
+            .all(|(buffer, &width)| buffer.len() == rows * width)
+    );
+    if rows == 0 {
+        return;
+    }
+    let owned: StateChunks<T> = outputs.iter_mut().map(|buffer| &mut **buffer).collect();
+    par_row_outputs_recurse(0, rows, row_chunk.max(1), owned, widths, work);
+}
+
+fn par_row_outputs_recurse<T: Send + Sync>(
+    first_row: usize,
+    rows: usize,
+    row_chunk: usize,
+    mut outputs: StateChunks<'_, T>,
+    widths: &[usize],
+    work: RowWork<T>,
+) {
+    if rows <= row_chunk {
+        work(first_row, &mut outputs);
+        return;
+    }
+    // Halve, rounded to a chunk boundary, so every leaf holds whole chunks and
+    // `work` sees the same windows the hand-written pipelines passed.
+    let mid = (rows / 2 / row_chunk).max(1) * row_chunk;
+    let mut lo: StateChunks<T> = SmallVec::with_capacity(outputs.len());
+    let mut hi: StateChunks<T> = SmallVec::with_capacity(outputs.len());
+    for (buffer, &width) in outputs.into_iter().zip(widths) {
+        let (buffer_lo, buffer_hi) = buffer.split_at_mut(mid * width);
+        lo.push(buffer_lo);
+        hi.push(buffer_hi);
+    }
+    rayon::join(
+        || par_row_outputs_recurse(first_row, mid, row_chunk, lo, widths, work),
+        || par_row_outputs_recurse(first_row + mid, rows - mid, row_chunk, hi, widths, work),
+    );
+}
+
+/// Apply an optimizer step in parallel over a parameter, its gradient, and any
+/// number of same-length state buffers.
+///
+/// Every optimizer in the engine had written this by hand: a `param.len() <
+/// PAR_THRESHOLD` check around a `par_chunks_mut(PAR_CHUNK)` zipped with the
+/// gradient and one to three state buffers, once per dtype. Six copies of the
+/// same fan-out, differing only in how many `.zip`s deep the tuple went — and
+/// each of those nested `Zip` producers is its own rayon instantiation.
+///
+/// One element per "row", so this is [`par_row_outputs`] with every width 1,
+/// plus the gradient window the caller would otherwise have to slice itself.
+pub(crate) fn par_param_update<T: Send + Sync>(
+    param: &mut [T],
+    grad: &[T],
+    state: &mut [&mut [T]],
+    chunk: usize,
+    work: UpdateWork<T>,
+) {
+    debug_assert_eq!(param.len(), grad.len());
+    debug_assert!(state.iter().all(|buffer| buffer.len() == param.len()));
+    let rows = param.len();
+    let mut buffers: StateChunks<T> = SmallVec::with_capacity(state.len() + 1);
+    buffers.push(param);
+    buffers.extend(state.iter_mut().map(|buffer| &mut **buffer));
+    let widths: SmallVec<[usize; 4]> = smallvec![1; buffers.len()];
+    par_row_outputs(rows, chunk, &mut buffers, &widths, &|first, buffers| {
+        let (param, state) = buffers
+            .split_first_mut()
+            .expect("the parameter is always the first buffer");
+        work(param, &grad[first..first + param.len()], state);
+    });
+}
+
 /// Fold `data` in parallel chunk by chunk, then combine the per-chunk results.
 ///
 /// The erased form of `data.par_chunks(n).map(fold).reduce(|| id, combine)`.
@@ -375,6 +487,51 @@ where
     data.par_chunks(chunk.max(1))
         .map(fold)
         .reduce(|| identity, combine)
+}
+
+/// True when `test` holds for at least one chunk of `data`.
+///
+/// The chunked form of `data.par_iter().any(..)`, which hands rayon one work
+/// item per element to evaluate a predicate it cannot inline. Short-circuits at
+/// chunk granularity, so a hit in the first chunk still stops the scan early.
+pub(crate) fn par_any_chunk<T: Sync>(
+    data: &[T],
+    chunk: usize,
+    test: &(dyn Fn(&[T]) -> bool + Sync),
+) -> bool {
+    data.par_chunks(chunk.max(1)).any(test)
+}
+
+/// True when `test` holds for every chunk of `data`. The counterpart of
+/// [`par_any_chunk`]; spelled out rather than written as a double negation at
+/// each call site.
+pub(crate) fn par_all_chunk<T: Sync>(
+    data: &[T],
+    chunk: usize,
+    test: &(dyn Fn(&[T]) -> bool + Sync),
+) -> bool {
+    data.par_chunks(chunk.max(1)).all(test)
+}
+
+/// True when `test` holds for every matching pair of chunks.
+///
+/// Short-circuits, but at chunk granularity rather than per element: rayon's
+/// `all` over a zipped `par_iter` hands out one item per element and evaluates
+/// the predicate behind an opaque closure, so nothing vectorizes. Here the
+/// predicate sees a whole chunk and inlines.
+pub(crate) fn par_all_chunks<T>(
+    a: &[T],
+    b: &[T],
+    chunk: usize,
+    test: &(dyn Fn(&[T], &[T]) -> bool + Sync),
+) -> bool
+where
+    T: Sync,
+{
+    debug_assert_eq!(a.len(), b.len());
+    a.par_chunks(chunk.max(1))
+        .zip(b.par_chunks(chunk.max(1)))
+        .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))
 }
 
 /// Run `work(0..count)` in parallel and collect the results in index order.
@@ -811,6 +968,68 @@ mod tests {
             par_map_indexed(37, &|i: usize| i * i),
             (0..37).map(|i| i * i).collect::<Vec<_>>()
         );
+    }
+
+    /// The split must be invisible: every element sees the same parameter,
+    /// gradient and state values it would have seen running sequentially, and
+    /// the state buffers stay aligned with the parameter they belong to.
+    #[test]
+    fn par_param_update_matches_a_sequential_step_for_every_arity() {
+        for len in [0usize, 1, 1023, 1024, 1025, 70_000] {
+            for arity in 0..=3usize {
+                let param: Vec<f64> = (0..len).map(|i| i as f64 * 0.5).collect();
+                let grad: Vec<f64> = (0..len).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+                let states: Vec<Vec<f64>> = (0..arity)
+                    .map(|s| (0..len).map(|i| (s * len + i) as f64).collect())
+                    .collect();
+
+                // One step, written once, applied both ways.
+                let step = |p: &mut [f64], g: &[f64], state: &mut [&mut [f64]]| {
+                    for i in 0..p.len() {
+                        let mut delta = g[i];
+                        for buffer in state.iter_mut() {
+                            buffer[i] = 0.9 * buffer[i] + g[i];
+                            delta += buffer[i];
+                        }
+                        p[i] -= 0.01 * delta;
+                    }
+                };
+
+                let (mut seq_param, mut seq_states) = (param.clone(), states.clone());
+                let mut seq_refs: Vec<&mut [f64]> =
+                    seq_states.iter_mut().map(|s| s.as_mut_slice()).collect();
+                step(&mut seq_param, &grad, &mut seq_refs);
+
+                let (mut par_param, mut par_states) = (param.clone(), states.clone());
+                let mut par_refs: Vec<&mut [f64]> =
+                    par_states.iter_mut().map(|s| s.as_mut_slice()).collect();
+                par_param_update(&mut par_param, &grad, &mut par_refs, 1024, &step);
+
+                assert_eq!(par_param, seq_param, "param len={len} arity={arity}");
+                assert_eq!(par_states, seq_states, "state len={len} arity={arity}");
+            }
+        }
+    }
+
+    /// Each leaf must be a whole chunk, so a kernel that reasons about its
+    /// window's alignment is not handed a ragged one in the middle.
+    #[test]
+    fn par_param_update_splits_only_on_chunk_boundaries() {
+        use std::sync::Mutex;
+        let len = 70_000;
+        let chunk = 1024;
+        let (mut param, grad) = (vec![0.0f32; len], vec![0.0f32; len]);
+        let windows = Mutex::new(Vec::new());
+        par_param_update(&mut param, &grad, &mut [], chunk, &|p, _, _| {
+            windows.lock().expect("lock").push(p.len());
+        });
+        let mut widths = windows.into_inner().expect("lock");
+        widths.sort_unstable();
+        assert_eq!(widths.iter().sum::<usize>(), len);
+        // Every window is a full chunk but the last, which holds the remainder.
+        let tail = len % chunk;
+        assert_eq!(widths[0], tail, "{widths:?}");
+        assert!(widths[1..].iter().all(|&w| w == chunk), "{widths:?}");
     }
 
     #[test]

@@ -7,14 +7,13 @@
 use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
-use crate::ops::map::{par_out_chunks, par_out_chunks2};
+use crate::ops::map::{par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2};
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
-    ops::map::PAR_THRESHOLD,
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -95,8 +94,8 @@ fn bool_scalar_tensor(value: bool, tensor: &Tensor, keepdim: bool) -> Result<Ten
 /// `any`/`all` over every element.
 fn bool_fold_all(tensor: &Tensor, keepdim: bool, fold: BoolFold) -> Result<Tensor> {
     let value = with_truthy_slice!(tensor, |input, truthy| match fold {
-        BoolFold::Any => input.par_iter().any(|&v| truthy(v)),
-        BoolFold::All => input.par_iter().all(|&v| truthy(v)),
+        BoolFold::Any => par_any_chunk(input, PAR_CHUNK, &|chunk| chunk.iter().any(|&v| truthy(v))),
+        BoolFold::All => par_all_chunk(input, PAR_CHUNK, &|chunk| chunk.iter().all(|&v| truthy(v))),
     });
     bool_scalar_tensor(value, tensor, keepdim)
 }

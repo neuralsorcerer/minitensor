@@ -13,10 +13,9 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// Adagrad optimizer with parameter groups.
@@ -181,10 +180,12 @@ impl Adagrad {
                 if len < PAR_THRESHOLD {
                     step_chunk(p, g, sum);
                 } else {
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .zip(sum.par_chunks_mut(PAR_CHUNK))
-                        .for_each(|((p, g), sum)| step_chunk(p, g, sum));
+                    par_param_update(p, g, &mut [sum], PAR_CHUNK, &|p, g, state| {
+                        let [sum] = state else {
+                            unreachable!("one state buffer")
+                        };
+                        step_chunk(p, g, sum)
+                    });
                 }
             }};
         }

@@ -13,10 +13,9 @@ use crate::serialization::OptimizerState;
 use crate::{
     autograd::TensorId,
     error::Result,
-    ops::map::{PAR_CHUNK, PAR_THRESHOLD},
+    ops::map::{PAR_CHUNK, PAR_THRESHOLD, par_param_update},
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// NAdam (Dozat, 2016): Adam with Nesterov momentum.
@@ -223,11 +222,12 @@ impl NAdam {
                 if len < PAR_THRESHOLD {
                     step_chunk(p, g, m_buf, v_buf);
                 } else {
-                    p.par_chunks_mut(PAR_CHUNK)
-                        .zip(g.par_chunks(PAR_CHUNK))
-                        .zip(m_buf.par_chunks_mut(PAR_CHUNK))
-                        .zip(v_buf.par_chunks_mut(PAR_CHUNK))
-                        .for_each(|(((p, g), m), v)| step_chunk(p, g, m, v));
+                    par_param_update(p, g, &mut [m_buf, v_buf], PAR_CHUNK, &|p, g, state| {
+                        let [m, v] = state else {
+                            unreachable!("two state buffers")
+                        };
+                        step_chunk(p, g, m, v)
+                    });
                 }
             }};
         }
