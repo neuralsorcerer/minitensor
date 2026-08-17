@@ -901,12 +901,7 @@ pub(crate) fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> R
         .as_f32_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
 
-    let sum: f32 = deterministic_par_sum(data, 8192, |chunk| {
-        chunk
-            .iter()
-            .map(|&v| if v.is_nan() { 0.0 } else { v })
-            .sum::<f32>()
-    });
+    let sum: f32 = deterministic_par_sum(data, 8192, simd_nansum_f32);
 
     let result_slice = result_data
         .as_f32_slice_mut()
@@ -921,12 +916,7 @@ pub(crate) fn nansum_all_f64(tensor: &Tensor, result_data: &mut TensorData) -> R
         .as_f64_slice()
         .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
 
-    let sum: f64 = deterministic_par_sum(data, 8192, |chunk| {
-        chunk
-            .iter()
-            .map(|&v| if v.is_nan() { 0.0 } else { v })
-            .sum::<f64>()
-    });
+    let sum: f64 = deterministic_par_sum(data, 8192, simd_nansum_f64);
 
     let result_slice = result_data
         .as_f64_slice_mut()

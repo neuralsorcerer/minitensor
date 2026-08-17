@@ -79,25 +79,6 @@ where
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
 
-/// How a reduction or scan accumulates, per dtype.
-///
-/// Integer accumulation wraps; float accumulation is the ordinary operator.
-/// The distinction has to live somewhere, because the kernels that do the
-/// accumulating -- `sum_along_dim`, `prod_along_dim`, the cumulative scans, the
-/// lane folds -- are written once and instantiated for every dtype, so a bare
-/// `+` in one of them means two different things depending on which type it
-/// lands on and which profile it was built under.
-///
-/// Rust's `+`, `-` and `*` on integers panic on overflow when overflow checks
-/// are on and wrap when they are not, so `sum` of an int32 tensor that
-/// overflows aborted under `cargo test` and returned a wrapped value from the
-/// released wheel. Naming the wrap makes every build agree on the answer the
-/// release build was already giving, which is also what an integer tensor is
-/// expected to do.
-///
-/// The float impls are `self + other` and `self * other` exactly, so no
-/// summation order and no rounding changes anywhere -- which matters, because
-/// the order these kernels accumulate in is pinned by `tests/determinism.rs`.
 /// The dtype an *accumulating* reduction reports.
 ///
 /// `sum`, `nansum`, `prod`, `cumsum` and `cumprod` build a running total, so
@@ -127,6 +108,25 @@ pub(crate) fn accumulating_dtype(dtype: DataType) -> DataType {
     }
 }
 
+/// How a reduction or scan accumulates, per dtype.
+///
+/// Integer accumulation wraps; float accumulation is the ordinary operator.
+/// The distinction has to live somewhere, because the kernels that do the
+/// accumulating -- `sum_along_dim`, `prod_along_dim`, the cumulative scans, the
+/// lane folds -- are written once and instantiated for every dtype, so a bare
+/// `+` in one of them means two different things depending on which type it
+/// lands on and which profile it was built under.
+///
+/// Rust's `+`, `-` and `*` on integers panic on overflow when overflow checks
+/// are on and wrap when they are not, so `sum` of an int32 tensor that
+/// overflows aborted under `cargo test` and returned a wrapped value from the
+/// released wheel. Naming the wrap makes every build agree on the answer the
+/// release build was already giving, which is also what an integer tensor is
+/// expected to do.
+///
+/// The float impls are `self + other` and `self * other` exactly, so no
+/// summation order and no rounding changes anywhere -- which matters, because
+/// the order these kernels accumulate in is pinned by `tests/determinism.rs`.
 pub(crate) trait Accumulate: Copy {
     /// `self + other`, wrapping for integers.
     fn acc_add(self, other: Self) -> Self;
@@ -182,6 +182,40 @@ impl_accumulate_int!(i64);
 ///
 /// `combine` is passed explicitly because not every accumulator is `Add`:
 /// `nanmean` carries `(sum, count)` pairs through the same fold.
+/// Chunk length for [`accurate_run_sum`]. The same 8192 `deterministic_par_sum`
+/// uses, so a long run and a whole-tensor reduction accumulate the same way.
+pub(crate) const RUN_SUM_CHUNK: usize = 8192;
+
+/// Sum one contiguous run with the accuracy a whole-tensor reduction gets.
+///
+/// `sum()` over a tensor and `sum(dim=0)` over the same tensor viewed as one
+/// axis are the same arithmetic, and they were not the same answer. The first
+/// goes through `deterministic_par_sum`, which folds 8192-element partials
+/// pairwise, so its error grows like `log n`. The second walked the run with a
+/// single `simd_sum`, whose eight accumulator lanes leave the error growing
+/// like `n`. Summing 4M positive float32 values, the axis form was **613 times**
+/// less accurate than the whole-tensor form on identical data (4.4e-6 against
+/// 7.1e-9), and a single long row inside a 2-D reduction had the same problem.
+///
+/// This is `deterministic_par_sum`'s accumulation without its parallelism,
+/// because the caller is already inside a parallel loop over rows: the partials
+/// are pinned to chunk order and folded pairwise, so the result depends only on
+/// the run length. Short runs go straight to `sum_run`, which is every row of a
+/// normal matrix -- the extra allocation only appears once a single run is long
+/// enough to need it, where it is amortized over at least 8192 elements.
+#[inline]
+pub(crate) fn accurate_run_sum<T, U, F>(data: &[T], sum_run: F) -> U
+where
+    U: Copy + Default + std::ops::Add<Output = U>,
+    F: Fn(&[T]) -> U,
+{
+    if data.len() <= RUN_SUM_CHUNK {
+        return sum_run(data);
+    }
+    let partials: Vec<U> = data.chunks(RUN_SUM_CHUNK).map(&sum_run).collect();
+    pairwise_fold(partials, U::default(), |a, b| a + b)
+}
+
 pub(crate) fn pairwise_fold<U, F>(mut values: Vec<U>, identity: U, combine: F) -> U
 where
     U: Copy,

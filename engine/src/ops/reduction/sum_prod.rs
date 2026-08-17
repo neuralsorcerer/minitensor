@@ -9,7 +9,7 @@ use crate::ops::map::{
     par_out_chunks,
 };
 use crate::ops::simd::*;
-use crate::ops::util::{Accumulate, accumulating_dtype};
+use crate::ops::util::{Accumulate, accumulating_dtype, accurate_run_sum};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -165,7 +165,7 @@ macro_rules! sum_along_dim_kernel {
                         tensor.ndim(),
                     ));
                 }
-                result_slice[0] = $simd_sum(input_data);
+                result_slice[0] = accurate_run_sum(input_data, $simd_sum);
             } else if tensor.ndim() == 2 {
                 let cols = input_shape[1];
                 match dim {
@@ -183,7 +183,7 @@ macro_rules! sum_along_dim_kernel {
                         par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
                             for (offset, out) in chunk.iter_mut().enumerate() {
                                 let base = (start + offset) * cols;
-                                *out = $simd_sum(&input_data[base..base + cols]);
+                                *out = accurate_run_sum(&input_data[base..base + cols], $simd_sum);
                             }
                         });
                     }
@@ -221,7 +221,8 @@ macro_rules! sum_along_dim_kernel {
 /// Generates a NaN-ignoring sum-along-dim reduction kernel. Float dtypes only
 /// (integer dtypes have no NaN, so they route through the plain sum kernel).
 macro_rules! nansum_along_dim_kernel {
-    ($name:ident, $ty:ty, $accessor:ident, $accessor_mut:ident, $tyname:literal, $zero:expr) => {
+    ($name:ident, $ty:ty, $accessor:ident, $accessor_mut:ident, $tyname:literal, $zero:expr,
+     $simd_nansum:ident) => {
         pub(crate) fn $name(
             tensor: &Tensor,
             result_data: &mut TensorData,
@@ -252,7 +253,7 @@ macro_rules! nansum_along_dim_kernel {
                         tensor.ndim(),
                     ));
                 }
-                result_slice[0] = input_data.iter().filter(|v| !v.is_nan()).sum::<$ty>();
+                result_slice[0] = accurate_run_sum(input_data, $simd_nansum);
             } else if tensor.ndim() == 2 {
                 let cols = input_shape[1];
                 match dim {
@@ -270,10 +271,8 @@ macro_rules! nansum_along_dim_kernel {
                         par_out_chunks(result_slice, outputs_per_task(cols), &|start, chunk| {
                             for (offset, out) in chunk.iter_mut().enumerate() {
                                 let base = (start + offset) * cols;
-                                *out = input_data[base..base + cols]
-                                    .iter()
-                                    .filter(|v| !v.is_nan())
-                                    .sum::<$ty>();
+                                *out =
+                                    accurate_run_sum(&input_data[base..base + cols], $simd_nansum);
                             }
                         });
                     }
@@ -327,7 +326,8 @@ nansum_along_dim_kernel!(
     as_f32_slice,
     as_f32_slice_mut,
     "f32",
-    0f32
+    0f32,
+    simd_nansum_f32
 );
 
 sum_along_dim_kernel!(
@@ -346,7 +346,8 @@ nansum_along_dim_kernel!(
     as_f64_slice,
     as_f64_slice_mut,
     "f64",
-    0f64
+    0f64,
+    simd_nansum_f64
 );
 
 sum_along_dim_kernel!(

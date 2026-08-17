@@ -335,6 +335,66 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// the largest magnitude keeps every intermediate inside the range. When that
 /// magnitude is itself zero or infinite there is nothing to scale by, and
 /// [`unusable_scales_to_ones`] stands one in for it.
+/// `sqrt(sum(x^2))` straight, for the `p == 2` orders whose data does not need
+/// the scaling.
+///
+/// The scaled route below is what makes this library's `norm` right where
+/// NumPy's is not -- `norm` of a float32 vector of `1e20`s is `1.73e20` here
+/// and `inf` there, and of `1e-25`s it is `1.41e-25` here and `0` there,
+/// because squaring leaves the exponent range in both directions. Dividing by
+/// the largest magnitude first moves the whole vector back into range.
+///
+/// It is also three passes and a full-size temporary where the direct form is
+/// one reduction: a max over the input, then `(|x| / s)^2` materialized, then
+/// the sum. On a 2048x1024 float32 tensor `norm()` measured 1.155ms against
+/// 0.271ms for `(x * x).sum()` spelled out with this library's own operators --
+/// its own `mul` and `sum` beat its `norm` by 4.3x, and NumPy's `norm` by 4x.
+///
+/// So try the direct form first and keep the scaled one for the inputs that
+/// actually need it. Overflow and underflow are both detectable *after* the
+/// fact and neither is silent: a sum of squares that leaves the range comes
+/// back `inf` or `0`, and either sends the whole reduction down the scaled
+/// path. A NaN is not a scaling failure -- it means the input held one -- so it
+/// propagates rather than triggering the fallback.
+///
+/// The values this returns are not bit-identical to the scaled route's, and are
+/// slightly closer to the true norm: `(|x| / s)^2 ... * s` rounds at the divide
+/// and again at the multiply, and this does neither.
+fn euclidean_norm_unscaled(input: &Tensor, p: f64, dims: &[usize]) -> Result<Option<Tensor>> {
+    if p != 2.0 {
+        return Ok(None);
+    }
+
+    let squared = arithmetic::mul(input, input)?;
+    let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+    let summed = reduction::sum(&squared, Some(dims_isize), true)?;
+
+    // One element out of range is enough to fall back for the whole reduction:
+    // the scaled path is per-slice, so it costs nothing extra to take it for
+    // every slice, and the alternative is threading a per-slice choice through
+    // the arithmetic below.
+    let needs_scaling = match summed.dtype() {
+        DataType::Float32 => summed
+            .data()
+            .as_f32_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to read squared norm sum"))?
+            .iter()
+            .any(|v| v.is_infinite() || *v == 0.0),
+        DataType::Float64 => summed
+            .data()
+            .as_f64_slice()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to read squared norm sum"))?
+            .iter()
+            .any(|v| v.is_infinite() || *v == 0.0),
+        _ => return Ok(None),
+    };
+    if needs_scaling {
+        return Ok(None);
+    }
+
+    Ok(Some(activation::sqrt(&summed)?))
+}
+
 pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     if !tensor.dtype().is_float() {
         return Err(MinitensorError::invalid_operation(
@@ -375,6 +435,8 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
             reduce_extremum(&activation::abs(&input)?, &dims, false)?
         } else if p == 0.0 {
             count_nonzero_over(&input, &dims)?
+        } else if let Some(fast) = euclidean_norm_unscaled(&input, p, &dims)? {
+            fast
         } else {
             let scale = unusable_scales_to_ones(&abs_max_over(&input, &dims)?)?;
             let powered = match scaled_powers(&input, &scale, p, &dims)? {

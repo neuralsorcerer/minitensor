@@ -358,6 +358,43 @@ pub fn simd_sum_i32(data: &[i32]) -> i32 {
     total
 }
 
+/// Sum a float slice treating NaN as zero, with the same lane structure as
+/// [`simd_sum_f32`].
+///
+/// `nansum` folded its chunks with a plain `iter().sum()`, which is a single
+/// dependent chain of additions where the ordinary sum keeps eight independent
+/// ones. That is eight times the error growth, so `nansum` and `sum` disagreed
+/// on data holding no NaN at all -- the two spellings of the same arithmetic,
+/// and `nansum` was the worse of them.
+macro_rules! nan_sum_kernel {
+    ($name:ident, $ty:ty, $lanes:expr) => {
+        pub fn $name(data: &[$ty]) -> $ty {
+            const LANES: usize = $lanes;
+            let mut sums = [0.0 as $ty; LANES];
+            let mut blocks = data.chunks_exact(LANES);
+            for block in &mut blocks {
+                for lane in 0..LANES {
+                    let v = block[lane];
+                    // Branchless: a NaN contributes its identity rather than
+                    // taking a different path, so the loop stays vectorizable.
+                    sums[lane] += if v.is_nan() { 0.0 } else { v };
+                }
+            }
+            let mut total = 0.0 as $ty;
+            for lane in 0..LANES {
+                total += sums[lane];
+            }
+            for &v in blocks.remainder() {
+                total += if v.is_nan() { 0.0 } else { v };
+            }
+            total
+        }
+    };
+}
+
+nan_sum_kernel!(simd_nansum_f32, f32, 8);
+nan_sum_kernel!(simd_nansum_f64, f64, 4);
+
 /// Sum an i32 slice into an i64 accumulator.
 ///
 /// `sum` and `prod` report a wider integer than they read, matching NumPy and
