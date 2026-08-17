@@ -824,6 +824,37 @@ pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     tensor.any(dim, Some(keepdim))
 }
 
+/// Largest element over `dim`, values only.
+///
+/// `max(dim=...)` reports the index alongside, and finding it is most of the
+/// cost; see `Tensor.amax`. NumPy and PyTorch both spell this `amax`.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn amax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.max_values(dim, keepdim)
+}
+
+/// Smallest element over `dim`, values only. See [`amax`].
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn amin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.min_values(dim, keepdim)
+}
+
+/// Like `amax`, ignoring NaN.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanamax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.nanmax_values(dim, keepdim)
+}
+
+/// Like `amin`, ignoring NaN.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanamin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.nanmin_values(dim, keepdim)
+}
+
 /// Largest element over `dim`; with a `dim` it returns the values and their indices.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
@@ -1450,6 +1481,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(any, parent)?)?;
     parent.add_function(wrap_pyfunction!(max, parent)?)?;
     parent.add_function(wrap_pyfunction!(min, parent)?)?;
+    parent.add_function(wrap_pyfunction!(amax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(amin, parent)?)?;
     parent.add_function(wrap_pyfunction!(argmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(argmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(cumsum, parent)?)?;
@@ -1462,6 +1495,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanamax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanamin, parent)?)?;
     parent.add_function(wrap_pyfunction!(isnan, parent)?)?;
     parent.add_function(wrap_pyfunction!(isinf, parent)?)?;
     parent.add_function(wrap_pyfunction!(isfinite, parent)?)?;
