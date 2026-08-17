@@ -8,7 +8,10 @@ use super::*;
 use crate::ops::map::{outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2};
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
-use crate::ops::util::{Accumulate, accumulating_dtype, deterministic_par_sum, pairwise_fold};
+use crate::ops::util::{
+    Accumulate, accumulating_dtype, accurate_run_sum, accurate_slab_sum, deterministic_par_sum,
+    pairwise_fold,
+};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -632,20 +635,28 @@ fn var_fused_single_axis(
                 // rayon was handed one task per output and each of those
                 // allocated a one-element `col_mean` on the heap -- a thousand
                 // allocations and a thousand tasks to reduce a thousand rows.
+                // Both passes go through `accurate_run_sum`, for the reason
+                // `sum` does: a running total over a long row accumulates one
+                // rounding per element. This is the path taken only when the
+                // tensor does *not* require gradients, so leaving it naive made
+                // `var` answer differently depending on whether it was being
+                // trained through -- and the untrained answer was the worse
+                // one, by 38000x at a 4M-element axis (3.8e-3 against 1.2e-7).
                 let run = |first: usize, chunk: &mut [$ty]| {
                     for (i, slot) in chunk.iter_mut().enumerate() {
                         let base = (first + i) * dim_size;
                         let row = &input[base..base + dim_size];
-                        let mut total = 0.0 as $ty;
-                        for &v in row {
-                            total += v;
-                        }
+                        let total =
+                            accurate_run_sum(row, |part: &[$ty]| part.iter().copied().sum::<$ty>());
                         let mean = total / n;
-                        let mut acc = 0.0 as $ty;
-                        for &v in row {
-                            let d = v - mean;
-                            acc += d * d;
-                        }
+                        let acc = accurate_run_sum(row, |part: &[$ty]| {
+                            part.iter()
+                                .map(|&v| {
+                                    let d = v - mean;
+                                    d * d
+                                })
+                                .sum::<$ty>()
+                        });
                         *slot = acc / divisor;
                     }
                 };
@@ -663,28 +674,30 @@ fn var_fused_single_axis(
                 // a vector of `inner`, allocated once per outer position.
                 par_out_chunks(out, inner, &|start, out_chunk| {
                     let block_base = (start / inner) * outer_stride;
-                    let mut col_mean = vec![0.0 as $ty; inner];
-                    for k in 0..dim_size {
-                        let base = block_base + k * inner;
-                        let slab = &input[base..base + inner];
-                        for (m, &v) in col_mean.iter_mut().zip(slab) {
-                            *m += v;
-                        }
-                    }
+                    // Both passes are blocked for the same reason the
+                    // contiguous-row path above uses `accurate_run_sum`.
+                    let mut col_mean =
+                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for (m, &v) in acc.iter_mut().zip(slab) {
+                                *m += v;
+                            }
+                        });
                     for m in col_mean.iter_mut() {
                         *m /= n;
                     }
-                    out_chunk.fill(0.0 as $ty);
-                    for k in 0..dim_size {
-                        let base = block_base + k * inner;
-                        let slab = &input[base..base + inner];
-                        for ((acc, &v), &m) in out_chunk.iter_mut().zip(slab).zip(col_mean.iter()) {
-                            let d = v - m;
-                            *acc += d * d;
-                        }
-                    }
-                    for acc in out_chunk.iter_mut() {
-                        *acc /= divisor;
+                    let squared =
+                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for ((a, &v), &m) in acc.iter_mut().zip(slab).zip(col_mean.iter()) {
+                                let d = v - m;
+                                *a += d * d;
+                            }
+                        });
+                    for (acc, &v) in out_chunk.iter_mut().zip(squared.iter()) {
+                        *acc = v / divisor;
                     }
                 });
             }

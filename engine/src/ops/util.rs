@@ -169,6 +169,76 @@ impl_accumulate_float!(f64);
 impl_accumulate_int!(i32);
 impl_accumulate_int!(i64);
 
+/// Accumulate `inner` parallel totals across `dim_size` slab steps, with the
+/// error growth of a pairwise fold rather than a running sum.
+///
+/// The slab form of [`accurate_run_sum`], for the reductions whose axis is not
+/// the last one: `out[r] += f(input[k][r])` for every `r` at once. The running
+/// totals are a vector rather than a scalar, so the chunk partials are vectors
+/// too -- but only `numel / RUN_SUM_CHUNK` values in total, because a block
+/// covers a fixed number of *elements* rather than a fixed number of steps.
+/// A four-million-element slab needs about 488 extra floats.
+///
+/// `add_step(k, acc)` folds step `k` of the reduced axis into `acc`, which is
+/// `inner` wide. It is called once per `(block, k)` and never sees a block
+/// boundary, so a caller that reads `input[base + k * inner ..]` is unaffected
+/// by the blocking.
+pub(crate) fn accurate_slab_sum<T>(
+    dim_size: usize,
+    inner: usize,
+    zero: T,
+    mut add_step: impl FnMut(usize, &mut [T]),
+) -> Vec<T>
+where
+    T: Copy + std::ops::Add<Output = T>,
+{
+    // Blocks are counted in *steps*, not elements. Counting elements made the
+    // block eight steps wide for a 1024-wide slab, which is 256 partial vectors
+    // for a 2048-step axis that never needed splitting -- 48% slower on
+    // `var(dim=0)` of a 2048x1024 tensor for no accuracy anyone could measure.
+    // Counting steps also bounds the partials at `slab_numel / RUN_SUM_CHUNK`
+    // whatever `inner` is, because a wider slab has proportionally fewer steps.
+    let mut fill = |from: usize, to: usize| {
+        let mut acc = vec![zero; inner];
+        for k in from..to {
+            add_step(k, &mut acc);
+        }
+        acc
+    };
+    if dim_size <= RUN_SUM_CHUNK {
+        return fill(0, dim_size);
+    }
+    let block = RUN_SUM_CHUNK;
+
+    let mut partials: Vec<Vec<T>> = (0..dim_size)
+        .step_by(block)
+        .map(|start| fill(start, (start + block).min(dim_size)))
+        .collect();
+
+    // `pairwise_fold` wants `Copy`, which a `Vec` is not, so the same halving
+    // is spelled out here over owned buffers.
+    let mut len = partials.len();
+    while len > 1 {
+        let mut write = 0;
+        let mut read = 0;
+        while read + 1 < len {
+            let (left, right) = partials.split_at_mut(read + 1);
+            for (a, &b) in left[read].iter_mut().zip(right[0].iter()) {
+                *a = *a + b;
+            }
+            partials.swap(write, read);
+            write += 1;
+            read += 2;
+        }
+        if read < len {
+            partials.swap(write, read);
+            write += 1;
+        }
+        len = write;
+    }
+    partials.swap_remove(0)
+}
+
 /// Combine `values` with a fixed binary tree rather than a running total.
 ///
 /// The obvious way to finish `deterministic_par_sum` is a sequential fold over

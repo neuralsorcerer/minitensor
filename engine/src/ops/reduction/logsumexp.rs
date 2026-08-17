@@ -10,7 +10,7 @@ use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::map::par_out_chunks;
-use crate::ops::util::accumulating_dtype;
+use crate::ops::util::{accumulating_dtype, accurate_slab_sum};
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
     autograd::with_grad_fn,
@@ -167,17 +167,22 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                         }
                     }
                     // Sum of exp(x - max), skipping non-finite-max columns
-                    // (their result is the max itself).
-                    let mut col_sum = vec![0.0 as $ty; inner];
-                    for k in 0..dim_size {
-                        let base = block_base + k * inner;
-                        let slab = &input[base..base + inner];
-                        for ((s, &v), &m) in col_sum.iter_mut().zip(slab).zip(col_max.iter()) {
-                            if m.is_finite() {
-                                *s += (v - m).exp();
+                    // (their result is the max itself). Blocked, because this
+                    // is the path taken only when the tensor does not require
+                    // gradients: a running total over a million-step axis left
+                    // `logsumexp` answering differently depending on whether it
+                    // was being trained through, and the untrained answer was
+                    // the worse one by three orders of magnitude.
+                    let col_sum =
+                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                            let base = block_base + k * inner;
+                            let slab = &input[base..base + inner];
+                            for ((s, &v), &m) in acc.iter_mut().zip(slab).zip(col_max.iter()) {
+                                if m.is_finite() {
+                                    *s += (v - m).exp();
+                                }
                             }
-                        }
-                    }
+                        });
                     for ((dst, &m), &s) in
                         out_chunk.iter_mut().zip(col_max.iter()).zip(col_sum.iter())
                     {
