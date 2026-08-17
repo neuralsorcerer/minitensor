@@ -20,6 +20,11 @@ use std::sync::Arc;
 use cblas::{Layout, Transpose};
 
 pub(crate) use crate::ops::map::PAR_THRESHOLD;
+use crate::ops::map::try_par_out_chunks;
+// The hand-written GEMM banding is the fallback for builds without BLAS; with
+// the `blas` feature the library does the blocking itself.
+#[cfg(not(feature = "blas"))]
+use crate::ops::map::par_for_indexed;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DiagonalSpec {
@@ -551,7 +556,7 @@ macro_rules! split_gemm {
                 GemmSplit::Cols(tasks) => {
                     let width = n.div_ceil(tasks);
                     let (a, b, c) = (SendPtr(a), SendPtr(b), SendPtr(c));
-                    (0..tasks).into_par_iter().for_each(|t| {
+                    par_for_indexed(tasks, &|t| {
                         let start = t * width;
                         if start >= n {
                             return;
@@ -581,7 +586,7 @@ macro_rules! split_gemm {
                 GemmSplit::Rows(tasks) => {
                     let rows = m.div_ceil(tasks);
                     let (a, b, c) = (SendPtr(a), SendPtr(b), SendPtr(c));
-                    (0..tasks).into_par_iter().for_each(|t| {
+                    par_for_indexed(tasks, &|t| {
                         let start = t * rows;
                         if start >= m {
                             return;
@@ -1311,17 +1316,14 @@ where
     // singular batch is reported is unspecified, but the error is identical for
     // all of them ("solve received a singular matrix"), so the message does not
     // depend on the scheduling.
-    out_slice
-        .par_chunks_mut(per_task * rhs_stride)
-        .enumerate()
-        .map(|(group_idx, out_group)| {
-            solve_group(
-                group_idx * per_task,
-                out_group.len() / rhs_stride,
-                out_group,
-            )
-        })
-        .collect::<Result<()>>()
+    let span = per_task * rhs_stride;
+    try_par_out_chunks(out_slice, span, &|start, out_group| {
+        solve_group(
+            (start / span) * per_task,
+            out_group.len() / rhs_stride,
+            out_group,
+        )
+    })
 }
 
 fn gaussian_elimination<T>(matrix: &mut [T], rhs: &mut [T], n: usize, rhs_cols: usize) -> Result<()>

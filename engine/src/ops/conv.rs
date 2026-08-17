@@ -5,13 +5,13 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::Conv2dBackward,
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -419,40 +419,39 @@ fn conv2d_forward<T: ConvScalar>(
         // all. What is left is a contiguous copy per row when the horizontal
         // stride is 1, which is the overwhelmingly common case.
         let mut cols = vec![T::default(); k_dim * n_cols];
-        cols.par_chunks_mut(n_cols)
-            .enumerate()
-            .for_each(|(k, row)| {
-                let ic = k / kh_kw;
-                let rem = k % kh_kw;
-                let ky = rem / kernel_w;
-                let kx = rem % kernel_w;
-                let (oh_lo, oh_hi) =
-                    in_bounds_range(ky, padding.0, input_height, stride.0, output_height);
-                let (ow_lo, ow_hi) =
-                    in_bounds_range(kx, padding.1, input_width, stride.1, output_width);
-                if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                    return;
-                }
-                let span = ow_hi - ow_lo;
-                for n in 0..batch_size {
-                    let dst_n = n * ohw;
-                    let plane = (n * in_channels + ic) * input_height;
-                    for oh in oh_lo..oh_hi {
-                        let ih = oh * stride.0 + ky - padding.0;
-                        let src = (plane + ih) * input_width;
-                        let dst = dst_n + oh * output_width + ow_lo;
-                        if stride.1 == 1 {
-                            let s = src + ow_lo + kx - padding.1;
-                            row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
-                        } else {
-                            for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
-                                let iw = (ow_lo + i) * stride.1 + kx - padding.1;
-                                *slot = input_data[src + iw];
-                            }
+        par_out_chunks(&mut cols, n_cols, &|start, row| {
+            let k = start / n_cols;
+            let ic = k / kh_kw;
+            let rem = k % kh_kw;
+            let ky = rem / kernel_w;
+            let kx = rem % kernel_w;
+            let (oh_lo, oh_hi) =
+                in_bounds_range(ky, padding.0, input_height, stride.0, output_height);
+            let (ow_lo, ow_hi) =
+                in_bounds_range(kx, padding.1, input_width, stride.1, output_width);
+            if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                return;
+            }
+            let span = ow_hi - ow_lo;
+            for n in 0..batch_size {
+                let dst_n = n * ohw;
+                let plane = (n * in_channels + ic) * input_height;
+                for oh in oh_lo..oh_hi {
+                    let ih = oh * stride.0 + ky - padding.0;
+                    let src = (plane + ih) * input_width;
+                    let dst = dst_n + oh * output_width + ow_lo;
+                    if stride.1 == 1 {
+                        let s = src + ow_lo + kx - padding.1;
+                        row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
+                    } else {
+                        for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
+                            let iw = (ow_lo + i) * stride.1 + kx - padding.1;
+                            *slot = input_data[src + iw];
                         }
                     }
                 }
-            });
+            }
+        });
 
         let mut gemm_out = vec![T::default(); out_channels * n_cols];
         // SAFETY: `weight_data` is [C_out, k_dim], `cols` is [k_dim, n_cols],
@@ -471,20 +470,18 @@ fn conv2d_forward<T: ConvScalar>(
 
         // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a given
         // (n, oc) the source and destination are contiguous `ohw` slabs.
-        output_vec
-            .par_chunks_mut(ohw)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| {
-                let n = chunk_idx / out_channels;
-                let oc = chunk_idx % out_channels;
-                let base = oc * n_cols + n * ohw;
-                for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
-                    *o = v;
-                    if let Some(bd) = bias_data {
-                        *o += bd[oc];
-                    }
+        par_out_chunks(&mut output_vec, ohw, &|start, out_chunk| {
+            let chunk_idx = start / ohw;
+            let n = chunk_idx / out_channels;
+            let oc = chunk_idx % out_channels;
+            let base = oc * n_cols + n * ohw;
+            for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
+                *o = v;
+                if let Some(bd) = bias_data {
+                    *o += bd[oc];
                 }
-            });
+            }
+        });
     }
 
     Ok(T::into_tensor_data(output_vec, input.device()))

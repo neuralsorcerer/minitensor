@@ -7,7 +7,6 @@
 use crate::{
     device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
 };
-use rayon::prelude::*;
 use std::cell::UnsafeCell;
 
 /// Tensor data storage.
@@ -285,7 +284,11 @@ impl TensorData {
     #[inline(always)]
     fn fill_slice<T: Copy + Send + Sync>(slice: &mut [T], value: T) {
         if slice.len() >= 1024 {
-            slice.par_iter_mut().for_each(|x| *x = value);
+            // `fill` per chunk, not a write per element: rayon was being handed
+            // one work item per element to perform a single store.
+            crate::ops::map::par_out_chunks(slice, crate::ops::map::PAR_CHUNK, &|_, chunk| {
+                chunk.fill(value)
+            });
         } else {
             slice.fill(value);
         }

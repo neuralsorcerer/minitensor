@@ -11,7 +11,6 @@ use crate::{
     serialization::OptimizerState,
     tensor::Tensor,
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// Utility functions for gradient operations.
@@ -35,6 +34,7 @@ pub struct GradientUtils;
 /// [`crate::ops::map::PAR_THRESHOLD`] for the measurements: below it, waking
 /// rayon's parked workers costs more than the whole loop.
 use crate::ops::map::PAR_THRESHOLD as GRAD_PAR_THRESHOLD;
+use crate::ops::map::{PAR_CHUNK, par_out_chunks};
 
 /// Sum of squares of a float slice, parallel above the threshold.
 fn sum_squares<T: Copy + Send + Sync + Into<f64>>(values: &[T]) -> f64 {
@@ -62,7 +62,11 @@ fn map_in_place<T: Copy + Send + Sync>(values: &mut [T], op: impl Fn(T) -> T + S
             *v = op(*v);
         }
     } else {
-        values.par_iter_mut().for_each(|v| *v = op(*v));
+        par_out_chunks(values, PAR_CHUNK, &|_, chunk| {
+            for v in chunk.iter_mut() {
+                *v = op(*v);
+            }
+        });
     }
 }
 

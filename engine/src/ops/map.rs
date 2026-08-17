@@ -363,6 +363,9 @@ type RowWork<'a, T> = &'a (dyn Fn(usize, &mut [&mut [T]]) + Sync);
 /// [`RowWork`] for an optimizer step, which also gets its gradient window.
 type UpdateWork<'a, T> = &'a (dyn Fn(&mut [T], &[T], &mut [&mut [T]]) + Sync);
 
+/// [`OutWork`] for chunk work that can fail.
+type TryOutWork<'a, T, E> = &'a (dyn Fn(usize, &mut [T]) -> Result<(), E> + Sync);
+
 /// Split `rows` rows of work across threads, cutting **several output buffers
 /// at the same row boundary** — each with its own number of elements per row.
 ///
@@ -532,6 +535,38 @@ where
     a.par_chunks(chunk.max(1))
         .zip(b.par_chunks(chunk.max(1)))
         .all(|(a_chunk, b_chunk)| test(a_chunk, b_chunk))
+}
+
+/// Run `work(0..count)` in parallel for its effects.
+///
+/// The erased form of `(0..count).into_par_iter().for_each(..)`, for kernels
+/// that carve their own bands out of raw pointers rather than out of slices --
+/// the blocked GEMM paths, which cannot hand rayon a `&mut [T]` because the
+/// bands interleave by column.
+#[cfg(not(feature = "blas"))]
+pub(crate) fn par_for_indexed(count: usize, work: &(dyn Fn(usize) + Sync)) {
+    (0..count).into_par_iter().for_each(work);
+}
+
+/// [`par_out_chunks`] for work that can fail, stopping at the first error.
+///
+/// Which error is reported when several chunks fail is unspecified, exactly as
+/// it was for the `map(..).collect::<Result<()>>()` this replaces.
+pub(crate) fn try_par_out_chunks<T: Send, E: Send>(
+    out: &mut [T],
+    chunk: usize,
+    work: TryOutWork<T, E>,
+) -> Result<(), E> {
+    if out.is_empty() {
+        return Ok(());
+    }
+    if out.len() <= chunk || chunk == 0 {
+        return work(0, out);
+    }
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .map(|(index, out_chunk)| work(index * chunk, out_chunk))
+        .collect()
 }
 
 /// Run `work(0..count)` in parallel and collect the results in index order.

@@ -11,7 +11,7 @@ use crate::{
     },
     device::Device,
     error::{MinitensorError, Result},
-    ops::map::{PAR_THRESHOLD, build_vec},
+    ops::map::{PAR_THRESHOLD, build_vec, par_out_chunks},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -413,18 +413,16 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             // the sum of the inputs'), so every element is written once.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    spare
-                        .par_chunks_mut(chunk_size)
-                        .enumerate()
-                        .for_each(|(o, out_chunk)| {
-                            let mut dst_offset = 0;
-                            for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
-                                let src_start = o * src_stride;
-                                out_chunk[dst_offset..dst_offset + src_stride]
-                                    .write_copy_of_slice(&src[src_start..src_start + src_stride]);
-                                dst_offset += src_stride;
-                            }
-                        });
+                    par_out_chunks(spare, chunk_size, &|start, out_chunk| {
+                        let o = start / chunk_size;
+                        let mut dst_offset = 0;
+                        for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
+                            let src_start = o * src_stride;
+                            out_chunk[dst_offset..dst_offset + src_stride]
+                                .write_copy_of_slice(&src[src_start..src_start + src_stride]);
+                            dst_offset += src_stride;
+                        }
+                    });
                 })
             };
             TensorData::$from_vec(out, device)
@@ -527,18 +525,15 @@ pub fn repeat(tensor: &Tensor, repeats: &[usize]) -> Result<Tensor> {
                 // is exactly one chunk, so every element is written once.
                 let out = unsafe {
                     build_vec::<$ty, _>(output_numel, |spare| {
-                        spare
-                            .par_chunks_mut(chunk_size)
-                            .enumerate()
-                            .for_each(|(o, out_chunk)| {
-                                let src_start = o * src_chunk_size;
-                                let src_chunk = &src[src_start..src_start + src_chunk_size];
-                                for r in 0..rep {
-                                    let dst_start = r * src_chunk_size;
-                                    out_chunk[dst_start..dst_start + src_chunk_size]
-                                        .write_copy_of_slice(src_chunk);
-                                }
-                            });
+                        par_out_chunks(spare, chunk_size, &|start, out_chunk| {
+                            let src_start = (start / chunk_size) * src_chunk_size;
+                            let src_chunk = &src[src_start..src_start + src_chunk_size];
+                            for r in 0..rep {
+                                let dst_start = r * src_chunk_size;
+                                out_chunk[dst_start..dst_start + src_chunk_size]
+                                    .write_copy_of_slice(src_chunk);
+                            }
+                        });
                     })
                 };
                 TensorData::$from_vec(out, device)
@@ -611,17 +606,16 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
             // run of `inner` per selected index, so every element is written.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    spare
-                        .par_chunks_mut(output_shape_vec[dim] * inner)
-                        .enumerate()
-                        .for_each(|(o, out_chunk)| {
-                            for (i, &idx) in indices.iter().enumerate() {
-                                let src_start = o * dims[dim] * inner + idx * inner;
-                                let dst_start = i * inner;
-                                out_chunk[dst_start..dst_start + inner]
-                                    .write_copy_of_slice(&src[src_start..src_start + inner]);
-                            }
-                        });
+                    let span = output_shape_vec[dim] * inner;
+                    par_out_chunks(spare, span, &|start, out_chunk| {
+                        let o = start / span;
+                        for (i, &idx) in indices.iter().enumerate() {
+                            let src_start = o * dims[dim] * inner + idx * inner;
+                            let dst_start = i * inner;
+                            out_chunk[dst_start..dst_start + inner]
+                                .write_copy_of_slice(&src[src_start..src_start + inner]);
+                        }
+                    });
                 })
             };
             TensorData::$from_vec(out, device)
@@ -735,21 +729,19 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
             // by the innermost loop.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    spare
-                        .par_chunks_mut(chunk_size)
-                        .enumerate()
-                        .for_each(|(o, out_chunk)| {
-                            let base = o * dim_size * inner;
-                            let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
-                            for i in 0..idx_dim {
-                                let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
-                                let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
-                                for (j, &gather_val) in idx_row.iter().enumerate() {
-                                    let gather_idx = gather_val as usize;
-                                    dst_row[j].write(src[base + gather_idx * inner + j]);
-                                }
+                    par_out_chunks(spare, chunk_size, &|start, out_chunk| {
+                        let o = start / chunk_size;
+                        let base = o * dim_size * inner;
+                        let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
+                        for i in 0..idx_dim {
+                            let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
+                            let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
+                            for (j, &gather_val) in idx_row.iter().enumerate() {
+                                let gather_idx = gather_val as usize;
+                                dst_row[j].write(src[base + gather_idx * inner + j]);
                             }
-                        });
+                        }
+                    });
                 })
             };
             TensorData::$from_vec(out, device)

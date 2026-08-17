@@ -11,13 +11,12 @@ use super::shape::{mask_select_into, zip_mask_into};
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::binary_map,
+    ops::map::{binary_map, par_out_chunks},
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
 };
 use libm::erfc;
 use num_traits::Float;
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -962,12 +961,10 @@ fn zip_blocks_maybe_par<T, F>(
             block(block_idx, go, sv, out);
         }
     } else {
-        grad_output
-            .par_chunks(group)
-            .zip(saved.par_chunks(group))
-            .zip(grad_input.par_chunks_mut(group))
-            .enumerate()
-            .for_each(|(block_idx, ((go, sv), out))| block(block_idx, go, sv, out));
+        par_out_chunks(grad_input, group, &|start, out| {
+            let span = start..start + out.len();
+            block(start / group, &grad_output[span.clone()], &saved[span], out);
+        });
     }
 }
 /// Geometry shared by the softmax-family backward kernels: the reduced

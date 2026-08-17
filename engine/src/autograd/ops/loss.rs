@@ -7,6 +7,7 @@
 //! Gradient functions for the loss operations in [`crate::ops::loss`].
 
 use super::*;
+use crate::ops::map::par_out_chunks;
 use crate::{
     error::{MinitensorError, Result},
     ops::map::{binary_map, ternary_map, unary_map_into},
@@ -14,7 +15,6 @@ use crate::{
     ops::{activation, arithmetic, reduction},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -234,10 +234,10 @@ pub struct CrossEntropyLossBackward {
 macro_rules! cross_entropy_index_grad {
     ($name:ident, $ty:ty, $idx:ty) => {
         fn $name(probs: &[$ty], idx: &[$idx], classes: usize, scale: &[f64], out: &mut [$ty]) {
-            out.par_chunks_mut(classes)
-                .zip(probs.par_chunks(classes))
-                .enumerate()
-                .for_each(|(row, (o, p))| {
+            par_out_chunks(out, classes, &|start, o| {
+                let row = start / classes;
+                let p = &probs[start..start + o.len()];
+                {
                     let s = if scale.len() == 1 {
                         scale[0]
                     } else {
@@ -250,7 +250,8 @@ macro_rules! cross_entropy_index_grad {
                     if target < classes {
                         o[target] = ((p[target] as f64 - 1.0) * s) as $ty;
                     }
-                });
+                }
+            });
         }
     };
 }

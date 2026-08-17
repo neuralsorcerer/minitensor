@@ -7,12 +7,12 @@
 use super::*;
 use crate::autograd::RepeatInterleaveBackward;
 use crate::ops::map::build_vec;
+use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 fn expand_repeats(spec: RepeatInterleaveSpec<'_>, dim_size: usize) -> Result<Vec<usize>> {
@@ -138,25 +138,23 @@ pub fn repeat_interleave(
             // inner` elements.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    spare
-                        .par_chunks_mut(target_dim * inner)
-                        .enumerate()
-                        .for_each(|(outer_idx, out_chunk)| {
-                            let mut dst_offset = 0;
-                            let base = outer_idx * dim_size * inner;
-                            for (i, &rep) in reps.iter().enumerate() {
-                                if rep == 0 {
-                                    continue;
-                                }
-                                let src_start = base + i * inner;
-                                let src_slice = &src[src_start..src_start + inner];
-                                for _ in 0..rep {
-                                    let end = dst_offset + inner;
-                                    out_chunk[dst_offset..end].write_copy_of_slice(src_slice);
-                                    dst_offset = end;
-                                }
+                    let span = target_dim * inner;
+                    par_out_chunks(spare, span, &|start, out_chunk| {
+                        let mut dst_offset = 0;
+                        let base = (start / span) * dim_size * inner;
+                        for (i, &rep) in reps.iter().enumerate() {
+                            if rep == 0 {
+                                continue;
                             }
-                        });
+                            let src_start = base + i * inner;
+                            let src_slice = &src[src_start..src_start + inner];
+                            for _ in 0..rep {
+                                let end = dst_offset + inner;
+                                out_chunk[dst_offset..end].write_copy_of_slice(src_slice);
+                                dst_offset = end;
+                            }
+                        }
+                    });
                 })
             };
             TensorData::$from_vec(out, device)

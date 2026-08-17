@@ -13,12 +13,12 @@
 //! coordinates treated as padding rather than clamped.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::map::{par_out_chunks, par_out_chunks2};
 use crate::{
     autograd::{AvgPool2dBackward, MaxPool2dBackward},
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Output extent of a pooling axis, matching the convolution's formula.
@@ -114,12 +114,12 @@ macro_rules! max_pool2d_kernel {
             let mut values = vec![<$ty>::NAN; batch * channels * plane_out];
             let mut indices = vec![0i64; batch * channels * plane_out];
 
-            values
-                .par_chunks_mut(plane_out)
-                .zip(indices.par_chunks_mut(plane_out))
-                .enumerate()
-                .for_each(|(plane, (out_values, out_indices))| {
-                    let base = plane * plane_in;
+            par_out_chunks2(
+                &mut values,
+                &mut indices,
+                plane_out,
+                &|first, out_values, out_indices| {
+                    let base = (first / plane_out) * plane_in;
                     for oh in 0..out_h {
                         for ow in 0..out_w {
                             let mut best = <$ty>::NEG_INFINITY;
@@ -158,7 +158,8 @@ macro_rules! max_pool2d_kernel {
                             out_indices[slot] = best_index;
                         }
                     }
-                });
+                },
+            );
 
             Ok((values, indices))
         }
@@ -194,44 +195,41 @@ macro_rules! avg_pool2d_kernel {
             let plane_in = in_h * in_w;
             let mut values = vec![0 as $ty; batch * channels * plane_out];
 
-            values
-                .par_chunks_mut(plane_out)
-                .enumerate()
-                .for_each(|(plane, out_values)| {
-                    let base = plane * plane_in;
-                    for oh in 0..out_h {
-                        for ow in 0..out_w {
-                            let mut total = 0 as $ty;
-                            let mut counted = 0usize;
-                            for ky in 0..kernel.0 {
-                                let ih = oh * stride.0 + ky;
-                                let inside_h = ih >= padding.0 && ih < in_h + padding.0;
-                                for kx in 0..kernel.1 {
-                                    let iw = ow * stride.1 + kx;
-                                    let inside_w = iw >= padding.1 && iw < in_w + padding.1;
-                                    if inside_h && inside_w {
-                                        let offset = (ih - padding.0) * in_w + (iw - padding.1);
-                                        total += data[base + offset];
-                                        counted += 1;
-                                    }
+            par_out_chunks(&mut values, plane_out, &|first, out_values| {
+                let base = (first / plane_out) * plane_in;
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let mut total = 0 as $ty;
+                        let mut counted = 0usize;
+                        for ky in 0..kernel.0 {
+                            let ih = oh * stride.0 + ky;
+                            let inside_h = ih >= padding.0 && ih < in_h + padding.0;
+                            for kx in 0..kernel.1 {
+                                let iw = ow * stride.1 + kx;
+                                let inside_w = iw >= padding.1 && iw < in_w + padding.1;
+                                if inside_h && inside_w {
+                                    let offset = (ih - padding.0) * in_w + (iw - padding.1);
+                                    total += data[base + offset];
+                                    counted += 1;
                                 }
                             }
-                            // `count_include_pad` decides whether the padded
-                            // cells count towards the divisor.
-                            let divisor = if count_include_pad {
-                                kernel.0 * kernel.1
-                            } else {
-                                counted
-                            };
-                            let slot = oh * out_w + ow;
-                            out_values[slot] = if divisor == 0 {
-                                0 as $ty
-                            } else {
-                                total / divisor as $ty
-                            };
                         }
+                        // `count_include_pad` decides whether the padded
+                        // cells count towards the divisor.
+                        let divisor = if count_include_pad {
+                            kernel.0 * kernel.1
+                        } else {
+                            counted
+                        };
+                        let slot = oh * out_w + ow;
+                        out_values[slot] = if divisor == 0 {
+                            0 as $ty
+                        } else {
+                            total / divisor as $ty
+                        };
                     }
-                });
+                }
+            });
 
             Ok(values)
         }

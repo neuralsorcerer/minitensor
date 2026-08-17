@@ -5,8 +5,8 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::ops::map::par_out_chunks;
 use crate::tensor::{Shape, Strides};
-use rayon::prelude::*;
 
 /// Generic transpose implementation
 /// Transpose `input_data` (viewed as `input_shape`) into a fresh contiguous
@@ -36,7 +36,8 @@ pub(crate) fn transpose_map<T: Copy + Send + Sync>(
                         }
                     }
                 } else {
-                    spare.par_chunks_mut(rows).enumerate().for_each(|(j, col)| {
+                    par_out_chunks(spare, rows, &|start, col| {
+                        let j = start / rows;
                         for (i, slot) in col.iter_mut().enumerate() {
                             slot.write(input_data[i * cols + j]);
                         }

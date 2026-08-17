@@ -14,10 +14,10 @@ use crate::{
     ops::kernels::*,
     tensor::{DataType, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 pub(crate) use crate::ops::map::PAR_THRESHOLD;
+use crate::ops::map::par_out_chunks;
 use crate::ops::map::unary_map;
 
 /// Element-wise addition with broadcasting support
@@ -186,13 +186,12 @@ fn binary_assign_slices<T: Copy + Send + Sync>(
             *l = op(*l, r);
         }
     } else {
-        lhs.par_chunks_mut(CHUNK)
-            .zip(rhs.par_chunks(CHUNK))
-            .for_each(|(lhs_chunk, rhs_chunk)| {
-                for (l, &r) in lhs_chunk.iter_mut().zip(rhs_chunk.iter()) {
-                    *l = op(*l, r);
-                }
-            });
+        par_out_chunks(lhs, CHUNK, &|start, lhs_chunk| {
+            let rhs_chunk = &rhs[start..start + lhs_chunk.len()];
+            for (l, &r) in lhs_chunk.iter_mut().zip(rhs_chunk.iter()) {
+                *l = op(*l, r);
+            }
+        });
     }
 }
 

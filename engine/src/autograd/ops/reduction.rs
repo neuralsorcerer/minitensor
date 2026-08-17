@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use crate::ops::map::par_out_chunks;
 use crate::{
     error::{MinitensorError, Result},
     ops::util::create_scalar_tensor,
@@ -688,24 +689,21 @@ macro_rules! rms_norm_grad {
             let recip = 1.0 / norm as f64;
 
             if want_input {
-                grad_input
-                    .par_chunks_mut(norm)
-                    .zip(input.par_chunks(norm))
-                    .zip(grad.par_chunks(norm))
-                    .zip(inv_rms.par_iter())
-                    .for_each(|(((gi, row), g), &r)| {
-                        let r = r as f64;
-                        let mut dot = 0.0f64;
-                        for i in 0..norm {
-                            let w = weight.map_or(1.0, |w| w[i] as f64);
-                            dot += g[i] as f64 * w * row[i] as f64;
-                        }
-                        let coeff = r * r * dot * recip;
-                        for i in 0..norm {
-                            let w = weight.map_or(1.0, |w| w[i] as f64);
-                            gi[i] = (r * (g[i] as f64 * w - row[i] as f64 * coeff)) as $ty;
-                        }
-                    });
+                par_out_chunks(&mut grad_input, norm, &|start, gi| {
+                    let r = inv_rms[start / norm] as f64;
+                    let row = &input[start..start + norm];
+                    let g = &grad[start..start + norm];
+                    let mut dot = 0.0f64;
+                    for i in 0..norm {
+                        let w = weight.map_or(1.0, |w| w[i] as f64);
+                        dot += g[i] as f64 * w * row[i] as f64;
+                    }
+                    let coeff = r * r * dot * recip;
+                    for i in 0..norm {
+                        let w = weight.map_or(1.0, |w| w[i] as f64);
+                        gi[i] = (r * (g[i] as f64 * w - row[i] as f64 * coeff)) as $ty;
+                    }
+                });
             }
 
             let grad_weight = if want_weight {

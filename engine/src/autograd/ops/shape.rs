@@ -7,11 +7,10 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
-    ops::map::PAR_CHUNK,
+    ops::map::{PAR_CHUNK, par_out_chunks},
     ops::reduction,
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -56,10 +55,10 @@ where
     if out.len() < PAR_THRESHOLD {
         apply(out, grad_out, mask);
     } else {
-        out.par_chunks_mut(PAR_CHUNK)
-            .zip(grad_out.par_chunks(PAR_CHUNK))
-            .zip(mask.par_chunks(PAR_CHUNK))
-            .for_each(|((o, g), m)| apply(o, g, m));
+        par_out_chunks(out, PAR_CHUNK, &|start, o| {
+            let span = start..start + o.len();
+            apply(o, &grad_out[span.clone()], &mask[span]);
+        });
     }
 }
 
@@ -95,18 +94,17 @@ fn index_select_backward_grad(
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for index backward")
                 })?;
-                gi.par_chunks_mut(in_chunk)
-                    .enumerate()
-                    .for_each(|(o, gi_chunk)| {
-                        let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
-                        for (i, &idx) in indices.iter().enumerate() {
-                            let dst = idx * inner;
-                            let src = i * inner;
-                            for j in 0..inner {
-                                gi_chunk[dst + j] += go_chunk[src + j];
-                            }
+                par_out_chunks(gi, in_chunk, &|start, gi_chunk| {
+                    let o = start / in_chunk;
+                    let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
+                    for (i, &idx) in indices.iter().enumerate() {
+                        let dst = idx * inner;
+                        let src = i * inner;
+                        for j in 0..inner {
+                            gi_chunk[dst + j] += go_chunk[src + j];
                         }
-                    });
+                    }
+                });
             }};
         }
 
@@ -164,19 +162,18 @@ fn gather_backward_grad(
                 let gi = grad_data.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write grad for gather backward")
                 })?;
-                gi.par_chunks_mut(in_chunk)
-                    .enumerate()
-                    .for_each(|(o, gi_chunk)| {
-                        let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
-                        let idx_chunk = &index[o * out_chunk..(o + 1) * out_chunk];
-                        for i in 0..out_dim {
-                            for j in 0..inner {
-                                let pos = i * inner + j;
-                                let src_idx = idx_chunk[pos] as usize;
-                                gi_chunk[src_idx * inner + j] += go_chunk[pos];
-                            }
+                par_out_chunks(gi, in_chunk, &|start, gi_chunk| {
+                    let o = start / in_chunk;
+                    let go_chunk = &go[o * out_chunk..(o + 1) * out_chunk];
+                    let idx_chunk = &index[o * out_chunk..(o + 1) * out_chunk];
+                    for i in 0..out_dim {
+                        for j in 0..inner {
+                            let pos = i * inner + j;
+                            let src_idx = idx_chunk[pos] as usize;
+                            gi_chunk[src_idx * inner + j] += go_chunk[pos];
                         }
-                    });
+                    }
+                });
             }};
         }
 
@@ -611,27 +608,26 @@ pub(crate) fn repeat_interleave_backward_impl(
             })?;
             let mut dst = vec![<$ty>::default(); numel];
             let chunk = total_repeats * inner;
-            dst.par_chunks_mut(dim_size * inner)
-                .enumerate()
-                .for_each(|(outer_idx, dst_chunk)| {
-                    let mut src_offset = outer_idx * chunk;
-                    for (i, &rep) in repeats.iter().enumerate() {
-                        if rep == 0 {
-                            continue;
-                        }
-                        let dst_start = i * inner;
-                        let dst_slice = &mut dst_chunk[dst_start..dst_start + inner];
-                        for _ in 0..rep {
-                            let src_slice = &src[src_offset..src_offset + inner];
-                            dst_slice.iter_mut().zip(src_slice.iter()).for_each(
-                                |(dst_val, &src_val)| {
-                                    *dst_val += src_val;
-                                },
-                            );
-                            src_offset += inner;
-                        }
+            let span = dim_size * inner;
+            par_out_chunks(&mut dst, span, &|start, dst_chunk| {
+                let mut src_offset = (start / span) * chunk;
+                for (i, &rep) in repeats.iter().enumerate() {
+                    if rep == 0 {
+                        continue;
                     }
-                });
+                    let dst_start = i * inner;
+                    let dst_slice = &mut dst_chunk[dst_start..dst_start + inner];
+                    for _ in 0..rep {
+                        let src_slice = &src[src_offset..src_offset + inner];
+                        dst_slice.iter_mut().zip(src_slice.iter()).for_each(
+                            |(dst_val, &src_val)| {
+                                *dst_val += src_val;
+                            },
+                        );
+                        src_offset += inner;
+                    }
+                }
+            });
             TensorData::$from_vec(dst, device)
         }};
     }

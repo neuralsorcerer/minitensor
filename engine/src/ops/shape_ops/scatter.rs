@@ -5,13 +5,13 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::{ScatterAddBackward, ScatterBackward},
     error::{MinitensorError, Result},
     ops::util::normalize_dim,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Geometry shared by both scatter kernels, in the same terms `gather` uses:
@@ -171,19 +171,18 @@ fn scatter_impl(
                     // fixed order. That makes both kernels deterministic --
                     // including `scatter_add`, whose float accumulation would
                     // otherwise depend on how the work was scheduled.
-                    dst.par_chunks_mut(in_chunk)
-                        .enumerate()
-                        .for_each(|(o, dst_chunk)| {
-                            let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
-                            let upd = &updates[o * idx_chunk..(o + 1) * idx_chunk];
-                            for i in 0..layout.index_dim {
-                                for j in 0..inner {
-                                    let pos = i * inner + j;
-                                    let target = idx[pos] as usize * inner + j;
-                                    dst_chunk[target] = combine(dst_chunk[target], upd[pos]);
-                                }
+                    par_out_chunks(dst, in_chunk, &|start, dst_chunk| {
+                        let o = start / in_chunk;
+                        let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
+                        let upd = &updates[o * idx_chunk..(o + 1) * idx_chunk];
+                        for i in 0..layout.index_dim {
+                            for j in 0..inner {
+                                let pos = i * inner + j;
+                                let target = idx[pos] as usize * inner + j;
+                                dst_chunk[target] = combine(dst_chunk[target], upd[pos]);
                             }
-                        });
+                        }
+                    });
                 }
             }
             out
@@ -311,24 +310,23 @@ pub(crate) fn gather_grad_for_src(
                 let dst = out.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write scatter source gradient")
                 })?;
-                dst.par_chunks_mut(idx_chunk)
-                    .enumerate()
-                    .for_each(|(o, dst_chunk)| {
-                        let g_chunk = &g[o * in_chunk..(o + 1) * in_chunk];
-                        let idx = &indices[o * idx_chunk..(o + 1) * idx_chunk];
-                        let win = keep.map(|w| &w[o * in_chunk..(o + 1) * in_chunk]);
-                        for i in 0..index_dim {
-                            for j in 0..inner {
-                                let pos = i * inner + j;
-                                let target = idx[pos] as usize * inner + j;
-                                // An overwritten writer contributed nothing to
-                                // the output, so it earns no gradient.
-                                if win.is_none_or(|w| w[target] == i) {
-                                    dst_chunk[pos] = g_chunk[target];
-                                }
+                par_out_chunks(dst, idx_chunk, &|start, dst_chunk| {
+                    let o = start / idx_chunk;
+                    let g_chunk = &g[o * in_chunk..(o + 1) * in_chunk];
+                    let idx = &indices[o * idx_chunk..(o + 1) * idx_chunk];
+                    let win = keep.map(|w| &w[o * in_chunk..(o + 1) * in_chunk]);
+                    for i in 0..index_dim {
+                        for j in 0..inner {
+                            let pos = i * inner + j;
+                            let target = idx[pos] as usize * inner + j;
+                            // An overwritten writer contributed nothing to
+                            // the output, so it earns no gradient.
+                            if win.is_none_or(|w| w[target] == i) {
+                                dst_chunk[pos] = g_chunk[target];
                             }
                         }
-                    });
+                    }
+                });
             }};
         }
 

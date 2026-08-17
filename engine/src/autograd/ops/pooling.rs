@@ -13,11 +13,11 @@
 
 use super::*;
 use crate::ops::conv::ConvScalar;
+use crate::ops::map::par_out_chunks;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -59,17 +59,15 @@ macro_rules! max_pool_backward {
             let plane_out = if planes == 0 { 0 } else { go.len() / planes };
 
             let mut grad = vec![0 as $ty; planes * plane_in];
-            grad.par_chunks_mut(plane_in)
-                .enumerate()
-                .for_each(|(plane, grad_plane)| {
-                    let start = plane * plane_out;
-                    for slot in 0..plane_out {
-                        let offset = indices[start + slot];
-                        if offset >= 0 {
-                            grad_plane[offset as usize] += go[start + slot];
-                        }
+            par_out_chunks(&mut grad, plane_in, &|first, grad_plane| {
+                let start = (first / plane_in) * plane_out;
+                for slot in 0..plane_out {
+                    let offset = indices[start + slot];
+                    if offset >= 0 {
+                        grad_plane[offset as usize] += go[start + slot];
                     }
-                });
+                }
+            });
 
             Ok(TensorData::$from_vec(grad, grad_output.device()))
         }
@@ -136,10 +134,9 @@ macro_rules! avg_pool_backward {
             let planes = input_shape[0] * input_shape[1];
 
             let mut grad = vec![0 as $ty; planes * plane_in];
-            grad.par_chunks_mut(plane_in)
-                .enumerate()
-                .for_each(|(plane, grad_plane)| {
-                    let start = plane * plane_out;
+            par_out_chunks(&mut grad, plane_in, &|first, grad_plane| {
+                let start = (first / plane_in) * plane_out;
+                {
                     for oh in 0..out_h {
                         for ow in 0..out_w {
                             // Recompute the divisor the forward pass used, so an
@@ -185,7 +182,8 @@ macro_rules! avg_pool_backward {
                             }
                         }
                     }
-                });
+                }
+            });
 
             Ok(TensorData::$from_vec(grad, grad_output.device()))
         }
@@ -309,7 +307,8 @@ impl Conv2dBackward {
         // the layout both weight- and input-gradient GEMMs contract against.
         let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
             let mut gm = vec![T::default(); out_channels * n_ohw];
-            gm.par_chunks_mut(n_ohw).enumerate().for_each(|(oc, row)| {
+            par_out_chunks(&mut gm, n_ohw, &|start, row| {
+                let oc = start / n_ohw;
                 for n in 0..batch {
                     let src = (n * out_channels + oc) * ohw;
                     row[n * ohw..n * ohw + ohw].copy_from_slice(&go[src..src + ohw]);
@@ -350,10 +349,9 @@ impl Conv2dBackward {
                 // im2col does the same: recovering `(oh, ow)` from a flat `p`
                 // cost two runtime-divisor divisions per element, over 4.7M
                 // elements for a 16x32x32x32 conv.
-                grad_input
-                    .par_chunks_mut(in_stride)
-                    .enumerate()
-                    .for_each(|(n, gi)| {
+                par_out_chunks(&mut grad_input, in_stride, &|start, gi| {
+                    let n = start / in_stride;
+                    {
                         for k in 0..k_dim {
                             let ic = k / kh_kw;
                             let rem = k % kh_kw;
@@ -377,7 +375,8 @@ impl Conv2dBackward {
                                 }
                             }
                         }
-                    });
+                    }
+                });
             }
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_input, device)),
@@ -399,9 +398,9 @@ impl Conv2dBackward {
                 // `k` is walked as nested (ic, ky, kx) loops rather than
                 // decomposed: three divisions per element, and this buffer has
                 // the same 4.7M elements as the one above.
-                cols.par_chunks_mut(k_dim)
-                    .enumerate()
-                    .for_each(|(r, prow)| {
+                par_out_chunks(&mut cols, k_dim, &|start, prow| {
+                    let r = start / k_dim;
+                    {
                         let n = r / ohw;
                         let p = r % ohw;
                         let oh = p / out_w;
@@ -422,7 +421,8 @@ impl Conv2dBackward {
                                 }
                             }
                         }
-                    });
+                    }
+                });
                 // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
                 // grad_weight is [C_out, K]; all contiguous row-major, dims match.
                 unsafe {
@@ -451,7 +451,7 @@ impl Conv2dBackward {
             && let Some(bias_id) = self.bias_id
         {
             let mut grad_bias = vec![T::default(); out_channels];
-            grad_bias.par_iter_mut().enumerate().for_each(|(oc, gb)| {
+            par_out_chunks(&mut grad_bias, 1, &|oc, gb| {
                 let mut sum = T::default();
                 for n in 0..batch {
                     let base = (n * out_channels + oc) * out_h * out_w;
@@ -459,7 +459,7 @@ impl Conv2dBackward {
                         sum += go[base + k];
                     }
                 }
-                *gb = sum;
+                gb[0] = sum;
             });
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_bias, device)),

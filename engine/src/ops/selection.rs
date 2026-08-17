@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::autograd::with_grad_fn;
+use crate::ops::map::par_out_chunks;
 use crate::{
     autograd::WhereBackward,
     device::Device,
@@ -12,7 +13,6 @@ use crate::{
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -424,10 +424,7 @@ fn where_map<T: Copy + Send + Sync>(
                 if numel < BINARY_PAR_THRESHOLD {
                     fill_chunk(0, spare);
                 } else {
-                    spare
-                        .par_chunks_mut(PAR_CHUNK)
-                        .enumerate()
-                        .for_each(|(ci, chunk)| fill_chunk(ci * PAR_CHUNK, chunk));
+                    par_out_chunks(spare, PAR_CHUNK, &fill_chunk);
                 }
                 Ok(())
             })
@@ -509,10 +506,7 @@ fn where_map<T: Copy + Send + Sync>(
             if numel < BINARY_PAR_THRESHOLD {
                 fill_chunk(0, spare);
             } else {
-                spare
-                    .par_chunks_mut(PAR_CHUNK)
-                    .enumerate()
-                    .for_each(|(ci, chunk)| fill_chunk(ci * PAR_CHUNK, chunk));
+                par_out_chunks(spare, PAR_CHUNK, &fill_chunk);
             }
             Ok(())
         })

@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::map::par_out_chunks;
 use crate::ops::map::{
     BINARY_PAR_THRESHOLD, PAR_CHUNK, SIMD_PAR_CHUNK, SIMD_PAR_THRESHOLD, binary_map,
     binary_map_blocks_threshold, build_vec_with, unary_map_threshold,
@@ -13,7 +14,6 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use smallvec::SmallVec;
 use smallvec::smallvec;
 use std::convert::Infallible;
@@ -547,16 +547,13 @@ where
     let rows_per_chunk = (PAR_CHUNK / inner).max(1);
     let chunk_len = rows_per_chunk * inner;
     let fill = |spare: &mut [std::mem::MaybeUninit<U>]| {
-        spare
-            .par_chunks_mut(chunk_len)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| {
-                let first_row = chunk_idx * rows_per_chunk;
-                for (local, out_row) in out_chunk.chunks_mut(inner).enumerate() {
-                    let (lhs_base, rhs_base) = row_bases(first_row + local);
-                    fill_row(out_row, lhs_base, rhs_base);
-                }
-            });
+        par_out_chunks(spare, chunk_len, &|start, out_chunk| {
+            let first_row = (start / chunk_len) * rows_per_chunk;
+            for (local, out_row) in out_chunk.chunks_mut(inner).enumerate() {
+                let (lhs_base, rhs_base) = row_bases(first_row + local);
+                fill_row(out_row, lhs_base, rhs_base);
+            }
+        });
         Ok(())
     };
     // SAFETY: the chunks partition the spare slice into whole rows and every

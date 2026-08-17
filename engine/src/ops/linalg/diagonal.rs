@@ -6,13 +6,13 @@
 
 use super::*;
 use crate::autograd::TransposeBackward;
+use crate::ops::map::par_out_chunks;
 use crate::ops::reduction;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Transpose operation with gradient support
@@ -348,10 +348,7 @@ fn triangular_mask_map<T: Copy + Default + Send + Sync>(
                     fill_row(row_idx, row);
                 }
             } else {
-                spare
-                    .par_chunks_mut(cols)
-                    .enumerate()
-                    .for_each(|(row_idx, row)| fill_row(row_idx, row));
+                par_out_chunks(spare, cols, &|start, row| fill_row(start / cols, row));
             }
             Ok(())
         })
@@ -509,22 +506,18 @@ where
             mul_row(out_row, &lhs_data[i * k..i * k + k], rhs_data);
         }
     } else {
-        output_data
-            .par_chunks_mut(m * n)
-            .enumerate()
-            .for_each(|(b, chunk)| {
-                let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
-                let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
-                // Rows within a batch are independent too, so split them as
-                // well; a single-batch call would otherwise leave every core
-                // but one idle.
-                chunk
-                    .par_chunks_mut(n)
-                    .enumerate()
-                    .for_each(|(i, out_row)| {
-                        mul_row(out_row, &lhs_batch[i * k..i * k + k], rhs_batch);
-                    });
+        par_out_chunks(output_data, m * n, &|start, chunk| {
+            let b = start / (m * n);
+            let lhs_batch = &lhs_data[b * m * k..(b + 1) * m * k];
+            let rhs_batch = &rhs_data[b * k * n..(b + 1) * k * n];
+            // Rows within a batch are independent too, so split them as
+            // well; a single-batch call would otherwise leave every core
+            // but one idle.
+            par_out_chunks(chunk, n, &|row_start, out_row| {
+                let i = row_start / n;
+                mul_row(out_row, &lhs_batch[i * k..i * k + k], rhs_batch);
             });
+        });
     }
 
     Ok(())
@@ -565,16 +558,14 @@ fn optimized_matmul_f32(
     } else if batch >= rayon::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.
-        output_data
-            .par_chunks_mut(m * n)
-            .enumerate()
-            .for_each(|(b, chunk)| {
-                let a = &lhs_data[b * m * k..(b + 1) * m * k];
-                let r = &rhs_data[b * k * n..(b + 1) * k * n];
-                unsafe {
-                    gemm_serial_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
-                }
-            });
+        par_out_chunks(output_data, m * n, &|start, chunk| {
+            let b = start / (m * n);
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+            unsafe {
+                gemm_serial_f32(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+            }
+        });
     } else {
         // Too few batch elements to keep every thread busy; walk them in turn
         // and let each product split itself.
@@ -625,16 +616,14 @@ fn optimized_matmul_f64(
     } else if batch >= rayon::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.
-        output_data
-            .par_chunks_mut(m * n)
-            .enumerate()
-            .for_each(|(b, chunk)| {
-                let a = &lhs_data[b * m * k..(b + 1) * m * k];
-                let r = &rhs_data[b * k * n..(b + 1) * k * n];
-                unsafe {
-                    gemm_serial_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
-                }
-            });
+        par_out_chunks(output_data, m * n, &|start, chunk| {
+            let b = start / (m * n);
+            let a = &lhs_data[b * m * k..(b + 1) * m * k];
+            let r = &rhs_data[b * k * n..(b + 1) * k * n];
+            unsafe {
+                gemm_serial_f64(m, k, n, a.as_ptr(), r.as_ptr(), chunk.as_mut_ptr());
+            }
+        });
     } else {
         // Too few batch elements to keep every thread busy; walk them in turn
         // and let each product split itself.
