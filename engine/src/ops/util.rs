@@ -210,13 +210,24 @@ where
     }
     let block = RUN_SUM_CHUNK;
 
-    let mut partials: Vec<Vec<T>> = (0..dim_size)
+    let partials: Vec<Vec<T>> = (0..dim_size)
         .step_by(block)
         .map(|start| fill(start, (start + block).min(dim_size)))
         .collect();
 
-    // `pairwise_fold` wants `Copy`, which a `Vec` is not, so the same halving
-    // is spelled out here over owned buffers.
+    pairwise_fold_vectors(partials, |a, b| a + b)
+}
+
+/// [`pairwise_fold`] over owned accumulator *vectors*.
+///
+/// `pairwise_fold` wants `Copy`, which a `Vec` is not, so the same halving is
+/// spelled out here and moves buffers instead of copying them. `merge` joins
+/// two accumulators elementwise.
+pub(crate) fn pairwise_fold_vectors<A: Copy>(
+    mut partials: Vec<Vec<A>>,
+    merge: impl Fn(A, A) -> A,
+) -> Vec<A> {
+    debug_assert!(!partials.is_empty());
     let mut len = partials.len();
     while len > 1 {
         let mut write = 0;
@@ -224,7 +235,7 @@ where
         while read + 1 < len {
             let (left, right) = partials.split_at_mut(read + 1);
             for (a, &b) in left[read].iter_mut().zip(right[0].iter()) {
-                *a = *a + b;
+                *a = merge(*a, b);
             }
             partials.swap(write, read);
             write += 1;

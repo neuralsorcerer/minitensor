@@ -9,7 +9,9 @@ use crate::ops::map::{
     par_out_chunks,
 };
 use crate::ops::simd::*;
-use crate::ops::util::{Accumulate, accumulating_dtype, accurate_run_sum};
+use crate::ops::util::{
+    Accumulate, RUN_SUM_CHUNK, accumulating_dtype, accurate_run_sum, pairwise_fold_vectors,
+};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -41,12 +43,17 @@ const DIM0_MIN_BANDS: usize = 4;
 /// floating point that changes the rounding, so the same program produced
 /// different sums on machines with different core counts.
 ///
-/// Note what the block width does *not* affect: every output element still
-/// accumulates rows `0..rows` in index order whatever the partition, so the
-/// result is identical for any block size. That leaves the width free to be
-/// chosen purely for locality -- one wide contiguous run per thread rather than
-/// many narrow interleaved ones -- including from the thread count, without
-/// costing reproducibility.
+/// Note what the *column-band* width does not affect: on that path every output
+/// element still accumulates rows `0..rows` in index order whatever the
+/// partition, so the result is identical for any block size. That leaves the
+/// width free to be chosen purely for locality -- one wide contiguous run per
+/// thread rather than many narrow interleaved ones -- including from the thread
+/// count, without costing reproducibility.
+///
+/// The *row-band* path is the other way round: there the partition decides how
+/// the partial sums are grouped, so its layout is fixed by the row count alone,
+/// and within a band the rows are blocked and folded pairwise for accuracy
+/// rather than run into a single total.
 ///
 /// `combine` folds one input value into an accumulator and `merge` joins two
 /// accumulators. They are separate because the two are no longer the same
@@ -84,24 +91,39 @@ fn reduce_along_dim0<I, A, F, M>(
         // inside the band body, so the accumulate loop still inlines and
         // vectorizes. Erasing it here instead would put an indirect call on
         // every element.
+        //
+        // Inside a band the rows are blocked and the blocks folded pairwise,
+        // rather than run into one total. A band is up to `rows / 64` rows
+        // wide, so on a few million rows it was a chain of tens of thousands of
+        // roundings: summing four million squares two columns wide measured
+        // 7.5e-6 relative, where the same values through a contiguous
+        // `accurate_run_sum` give about 3e-7. It only shows on summands with a
+        // wide relative spread -- uniform values in [0.5, 1.5] hid it at 3.5e-7
+        // and sent me looking in the wrong place -- but a sum of squares, which
+        // is what `var` and `norm` feed through here, has exactly that spread.
         let partials: Vec<Vec<A>> = par_map_indexed(bands, &|index| {
             let start = index * band;
             let end = ((index + 1) * band).min(rows);
-            let mut acc = vec![init; cols];
-            for row in input[start * cols..end * cols].chunks_exact(cols) {
-                for (slot, &value) in acc.iter_mut().zip(row) {
-                    *slot = combine(*slot, value);
-                }
-            }
-            acc
+            let blocks: Vec<Vec<A>> = (start..end)
+                .step_by(RUN_SUM_CHUNK)
+                .map(|from| {
+                    let to = (from + RUN_SUM_CHUNK).min(end);
+                    let mut acc = vec![init; cols];
+                    for row in input[from * cols..to * cols].chunks_exact(cols) {
+                        for (slot, &value) in acc.iter_mut().zip(row) {
+                            *slot = combine(*slot, value);
+                        }
+                    }
+                    acc
+                })
+                .collect();
+            pairwise_fold_vectors(blocks, merge)
         });
 
-        out.copy_from_slice(&partials[0]);
-        for partial in &partials[1..] {
-            for (slot, &value) in out.iter_mut().zip(partial) {
-                *slot = merge(*slot, value);
-            }
-        }
+        // The bands merge pairwise too; a running fold over them was a second,
+        // shorter chain of the same kind.
+        let total = pairwise_fold_vectors(partials, merge);
+        out.copy_from_slice(&total);
         return;
     }
 

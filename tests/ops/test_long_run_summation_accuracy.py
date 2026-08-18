@@ -130,3 +130,68 @@ def test_integer_runs_are_untouched(dtype):
     expected = int(values.astype(np.int64).sum())
     assert t.sum().item() == expected
     assert t.sum(0).item() == expected
+
+
+# --- reducing dimension zero ------------------------------------------------
+
+
+def _wide_spread(rows, cols, seed=21):
+    """Summands whose magnitudes span orders of magnitude.
+
+    This is what a sum of squares looks like -- most terms small, a few large --
+    and it is the shape that exposes a running total. Uniform values in
+    [0.5, 1.5] do not: they hid this defect at 3.5e-7 while the same reduction
+    over squares was at 7.5e-6, and measuring with them alone led me to
+    conclude, wrongly, that there was nothing here to fix.
+    """
+    rng = np.random.default_rng(seed)
+    return ((rng.standard_normal((rows, cols)) * 3) ** 2).astype(np.float32)
+
+
+@pytest.mark.parametrize("rows,cols", [(500_000, 4), (2_000_000, 2), (4_000_000, 1)])
+def test_reducing_dimension_zero_does_not_degrade_with_row_count(rows, cols):
+    """`sum(dim=0)` bands the rows for parallelism, and a band can be tens of
+    thousands of rows wide. Blocking within the band keeps the error flat."""
+    values = _wide_spread(rows, cols)
+    exact = values.astype(np.float64).sum(axis=0)
+    got = mt.Tensor(values, dtype="float32").sum(0).numpy()
+
+    error = float(np.abs(got.astype(np.float64) - exact).max() / np.abs(exact).max())
+    assert error < 1e-5, f"{rows}x{cols} error {error:.3e}"
+
+
+@pytest.mark.parametrize("rows,cols", [(500_000, 4), (2_000_000, 2)])
+def test_reducing_dimension_zero_is_no_worse_than_numpy(rows, cols):
+    values = _wide_spread(rows, cols, seed=23)
+    exact = values.astype(np.float64).sum(axis=0)
+
+    def rel(v):
+        return float(
+            np.abs(np.asarray(v, np.float64) - exact).max() / np.abs(exact).max()
+        )
+
+    assert rel(mt.Tensor(values, dtype="float32").sum(0).numpy()) <= rel(
+        values.sum(axis=0)
+    )
+
+
+@pytest.mark.parametrize("rows,cols", [(500_000, 4), (2_000_000, 2)])
+def test_var_agrees_across_paths_when_reducing_dimension_zero(rows, cols):
+    """The composed path sums through `sum(dim=0)` and the fused one does not,
+    so this is where the two could drift apart again."""
+    values = _wide_spread(rows, cols, seed=27)
+    exact = values.astype(np.float64).var(axis=0, ddof=1)
+
+    def rel(v):
+        return float(
+            np.abs(np.asarray(v, np.float64) - exact).max() / np.abs(exact).max()
+        )
+
+    fused = rel(mt.Tensor(values, dtype="float32").var(dim=0).numpy())
+    composed = rel(
+        mt.Tensor(values, dtype="float32", requires_grad=True).var(dim=0).numpy()
+    )
+    assert (
+        fused < 1e-5 and composed < 1e-5
+    ), f"fused {fused:.3e} composed {composed:.3e}"
+    assert composed < 100 * max(fused, 1e-9)
