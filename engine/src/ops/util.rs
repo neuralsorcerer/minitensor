@@ -15,6 +15,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use std::ops::Range;
 use std::sync::Arc;
 
 /// Resolve a possibly negative dimension index against `ndim`, erroring when
@@ -169,20 +170,84 @@ impl_accumulate_float!(f64);
 impl_accumulate_int!(i32);
 impl_accumulate_int!(i64);
 
+/// Sum `count` terms produced by `term(k)`, blocked and folded pairwise.
+///
+/// [`accurate_run_sum`] for sequences that are not a slice: a strided walk down
+/// a column, a masked subset, or terms computed on the fly. It also takes the
+/// zero explicitly rather than through `Default`, which is what lets the
+/// softmax kernels use it -- they are generic over `num_traits::Float`, and
+/// `Float` does not imply `Default`.
+///
+/// Its blocks are `RUN_SUM_CHUNK / 8`, because it can afford them: the partials
+/// here are single values, so a million terms leave 976 of them rather than the
+/// 976 *vectors* that made a small block ruinous for [`accurate_slab_sum`].
+/// Eight times shorter blocks means eight times shorter runs inside a lane, and
+/// that is the whole remaining error -- it took `softmax` over a million-class
+/// axis from 6.9e-7 to 2.5e-8, which is NumPy's own figure to the digit, and
+/// measured no slower on any shape.
+#[inline]
+pub(crate) fn accurate_indexed_sum<U>(count: usize, zero: U, mut term: impl FnMut(usize) -> U) -> U
+where
+    U: Copy + std::ops::Add<Output = U>,
+{
+    /// Eight independent chains rather than one, the same split `simd_sum_f32`
+    /// uses. It divides the dependent chain -- and so the error growth -- by
+    /// eight, and lets the loop vectorize where a single accumulator cannot.
+    #[inline(always)]
+    fn run<U, F>(from: usize, to: usize, zero: U, term: &mut F) -> U
+    where
+        U: Copy + std::ops::Add<Output = U>,
+        F: FnMut(usize) -> U,
+    {
+        const LANES: usize = 8;
+        let mut lanes = [zero; LANES];
+        let whole = from + (to - from) / LANES * LANES;
+        let mut k = from;
+        while k < whole {
+            for (lane, slot) in lanes.iter_mut().enumerate() {
+                *slot = *slot + term(k + lane);
+            }
+            k += LANES;
+        }
+        let mut acc = zero;
+        for slot in lanes {
+            acc = acc + slot;
+        }
+        while k < to {
+            acc = acc + term(k);
+            k += 1;
+        }
+        acc
+    }
+
+    const BLOCK: usize = RUN_SUM_CHUNK / 8;
+    if count <= BLOCK {
+        return run(0, count, zero, &mut term);
+    }
+    let partials: Vec<U> = (0..count)
+        .step_by(BLOCK)
+        .map(|from| run(from, (from + BLOCK).min(count), zero, &mut term))
+        .collect();
+    pairwise_fold(partials, zero, |a, b| a + b)
+}
+
 /// Accumulate `inner` parallel totals across `dim_size` slab steps, with the
 /// error growth of a pairwise fold rather than a running sum.
 ///
 /// The slab form of [`accurate_run_sum`], for the reductions whose axis is not
 /// the last one: `out[r] += f(input[k][r])` for every `r` at once. The running
 /// totals are a vector rather than a scalar, so the chunk partials are vectors
-/// too -- but only `numel / RUN_SUM_CHUNK` values in total, because a block
-/// covers a fixed number of *elements* rather than a fixed number of steps.
-/// A four-million-element slab needs about 488 extra floats.
+/// too -- but only `dim_size / RUN_SUM_CHUNK` of them.
 ///
 /// `add_step(k, acc)` folds step `k` of the reduced axis into `acc`, which is
 /// `inner` wide. It is called once per `(block, k)` and never sees a block
 /// boundary, so a caller that reads `input[base + k * inner ..]` is unaffected
 /// by the blocking.
+///
+/// A kernel that also *writes* while it accumulates cannot use this: handing
+/// the output to the closure captures it by unique borrow, and reloading that
+/// borrow per step cost 12% on `softmax(dim=0)`. Those drive [`slab_blocks`]
+/// themselves, which is the same blocking with the loop left to the caller.
 pub(crate) fn accurate_slab_sum<T>(
     dim_size: usize,
     inner: usize,
@@ -192,30 +257,36 @@ pub(crate) fn accurate_slab_sum<T>(
 where
     T: Copy + std::ops::Add<Output = T>,
 {
-    // Blocks are counted in *steps*, not elements. Counting elements made the
-    // block eight steps wide for a 1024-wide slab, which is 256 partial vectors
-    // for a 2048-step axis that never needed splitting -- 48% slower on
-    // `var(dim=0)` of a 2048x1024 tensor for no accuracy anyone could measure.
-    // Counting steps also bounds the partials at `slab_numel / RUN_SUM_CHUNK`
-    // whatever `inner` is, because a wider slab has proportionally fewer steps.
-    let mut fill = |from: usize, to: usize| {
+    let mut partials: Vec<Vec<T>> = Vec::new();
+    for steps in slab_blocks(dim_size) {
         let mut acc = vec![zero; inner];
-        for k in from..to {
+        for k in steps {
             add_step(k, &mut acc);
         }
-        acc
-    };
-    if dim_size <= RUN_SUM_CHUNK {
-        return fill(0, dim_size);
+        partials.push(acc);
     }
-    let block = RUN_SUM_CHUNK;
-
-    let partials: Vec<Vec<T>> = (0..dim_size)
-        .step_by(block)
-        .map(|start| fill(start, (start + block).min(dim_size)))
-        .collect();
-
+    if partials.is_empty() {
+        return vec![zero; inner];
+    }
     pairwise_fold_vectors(partials, |a, b| a + b)
+}
+
+/// The step ranges [`accurate_slab_sum`] accumulates into one partial each.
+///
+/// Blocks are counted in *steps*, not elements. Counting elements made the
+/// block eight steps wide for a 1024-wide slab, which is 256 partial vectors
+/// for a 2048-step axis that never needed splitting -- 48% slower on
+/// `var(dim=0)` of a 2048x1024 tensor for no accuracy anyone could measure.
+/// Counting steps also bounds the partials at `slab_numel / RUN_SUM_CHUNK`
+/// whatever the slab width is, because a wider slab has proportionally fewer
+/// steps.
+///
+/// An axis short enough to need no splitting yields exactly one range, so a
+/// caller looping over these does the single-block walk with no extra test.
+pub(crate) fn slab_blocks(dim_size: usize) -> impl Iterator<Item = Range<usize>> {
+    (0..dim_size)
+        .step_by(RUN_SUM_CHUNK)
+        .map(move |start| start..(start + RUN_SUM_CHUNK).min(dim_size))
 }
 
 /// [`pairwise_fold`] over owned accumulator *vectors*.

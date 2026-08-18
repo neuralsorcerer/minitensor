@@ -760,7 +760,7 @@ pub fn log_softmax(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTenso
     tensor.log_softmax(dim)
 }
 
-/// `softmax` over the positions `mask` selects, with the rest excluded from the normalization rather than zeroed after it.
+/// `softmax` over the positions `mask` leaves alone: a true entry is excluded from the max and the sum -- not zeroed after normalizing -- and comes out 0.
 #[pyfunction]
 #[pyo3(signature = (input, mask, dim=None))]
 pub fn masked_softmax(

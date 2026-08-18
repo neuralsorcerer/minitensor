@@ -8,7 +8,10 @@ use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
 use crate::ops::map::par_out_chunks;
-use crate::ops::util::{broadcast_mask_index, stable_sigmoid_f64};
+use crate::ops::util::{
+    accurate_indexed_sum, accurate_slab_sum, broadcast_mask_index, pairwise_fold_vectors,
+    slab_blocks, stable_sigmoid_f64,
+};
 use crate::tensor::DataType;
 use crate::tensor::Shape;
 use crate::tensor::Strides;
@@ -401,9 +404,10 @@ fn mask_strides_for(tensor_shape: &Shape, mask_shape: &Shape) -> Option<(Strides
 /// The softmax dimension is the outer (row) index. Processing the block one
 /// contiguous row at a time with `after`-sized max/sum accumulators makes every
 /// memory access sequential, unlike the naive per-column loop which strides by
-/// `after` on every element. Numerically identical to the strided version: the
-/// per-column max is order-independent and the per-column sum accumulates rows
-/// in the same order.
+/// `after` on every element. The per-column max is order-independent, so it is
+/// exactly the strided version's; the per-column sums walk the rows in the same
+/// order but add them up in blocks (see [`slab_blocks`]), which is the only
+/// reason this is more accurate than a strided walk rather than identical to it.
 fn softmax_block_columnwise<T: Float>(
     in_block: &[T],
     out_block: &mut [T],
@@ -420,23 +424,38 @@ fn softmax_block_columnwise<T: Float>(
             }
         }
     }
-    let mut col_sum = vec![T::zero(); after];
-    for k in 0..dim_size {
-        let in_row = &in_block[k * after..k * after + after];
-        let out_row = &mut out_block[k * after..k * after + after];
-        for a in 0..after {
-            let m = col_max[a];
-            // A column whose max is -inf is all -inf (or empty); emit 0, matching
-            // the contiguous path's negative-infinity short-circuit.
-            let e = if m == neg_inf {
-                T::zero()
-            } else {
-                (in_row[a] - m).exp()
-            };
-            out_row[a] = e;
-            col_sum[a] = col_sum[a] + e;
+    // The column sums are the slab form of the same accuracy problem, and they
+    // are filled in the pass that writes the exponentials: each `exp` is
+    // computed once, stored, and added. Splitting the two apart costs the whole
+    // kernel again -- recomputing `exp` for the sum ran 64% slower on
+    // `softmax(dim=0)` of a 500000x3 tensor, and reading the stored value back
+    // in a second pass 26%.
+    let mut partials: Vec<Vec<T>> = Vec::new();
+    for steps in slab_blocks(dim_size) {
+        let mut acc = vec![T::zero(); after];
+        for k in steps {
+            let in_row = &in_block[k * after..k * after + after];
+            let out_row = &mut out_block[k * after..k * after + after];
+            for a in 0..after {
+                let m = col_max[a];
+                // A column whose max is -inf is all -inf (or empty); emit 0,
+                // matching the contiguous path's negative-infinity
+                // short-circuit, and let the zero drop out of the sum.
+                let e = if m == neg_inf {
+                    T::zero()
+                } else {
+                    (in_row[a] - m).exp()
+                };
+                out_row[a] = e;
+                acc[a] = acc[a] + e;
+            }
         }
+        partials.push(acc);
     }
+    if partials.is_empty() {
+        return;
+    }
+    let col_sum = pairwise_fold_vectors(partials, |a, b| a + b);
     for k in 0..dim_size {
         let out_row = &mut out_block[k * after..k * after + after];
         for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
@@ -474,12 +493,14 @@ fn softmax_core<T: Float + Send + Sync>(
                 out_block.fill(T::zero());
                 return;
             }
-            let mut sum = T::zero();
             for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                let e = (v - max_val).exp();
-                *o = e;
-                sum = sum + e;
+                *o = (v - max_val).exp();
             }
+            // Blocked: a running total over a long axis loses the small terms,
+            // and every term here but the largest *is* small. Over a 250k-class
+            // vocabulary the probabilities came back summing to 1.0004 rather
+            // than 1, at 4.2e-4 relative error against NumPy's 1.0e-7.
+            let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
             for o in out_block.iter_mut() {
                 *o = *o / sum;
             }
@@ -553,17 +574,15 @@ fn masked_softmax_core<T: Float + Send + Sync>(
                 }
                 continue;
             }
-            let mut sum = T::zero();
             for k in 0..dim_size {
                 let idx = base + k * after;
-                if is_masked(block_offset + idx) {
-                    out_block[idx] = T::zero();
+                out_block[idx] = if is_masked(block_offset + idx) {
+                    T::zero()
                 } else {
-                    let e = (in_block[idx] - max_val).exp();
-                    out_block[idx] = e;
-                    sum = sum + e;
-                }
+                    (in_block[idx] - max_val).exp()
+                };
             }
+            let sum = accurate_indexed_sum(dim_size, T::zero(), |k| out_block[base + k * after]);
             if sum != T::zero() {
                 for k in 0..dim_size {
                     let idx = base + k * after;
@@ -664,10 +683,8 @@ fn log_softmax_core<T: Float + Send + Sync>(
                 out_block.fill(neg_inf);
                 return;
             }
-            let mut sum = T::zero();
-            for &v in in_block.iter() {
-                sum = sum + (v - max_val).exp();
-            }
+            let sum =
+                accurate_indexed_sum(in_block.len(), T::zero(), |k| (in_block[k] - max_val).exp());
             let logsum = sum.ln() + max_val;
             for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
                 *o = v - logsum;
@@ -685,16 +702,15 @@ fn log_softmax_core<T: Float + Send + Sync>(
                     }
                 }
             }
-            let mut col_sum = vec![T::zero(); after];
-            for k in 0..dim_size {
+            let col_sum = accurate_slab_sum(dim_size, after, T::zero(), |k, acc: &mut [T]| {
                 let in_row = &in_block[k * after..k * after + after];
                 for a in 0..after {
                     let m = col_logsum[a];
                     if m != neg_inf {
-                        col_sum[a] = col_sum[a] + (in_row[a] - m).exp();
+                        acc[a] = acc[a] + (in_row[a] - m).exp();
                     }
                 }
-            }
+            });
             // Fold each column's max into log(sum) + max; -inf columns stay
             // -inf so their outputs are all -inf.
             for a in 0..after {
@@ -779,13 +795,14 @@ fn masked_log_softmax_core<T: Float + Send + Sync>(
                 }
                 continue;
             }
-            let mut sum = T::zero();
-            for k in 0..dim_size {
+            let sum = accurate_indexed_sum(dim_size, T::zero(), |k| {
                 let idx = base + k * after;
-                if !is_masked(block_offset + idx) {
-                    sum = sum + (in_block[idx] - max_val).exp();
+                if is_masked(block_offset + idx) {
+                    T::zero()
+                } else {
+                    (in_block[idx] - max_val).exp()
                 }
-            }
+            });
             let logsum = sum.ln() + max_val;
             for k in 0..dim_size {
                 let idx = base + k * after;
