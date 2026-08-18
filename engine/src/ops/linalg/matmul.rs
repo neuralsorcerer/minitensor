@@ -13,7 +13,6 @@ use crate::{
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use rayon::prelude::*;
 use std::sync::Arc;
 
 #[cfg(feature = "blas")]
@@ -21,6 +20,8 @@ use cblas::{Layout, Transpose};
 
 pub(crate) use crate::ops::map::PAR_THRESHOLD;
 use crate::ops::map::try_par_out_chunks;
+use crate::ops::simd::{simd_dot_f32, simd_dot_f64};
+use crate::ops::util::accurate_pair_sum;
 // The hand-written GEMM banding is the fallback for builds without BLAS; with
 // the `blas` feature the library does the blocking itself.
 #[cfg(not(feature = "blas"))]
@@ -1478,101 +1479,51 @@ pub fn dot(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let lhs_view = lhs_cast.as_ref();
     let rhs_view = rhs_cast.as_ref();
 
-    let numel = lhs_view.numel();
     let device = lhs.device();
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
 
+    // One shape for all four dtypes: aligned blocks of both operands, reduced
+    // by `run` and folded pairwise. The fold is what makes the answer depend
+    // only on the length -- a dot product that changes in its last bits between
+    // runs is the same reproducibility problem as a non-deterministic `sum` --
+    // and, for the floats, it is also what stops the error growing with the
+    // length the way one running total does.
+    macro_rules! dot_of {
+        ($accessor:ident, $from_vec:ident, $zero:expr, $run:expr) => {{
+            let lhs_slice = lhs_view.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    stringify!($accessor),
+                    " for dot input"
+                ))
+            })?;
+            let rhs_slice = rhs_view.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    stringify!($accessor),
+                    " for dot input"
+                ))
+            })?;
+            let dot = accurate_pair_sum(lhs_slice, rhs_slice, $zero, $run);
+            TensorData::$from_vec(vec![dot], device)
+        }};
+    }
+
+    // Integer accumulation wraps and is exact, so blocking cannot change what
+    // it produces -- it only buys the same parallelism the floats get.
     let output_data = match result_dtype {
-        DataType::Float32 => {
-            let lhs_slice = lhs_view.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice for dot input")
-            })?;
-            let rhs_slice = rhs_view.data().as_f32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f32 slice for dot input")
-            })?;
-
-            let dot = if numel >= PAR_THRESHOLD {
-                // Index-ordered partials: see `deterministic_par_sum`. A dot
-                // product that changes in its last bits between runs is the
-                // same reproducibility problem as a non-deterministic `sum`.
-                // Both operands are the same length here, so chunking them at
-                // the same size keeps the pairs aligned.
-                let partials: Vec<f32> = lhs_slice
-                    .par_chunks(8192)
-                    .zip(rhs_slice.par_chunks(8192))
-                    .map(|(a, b)| a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f32>())
-                    .collect();
-                crate::ops::util::pairwise_fold(partials, 0.0_f32, |a, b| a + b)
-            } else {
-                lhs_slice
-                    .iter()
-                    .zip(rhs_slice.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<f32>()
-            };
-
-            TensorData::from_vec_f32(vec![dot], device)
-        }
-        DataType::Float64 => {
-            let lhs_slice = lhs_view.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice for dot input")
-            })?;
-            let rhs_slice = rhs_view.data().as_f64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get f64 slice for dot input")
-            })?;
-
-            let dot = if numel >= PAR_THRESHOLD {
-                // Index-ordered partials: see `deterministic_par_sum`. A dot
-                // product that changes in its last bits between runs is the
-                // same reproducibility problem as a non-deterministic `sum`.
-                // Both operands are the same length here, so chunking them at
-                // the same size keeps the pairs aligned.
-                let partials: Vec<f64> = lhs_slice
-                    .par_chunks(8192)
-                    .zip(rhs_slice.par_chunks(8192))
-                    .map(|(a, b)| a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f64>())
-                    .collect();
-                crate::ops::util::pairwise_fold(partials, 0.0_f64, |a, b| a + b)
-            } else {
-                lhs_slice
-                    .iter()
-                    .zip(rhs_slice.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<f64>()
-            };
-
-            TensorData::from_vec_f64(vec![dot], device)
-        }
-        DataType::Int32 => {
-            let lhs_slice = lhs_view.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice for dot input")
-            })?;
-            let rhs_slice = rhs_view.data().as_i32_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i32 slice for dot input")
-            })?;
-
-            let mut dot: i32 = 0;
-            for (&a, &b) in lhs_slice.iter().zip(rhs_slice.iter()) {
-                dot = dot.wrapping_add(a.wrapping_mul(b));
-            }
-
-            TensorData::from_vec_i32(vec![dot], device)
-        }
-        DataType::Int64 => {
-            let lhs_slice = lhs_view.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice for dot input")
-            })?;
-            let rhs_slice = rhs_view.data().as_i64_slice().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get i64 slice for dot input")
-            })?;
-
-            let mut dot: i64 = 0;
-            for (&a, &b) in lhs_slice.iter().zip(rhs_slice.iter()) {
-                dot = dot.wrapping_add(a.wrapping_mul(b));
-            }
-
-            TensorData::from_vec_i64(vec![dot], device)
-        }
+        DataType::Float32 => dot_of!(as_f32_slice, from_vec_f32, 0.0_f32, simd_dot_f32),
+        DataType::Float64 => dot_of!(as_f64_slice, from_vec_f64, 0.0_f64, simd_dot_f64),
+        DataType::Int32 => dot_of!(as_i32_slice, from_vec_i32, 0_i32, |a: &[i32], b: &[i32]| {
+            a.iter()
+                .zip(b)
+                .fold(0_i32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+        }),
+        DataType::Int64 => dot_of!(as_i64_slice, from_vec_i64, 0_i64, |a: &[i64], b: &[i64]| {
+            a.iter()
+                .zip(b)
+                .fold(0_i64, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+        }),
         DataType::Bool => unreachable!("Bool dtype handled earlier"),
     };
 

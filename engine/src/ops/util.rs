@@ -368,6 +368,45 @@ where
     pairwise_fold(partials, U::default(), |a, b| a + b)
 }
 
+/// [`accurate_run_sum`] over two slices walked together, parallel when it is
+/// worth it.
+///
+/// A dot product is a sum like any other and needs the same accumulation, but
+/// it reads two runs at once, so it cannot go through the single-slice form.
+/// `run(a_block, b_block)` reduces one aligned pair of blocks -- `simd_dot_f32`
+/// and friends -- and the block results are folded pairwise, which makes the
+/// answer depend on the length alone and not on how rayon split the work.
+///
+/// The blocks are `RUN_SUM_CHUNK` in both the serial and the parallel case, so
+/// crossing the parallel threshold does not change the answer. Partials combine
+/// through [`Accumulate`], which is what lets an integer dot product take this
+/// path too: its accumulation wraps, and `+` on `i32` panics rather than
+/// wrapping when overflow checks are on.
+pub(crate) fn accurate_pair_sum<T, U, F>(a: &[T], b: &[T], zero: U, run: F) -> U
+where
+    T: Sync,
+    U: Copy + Send + Accumulate,
+    F: Fn(&[T], &[T]) -> U + Send + Sync,
+{
+    debug_assert_eq!(a.len(), b.len());
+    if a.len() <= RUN_SUM_CHUNK {
+        return run(a, b);
+    }
+    let partials: Vec<U> = if a.len() >= crate::ops::map::PAR_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_chunks(RUN_SUM_CHUNK)
+            .zip(b.par_chunks(RUN_SUM_CHUNK))
+            .map(|(x, y)| run(x, y))
+            .collect()
+    } else {
+        a.chunks(RUN_SUM_CHUNK)
+            .zip(b.chunks(RUN_SUM_CHUNK))
+            .map(|(x, y)| run(x, y))
+            .collect()
+    };
+    pairwise_fold(partials, zero, |p, q| p.acc_add(q))
+}
+
 pub(crate) fn pairwise_fold<U, F>(mut values: Vec<U>, identity: U, combine: F) -> U
 where
     U: Copy,
