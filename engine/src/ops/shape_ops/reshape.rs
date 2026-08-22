@@ -308,6 +308,26 @@ pub fn movedim(tensor: &Tensor, source: &[isize], destination: &[isize]) -> Resu
 }
 
 /// Concatenate tensors along a specified dimension
+/// How much of the output one task of [`concatenate`] fills.
+///
+/// The copy used to be chunked by the output's *concatenated block* -- one
+/// task per position along the axes outside `dim`. That is plenty of tasks
+/// when `dim` is an inner axis and exactly one when it is axis 0, which is the
+/// common call: `cat` of two 16MB float32 matrices along dimension 0 ran on a
+/// single core at 17.9ms against NumPy's 5.5ms, while the same tensors along
+/// dimension 1 took 6.9ms because that shape happened to split.
+///
+/// Sizing the task by the output instead makes the split independent of which
+/// axis is being joined. Four tasks per thread rather than one, so a late or
+/// slow task cannot leave a whole core idle at the end; and a floor, because
+/// these are memcpys and short ones do not reach streaming speed. Below the
+/// floor the whole output is one task and nothing is handed to rayon.
+fn concat_task_len(numel: usize) -> usize {
+    const MIN_TASK: usize = 1 << 14;
+    let threads = rayon::current_num_threads().max(1);
+    numel.div_ceil(threads * 4).max(MIN_TASK)
+}
+
 pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
     if tensors.is_empty() {
         return Err(MinitensorError::invalid_operation(
@@ -407,20 +427,38 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
             }
             let src_strides: Vec<usize> = dim_sizes.iter().map(|&d| d * inner).collect();
 
-            let chunk_size = output_shape_obj.dims()[dim] * inner;
-            // SAFETY: the chunks tile the output, and within a chunk the source
-            // strides sum to exactly `chunk_size` (the concatenated dimension is
-            // the sum of the inputs'), so every element is written once.
+            let block = output_shape_obj.dims()[dim] * inner;
+            let numel = output_shape_obj.numel();
+            let task = concat_task_len(numel);
+            // SAFETY: the chunks tile the output, and the walk below advances
+            // `written` by exactly what it copies until the chunk is full, so
+            // every element is written once.
             let out = unsafe {
-                build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    par_out_chunks(spare, chunk_size, &|start, out_chunk| {
-                        let o = start / chunk_size;
-                        let mut dst_offset = 0;
-                        for (src, &src_stride) in sources.iter().zip(src_strides.iter()) {
-                            let src_start = o * src_stride;
-                            out_chunk[dst_offset..dst_offset + src_stride]
-                                .write_copy_of_slice(&src[src_start..src_start + src_stride]);
-                            dst_offset += src_stride;
+                build_vec::<$ty, _>(numel, |spare| {
+                    par_out_chunks(spare, task, &|start, out_chunk| {
+                        let mut written = 0usize;
+                        while written < out_chunk.len() {
+                            // Where this lands: which repeat of the
+                            // concatenated axis, and how far into it.
+                            let global = start + written;
+                            let o = global / block;
+                            let mut offset = global % block;
+                            // `>=`, not `>`: an offset landing exactly on a
+                            // boundary belongs to the *next* source, and a
+                            // zero-width input has to be stepped over. Getting
+                            // that wrong leaves `take` at zero, which does not
+                            // return a wrong answer -- it hangs.
+                            let mut s = 0;
+                            while offset >= src_strides[s] {
+                                offset -= src_strides[s];
+                                s += 1;
+                            }
+                            let take = (src_strides[s] - offset).min(out_chunk.len() - written);
+                            debug_assert!(take > 0, "concatenate would not advance");
+                            let src_start = o * src_strides[s] + offset;
+                            out_chunk[written..written + take]
+                                .write_copy_of_slice(&sources[s][src_start..src_start + take]);
+                            written += take;
                         }
                     });
                 })
