@@ -209,7 +209,7 @@ pub struct PyConv1d;
 impl PyConv1d {
     /// Create a new Conv1d layer
     #[new]
-    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, bias=true, device=None, dtype=None))]
+    #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true, device=None, dtype=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         in_channels: usize,
@@ -217,6 +217,8 @@ impl PyConv1d {
         kernel_size: usize,
         stride: usize,
         padding: usize,
+        dilation: usize,
+        groups: usize,
         bias: bool,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
@@ -229,6 +231,8 @@ impl PyConv1d {
             kernel_size,
             Some(stride),
             Some(padding),
+            Some(dilation),
+            Some(groups),
             bias,
             device,
             dtype,
@@ -492,6 +496,8 @@ impl PyConv2d {
         kernel_size,
         stride=None,
         padding=None,
+        dilation=None,
+        groups=None,
         bias=None,
         device=None,
         dtype=None
@@ -503,6 +509,8 @@ impl PyConv2d {
         kernel_size: &Bound<PyAny>,
         stride: Option<&Bound<PyAny>>,
         padding: Option<&Bound<PyAny>>,
+        dilation: Option<&Bound<PyAny>>,
+        groups: Option<usize>,
         bias: Option<bool>,
         device: Option<&PyDevice>,
         dtype: Option<&str>,
@@ -516,6 +524,11 @@ impl PyConv2d {
             Some(p) => parse_tuple2(p)?,
             None => (0, 0),
         };
+        let dilation = match dilation {
+            Some(d) => parse_tuple2(d)?,
+            None => (1, 1),
+        };
+        let groups = groups.unwrap_or(1);
         let bias = bias.unwrap_or(true);
         let device = resolve_device(device)?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
@@ -526,6 +539,8 @@ impl PyConv2d {
             kernel_size,
             Some(stride),
             Some(padding),
+            Some(dilation),
+            Some(groups),
             bias,
             device,
             dtype,

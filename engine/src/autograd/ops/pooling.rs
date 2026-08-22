@@ -268,6 +268,8 @@ pub struct Conv2dBackward {
     pub bias_requires_grad: bool,
     pub stride: (usize, usize),
     pub padding: (usize, usize),
+    pub dilation: (usize, usize),
+    pub groups: usize,
     pub deps: SmallVec<[TensorId; 3]>,
 }
 impl Conv2dBackward {
@@ -284,6 +286,8 @@ impl Conv2dBackward {
         let (out_h, out_w) = (go_dims[2], go_dims[3]);
         let stride = self.stride;
         let padding = self.padding;
+        let dilation = self.dilation;
+        let groups = self.groups;
 
         let input = T::slice(self.input.data()).ok_or_else(|| {
             MinitensorError::internal_error("conv2d backward: input dtype does not match gradient")
@@ -302,6 +306,13 @@ impl Conv2dBackward {
         let n_ohw = batch * ohw;
         let k_dim = in_channels * kernel_h * kernel_w;
         let kh_kw = kernel_h * kernel_w;
+        // The forward's grouping, seen from the other side. `k` runs
+        // channel-major, so a group owns a contiguous row-block of every
+        // `[k_dim, ...]` buffer here, and the weight owns a contiguous
+        // row-block of `[C_out, group_k]`.
+        let group_in = in_channels / groups;
+        let group_out = out_channels / groups;
+        let group_k = group_in * kh_kw;
 
         // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
         // the layout both weight- and input-gradient GEMMs contract against.
@@ -334,15 +345,23 @@ impl Conv2dBackward {
                 // which for a 512-channel layer is 9 MB moved per backward.
                 // `go_mat` is [C_out, N*OH*OW] and `grad_cols` [K, N*OH*OW],
                 // both contiguous row-major.
-                unsafe {
-                    T::gemm_tn(
-                        k_dim,
-                        out_channels,
-                        n_ohw,
-                        weight.as_ptr(),
-                        go_mat.as_ptr(),
-                        grad_cols.as_mut_ptr(),
-                    );
+                for g in 0..groups {
+                    // SAFETY: group `g` reads `weight` rows
+                    // `[g*group_out, (g+1)*group_out)` -- stored `[group_out,
+                    // group_k]` and read transposed by stride -- against
+                    // `go_mat` rows `[g*group_out, ..)`, writing `grad_cols`
+                    // rows `[g*group_k, ..)`. Each is a row-block of a
+                    // contiguous buffer exactly `groups` times its size.
+                    unsafe {
+                        T::gemm_tn(
+                            group_k,
+                            group_out,
+                            n_ohw,
+                            weight.as_ptr().add(g * group_out * group_k),
+                            go_mat.as_ptr().add(g * group_out * n_ohw),
+                            grad_cols.as_mut_ptr().add(g * group_k * n_ohw),
+                        );
+                    }
                 }
                 // Output positions are walked as nested loops and their
                 // in-bounds range is hoisted, for the reason the forward's
@@ -359,18 +378,20 @@ impl Conv2dBackward {
                             let kx = rem % kernel_w;
                             let row_base = k * n_ohw + n * ohw;
                             let ic_base = ic * in_h * in_w;
+                            let ky_off = ky * dilation.0;
+                            let kx_off = kx * dilation.1;
                             let (oh_lo, oh_hi) = crate::ops::conv::in_bounds_range(
-                                ky, padding.0, in_h, stride.0, out_h,
+                                ky_off, padding.0, in_h, stride.0, out_h,
                             );
                             let (ow_lo, ow_hi) = crate::ops::conv::in_bounds_range(
-                                kx, padding.1, in_w, stride.1, out_w,
+                                kx_off, padding.1, in_w, stride.1, out_w,
                             );
                             for oh in oh_lo..oh_hi {
-                                let ih = oh * stride.0 + ky - padding.0;
+                                let ih = oh * stride.0 + ky_off - padding.0;
                                 let dst = ic_base + ih * in_w;
                                 let src = row_base + oh * out_w;
                                 for ow in ow_lo..ow_hi {
-                                    let iw = ow * stride.1 + kx - padding.1;
+                                    let iw = ow * stride.1 + kx_off - padding.1;
                                     gi[dst + iw] += grad_cols[src + ow];
                                 }
                             }
@@ -392,48 +413,60 @@ impl Conv2dBackward {
         // the input (the same lowering as the forward). One GEMM replaces the
         // naive per-element accumulation.
         if self.weight_requires_grad {
-            let mut grad_weight = vec![T::default(); out_channels * k_dim];
+            let mut grad_weight = vec![T::default(); out_channels * group_k];
             if n_ohw > 0 {
-                let mut cols = vec![T::default(); n_ohw * k_dim];
-                // `k` is walked as nested (ic, ky, kx) loops rather than
-                // decomposed: three divisions per element, and this buffer has
-                // the same 4.7M elements as the one above.
-                par_out_chunks(&mut cols, k_dim, &|start, prow| {
-                    let r = start / k_dim;
-                    {
-                        let n = r / ohw;
-                        let p = r % ohw;
-                        let oh = p / out_w;
-                        let ow = p % out_w;
-                        let mut k = 0usize;
-                        for ic in 0..in_channels {
-                            let plane = (n * in_channels + ic) * in_h * in_w;
-                            for ky in 0..kernel_h {
-                                let ih = oh * stride.0 + ky;
-                                let row_ok = ih >= padding.0 && ih < in_h + padding.0;
-                                let ih = ih.wrapping_sub(padding.0);
-                                for kx in 0..kernel_w {
-                                    let iw = ow * stride.1 + kx;
-                                    if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
-                                        prow[k] = input[plane + ih * in_w + (iw - padding.1)];
+                // This lowering is transposed relative to the forward's --
+                // `[N*OH*OW, K]`, one row per output position -- so a group's
+                // `k` values are a column-block, not a row-block, and cannot be
+                // handed to a GEMM by pointer offset. It is rebuilt per group
+                // instead, into a buffer sized for one group rather than all of
+                // them, so the memory is `1/groups` of what it was.
+                let mut cols = vec![T::default(); n_ohw * group_k];
+                for g in 0..groups {
+                    cols.fill(T::default());
+                    // `k` is walked as nested (ic, ky, kx) loops rather than
+                    // decomposed: three divisions per element, and this buffer
+                    // has the same 4.7M elements as the one above.
+                    par_out_chunks(&mut cols, group_k, &|start, prow| {
+                        let r = start / group_k;
+                        {
+                            let n = r / ohw;
+                            let p = r % ohw;
+                            let oh = p / out_w;
+                            let ow = p % out_w;
+                            let mut k = 0usize;
+                            for ic in g * group_in..(g + 1) * group_in {
+                                let plane = (n * in_channels + ic) * in_h * in_w;
+                                for ky in 0..kernel_h {
+                                    let ih = oh * stride.0 + ky * dilation.0;
+                                    let row_ok = ih >= padding.0 && ih < in_h + padding.0;
+                                    let ih = ih.wrapping_sub(padding.0);
+                                    for kx in 0..kernel_w {
+                                        let iw = ow * stride.1 + kx * dilation.1;
+                                        if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
+                                            prow[k] = input[plane + ih * in_w + (iw - padding.1)];
+                                        }
+                                        k += 1;
                                     }
-                                    k += 1;
                                 }
                             }
                         }
+                    });
+                    // SAFETY: `go_mat` rows [g*group_out, ..) form a
+                    // [group_out, N*OH*OW] block, `cols` is [N*OH*OW, group_k]
+                    // in full, and `grad_weight` rows [g*group_out, ..) form a
+                    // [group_out, group_k] block. All contiguous row-major with
+                    // matching dimensions.
+                    unsafe {
+                        T::gemm(
+                            group_out,
+                            n_ohw,
+                            group_k,
+                            go_mat.as_ptr().add(g * group_out * n_ohw),
+                            cols.as_ptr(),
+                            grad_weight.as_mut_ptr().add(g * group_out * group_k),
+                        );
                     }
-                });
-                // SAFETY: go_mat is [C_out, N*OH*OW], cols is [N*OH*OW, K], and
-                // grad_weight is [C_out, K]; all contiguous row-major, dims match.
-                unsafe {
-                    T::gemm(
-                        out_channels,
-                        n_ohw,
-                        k_dim,
-                        go_mat.as_ptr(),
-                        cols.as_ptr(),
-                        grad_weight.as_mut_ptr(),
-                    );
                 }
             }
             let grad = Tensor::new(

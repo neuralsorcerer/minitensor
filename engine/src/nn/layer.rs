@@ -425,19 +425,21 @@ mod parameter_view_tests {
             ),
             (
                 "Conv1d+bias",
-                Box::new(Conv1d::new(2, 3, 3, None, None, true, dev, dt).unwrap()),
+                Box::new(Conv1d::new(2, 3, 3, None, None, None, None, true, dev, dt).unwrap()),
             ),
             (
                 "Conv1d-bias",
-                Box::new(Conv1d::new(2, 3, 3, None, None, false, dev, dt).unwrap()),
+                Box::new(Conv1d::new(2, 3, 3, None, None, None, None, false, dev, dt).unwrap()),
             ),
             (
                 "Conv2d+bias",
-                Box::new(Conv2d::new(2, 3, (3, 3), None, None, true, dev, dt).unwrap()),
+                Box::new(Conv2d::new(2, 3, (3, 3), None, None, None, None, true, dev, dt).unwrap()),
             ),
             (
                 "Conv2d-bias",
-                Box::new(Conv2d::new(2, 3, (3, 3), None, None, false, dev, dt).unwrap()),
+                Box::new(
+                    Conv2d::new(2, 3, (3, 3), None, None, None, None, false, dev, dt).unwrap(),
+                ),
             ),
         ];
 

@@ -156,41 +156,48 @@ fn parse_pair_arg(
     }
 }
 
-/// 2-D cross-correlation of `input` with `weight`, with optional stride and zero padding.
+/// 2-D cross-correlation of `input` with `weight`. `dilation` spaces the kernel taps apart; `groups` splits the channels into that many independent convolutions, so `groups=in_channels` is a depthwise convolution.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None))]
+#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, dilation=None, groups=1))]
 fn conv2d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
     bias: Option<&Bound<PyAny>>,
     stride: Option<&Bound<PyAny>>,
     padding: Option<&Bound<PyAny>>,
+    dilation: Option<&Bound<PyAny>>,
+    groups: usize,
 ) -> PyResult<PyTensor> {
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
     let bias_tensor = borrow_optional_tensor(bias)?;
     let stride = parse_pair_arg("stride", stride, (1, 1))?;
     let padding = parse_pair_arg("padding", padding, (0, 0))?;
+    let dilation = parse_pair_arg("dilation", dilation, (1, 1))?;
     let result = conv2d_op(
         input_tensor.tensor(),
         weight_tensor.tensor(),
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
         padding,
+        dilation,
+        groups,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
-/// 1-D cross-correlation of `input` with `weight`, with optional stride and zero padding.
+/// 1-D cross-correlation of `input` with `weight`. See `conv2d` for `dilation` and `groups`.
 #[pyfunction]
-#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0))]
+#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1))]
 fn conv1d(
     input: &Bound<PyAny>,
     weight: &Bound<PyAny>,
     bias: Option<&Bound<PyAny>>,
     stride: usize,
     padding: usize,
+    dilation: usize,
+    groups: usize,
 ) -> PyResult<PyTensor> {
     let input_tensor = borrow_tensor(input)?;
     let weight_tensor = borrow_tensor(weight)?;
@@ -201,6 +208,8 @@ fn conv1d(
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
         padding,
+        dilation,
+        groups,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

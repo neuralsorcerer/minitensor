@@ -14,6 +14,24 @@ use crate::{
     tensor::{DataType, Shape, Tensor},
 };
 
+/// Both convolution layers reject a grouping the channels cannot be split
+/// into, at construction rather than at the first forward pass -- the weight
+/// shape depends on it, so a layer built with a bad `groups` would otherwise
+/// allocate parameters that no input could ever match.
+fn check_groups(in_channels: usize, out_channels: usize, groups: usize) -> Result<()> {
+    if groups == 0 {
+        return Err(MinitensorError::invalid_argument(
+            "groups must be greater than zero",
+        ));
+    }
+    if !in_channels.is_multiple_of(groups) || !out_channels.is_multiple_of(groups) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "groups={groups} must divide both in_channels={in_channels} and out_channels={out_channels}"
+        )));
+    }
+    Ok(())
+}
+
 /// 2D Convolutional layer
 ///
 /// Applies a 2D convolution over an input signal composed of several input planes.
@@ -28,6 +46,8 @@ pub struct Conv2d {
     kernel_size: (usize, usize),
     stride: (usize, usize),
     padding: (usize, usize),
+    dilation: (usize, usize),
+    groups: usize,
 }
 
 impl Conv2d {
@@ -39,26 +59,36 @@ impl Conv2d {
     /// * `kernel_size` - Size of the convolving kernel (height, width)
     /// * `stride` - Stride of the convolution. Default: (1, 1)
     /// * `padding` - Zero-padding added to both sides of the input. Default: (0, 0)
+    /// * `dilation` - Spacing between kernel taps. Default: (1, 1)
+    /// * `groups` - How many independent convolutions to split the channels
+    ///   into; must divide both channel counts. `groups == in_channels` is a
+    ///   depthwise convolution. Default: 1
     /// * `bias` - If true, adds a learnable bias to the output. Default: true
     /// * `device` - Device to place the layer parameters on
     /// * `dtype` - Data type for the layer parameters
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         in_channels: usize,
         out_channels: usize,
         kernel_size: (usize, usize),
         stride: Option<(usize, usize)>,
         padding: Option<(usize, usize)>,
+        dilation: Option<(usize, usize)>,
+        groups: Option<usize>,
         bias: bool,
         device: Device,
         dtype: DataType,
     ) -> Result<Self> {
         let stride = stride.unwrap_or((1, 1));
         let padding = padding.unwrap_or((0, 0));
+        let dilation = dilation.unwrap_or((1, 1));
+        let groups = groups.unwrap_or(1);
+        check_groups(in_channels, out_channels, groups)?;
 
         // Initialize weight tensor with shape [out_channels, in_channels, kernel_height, kernel_width]
         let weight_shape = Shape::new(vec![
             out_channels,
-            in_channels,
+            in_channels / groups,
             kernel_size.0,
             kernel_size.1,
         ]);
@@ -80,16 +110,21 @@ impl Conv2d {
             kernel_size,
             stride,
             padding,
+            dilation,
+            groups,
         })
     }
 
     /// Create a new Conv2d layer with custom initialization
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_init(
         in_channels: usize,
         out_channels: usize,
         kernel_size: (usize, usize),
         stride: Option<(usize, usize)>,
         padding: Option<(usize, usize)>,
+        dilation: Option<(usize, usize)>,
+        groups: Option<usize>,
         bias: bool,
         weight_init: InitMethod,
         bias_init: Option<InitMethod>,
@@ -98,11 +133,14 @@ impl Conv2d {
     ) -> Result<Self> {
         let stride = stride.unwrap_or((1, 1));
         let padding = padding.unwrap_or((0, 0));
+        let dilation = dilation.unwrap_or((1, 1));
+        let groups = groups.unwrap_or(1);
+        check_groups(in_channels, out_channels, groups)?;
 
         // Initialize weight tensor
         let weight_shape = Shape::new(vec![
             out_channels,
-            in_channels,
+            in_channels / groups,
             kernel_size.0,
             kernel_size.1,
         ]);
@@ -125,6 +163,8 @@ impl Conv2d {
             kernel_size,
             stride,
             padding,
+            dilation,
+            groups,
         })
     }
 
@@ -153,6 +193,16 @@ impl Conv2d {
         self.padding
     }
 
+    /// Get dilation
+    pub fn dilation(&self) -> (usize, usize) {
+        self.dilation
+    }
+
+    /// Get the number of groups
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
     /// Get the weight tensor
     pub fn weight(&self) -> &Tensor {
         &self.weight
@@ -165,10 +215,12 @@ impl Conv2d {
 
     /// Calculate output dimensions for given input dimensions
     pub fn output_size(&self, input_height: usize, input_width: usize) -> (usize, usize) {
-        let output_height =
-            (input_height + 2 * self.padding.0 - self.kernel_size.0) / self.stride.0 + 1;
-        let output_width =
-            (input_width + 2 * self.padding.1 - self.kernel_size.1) / self.stride.1 + 1;
+        // The kernel's *span* once its taps are spread by the dilation, which
+        // is what the padded input has to accommodate.
+        let span_h = self.dilation.0 * (self.kernel_size.0 - 1) + 1;
+        let span_w = self.dilation.1 * (self.kernel_size.1 - 1) + 1;
+        let output_height = (input_height + 2 * self.padding.0 - span_h) / self.stride.0 + 1;
+        let output_width = (input_width + 2 * self.padding.1 - span_w) / self.stride.1 + 1;
         (output_height, output_width)
     }
 }
@@ -182,6 +234,8 @@ impl Layer for Conv2d {
             self.bias.as_ref(),
             self.stride,
             self.padding,
+            self.dilation,
+            self.groups,
         )
     }
 
@@ -202,18 +256,24 @@ pub struct Conv1d {
     kernel_size: usize,
     stride: usize,
     padding: usize,
+    dilation: usize,
+    groups: usize,
 }
 
 impl Conv1d {
     /// Create a new 1D convolutional layer.
     ///
-    /// `stride` defaults to 1 and `padding` to 0, matching the 2-D layer.
+    /// `stride` defaults to 1, `padding` to 0, `dilation` to 1 and `groups` to
+    /// 1, matching the 2-D layer.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
         stride: Option<usize>,
         padding: Option<usize>,
+        dilation: Option<usize>,
+        groups: Option<usize>,
         bias: bool,
         device: Device,
         dtype: DataType,
@@ -229,7 +289,10 @@ impl Conv1d {
             ));
         }
 
-        let weight_shape = Shape::new(vec![out_channels, in_channels, kernel_size]);
+        let groups = groups.unwrap_or(1);
+        check_groups(in_channels, out_channels, groups)?;
+
+        let weight_shape = Shape::new(vec![out_channels, in_channels / groups, kernel_size]);
         let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
         let bias_tensor = if bias {
             Some(init_bias(Shape::new(vec![out_channels]), dtype, device)?)
@@ -245,6 +308,8 @@ impl Conv1d {
             kernel_size,
             stride: stride.unwrap_or(1),
             padding: padding.unwrap_or(0),
+            dilation: dilation.unwrap_or(1),
+            groups,
         })
     }
 
@@ -268,6 +333,14 @@ impl Conv1d {
         self.padding
     }
 
+    pub fn dilation(&self) -> usize {
+        self.dilation
+    }
+
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+
     pub fn weight(&self) -> &Tensor {
         &self.weight
     }
@@ -285,6 +358,8 @@ impl Layer for Conv1d {
             self.bias.as_ref(),
             self.stride,
             self.padding,
+            self.dilation,
+            self.groups,
         )
     }
 
@@ -306,6 +381,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -330,6 +407,8 @@ mod tests {
             (3, 3),
             None,
             None,
+            None,
+            None,
             false,
             Device::cpu(),
             DataType::Float32,
@@ -349,6 +428,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -367,6 +448,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((0, 0)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -385,6 +468,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -406,6 +491,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -451,6 +538,8 @@ mod tests {
             (3, 3),
             Some((1, 1)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,
@@ -474,6 +563,8 @@ mod tests {
             1,
             1,
             (1, 1),
+            None,
+            None,
             None,
             None,
             true,
@@ -525,6 +616,8 @@ mod tests {
             (3, 3),
             Some((2, 2)),
             Some((1, 1)),
+            None,
+            None,
             true,
             Device::cpu(),
             DataType::Float32,

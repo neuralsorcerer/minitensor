@@ -106,6 +106,8 @@ pub fn conv1d(
     bias: Option<&Tensor>,
     stride: usize,
     padding: usize,
+    dilation: usize,
+    groups: usize,
 ) -> Result<Tensor> {
     if input.ndim() != 3 {
         return Err(MinitensorError::invalid_operation(
@@ -141,7 +143,15 @@ pub fn conv1d(
         weight_dims[2],
     ]))?;
 
-    let output = conv2d(&input_2d, &weight_2d, bias, (1, stride), (0, padding))?;
+    let output = conv2d(
+        &input_2d,
+        &weight_2d,
+        bias,
+        (1, stride),
+        (0, padding),
+        (1, dilation),
+        groups,
+    )?;
     let out_dims = output.shape().dims().to_vec();
     output.reshape(Shape::new(vec![out_dims[0], out_dims[1], out_dims[3]]))
 }
@@ -160,6 +170,8 @@ pub fn conv2d(
     bias: Option<&Tensor>,
     stride: (usize, usize),
     padding: (usize, usize),
+    dilation: (usize, usize),
+    groups: usize,
 ) -> Result<Tensor> {
     // Validate dimensions
     if input.ndim() != 4 {
@@ -183,10 +195,23 @@ pub fn conv2d(
     let kernel_h = weight.size(2)?;
     let kernel_w = weight.size(3)?;
 
-    if in_channels != weight_in_channels {
+    if groups == 0 {
+        return Err(MinitensorError::invalid_operation(
+            "groups must be greater than zero",
+        ));
+    }
+    if !in_channels.is_multiple_of(groups) || !out_channels.is_multiple_of(groups) {
+        return Err(MinitensorError::invalid_operation(format!(
+            "conv2d groups={groups} must divide both in_channels={in_channels} and out_channels={out_channels}"
+        )));
+    }
+    // Each group's kernel spans only its own slice of the input channels, so
+    // the weight is `[C_out, C_in / groups, kH, kW]`. At `groups == 1` this is
+    // the ordinary check.
+    if in_channels / groups != weight_in_channels {
         return Err(MinitensorError::shape_mismatch(
             vec![weight_in_channels],
-            vec![in_channels],
+            vec![in_channels / groups],
         ));
     }
 
@@ -204,15 +229,26 @@ pub fn conv2d(
             "stride values must be greater than zero",
         ));
     }
+    if dilation.0 == 0 || dilation.1 == 0 {
+        return Err(MinitensorError::invalid_operation(
+            "dilation values must be greater than zero",
+        ));
+    }
 
-    if kernel_h > input_height + 2 * padding.0 || kernel_w > input_width + 2 * padding.1 {
+    // What the kernel actually covers once its taps are spread apart. Every
+    // bound below is in terms of this rather than the kernel size, which is
+    // what makes dilation a property of the geometry and not of the loops.
+    let span_h = dilation.0 * (kernel_h - 1) + 1;
+    let span_w = dilation.1 * (kernel_w - 1) + 1;
+
+    if span_h > input_height + 2 * padding.0 || span_w > input_width + 2 * padding.1 {
         return Err(MinitensorError::invalid_operation(
             "kernel size cannot be larger than padded input",
         ));
     }
 
-    let output_height = (input_height + 2 * padding.0 - kernel_h) / stride.0 + 1;
-    let output_width = (input_width + 2 * padding.1 - kernel_w) / stride.1 + 1;
+    let output_height = (input_height + 2 * padding.0 - span_h) / stride.0 + 1;
+    let output_width = (input_width + 2 * padding.1 - span_w) / stride.1 + 1;
     let output_shape = Shape::new(vec![batch_size, out_channels, output_height, output_width]);
 
     if !input.device().is_cpu() || !weight.device().is_cpu() {
@@ -244,6 +280,8 @@ pub fn conv2d(
                 output_width,
                 stride,
                 padding,
+                dilation,
+                groups,
             },
         )?,
         DataType::Float64 => conv2d_forward::<f64>(
@@ -262,6 +300,8 @@ pub fn conv2d(
                 output_width,
                 stride,
                 padding,
+                dilation,
+                groups,
             },
         )?,
         _ => {
@@ -304,6 +344,8 @@ pub fn conv2d(
             bias_requires_grad,
             stride,
             padding,
+            dilation,
+            groups,
             deps,
         });
         output = with_grad_fn(output, grad_fn)?;
@@ -326,6 +368,15 @@ pub(crate) struct ConvGeometry {
     pub output_width: usize,
     pub stride: (usize, usize),
     pub padding: (usize, usize),
+    /// Spacing between the kernel taps. `1` is an ordinary convolution; larger
+    /// widens the receptive field without adding parameters, which is what
+    /// dilated and atrous convolutions are.
+    pub dilation: (usize, usize),
+    /// How many independent convolutions the channels are split into. `1` is
+    /// ordinary; `in_channels` makes it depthwise, which is the half of a
+    /// depthwise-separable convolution that no amount of reshaping can express
+    /// without it.
+    pub groups: usize,
 }
 
 /// The half-open range of output positions along one axis whose input
@@ -382,6 +433,8 @@ fn conv2d_forward<T: ConvScalar>(
         output_width,
         stride,
         padding,
+        dilation,
+        groups,
     } = geom;
 
     let input_data = T::slice(input.data())
@@ -400,6 +453,13 @@ fn conv2d_forward<T: ConvScalar>(
     let k_dim = in_channels * kernel_h * kernel_w;
     let n_cols = batch_size * ohw;
     let kh_kw = kernel_h * kernel_w;
+    // Per-group shapes. The lowered `cols` still covers every input channel,
+    // and a group's rows within it are contiguous because `k` runs
+    // channel-major -- so the groups are `groups` GEMMs over row-blocks of the
+    // same three buffers, with no repacking.
+    let group_in = in_channels / groups;
+    let group_out = out_channels / groups;
+    let group_k = group_in * kh_kw;
 
     let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
 
@@ -425,10 +485,15 @@ fn conv2d_forward<T: ConvScalar>(
             let rem = k % kh_kw;
             let ky = rem / kernel_w;
             let kx = rem % kernel_w;
+            // The tap's offset into the input is `ky * dilation`, so the
+            // in-bounds range is the undilated one evaluated at that offset --
+            // `in_bounds_range` never needed to know about dilation.
+            let ky_off = ky * dilation.0;
+            let kx_off = kx * dilation.1;
             let (oh_lo, oh_hi) =
-                in_bounds_range(ky, padding.0, input_height, stride.0, output_height);
+                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
             let (ow_lo, ow_hi) =
-                in_bounds_range(kx, padding.1, input_width, stride.1, output_width);
+                in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
             if oh_lo >= oh_hi || ow_lo >= ow_hi {
                 return;
             }
@@ -437,15 +502,19 @@ fn conv2d_forward<T: ConvScalar>(
                 let dst_n = n * ohw;
                 let plane = (n * in_channels + ic) * input_height;
                 for oh in oh_lo..oh_hi {
-                    let ih = oh * stride.0 + ky - padding.0;
+                    let ih = oh * stride.0 + ky_off - padding.0;
                     let src = (plane + ih) * input_width;
                     let dst = dst_n + oh * output_width + ow_lo;
+                    // Dilation moves where the run starts, not how it is
+                    // spaced: consecutive output columns are still consecutive
+                    // input columns when the stride is 1, so the contiguous
+                    // copy survives.
                     if stride.1 == 1 {
-                        let s = src + ow_lo + kx - padding.1;
+                        let s = src + ow_lo + kx_off - padding.1;
                         row[dst..dst + span].copy_from_slice(&input_data[s..s + span]);
                     } else {
                         for (i, slot) in row[dst..dst + span].iter_mut().enumerate() {
-                            let iw = (ow_lo + i) * stride.1 + kx - padding.1;
+                            let iw = (ow_lo + i) * stride.1 + kx_off - padding.1;
                             *slot = input_data[src + iw];
                         }
                     }
@@ -454,18 +523,24 @@ fn conv2d_forward<T: ConvScalar>(
         });
 
         let mut gemm_out = vec![T::default(); out_channels * n_cols];
-        // SAFETY: `weight_data` is [C_out, k_dim], `cols` is [k_dim, n_cols],
-        // and `gemm_out` is [C_out, n_cols]; all contiguous row-major with
-        // matching dimensions.
-        unsafe {
-            T::gemm(
-                out_channels,
-                k_dim,
-                n_cols,
-                weight_data.as_ptr(),
-                cols.as_ptr(),
-                gemm_out.as_mut_ptr(),
-            );
+        for g in 0..groups {
+            // SAFETY: within group `g`, `weight_data` offset by
+            // `g * group_out * group_k` is [group_out, group_k], `cols` offset
+            // by `g * group_k * n_cols` is [group_k, n_cols], and `gemm_out`
+            // offset by `g * group_out * n_cols` is [group_out, n_cols]. All
+            // three are row-blocks of contiguous row-major buffers whose
+            // lengths are exactly `groups` times these, so no block runs past
+            // its allocation and no two groups overlap.
+            unsafe {
+                T::gemm(
+                    group_out,
+                    group_k,
+                    n_cols,
+                    weight_data.as_ptr().add(g * group_out * group_k),
+                    cols.as_ptr().add(g * group_k * n_cols),
+                    gemm_out.as_mut_ptr().add(g * group_out * n_cols),
+                );
+            }
         }
 
         // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a given
@@ -521,7 +596,7 @@ mod tests {
             Device::cpu(),
             false,
         );
-        let out = conv2d(&input, &weight, Some(&bias), (1, 1), (0, 0)).unwrap();
+        let out = conv2d(&input, &weight, Some(&bias), (1, 1), (0, 0), (1, 1), 1).unwrap();
         let data = out.data().as_f32_slice().unwrap();
         assert_eq!(data, &[2., 3., 4., 5.]);
     }
@@ -546,7 +621,7 @@ mod tests {
             Device::cpu(),
             false,
         );
-        let out = conv2d(&input, &weight, None, (2, 2), (1, 1)).unwrap();
+        let out = conv2d(&input, &weight, None, (2, 2), (1, 1), (1, 1), 1).unwrap();
         assert_eq!(out.shape(), &Shape::new(vec![1, 1, 3, 3]));
         let data = out.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1., 3., 0., 9., 17., 8., 0., 14., 16.]);
@@ -568,7 +643,7 @@ mod tests {
             Device::cpu(),
             false,
         );
-        let result = conv2d(&input, &weight, None, (1, 1), (0, 0));
+        let result = conv2d(&input, &weight, None, (1, 1), (0, 0), (1, 1), 1);
         assert!(result.is_err());
     }
 }
