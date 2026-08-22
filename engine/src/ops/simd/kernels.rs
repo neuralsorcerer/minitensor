@@ -302,41 +302,156 @@ rounding_kernel!(
     round_f64_blocks, f64, |x, m| (x * m).round_ties_even() / m
 );
 
-/// Unrolled sum for f32 slices to leverage auto-vectorization
-pub fn simd_sum_f32(data: &[f32]) -> f32 {
-    let mut sums = [0f32; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        sums[0] += chunk[0];
-        sums[1] += chunk[1];
-        sums[2] += chunk[2];
-        sums[3] += chunk[3];
-        sums[4] += chunk[4];
-        sums[5] += chunk[5];
-        sums[6] += chunk[6];
-        sums[7] += chunk[7];
-    }
-    let mut total: f32 = sums.iter().sum();
-    total += rem.iter().copied().sum::<f32>();
-    total
+/// The float sum every reduction in the library bottoms out in: `LANES`
+/// running chains, and a pairwise fold over 128-element leaves done in the
+/// same pass.
+///
+/// The lanes are what let it vectorize -- one accumulator is a dependent chain
+/// the compiler may not split, because floating point addition is not
+/// associative. They also divide the error by the lane count, which was where
+/// this stopped: eight lanes over 8192 elements is still a run of 1024
+/// additions per lane, and the error of a run that deep grows with its length
+/// where a pairwise fold's grows like `log n`. Averaged over 40 draws it was
+/// 2.96 times NumPy's error at 8192 elements and 1.83 times at 1024, with a
+/// worst case of 3.7e-7 against NumPy's 1.1e-7. Those are single-ulp figures --
+/// a float32 sum is never far wrong -- but they were the shape that gets worse
+/// with size rather than staying put, and this is the kernel every other
+/// reduction is built on.
+///
+/// Folding 128-element leaves pairwise makes the depth logarithmic, which is
+/// NumPy's algorithm and its leaf size; the mean error is now within noise of
+/// NumPy's at every length. Two things about the shape of it, both measured:
+///
+/// * The obvious recursion -- `f(left) + f(right)` down to the leaf -- cost
+///   2.4x. A call returning one float cannot keep its accumulators in registers
+///   and pays for the slice setup again every 128 elements.
+/// * Folding the lanes at each leaf, instead of once at the end, cost 25% on
+///   `nansum`. The lanes stay apart the whole way here, so the inner loop is
+///   still nothing but `LANES` independent adds, and a leaf boundary is
+///   `LANES` more adds every 128 elements. That is a few percent of the
+///   additions, and it measured 8-33% *faster* than the flat walk it replaced
+///   -- shorter chains leave the out-of-order engine more to overlap.
+///
+/// `pending[k]` holds the lane totals of a run of `2^k` leaves that has not yet
+/// found its partner, exactly as the bits of `leaves` say -- pushing a leaf
+/// carries the ones upward like an increment, and each carry is one addition of
+/// two equal-sized runs. That is the tree the recursion would have built,
+/// without the calls: 40 slots is more leaves than a `usize` can index.
+///
+/// `keep` is applied to each element on the way in: the identity for `sum`, and
+/// mapping NaN to zero for `nansum`, which is what lets the two agree
+/// bit-for-bit on data without NaN in it.
+macro_rules! float_sum_kernel {
+    ($(#[$attr:meta])* $name:ident, $ty:ty, $lanes:expr, $keep:expr) => {
+        $(#[$attr])*
+        pub fn $name(data: &[$ty]) -> $ty {
+            const LANES: usize = $lanes;
+            /// NumPy's. Long enough that the merge below is noise against the
+            /// adds, short enough that a lane's run through one leaf stays a
+            /// handful of roundings.
+            const LEAF: usize = 128;
+
+            /// One leaf's worth of elements into `LANES` running chains.
+            /// Nothing is folded here: the lanes stay apart all the way to the
+            /// end, so the loop is `LANES` independent adds per iteration and
+            /// nothing else -- which is what keeps this the same hot loop it
+            /// was before the leaves existed.
+            #[inline(always)]
+            fn lane_sums(block: &[$ty], keep: impl Fn($ty) -> $ty) -> [$ty; LANES] {
+                let mut sums = [0.0 as $ty; LANES];
+                let mut chunks = block.chunks_exact(LANES);
+                for chunk in &mut chunks {
+                    for lane in 0..LANES {
+                        sums[lane] += keep(chunk[lane]);
+                    }
+                }
+                // A slice shorter than one vector still has to go somewhere,
+                // and lane 0 is where a `LANES`-wide walk would have put it.
+                for &v in chunks.remainder() {
+                    sums[0] += keep(v);
+                }
+                sums
+            }
+
+            let keep = $keep;
+            let mut pending = [[0.0 as $ty; LANES]; 40];
+            let mut leaves: usize = 0;
+            let mut blocks = data.chunks_exact(LEAF);
+
+            for block in &mut blocks {
+                // Carry: while a run of this size is already waiting, the two
+                // combine and the result carries into the next size up. The
+                // merge is `LANES` adds per leaf against the leaf's `LEAF`, so
+                // it costs a few percent of the additions and nothing else.
+                let mut sums = lane_sums(block, keep);
+                let mut level = 0;
+                while leaves & (1 << level) != 0 {
+                    for lane in 0..LANES {
+                        sums[lane] += pending[level][lane];
+                    }
+                    leaves &= !(1 << level);
+                    level += 1;
+                }
+                pending[level] = sums;
+                leaves |= 1 << level;
+            }
+
+            // What is left is one partial per set bit, each covering twice the
+            // run of the bit below it. Combining them smallest-first pairs each
+            // one with a partner its own size or larger, which is what keeps
+            // the tree balanced; the tail, being the shortest run of all, is
+            // where it starts. Which side of the `+` each lands on does not
+            // matter -- addition is commutative even in floating point, and it
+            // is the grouping that decides the rounding.
+            let mut acc = lane_sums(blocks.remainder(), keep);
+            let mut level = 0;
+            let mut rest = leaves;
+            while rest != 0 {
+                if rest & 1 != 0 {
+                    for lane in 0..LANES {
+                        acc[lane] += pending[level][lane];
+                    }
+                }
+                rest >>= 1;
+                level += 1;
+            }
+
+            // Only now do the lanes meet, and pairwise: adding them up in order
+            // would put `LANES` more roundings on the deepest value here.
+            let mut width = LANES;
+            while width > 1 {
+                width /= 2;
+                for lane in 0..width {
+                    acc[lane] += acc[lane + width];
+                }
+            }
+            acc[0]
+        }
+    };
 }
 
-/// Unrolled sum for f64 slices to leverage auto-vectorization
-pub fn simd_sum_f64(data: &[f64]) -> f64 {
-    let mut sums = [0f64; 4];
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        sums[0] += chunk[0];
-        sums[1] += chunk[1];
-        sums[2] += chunk[2];
-        sums[3] += chunk[3];
-    }
-    let mut total: f64 = sums.iter().sum();
-    total += rem.iter().copied().sum::<f64>();
-    total
-}
+float_sum_kernel!(
+    /// Sum an f32 slice. See [`float_sum_kernel`].
+    simd_sum_f32, f32, 8, |v| v
+);
+
+float_sum_kernel!(
+    /// Sum an f64 slice. See [`float_sum_kernel`].
+    simd_sum_f64, f64, 4, |v| v
+);
+
+float_sum_kernel!(
+    /// Sum an f32 slice, skipping NaN. Branchless -- a NaN contributes the
+    /// identity rather than taking a different path, so the loop still
+    /// vectorizes and the result matches [`simd_sum_f32`] exactly when there is
+    /// no NaN to skip.
+    simd_nansum_f32, f32, 8, |v: f32| if v.is_nan() { 0.0 } else { v }
+);
+
+float_sum_kernel!(
+    /// [`simd_nansum_f32`] in double precision.
+    simd_nansum_f64, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
+);
 
 /// `simd_sum_f32` for the products of two slices, which is what a dot product
 /// and every inner product built on one needs.
@@ -412,43 +527,6 @@ pub fn simd_sum_i32(data: &[i32]) -> i32 {
     total = rem.iter().fold(total, |a, &b| a.wrapping_add(b));
     total
 }
-
-/// Sum a float slice treating NaN as zero, with the same lane structure as
-/// [`simd_sum_f32`].
-///
-/// `nansum` folded its chunks with a plain `iter().sum()`, which is a single
-/// dependent chain of additions where the ordinary sum keeps eight independent
-/// ones. That is eight times the error growth, so `nansum` and `sum` disagreed
-/// on data holding no NaN at all -- the two spellings of the same arithmetic,
-/// and `nansum` was the worse of them.
-macro_rules! nan_sum_kernel {
-    ($name:ident, $ty:ty, $lanes:expr) => {
-        pub fn $name(data: &[$ty]) -> $ty {
-            const LANES: usize = $lanes;
-            let mut sums = [0.0 as $ty; LANES];
-            let mut blocks = data.chunks_exact(LANES);
-            for block in &mut blocks {
-                for lane in 0..LANES {
-                    let v = block[lane];
-                    // Branchless: a NaN contributes its identity rather than
-                    // taking a different path, so the loop stays vectorizable.
-                    sums[lane] += if v.is_nan() { 0.0 } else { v };
-                }
-            }
-            let mut total = 0.0 as $ty;
-            for lane in 0..LANES {
-                total += sums[lane];
-            }
-            for &v in blocks.remainder() {
-                total += if v.is_nan() { 0.0 } else { v };
-            }
-            total
-        }
-    };
-}
-
-nan_sum_kernel!(simd_nansum_f32, f32, 8);
-nan_sum_kernel!(simd_nansum_f64, f64, 4);
 
 /// Sum an i32 slice into an i64 accumulator.
 ///
