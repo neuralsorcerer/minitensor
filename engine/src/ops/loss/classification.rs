@@ -791,6 +791,31 @@ mod tests {
     }
 
     #[test]
+    fn kl_div_treats_a_zero_target_as_contributing_nothing() {
+        // `target * (log target - log prediction)` is `0 * -inf` where the
+        // target is zero, and one NaN term takes the whole reduction with it.
+        // A one-hot target is nothing but zeros and a one, so this made the
+        // most common target a classifier has return NaN.
+        let predictions = create_test_tensor_f32(vec![0.1, 0.2, 0.3, 0.4], vec![4], true);
+        let targets = create_test_tensor_f32(vec![0.0, 0.0, 1.0, 0.0], vec![4], false);
+
+        let loss = kl_div_loss(&predictions, &targets, "sum").unwrap();
+        let value = loss.data().as_f32_slice().unwrap()[0];
+        assert!((value - -0.3f32.ln()).abs() < 1e-6, "{value}");
+
+        // A zero target opposite a zero prediction is `-inf - -inf`, which is
+        // NaN before the mask rather than an infinity.
+        let both_zero = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let loss = kl_div_loss(&both_zero, &both_zero, "sum").unwrap();
+        assert_eq!(loss.data().as_f32_slice().unwrap()[0], 0.0);
+
+        // But a live target against a zero prediction still diverges.
+        let live = create_test_tensor_f32(vec![0.5, 0.5], vec![2], false);
+        let loss = kl_div_loss(&both_zero, &live, "sum").unwrap();
+        assert!(loss.data().as_f32_slice().unwrap()[0].is_infinite());
+    }
+
+    #[test]
     fn kl_div_batchmean_divides_by_the_leading_dimension() {
         let predictions = create_test_tensor_f32(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
         let targets = create_test_tensor_f32(vec![0.5, 0.5, 0.5, 0.5], vec![2, 2], false);

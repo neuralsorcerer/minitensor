@@ -698,7 +698,21 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         let log_targets = log_tensor(targets)?;
         let log_predictions = log_tensor(predictions)?;
         let diff = sub(&log_targets, &log_predictions)?;
-        let kld = mul(targets, &diff)?;
+        let raw = mul(targets, &diff)?;
+
+        // A zero in the target makes that product `0 * -inf`, which is NaN, and
+        // one NaN term takes the whole reduction with it. A zero-probability
+        // class is an ordinary thing to ask for -- a one-hot target is nothing
+        // but zeros and a one -- so `kl_div` against one returned NaN rather
+        // than a loss. The term is defined as zero there, which is also its
+        // limit as the target goes to zero, so the elementwise result is masked
+        // rather than the logarithm being nudged away from the singularity.
+        // Masking the result rather than the log also covers a zero *and* a
+        // zero prediction at the same position, where the log difference is
+        // `-inf - -inf`.
+        let zero = create_scalar_tensor(0.0, targets.dtype(), targets.device())?;
+        let target_is_zero = targets.eq(&zero)?;
+        let kld = crate::ops::selection::where_op(&target_is_zero, &zero, &raw)?;
 
         // Apply reduction.
         //
