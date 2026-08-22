@@ -472,6 +472,11 @@ pub(crate) fn par_param_update<T: Send + Sync>(
 /// Both closures are charged once per chunk, so the fold body itself — the part
 /// that actually touches every element — stays a concrete type and inlines.
 ///
+/// `fold` is handed where its chunk starts, the same way [`par_out_chunks`]
+/// does, so a reduction whose answer is a *position* rather than a value can
+/// use this too — `argmax` folds `(index, value)` and needs to name the index
+/// it found.
+///
 /// `combine` must be associative and commutative for the result to be
 /// independent of the split; rayon does not promise a grouping. Exact
 /// operations (min, max, boolean and, bitwise or) qualify. Float addition does
@@ -480,15 +485,17 @@ pub(crate) fn par_fold_chunks<T, A>(
     data: &[T],
     chunk: usize,
     identity: A,
-    fold: &(dyn Fn(&[T]) -> A + Sync),
+    fold: &(dyn Fn(usize, &[T]) -> A + Sync),
     combine: &(dyn Fn(A, A) -> A + Sync),
 ) -> A
 where
     T: Sync,
     A: Copy + Send + Sync,
 {
-    data.par_chunks(chunk.max(1))
-        .map(fold)
+    let chunk = chunk.max(1);
+    data.par_chunks(chunk)
+        .enumerate()
+        .map(|(nth, block)| fold(nth * chunk, block))
         .reduce(|| identity, combine)
 }
 
@@ -995,7 +1002,7 @@ mod tests {
     fn par_fold_chunks_and_par_map_indexed_match_their_sequential_forms() {
         for len in [0usize, 1, 1000, 50_000] {
             let data: Vec<i64> = (0..len as i64).collect();
-            let total = par_fold_chunks(&data, 128, 0i64, &|c| c.iter().sum(), &|a, b| a + b);
+            let total = par_fold_chunks(&data, 128, 0i64, &|_, c| c.iter().sum(), &|a, b| a + b);
             assert_eq!(total, data.iter().sum::<i64>(), "{len}");
         }
         assert_eq!(par_map_indexed(0, &|i: usize| i), Vec::<usize>::new());

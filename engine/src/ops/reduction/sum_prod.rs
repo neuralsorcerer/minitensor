@@ -552,7 +552,7 @@ macro_rules! float_extremum_all {
                 data,
                 MINMAX_CHUNK,
                 ($identity, false),
-                &|chunk| {
+                &|_, chunk| {
                     const LANES: usize = $lanes;
                     let mut bests = [$identity; LANES];
                     let mut nans = [0u32; LANES];
@@ -616,7 +616,7 @@ macro_rules! int_extremum_all {
                 data,
                 MINMAX_CHUNK,
                 $identity,
-                &|chunk| {
+                &|_, chunk| {
                     const LANES: usize = $lanes;
                     let mut bests = [$identity; LANES];
                     let mut blocks = chunk.chunks_exact(LANES);

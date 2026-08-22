@@ -5,7 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::ops::map::{outputs_per_task, par_map_indexed, par_out_chunks, par_out_chunks2};
+use crate::ops::map::{
+    PAR_CHUNK, outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks, par_out_chunks2,
+};
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -284,32 +286,59 @@ where
     IsNan: Fn(T) -> bool + Sync,
     Better: Fn(T, T) -> bool + Sync,
 {
-    data.par_iter()
-        .copied()
-        .enumerate()
-        .reduce_with(|(i1, v1), (i2, v2)| match (is_nan(v1), is_nan(v2)) {
-            (true, true) => {
-                if i1 <= i2 {
-                    (i1, v1)
+    /// The first NaN seen, and the best non-NaN with its index. A NaN wins
+    /// outright, so the two are tracked apart rather than squeezed into one
+    /// comparison -- which also keeps the scan below a pair of tests per
+    /// element instead of a four-way match.
+    type Acc<T> = (Option<usize>, Option<(usize, T)>);
+
+    let pick = |a: Acc<T>, b: Acc<T>| -> Acc<T> {
+        let nan = match (a.0, b.0) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (found, None) | (None, found) => found,
+        };
+        let best = match (a.1, b.1) {
+            (Some((i1, v1)), Some((i2, v2))) => {
+                // Ties go to the lower index, which is what makes the answer
+                // independent of where the chunk boundaries fell.
+                if better(v1, v2) || (!better(v2, v1) && i1 <= i2) {
+                    Some((i1, v1))
                 } else {
-                    (i2, v2)
+                    Some((i2, v2))
                 }
             }
-            (true, false) => (i1, v1),
-            (false, true) => (i2, v2),
-            (false, false) => {
-                if better(v1, v2) {
-                    (i1, v1)
-                } else if better(v2, v1) {
-                    (i2, v2)
-                } else if i1 <= i2 {
-                    (i1, v1)
-                } else {
-                    (i2, v2)
+            (found, None) | (None, found) => found,
+        };
+        (nan, best)
+    };
+
+    // Chunked, not per element. `par_iter().enumerate().reduce_with(..)` hands
+    // rayon one work item per element and folds `(index, value)` tuples through
+    // a closure it cannot inline: `argmax` over 2M float32 took 0.71ms where
+    // `max` over the same data -- the same scan without the index -- took
+    // 0.18ms. The fold body is charged once per chunk here, so the loop inside
+    // it is a bare comparison per element.
+    let (nan, best) = par_fold_chunks(
+        data,
+        PAR_CHUNK,
+        (None, None),
+        &|offset, block| {
+            let mut acc: Acc<T> = (None, None);
+            for (i, &v) in block.iter().enumerate() {
+                if is_nan(v) {
+                    if acc.0.is_none() {
+                        acc.0 = Some(offset + i);
+                    }
+                } else if acc.1.is_none_or(|(_, best)| better(v, best)) {
+                    acc.1 = Some((offset + i, v));
                 }
             }
-        })
-        .map_or(0, |(i, _)| i)
+            acc
+        },
+        &pick,
+    );
+
+    nan.or(best.map(|(i, _)| i)).unwrap_or(0)
 }
 
 #[inline]

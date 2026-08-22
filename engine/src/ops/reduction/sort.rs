@@ -786,9 +786,13 @@ pub(crate) fn prod_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Res
 
     // Reads i32, multiplies in i64 -- see `accumulating_dtype`.
     let prod: i64 = if data.len() >= 1024 {
-        par_fold_chunks(data, 8192, 1i64, &simd_prod_i32_to_i64, &|a: i64, b| {
-            a.acc_mul(b)
-        })
+        par_fold_chunks(
+            data,
+            8192,
+            1i64,
+            &|_, c| simd_prod_i32_to_i64(c),
+            &|a: i64, b| a.acc_mul(b),
+        )
     } else {
         simd_prod_i32_to_i64(data)
     };
@@ -871,9 +875,13 @@ pub(crate) fn sum_all_i32(tensor: &Tensor, result_data: &mut TensorData) -> Resu
 
     // Reads i32, totals in i64 -- see `accumulating_dtype`.
     let sum: i64 = if data.len() >= 1024 {
-        par_fold_chunks(data, 8192, 0i64, &simd_sum_i32_to_i64, &|a: i64, b| {
-            a.acc_add(b)
-        })
+        par_fold_chunks(
+            data,
+            8192,
+            0i64,
+            &|_, c| simd_sum_i32_to_i64(c),
+            &|a: i64, b| a.acc_add(b),
+        )
     } else {
         simd_sum_i32_to_i64(data)
     };
