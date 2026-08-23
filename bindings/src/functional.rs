@@ -824,6 +824,18 @@ pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     tensor.any(dim, Some(keepdim))
 }
 
+/// Pad each axis. `padding` is flat and innermost-axis-first, so `[left, right]` pads the last axis and `[left, right, top, bottom]` the last two. `mode` is "constant" (filled with `value`), "reflect" or "replicate".
+#[pyfunction]
+#[pyo3(signature = (input, padding, mode="constant", value=0.0))]
+pub fn pad(
+    input: &Bound<PyAny>,
+    padding: Vec<isize>,
+    mode: &str,
+    value: f64,
+) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.pad(padding, mode, value)
+}
+
 /// Indices of every non-zero (or true) element, as an `[found, ndim]` int64 tensor in row-major order. Row `i` indexes straight back into the input.
 #[pyfunction]
 pub fn nonzero(input: &Bound<PyAny>) -> PyResult<PyTensor> {
@@ -1520,6 +1532,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(mean, parent)?)?;
     parent.add_function(wrap_pyfunction!(all, parent)?)?;
     parent.add_function(wrap_pyfunction!(any, parent)?)?;
+    parent.add_function(wrap_pyfunction!(pad, parent)?)?;
     parent.add_function(wrap_pyfunction!(nonzero, parent)?)?;
     parent.add_function(wrap_pyfunction!(count_nonzero, parent)?)?;
     parent.add_function(wrap_pyfunction!(masked_select, parent)?)?;

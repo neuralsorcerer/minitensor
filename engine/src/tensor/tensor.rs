@@ -861,6 +861,12 @@ impl Tensor {
         any(self, dim, keepdim)
     }
 
+    /// Pad each axis, innermost first. See `ops::shape_ops::pad`.
+    pub fn pad(&self, padding: &[usize], mode: &str, value: f64) -> Result<Self> {
+        let mode = crate::ops::shape_ops::PadMode::from_name(mode)?;
+        crate::ops::shape_ops::pad(self, padding, mode, value)
+    }
+
     /// Indices of every element that counts as true, one row each.
     pub fn nonzero(&self) -> Result<Self> {
         crate::ops::reduction::nonzero(self)

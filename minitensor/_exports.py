@@ -49,6 +49,7 @@ _FUNCTIONAL_FORWARDERS = (
     "mean",
     "all",
     "any",
+    "pad",
     "nonzero",
     "count_nonzero",
     "masked_select",

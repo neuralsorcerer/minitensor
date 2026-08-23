@@ -101,6 +101,22 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Pad each axis. `padding` is flat and innermost-axis-first -- `[left, right]` pads the last axis. `mode` is "constant" (with `value`), "reflect" or "replicate".
+    #[pyo3(signature = (padding, mode="constant", value=0.0))]
+    pub fn pad(&self, padding: Vec<isize>, mode: &str, value: f64) -> PyResult<Self> {
+        if padding.iter().any(|&p| p < 0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pad amounts must be non-negative",
+            ));
+        }
+        let widths: Vec<usize> = padding.into_iter().map(|p| p as usize).collect();
+        let result = self
+            .inner
+            .pad(&widths, mode, value)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Indices of every non-zero (or true) element, as an `[found, ndim]` int64 tensor in row-major order.
     pub fn nonzero(&self) -> PyResult<Self> {
         Ok(Self::from_tensor(

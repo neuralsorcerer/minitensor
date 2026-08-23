@@ -676,6 +676,81 @@ impl GradientFunction for ExpandBackward {
 }
 
 /// Gradient function for reshape operation
+/// Gradient of [`crate::ops::shape_ops::pad`].
+///
+/// Padding sends each output position to an input position or to nothing, so
+/// the gradient sends each output gradient back the same way -- and *adds*,
+/// because reflect and replicate send many output positions to one input. A
+/// replicated edge that was copied five times has five gradients arriving at
+/// it, and dropping four of them would be a silent under-count of exactly the
+/// elements padding touched. Constant padding is the case where nothing
+/// accumulates: its map is injective and the positions with no source
+/// contribute nothing at all.
+///
+/// The map is the one the forward built, carried here rather than rebuilt, so
+/// the two cannot disagree about where anything came from.
+pub struct PadBackward {
+    pub input_shape: Vec<usize>,
+    pub map: Vec<Option<usize>>,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl GradientFunction for PadBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let shape = Shape::new(self.input_shape.clone());
+        let numel = shape.numel();
+        let grad = grad_output.contiguous()?;
+        let mut data =
+            crate::tensor::TensorData::zeros_on_device(numel, grad.dtype(), grad.device());
+
+        // Serial: the scatter is many-to-one, so parallel writers would race on
+        // the shared edge elements. It is one pass over the padded tensor.
+        macro_rules! scatter {
+            ($accessor:ident, $accessor_mut:ident) => {{
+                let src = grad.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("pad backward: unexpected gradient dtype")
+                })?;
+                let dst = data.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("pad backward: unexpected output dtype")
+                })?;
+                for (out, source) in self.map.iter().enumerate() {
+                    if let Some(index) = source {
+                        dst[*index] += src[out];
+                    }
+                }
+            }};
+        }
+
+        match grad.dtype() {
+            crate::tensor::DataType::Float32 => scatter!(as_f32_slice, as_f32_slice_mut),
+            crate::tensor::DataType::Float64 => scatter!(as_f64_slice, as_f64_slice_mut),
+            other => {
+                return Err(MinitensorError::internal_error(format!(
+                    "pad backward: {other:?} tensors carry no gradient"
+                )));
+            }
+        }
+
+        let grad_input = Tensor::new(
+            std::sync::Arc::new(data),
+            shape,
+            grad.dtype(),
+            grad.device(),
+            false,
+        );
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
 pub struct ReshapeBackward {
     pub input_shape: Vec<usize>,
     pub input_id: TensorId,
