@@ -94,30 +94,20 @@ fn tridiagonalize<T: Factorable>(
 
     for k in 0..n.saturating_sub(2) {
         let rows = n - k - 1;
-        let mut norm_sq = T::zero();
-        for i in (k + 1)..n {
-            let value = work[i * n + k];
-            norm_sq = norm_sq + value * value;
-        }
-        let alpha = work[(k + 1) * n + k];
-        // Everything below the subdiagonal is already zero, so the reflector is
-        // the identity and this column is done.
-        let below = norm_sq - alpha * alpha;
-        if below <= T::zero() {
-            offdiagonal[k] = alpha;
+        // The same reflector `qr` and `svd` build, over this column. Written out
+        // again here it was a fourth copy of the choice of sign for `beta`, and
+        // it was the copy that squared its inputs without scaling them first --
+        // so a symmetric matrix with entries past `1e154` reported that it had
+        // not converged rather than decomposing.
+        let tau = reflector::make(work, (k + 1) * n + k, n, rows);
+        if tau == T::zero() {
+            // Already reduced below the subdiagonal, so the reflector is the
+            // identity and the entry that is there stands.
+            offdiagonal[k] = work[(k + 1) * n + k];
             continue;
         }
-
-        let norm = norm_sq.sqrt();
-        // Away from `alpha`, so `alpha - beta` is a sum of magnitudes rather
-        // than the cancellation that would wreck the reflector.
-        let beta = if alpha > T::zero() { -norm } else { norm };
-        let tau = (beta - alpha) / beta;
-        let scale = T::one() / (alpha - beta);
-        v[0] = T::one();
-        for i in (k + 2)..n {
-            v[i - k - 1] = work[i * n + k] * scale;
-        }
+        let beta = work[(k + 1) * n + k];
+        reflector::gather(work, (k + 1) * n + k, n, rows, &mut v[..rows]);
 
         // p = tau * A22 * v, reading the trailing block by rows.
         for (row, slot) in p[..rows].iter_mut().enumerate() {
@@ -147,8 +137,8 @@ fn tridiagonalize<T: Factorable>(
         }
 
         // The column and row this reflector zeroed, written analytically.
+        // `make` already left `beta` in the column; the row is its mirror.
         offdiagonal[k] = beta;
-        work[(k + 1) * n + k] = beta;
         work[k * n + k + 1] = beta;
         for i in (k + 2)..n {
             work[i * n + k] = T::zero();

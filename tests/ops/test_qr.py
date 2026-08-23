@@ -418,3 +418,23 @@ def test_the_module_level_function_agrees_with_the_method():
     for mode in ("reduced", "complete"):
         for a, b in zip(mt.qr(t, mode), t.qr(mode)):
             np.testing.assert_array_equal(a.numpy(), b.numpy())
+
+
+@pytest.mark.parametrize("magnitude", [1e160, 1e200, 1e250, 1e-160, 1e-200, 1e-250])
+def test_extreme_magnitudes(magnitude):
+    """Entries past where a sum of squares survives.
+
+    The reflector's length is the one place the factorisation squares anything,
+    and squaring overflows above about `1e154` in double precision. Before the
+    reflector scaled its input, this returned `NaN` above that -- and below
+    `1e-154` the sum underflowed to zero, so no reflector was built at all and
+    `Q` came back as the identity: perfectly orthogonal, and a residual of order
+    one, with nothing raised.
+    """
+    a = np.random.default_rng(3).standard_normal((6, 5)) * magnitude
+    q, r = mt.qr(mt.Tensor.from_numpy(a))
+    q, r = q.numpy(), r.numpy()
+
+    assert np.isfinite(q).all() and np.isfinite(r).all()
+    assert np.allclose(q.T @ q, np.eye(q.shape[1]), atol=1e-13)
+    assert np.abs(q @ r - a).max() <= 1e-13 * magnitude

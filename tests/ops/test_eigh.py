@@ -404,3 +404,26 @@ def test_the_module_level_functions_agree_with_the_methods():
     np.testing.assert_array_equal(mt.eigvalsh(t).numpy(), t.eigvalsh().numpy())
     for a, b in zip(mt.eigh(t), t.eigh()):
         np.testing.assert_array_equal(a.numpy(), b.numpy())
+
+
+@pytest.mark.parametrize("magnitude", [1e160, 1e200, 1e250, 1e-160, 1e-200, 1e-250])
+def test_extreme_magnitudes(magnitude):
+    """A covariance whose entries are nowhere near one.
+
+    The reduction to tridiagonal form used to build its own reflector rather
+    than the shared one, and that copy squared its input without scaling it
+    first -- so a matrix past about `1e154` reported that it had not converged
+    instead of decomposing, and one below `1e-154` quietly skipped the
+    reflection.
+    """
+    values = np.random.default_rng(4).standard_normal((6, 6)) * magnitude
+    a = (values + values.T) / 2
+
+    w, v = mt.eigh(mt.Tensor.from_numpy(a))
+    w, v = w.numpy(), v.numpy()
+    reference = np.linalg.eigvalsh(a)
+
+    assert np.isfinite(w).all() and np.isfinite(v).all()
+    assert np.abs(w - reference).max() <= 1e-13 * np.abs(reference).max()
+    assert np.allclose(v.T @ v, np.eye(6), atol=1e-13)
+    assert np.abs(a @ v - v * w).max() <= 1e-13 * magnitude

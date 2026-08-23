@@ -262,18 +262,152 @@ def test_zero_on_the_diagonal_of_the_band():
     assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-12)
 
 
-def test_wide_range_of_magnitudes():
-    """Entries near the top of the range, where the shift's squares would
-    overflow if the band were not scaled first."""
-    a = _matrix((6, 4), seed=8) * 1e150
-    _, s, _ = _call(a)
+@pytest.mark.parametrize("position", range(5))
+def test_zero_on_the_diagonal_at_each_position(position):
+    """A zero anywhere along the band, not just the one place it was tried.
+
+    The shift is formed by dividing by the first diagonal entry of the block, so
+    a zero there is where the sweep breaks down and the row has to be rotated
+    out of the band instead. A zero at the very bottom is the one position that
+    does *not* take that branch -- nothing ever scans it -- and is here to check
+    that it converges anyway rather than relying on the branch to save it.
+    """
+    n = 5
+    diagonal = np.array([2.0, 3.0, 4.0, 5.0, 6.0])
+    diagonal[position] = 0.0
+    a = np.diag(diagonal) + np.diag([1.5, 2.5, 3.5, 4.5], 1)
+
+    u, s, vt = _call(a, False)
+    assert np.allclose(s, np.linalg.svd(a, compute_uv=False), atol=1e-12)
+    assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-12)
+    assert np.allclose(u.T @ u, np.eye(n), atol=1e-12)
+    assert np.allclose(vt @ vt.T, np.eye(n), atol=1e-12)
+
+
+def test_several_zeros_on_the_diagonal():
+    """More than one, so the band splits repeatedly rather than once."""
+    diagonal = np.array([2.0, 0.0, 4.0, 0.0, 6.0, 0.0, 8.0])
+    a = np.diag(diagonal) + np.diag(np.full(6, 1.5), 1)
+
+    u, s, vt = _call(a, False)
+    assert np.allclose(s, np.linalg.svd(a, compute_uv=False), atol=1e-12)
+    assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-12)
+    assert np.allclose(u.T @ u, np.eye(7), atol=1e-12)
+
+
+def test_a_diagonal_entry_far_below_the_norm():
+    """Negligible rather than exactly zero, which is what the branch tests for.
+
+    An exact zero is the easy case. The condition is relative to the norm of the
+    whole band, so an entry eighteen orders below it has to take the same path,
+    and the value it leaves behind is a singular value of its own.
+    """
+    diagonal = np.array([1.0, 1e-18, 1.0, 1.0])
+    a = np.diag(diagonal) + np.diag([0.5, 0.5, 0.5], 1)
+
+    u, s, vt = _call(a, False)
+    assert np.allclose(s, np.linalg.svd(a, compute_uv=False), atol=1e-13)
+    assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-13)
+    assert np.allclose(u.T @ u, np.eye(4), atol=1e-13)
+
+
+def test_batched_bands_with_zeros_on_the_diagonal():
+    """One matrix per position in a batch, so the branch fires part-way through
+    a batch rather than only on a lone matrix."""
+    bands = []
+    for position in range(4):
+        diagonal = np.array([2.0, 3.0, 4.0, 5.0])
+        diagonal[position] = 0.0
+        bands.append(np.diag(diagonal) + np.diag([1.5, 2.5, 3.5], 1))
+    a = np.stack(bands)
+
+    u, s, vt = _call(a, False)
+    assert np.allclose(s, np.linalg.svd(a, compute_uv=False), atol=1e-12)
+    assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-12)
+
+
+def test_a_rank_deficient_band_that_is_not_hand_built():
+    """The same branch reached from an ordinary matrix rather than a fixture.
+
+    A product of two low-rank factors has exact zero singular values, and the
+    reduction puts them on the band where the deflation has to find them.
+    """
+    rng = np.random.default_rng(29)
+    a = rng.standard_normal((9, 4)) @ rng.standard_normal((4, 9))
+    u, s, vt = _call(a, False)
+    assert np.allclose(s, np.linalg.svd(a, compute_uv=False), atol=1e-12)
+    assert np.allclose(_reconstruct(u, s, vt), a, atol=1e-12)
+    assert np.allclose(u.T @ u, np.eye(9), atol=1e-12)
+    assert np.allclose(s[4:], 0.0, atol=1e-13)
+
+
+@pytest.mark.parametrize("magnitude", [1e100, 1e150, 1e200, 1e-100, 1e-150, 1e-200])
+def test_wide_range_of_magnitudes(magnitude):
+    """Entries far from one, where the shift's squares overflow or vanish.
+
+    The shift is an eigenvalue of a two-by-two of `B.T @ B`, so forming it
+    squares four entries of the band. At `1e200` that is `1e400` and the shift
+    becomes infinite; the band is scaled to a power of two first so it cannot.
+    A power of two makes the scaling exact in both directions, which is why
+    these are checked at full relative precision rather than loosely.
+    """
+    a = _matrix((6, 4), seed=8) * magnitude
+    u, s, vt = _call(a, False)
     assert np.isfinite(s).all()
     assert np.allclose(s, np.linalg.svd(a, compute_uv=False), rtol=1e-12)
+    assert np.allclose(_reconstruct(u, s, vt) / magnitude, a / magnitude, atol=1e-12)
 
 
-def test_tiny_entries():
-    a = _matrix((6, 4), seed=9) * 1e-150
-    _, s, _ = _call(a)
+@pytest.mark.parametrize("magnitude", [1e20, 1e30, 1e-20, 1e-30])
+def test_float32_wide_range_of_magnitudes(magnitude):
+    """The same, in single precision, where the ceiling is a great deal closer.
+
+    A float32 square overflows above about `1e19` -- a magnitude a covariance
+    entry reaches without anything being wrong -- so this is the case that
+    actually motivates the scaling rather than the double-precision one.
+    """
+    a = (_matrix((6, 4), seed=10) * magnitude).astype(np.float32)
+    _, s, _ = _call(a, False)
+    assert np.isfinite(s).all()
+    reference = np.linalg.svd(a.astype(np.float64), compute_uv=False)
+    assert np.allclose(s.astype(np.float64), reference, rtol=1e-5)
+
+
+def test_magnitudes_mixed_within_one_matrix():
+    """Rows spanning the whole range at once, which pins the guarantee's edge.
+
+    The accuracy on offer is absolute, in units of the largest singular value:
+    every step is an exact orthogonal transformation of a matrix within rounding
+    of `A`, and rounding is relative to `A`'s norm. Here the rows span 240 orders
+    of magnitude, so every singular value except the first is below `eps` times
+    the largest and is not determined by the input at all -- what comes back for
+    those is a legitimate answer for *some* matrix within rounding of this one.
+
+    NumPy does recover them, and that is not this algorithm being worse at the
+    same thing: a matrix that factors as `D1 @ A @ D2` for well-conditioned `A`
+    is the case a one-sided Jacobi SVD gets to full relative accuracy, and this
+    is not one. So the assertion is the contract that is actually offered, which
+    would still catch a NaN, an infinity, a negative value, or a wrong answer
+    for a value that *is* determined.
+    """
+    a = _matrix((5, 5), seed=11) * np.array([1e120, 1e60, 1.0, 1e-60, 1e-120])[:, None]
+    _, s, _ = _call(a, False)
+    reference = np.linalg.svd(a, compute_uv=False)
+
+    assert np.isfinite(s).all()
+    assert (s >= 0).all()
+    assert (np.diff(s) <= 0).all()
+    # Absolute accuracy, in units of the largest singular value.
+    assert np.abs(s - reference).max() <= 1e-12 * reference[0]
+    # The one value the input actually determines.
+    assert np.isclose(s[0], reference[0], rtol=1e-13)
+
+
+def test_batched_magnitudes():
+    """A batch whose matrices need different scale factors from each other."""
+    a = np.stack([_matrix((4, 3), seed=12) * m for m in (1e150, 1.0, 1e-150)])
+    _, s, _ = _call(a, False)
+    assert np.isfinite(s).all()
     assert np.allclose(s, np.linalg.svd(a, compute_uv=False), rtol=1e-12)
 
 
@@ -449,30 +583,75 @@ def test_weighted_singular_value_gradient(shape):
     assert np.allclose(got, expected, atol=1e-6)
 
 
-@pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 3), (3, 5)])
+def _square_weights(shape, seed):
+    """A general weight matrix for the sign-invariant losses below.
+
+    It has to be a matrix and not one weight per column. `sum_ij w_j u_ij**2`
+    has `dL/dU = 2 U diag(w)`, so `U.T @ Ubar` comes out exactly diagonal -- and
+    the coupling term is `F * (U.T @ Ubar)` with `F` zero on its diagonal, so it
+    is identically zero, and `(I - U U.T) @ Ubar` is too. A loss like that agrees
+    with finite differences while testing neither term. That is not a
+    hypothetical: it is what the first version of these tests did, and four
+    deliberate breaks of the gradient went unnoticed because of it.
+    """
+    values = _matrix(shape, seed=seed)
+    return values, mt.Tensor.from_numpy(np.ascontiguousarray(values))
+
+
+@pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 3), (3, 5), (6, 2), (2, 6)])
 def test_vector_gradient_against_finite_differences(shape):
     """A loss on the factors themselves, which is where the coupling term and
     the `1 / (s_j^2 - s_i^2)` live.
 
-    The loss is built to be invariant to the sign of each column, because the
-    factors are only determined up to that and a loss that was not invariant
-    would have no finite-difference derivative to compare against.
+    The loss is invariant to the sign of each column, because the factors are
+    only determined up to that and a loss that was not invariant would have no
+    finite-difference derivative to compare against. It is *not* invariant to
+    anything else, which is the part that matters.
     """
     a = _matrix(shape, seed=17)
+    m, n = shape
     k = min(shape)
-    weights = np.arange(1.0, k + 1)
+    left, tensor_left = _square_weights((m, k), 100)
+    right, tensor_right = _square_weights((n, k), 101)
 
     def loss(matrix):
         u, _, vt = np.linalg.svd(matrix, full_matrices=False)
-        return float(((u**2) @ weights).sum() + ((vt.T**2) @ weights).sum())
+        return float((left * u * u).sum() + (right * vt.T * vt.T).sum())
 
     expected = _numeric_grad(loss, a.copy())
-    tensor_weights = mt.Tensor.from_numpy(weights)
 
     def tensor_loss(u, s, vt):
-        left = ((u * u) @ tensor_weights).sum()
         v = vt.transpose(-1, -2)
-        return left + ((v * v) @ tensor_weights).sum()
+        return (tensor_left * u * u).sum() + (tensor_right * v * v).sum()
+
+    got = _grad_of(a, tensor_loss)
+    assert np.allclose(got, expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("shape", [(4, 4), (5, 3), (3, 5)])
+def test_gradient_of_a_loss_that_couples_u_and_v(shape):
+    """`sum_j (p . u_j)(q . v_j)`, which is sign-invariant only *jointly*.
+
+    Flipping column `j` of `U` alone changes it; flipping both columns leaves it
+    alone, which is exactly the freedom the factorisation has. It produces a
+    rank-one, non-symmetric `U.T @ Ubar`, so the coupling term and its transpose
+    are both non-zero and neither can stand in for the other.
+    """
+    a = _matrix(shape, seed=18)
+    m, n = shape
+    p = _matrix((m,), seed=102)
+    q = _matrix((n,), seed=103)
+
+    def loss(matrix):
+        u, _, vt = np.linalg.svd(matrix, full_matrices=False)
+        return float(((p @ u) * (q @ vt.T)).sum())
+
+    expected = _numeric_grad(loss, a.copy())
+    tp = mt.Tensor.from_numpy(p)
+    tq = mt.Tensor.from_numpy(q)
+
+    def tensor_loss(u, s, vt):
+        return ((tp @ u) * (tq @ vt.transpose(-1, -2))).sum()
 
     got = _grad_of(a, tensor_loss)
     assert np.allclose(got, expected, atol=1e-6)
@@ -480,13 +659,15 @@ def test_vector_gradient_against_finite_differences(shape):
 
 def test_all_three_gradients_together():
     """One backward through all three outputs sums three nodes' contributions."""
-    a = _matrix((4, 3), seed=18)
+    a = _matrix((4, 3), seed=19)
+    left, tensor_left = _square_weights((4, 3), 104)
+    right, tensor_right = _square_weights((3, 3), 105)
     weights = np.arange(1.0, 4.0)
 
     def loss(matrix):
         u, s, vt = np.linalg.svd(matrix, full_matrices=False)
         return float(
-            ((u**2) @ weights).sum() + s @ weights + ((vt.T**2) @ weights).sum()
+            (left * u * u).sum() + s @ weights + (right * vt.T * vt.T).sum()
         )
 
     expected = _numeric_grad(loss, a.copy())
@@ -495,13 +676,35 @@ def test_all_three_gradients_together():
     def tensor_loss(u, s, vt):
         v = vt.transpose(-1, -2)
         return (
-            ((u * u) @ tensor_weights).sum()
+            (tensor_left * u * u).sum()
             + (s * tensor_weights).sum()
-            + ((v * v) @ tensor_weights).sum()
+            + (tensor_right * v * v).sum()
         )
 
     got = _grad_of(a, tensor_loss)
     assert np.allclose(got, expected, atol=1e-6)
+
+
+def test_the_vector_gradient_terms_are_not_secretly_zero():
+    """A guard on the tests above rather than on the library.
+
+    Both non-trivial gradient terms are products with something that a badly
+    chosen loss makes identically zero, and a test whose subject is zero passes
+    whatever the code does. This asserts the subject is not zero, so that if a
+    future edit makes the losses degenerate again it fails here and says why
+    rather than quietly stopping testing anything.
+    """
+    a = _matrix((5, 3), seed=17)
+    u, _, vt = _call(a, False)
+    left, _ = _square_weights((5, 3), 100)
+
+    grad_u = 2 * left * u
+    projected = u.T @ grad_u
+    coupling = projected - np.diag(np.diag(projected))
+    outside = grad_u - u @ projected
+
+    assert np.abs(coupling).max() > 1e-3
+    assert np.abs(outside).max() > 1e-3
 
 
 def test_batched_gradient_matches_per_matrix():
@@ -518,11 +721,12 @@ def test_batched_vector_gradient_matches_per_matrix():
     term, which is the one with no matrix products in it. This is the rest.
     """
     a = _matrix((3, 5, 3), seed=28)
-    weights = mt.Tensor.from_numpy(np.arange(1.0, 4.0))
+    _, left = _square_weights((5, 3), 106)
+    _, right = _square_weights((3, 3), 107)
 
     def loss(u, s, vt):
         v = vt.transpose(-1, -2)
-        return ((u * u) @ weights).sum() + ((v * v) @ weights).sum()
+        return (left * u * u).sum() + (right * v * v).sum()
 
     batched = _grad_of(a, loss)
     each = np.stack([_grad_of(a[i], loss) for i in range(3)])

@@ -35,27 +35,50 @@ use num_traits::{Float, One, Zero};
 ///
 /// Returns `tau`, which is zero when the run was already reduced -- the identity
 /// is the reflector then, and the existing head stands whatever its sign.
+///
+/// The run is divided by its largest magnitude before anything is squared. That
+/// is not a refinement: the sum of squares is the only place this squares
+/// anything, and it overflows above about `1e154` in double and `1e19` in
+/// single -- magnitudes a real matrix reaches. Above that, `norm` came out
+/// infinite and the whole factorisation was `NaN`; below about `1e-154` the sum
+/// underflowed to zero, the run was declared already reduced, and `qr` returned
+/// a perfectly orthogonal `Q` with a residual of order one and no error at all.
+/// The quiet failure was the worse of the two.
+///
+/// Only `beta` has to be scaled back. Every other quantity here is invariant:
+/// `tau` is a ratio of two lengths, and each stored component is divided by a
+/// third, so the factor cancels in all of them.
 pub(crate) fn make<T: Factorable>(work: &mut [T], head: usize, step: usize, count: usize) -> T {
+    let mut largest = T::Acc::zero();
+    for i in 0..count {
+        largest = largest.max(work[head + i * step].widen().abs());
+    }
+    if largest == T::Acc::zero() || !largest.is_finite() {
+        return T::zero();
+    }
+
+    // Every ratio is at most one, so no term can overflow, and a term too small
+    // to matter after scaling was too small to matter unscaled.
     let mut below = T::Acc::zero();
     for i in 1..count {
-        let value = work[head + i * step].widen();
+        let value = work[head + i * step].widen() / largest;
         below = below + value * value;
     }
     if below == T::Acc::zero() {
         return T::zero();
     }
 
-    let alpha = work[head].widen();
+    let alpha = work[head].widen() / largest;
     let norm = (alpha * alpha + below).sqrt();
     // Away from `alpha`, so that `alpha - beta` is a sum of magnitudes and
     // never the cancellation that would wreck the reflector.
     let beta = if alpha > T::Acc::zero() { -norm } else { norm };
     let tau = T::narrow((beta - alpha) / beta);
-    let scale = T::Acc::one() / (alpha - beta);
+    let scale = T::Acc::one() / ((alpha - beta) * largest);
     for i in 1..count {
         work[head + i * step] = T::narrow(work[head + i * step].widen() * scale);
     }
-    work[head] = T::narrow(beta);
+    work[head] = T::narrow(beta * largest);
     tau
 }
 
