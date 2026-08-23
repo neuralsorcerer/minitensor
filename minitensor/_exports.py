@@ -174,6 +174,10 @@ _FUNCTIONAL_FORWARDERS = (
 # `functional`; a name *added* to `functional` and forgotten here would simply
 # never show up as `mt.<name>`, with nothing to notice.
 _FUNCTIONAL_ONLY = (
+    "adaptive_avg_pool1d",
+    "adaptive_avg_pool2d",
+    "adaptive_max_pool1d",
+    "adaptive_max_pool2d",
     "avg_pool1d",
     "avg_pool2d",
     "batch_norm",

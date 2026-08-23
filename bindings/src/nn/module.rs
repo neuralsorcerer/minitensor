@@ -28,7 +28,10 @@ use engine::nn::{
     dropout::{Dropout, Dropout2d},
     embedding::Embedding,
     normalization::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm},
-    pooling::{AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d},
+    pooling::{
+        AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
+        AvgPool2d, MaxPool1d, MaxPool2d,
+    },
     recurrent::{CellKind, Recurrent},
     utils::{LayerUtils, SequentialUtils},
 };
@@ -43,6 +46,8 @@ use engine::ops::loss::{
     mae_loss as mae_loss_op, smooth_l1_loss as smooth_l1_loss_op,
 };
 use engine::ops::pooling::{
+    adaptive_avg_pool1d as adaptive_avg_pool1d_op, adaptive_avg_pool2d as adaptive_avg_pool2d_op,
+    adaptive_max_pool1d as adaptive_max_pool1d_op, adaptive_max_pool2d as adaptive_max_pool2d_op,
     avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, max_pool1d as max_pool1d_op,
     max_pool2d as max_pool2d_op,
 };
@@ -339,6 +344,46 @@ fn max_pool2d(
     let padding = parse_pair_arg("padding", padding, (0, 0))?;
     let result =
         max_pool2d_op(input_tensor.tensor(), kernel, stride, padding).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Average pooling to a fixed `output_size`, whatever the input's spatial size is. Windows come from the ratio of the extents, so they can overlap and vary in size; `output_size=1` is the global average pool that ends most convolutional networks.
+#[pyfunction]
+#[pyo3(signature = (input, output_size))]
+fn adaptive_avg_pool2d(input: &Bound<PyAny>, output_size: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let size = parse_pair_arg("output_size", Some(output_size), (1, 1))?;
+    let result = adaptive_avg_pool2d_op(input_tensor.tensor(), size).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Max pooling to a fixed `output_size`. See `adaptive_avg_pool2d`.
+#[pyfunction]
+#[pyo3(signature = (input, output_size))]
+fn adaptive_max_pool2d(input: &Bound<PyAny>, output_size: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let size = parse_pair_arg("output_size", Some(output_size), (1, 1))?;
+    let result = adaptive_max_pool2d_op(input_tensor.tensor(), size).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// 1-D adaptive average pooling over `[N, C, L]`.
+#[pyfunction]
+#[pyo3(signature = (input, output_size))]
+fn adaptive_avg_pool1d(input: &Bound<PyAny>, output_size: usize) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let result =
+        adaptive_avg_pool1d_op(input_tensor.tensor(), output_size).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// 1-D adaptive max pooling over `[N, C, L]`.
+#[pyfunction]
+#[pyo3(signature = (input, output_size))]
+fn adaptive_max_pool1d(input: &Bound<PyAny>, output_size: usize) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let result =
+        adaptive_max_pool1d_op(input_tensor.tensor(), output_size).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
@@ -710,6 +755,10 @@ module_types! {
     AvgPool1d(AvgPool1d),
     ConvTranspose2d(ConvTranspose2d),
     ConvTranspose1d(ConvTranspose1d),
+    AdaptiveAvgPool2d(AdaptiveAvgPool2d),
+    AdaptiveMaxPool2d(AdaptiveMaxPool2d),
+    AdaptiveAvgPool1d(AdaptiveAvgPool1d),
+    AdaptiveMaxPool1d(AdaptiveMaxPool1d),
 }
 
 #[pymethods]
@@ -876,6 +925,18 @@ impl PyModule {
                 layer.out_channels(),
                 layer.kernel_size()
             ),
+            ModuleType::AdaptiveAvgPool2d(layer) => {
+                format!("AdaptiveAvgPool2d(output_size={:?})", layer.output_size())
+            }
+            ModuleType::AdaptiveMaxPool2d(layer) => {
+                format!("AdaptiveMaxPool2d(output_size={:?})", layer.output_size())
+            }
+            ModuleType::AdaptiveAvgPool1d(layer) => {
+                format!("AdaptiveAvgPool1d(output_size={})", layer.output_size())
+            }
+            ModuleType::AdaptiveMaxPool1d(layer) => {
+                format!("AdaptiveMaxPool1d(output_size={})", layer.output_size())
+            }
             ModuleType::BatchNorm1d(layer) => {
                 format!("BatchNorm1d(num_features={})", layer.num_features())
             }
@@ -1083,6 +1144,30 @@ impl PyModule {
         }
     }
 
+    pub fn from_adaptive_avg_pool2d(layer: AdaptiveAvgPool2d) -> Self {
+        Self {
+            inner: ModuleType::AdaptiveAvgPool2d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_adaptive_max_pool2d(layer: AdaptiveMaxPool2d) -> Self {
+        Self {
+            inner: ModuleType::AdaptiveMaxPool2d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_adaptive_avg_pool1d(layer: AdaptiveAvgPool1d) -> Self {
+        Self {
+            inner: ModuleType::AdaptiveAvgPool1d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_adaptive_max_pool1d(layer: AdaptiveMaxPool1d) -> Self {
+        Self {
+            inner: ModuleType::AdaptiveMaxPool1d(Box::new(layer)),
+        }
+    }
+
     pub fn from_conv_transpose2d(layer: ConvTranspose2d) -> Self {
         Self {
             inner: ModuleType::ConvTranspose2d(Box::new(layer)),
@@ -1212,6 +1297,10 @@ impl PyModule {
             ModuleType::AvgPool1d(layer) => layer.clone(),
             ModuleType::ConvTranspose2d(layer) => layer.clone(),
             ModuleType::ConvTranspose1d(layer) => layer.clone(),
+            ModuleType::AdaptiveAvgPool2d(layer) => layer.clone(),
+            ModuleType::AdaptiveMaxPool2d(layer) => layer.clone(),
+            ModuleType::AdaptiveAvgPool1d(layer) => layer.clone(),
+            ModuleType::AdaptiveMaxPool1d(layer) => layer.clone(),
         };
 
         Ok(layer)

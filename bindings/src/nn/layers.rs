@@ -790,6 +790,126 @@ impl PyConvTranspose1d {
     }
 }
 
+/// AdaptiveAvgPool2d layer
+#[pyclass(name = "AdaptiveAvgPool2d", extends = PyModule)]
+pub struct PyAdaptiveAvgPool2d;
+
+#[pymethods]
+impl PyAdaptiveAvgPool2d {
+    /// Create a new AdaptiveAvgPool2d layer
+    #[new]
+    #[pyo3(signature = (output_size=None))]
+    fn new(output_size: Option<&Bound<PyAny>>) -> PyResult<PyClassInitializer<Self>> {
+        let size: (usize, usize) = match output_size {
+            Some(output_size) => parse_tuple2(output_size)?,
+            None => (1, 1),
+        };
+        let layer = AdaptiveAvgPool2d::new(Some(size));
+        Ok(PyClassInitializer::from(PyModule::from_adaptive_avg_pool2d(layer)).add_subclass(Self))
+    }
+
+    /// The size every input is pooled down (or up) to
+    #[getter]
+    fn output_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::AdaptiveAvgPool2d(layer) => Ok(layer.output_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
+/// AdaptiveAvgPool1d layer
+#[pyclass(name = "AdaptiveAvgPool1d", extends = PyModule)]
+pub struct PyAdaptiveAvgPool1d;
+
+#[pymethods]
+impl PyAdaptiveAvgPool1d {
+    /// Create a new AdaptiveAvgPool1d layer
+    #[new]
+    #[pyo3(signature = (output_size=None))]
+    fn new(output_size: Option<&Bound<PyAny>>) -> PyResult<PyClassInitializer<Self>> {
+        let size: usize = match output_size {
+            Some(output_size) => output_size.extract::<usize>()?,
+            None => 1,
+        };
+        let layer = AdaptiveAvgPool1d::new(Some(size));
+        Ok(PyClassInitializer::from(PyModule::from_adaptive_avg_pool1d(layer)).add_subclass(Self))
+    }
+
+    /// The size every input is pooled down (or up) to
+    #[getter]
+    fn output_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::AdaptiveAvgPool1d(layer) => Ok(layer.output_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
+/// AdaptiveMaxPool2d layer
+#[pyclass(name = "AdaptiveMaxPool2d", extends = PyModule)]
+pub struct PyAdaptiveMaxPool2d;
+
+#[pymethods]
+impl PyAdaptiveMaxPool2d {
+    /// Create a new AdaptiveMaxPool2d layer
+    #[new]
+    #[pyo3(signature = (output_size=None))]
+    fn new(output_size: Option<&Bound<PyAny>>) -> PyResult<PyClassInitializer<Self>> {
+        let size: (usize, usize) = match output_size {
+            Some(output_size) => parse_tuple2(output_size)?,
+            None => (1, 1),
+        };
+        let layer = AdaptiveMaxPool2d::new(Some(size));
+        Ok(PyClassInitializer::from(PyModule::from_adaptive_max_pool2d(layer)).add_subclass(Self))
+    }
+
+    /// The size every input is pooled down (or up) to
+    #[getter]
+    fn output_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::AdaptiveMaxPool2d(layer) => Ok(layer.output_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
+/// AdaptiveMaxPool1d layer
+#[pyclass(name = "AdaptiveMaxPool1d", extends = PyModule)]
+pub struct PyAdaptiveMaxPool1d;
+
+#[pymethods]
+impl PyAdaptiveMaxPool1d {
+    /// Create a new AdaptiveMaxPool1d layer
+    #[new]
+    #[pyo3(signature = (output_size=None))]
+    fn new(output_size: Option<&Bound<PyAny>>) -> PyResult<PyClassInitializer<Self>> {
+        let size: usize = match output_size {
+            Some(output_size) => output_size.extract::<usize>()?,
+            None => 1,
+        };
+        let layer = AdaptiveMaxPool1d::new(Some(size));
+        Ok(PyClassInitializer::from(PyModule::from_adaptive_max_pool1d(layer)).add_subclass(Self))
+    }
+
+    /// The size every input is pooled down (or up) to
+    #[getter]
+    fn output_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::AdaptiveMaxPool1d(layer) => Ok(layer.output_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
 /// BatchNorm1d layer
 #[pyclass(name = "BatchNorm1d", extends = PyModule)]
 pub struct PyBatchNorm1d;
@@ -1726,6 +1846,10 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyConv2d>()?;
     nn_module.add_class::<PyConvTranspose2d>()?;
     nn_module.add_class::<PyConvTranspose1d>()?;
+    nn_module.add_class::<PyAdaptiveAvgPool2d>()?;
+    nn_module.add_class::<PyAdaptiveAvgPool1d>()?;
+    nn_module.add_class::<PyAdaptiveMaxPool2d>()?;
+    nn_module.add_class::<PyAdaptiveMaxPool1d>()?;
     nn_module.add_class::<PyMaxPool2d>()?;
     nn_module.add_class::<PyAvgPool2d>()?;
     nn_module.add_class::<PyBatchNorm1d>()?;
@@ -1740,6 +1864,10 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(adaptive_avg_pool2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(adaptive_max_pool2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(adaptive_avg_pool1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(adaptive_max_pool1d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv_transpose2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv_transpose1d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(max_pool1d, &nn_module)?)?;

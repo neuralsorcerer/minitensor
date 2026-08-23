@@ -239,6 +239,318 @@ macro_rules! avg_pool2d_kernel {
 avg_pool2d_kernel!(avg_pool2d_f32, f32, as_f32_slice);
 avg_pool2d_kernel!(avg_pool2d_f64, f64, as_f64_slice);
 
+/// The half-open input range that output position `index` pools over.
+///
+/// This is the whole of what makes a pooling "adaptive": the window comes from
+/// the ratio of the two extents rather than from a fixed kernel, so it stretches
+/// to cover whatever input it is given, and neighbouring windows overlap or
+/// leave gaps by however much they must. `start` rounds down and `end` rounds
+/// up, which is what guarantees every input position falls in at least one
+/// window and no window is empty.
+///
+/// When `out_size` divides `in_size` this degenerates exactly to a regular pool
+/// with kernel and stride both `in_size / out_size` -- which is the case a
+/// caller can check against, and the reason the formula has to be this one and
+/// not a plausible neighbour.
+#[inline]
+pub(crate) fn adaptive_window(
+    index: usize,
+    in_size: usize,
+    out_size: usize,
+) -> std::ops::Range<usize> {
+    let start = index * in_size / out_size;
+    let end = ((index + 1) * in_size).div_ceil(out_size);
+    start..end
+}
+
+/// Validate an adaptive pooling request and produce its geometry.
+fn adaptive_geometry(
+    input: &Tensor,
+    output_size: (usize, usize),
+    name: &str,
+) -> Result<PoolGeometry> {
+    if input.ndim() != 4 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{name} expects a 4D input tensor [N, C, H, W]"
+        )));
+    }
+    let (batch, channels) = (input.size(0)?, input.size(1)?);
+    let (in_h, in_w) = (input.size(2)?, input.size(3)?);
+    // An empty axis has no values to pool and the window over it would be
+    // empty, so an average would be zero divided by zero. Asking for no output
+    // along that axis is fine; asking for some is not.
+    if (in_h == 0 && output_size.0 > 0) || (in_w == 0 && output_size.1 > 0) {
+        return Err(MinitensorError::invalid_argument(format!(
+            "{name} cannot pool an empty spatial axis into a non-empty one"
+        )));
+    }
+    Ok(PoolGeometry {
+        batch,
+        channels,
+        in_h,
+        in_w,
+        out_h: output_size.0,
+        out_w: output_size.1,
+    })
+}
+
+macro_rules! adaptive_avg_pool2d_kernel {
+    ($name:ident, $ty:ty, $accessor:ident) => {
+        fn $name(input: &Tensor, geometry: &PoolGeometry) -> Result<Vec<$ty>> {
+            let data = input.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("adaptive_avg_pool2d received a mismatched dtype")
+            })?;
+            let PoolGeometry {
+                batch,
+                channels,
+                in_h,
+                in_w,
+                out_h,
+                out_w,
+            } = *geometry;
+
+            let plane_out = out_h * out_w;
+            let plane_in = in_h * in_w;
+            let mut values = vec![0 as $ty; batch * channels * plane_out];
+            if plane_out == 0 {
+                return Ok(values);
+            }
+
+            par_out_chunks(&mut values, plane_out, &|first, out_values| {
+                let base = (first / plane_out) * plane_in;
+                for oh in 0..out_h {
+                    let rows = adaptive_window(oh, in_h, out_h);
+                    for ow in 0..out_w {
+                        let cols = adaptive_window(ow, in_w, out_w);
+                        let count = rows.len() * cols.len();
+                        let mut total = 0 as $ty;
+                        for ih in rows.clone() {
+                            let row = base + ih * in_w;
+                            for value in &data[row + cols.start..row + cols.end] {
+                                total += *value;
+                            }
+                        }
+                        out_values[oh * out_w + ow] = total / count as $ty;
+                    }
+                }
+            });
+            Ok(values)
+        }
+    };
+}
+
+adaptive_avg_pool2d_kernel!(adaptive_avg_pool2d_f32, f32, as_f32_slice);
+adaptive_avg_pool2d_kernel!(adaptive_avg_pool2d_f64, f64, as_f64_slice);
+
+macro_rules! adaptive_max_pool2d_kernel {
+    ($name:ident, $ty:ty, $accessor:ident) => {
+        fn $name(input: &Tensor, geometry: &PoolGeometry) -> Result<(Vec<$ty>, Vec<i64>)> {
+            let data = input.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("adaptive_max_pool2d received a mismatched dtype")
+            })?;
+            let PoolGeometry {
+                batch,
+                channels,
+                in_h,
+                in_w,
+                out_h,
+                out_w,
+            } = *geometry;
+
+            let plane_out = out_h * out_w;
+            let plane_in = in_h * in_w;
+            let mut values = vec![0 as $ty; batch * channels * plane_out];
+            let mut indices = vec![0i64; batch * channels * plane_out];
+            if plane_out == 0 {
+                return Ok((values, indices));
+            }
+
+            par_out_chunks2(
+                &mut values,
+                &mut indices,
+                plane_out,
+                &|first, out_values, out_indices| {
+                    let base = (first / plane_out) * plane_in;
+                    for oh in 0..out_h {
+                        let rows = adaptive_window(oh, in_h, out_h);
+                        for ow in 0..out_w {
+                            let cols = adaptive_window(ow, in_w, out_w);
+                            let mut best = <$ty>::NEG_INFINITY;
+                            let mut best_index = -1i64;
+                            let mut saw_nan = false;
+                            for ih in rows.clone() {
+                                for iw in cols.clone() {
+                                    let offset = ih * in_w + iw;
+                                    let value = data[base + offset];
+                                    // A NaN in the window wins, as it does in
+                                    // `max_pool2d` and in `max` itself: the
+                                    // maximum of a set containing one is not a
+                                    // number, and quietly skipping it would let
+                                    // a NaN vanish from a network.
+                                    if value.is_nan() {
+                                        if !saw_nan {
+                                            saw_nan = true;
+                                            best = value;
+                                            best_index = offset as i64;
+                                        }
+                                    } else if !saw_nan && value > best {
+                                        best = value;
+                                        best_index = offset as i64;
+                                    }
+                                }
+                            }
+                            let slot = oh * out_w + ow;
+                            out_values[slot] = best;
+                            out_indices[slot] = best_index;
+                        }
+                    }
+                },
+            );
+            Ok((values, indices))
+        }
+    };
+}
+
+adaptive_max_pool2d_kernel!(adaptive_max_pool2d_f32, f32, as_f32_slice);
+adaptive_max_pool2d_kernel!(adaptive_max_pool2d_f64, f64, as_f64_slice);
+
+/// Average pooling to a fixed output size, whatever the input size is.
+///
+/// A regular pool needs a kernel and a stride, so the caller has to know the
+/// input's spatial extent to hit a chosen output extent -- and cannot hit one at
+/// all when the extent does not divide evenly, because a fixed window cannot
+/// produce unequal groups. This derives the window from the ratio instead, which
+/// is what lets a classifier head take any input size and still hand the linear
+/// layer the shape it expects.
+///
+/// `output_size` of `(1, 1)` is the global average pool that ends most
+/// convolutional networks.
+pub fn adaptive_avg_pool2d(input: &Tensor, output_size: (usize, usize)) -> Result<Tensor> {
+    let geometry = adaptive_geometry(input, output_size, "adaptive_avg_pool2d")?;
+    let out_shape = Shape::new(vec![
+        geometry.batch,
+        geometry.channels,
+        geometry.out_h,
+        geometry.out_w,
+    ]);
+
+    let data = match input.dtype() {
+        DataType::Float32 => {
+            TensorData::from_vec_f32(adaptive_avg_pool2d_f32(input, &geometry)?, input.device())
+        }
+        DataType::Float64 => {
+            TensorData::from_vec_f64(adaptive_avg_pool2d_f64(input, &geometry)?, input.device())
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "adaptive_avg_pool2d only supports float32 and float64 tensors",
+            ));
+        }
+    };
+
+    let mut output = Tensor::new(
+        Arc::new(data),
+        out_shape,
+        input.dtype(),
+        input.device(),
+        input.requires_grad(),
+    );
+
+    if input.requires_grad() {
+        let grad_fn = Arc::new(crate::autograd::AdaptiveAvgPool2dBackward {
+            input_id: input.id(),
+            input_shape: input.shape().dims().to_vec(),
+            output_size,
+        });
+        output = with_grad_fn(output, grad_fn)?;
+    }
+    Ok(output)
+}
+
+/// Max pooling to a fixed output size. See [`adaptive_avg_pool2d`] for what
+/// "adaptive" buys.
+///
+/// The winning positions are retained internally, so the backward pass is the
+/// same scatter a regular max pool performs and shares its implementation --
+/// which is the whole reason this records them rather than recomputing the
+/// windows.
+pub fn adaptive_max_pool2d(input: &Tensor, output_size: (usize, usize)) -> Result<Tensor> {
+    let geometry = adaptive_geometry(input, output_size, "adaptive_max_pool2d")?;
+    let out_shape = Shape::new(vec![
+        geometry.batch,
+        geometry.channels,
+        geometry.out_h,
+        geometry.out_w,
+    ]);
+
+    let (data, indices) = match input.dtype() {
+        DataType::Float32 => {
+            let (values, indices) = adaptive_max_pool2d_f32(input, &geometry)?;
+            (TensorData::from_vec_f32(values, input.device()), indices)
+        }
+        DataType::Float64 => {
+            let (values, indices) = adaptive_max_pool2d_f64(input, &geometry)?;
+            (TensorData::from_vec_f64(values, input.device()), indices)
+        }
+        _ => {
+            return Err(MinitensorError::invalid_operation(
+                "adaptive_max_pool2d only supports float32 and float64 tensors",
+            ));
+        }
+    };
+
+    let mut output = Tensor::new(
+        Arc::new(data),
+        out_shape,
+        input.dtype(),
+        input.device(),
+        input.requires_grad(),
+    );
+
+    if input.requires_grad() {
+        let grad_fn = Arc::new(MaxPool2dBackward {
+            input_id: input.id(),
+            input_shape: input.shape().dims().to_vec(),
+            indices,
+        });
+        output = with_grad_fn(output, grad_fn)?;
+    }
+    Ok(output)
+}
+
+/// 1-D adaptive average pooling over `[N, C, L]`.
+pub fn adaptive_avg_pool1d(input: &Tensor, output_size: usize) -> Result<Tensor> {
+    adaptive_pool1d(input, output_size, "adaptive_avg_pool1d", |t, size| {
+        adaptive_avg_pool2d(t, size)
+    })
+}
+
+/// 1-D adaptive max pooling over `[N, C, L]`.
+pub fn adaptive_max_pool1d(input: &Tensor, output_size: usize) -> Result<Tensor> {
+    adaptive_pool1d(input, output_size, "adaptive_max_pool1d", |t, size| {
+        adaptive_max_pool2d(t, size)
+    })
+}
+
+/// Give a 1-D signal a singleton height and defer to the 2-D pooler, as the
+/// fixed-window 1-D poolers do -- one window rule and one backward pass rather
+/// than two to keep in step.
+fn adaptive_pool1d<F>(input: &Tensor, output_size: usize, name: &str, pool: F) -> Result<Tensor>
+where
+    F: Fn(&Tensor, (usize, usize)) -> Result<Tensor>,
+{
+    if input.ndim() != 3 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{name} expects a 3D input tensor [N, C, L]"
+        )));
+    }
+    let dims = input.shape().dims().to_vec();
+    let widened = input.reshape(Shape::new(vec![dims[0], dims[1], 1, dims[2]]))?;
+    let pooled = pool(&widened, (1, output_size))?;
+    let out = pooled.shape().dims().to_vec();
+    pooled.reshape(Shape::new(vec![out[0], out[1], out[3]]))
+}
+
 /// Max pooling over a 4-D `[N, C, H, W]` input.
 ///
 /// Returns the pooled values; the winning positions are retained internally for

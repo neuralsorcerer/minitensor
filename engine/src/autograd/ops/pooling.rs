@@ -44,6 +44,114 @@ pub struct AvgPool2dBackward {
     pub count_include_pad: bool,
 }
 
+/// Spread each output gradient evenly over the window it averaged, where the
+/// windows came from the ratio of the extents rather than a fixed kernel.
+///
+/// Separate from [`AvgPool2dBackward`] because the windows are not uniform:
+/// each one has its own size, so each carries its own divisor, and they overlap
+/// by however much the ratio demands. A caller who reached for the fixed-window
+/// backward with an averaged kernel size would be wrong by a little almost
+/// everywhere and by a lot at the edges.
+pub struct AdaptiveAvgPool2dBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub output_size: (usize, usize),
+}
+
+macro_rules! adaptive_avg_pool_backward {
+    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
+        fn $name(
+            grad_output: &Tensor,
+            input_shape: &[usize],
+            output_size: (usize, usize),
+        ) -> Result<TensorData> {
+            let grad = grad_output.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "adaptive_avg_pool2d backward received a mismatched dtype",
+                )
+            })?;
+            let (batch, channels) = (input_shape[0], input_shape[1]);
+            let (in_h, in_w) = (input_shape[2], input_shape[3]);
+            let (out_h, out_w) = output_size;
+            let plane_in = in_h * in_w;
+            let plane_out = out_h * out_w;
+
+            let mut values = vec![0 as $ty; batch * channels * plane_in];
+            if plane_out == 0 || plane_in == 0 {
+                return Ok(TensorData::$from_vec(values, grad_output.device()));
+            }
+
+            // One task per `[H, W]` plane: the windows within a plane overlap,
+            // so the scatter-add inside is serial, but planes never touch.
+            par_out_chunks(&mut values, plane_in, &|first, image| {
+                let base = (first / plane_in) * plane_out;
+                for oh in 0..out_h {
+                    let rows = crate::ops::pooling::adaptive_window(oh, in_h, out_h);
+                    for ow in 0..out_w {
+                        let cols = crate::ops::pooling::adaptive_window(ow, in_w, out_w);
+                        let share = grad[base + oh * out_w + ow] / (rows.len() * cols.len()) as $ty;
+                        for ih in rows.clone() {
+                            let row = ih * in_w;
+                            for slot in &mut image[row + cols.start..row + cols.end] {
+                                *slot += share;
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(TensorData::$from_vec(values, grad_output.device()))
+        }
+    };
+}
+
+adaptive_avg_pool_backward!(
+    adaptive_avg_pool_backward_f32,
+    f32,
+    as_f32_slice,
+    from_vec_f32
+);
+adaptive_avg_pool_backward!(
+    adaptive_avg_pool_backward_f64,
+    f64,
+    as_f64_slice,
+    from_vec_f64
+);
+
+impl GradientFunction for AdaptiveAvgPool2dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let data = match grad_output.dtype() {
+            DataType::Float32 => {
+                adaptive_avg_pool_backward_f32(grad_output, &self.input_shape, self.output_size)?
+            }
+            DataType::Float64 => {
+                adaptive_avg_pool_backward_f64(grad_output, &self.input_shape, self.output_size)?
+            }
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "adaptive_avg_pool2d backward only supports floating point tensors",
+                ));
+            }
+        };
+        let mut gradients = FxHashMap::default();
+        accumulate_grad(
+            &mut gradients,
+            self.input_id,
+            Tensor::new(
+                Arc::new(data),
+                Shape::new(self.input_shape.clone()),
+                grad_output.dtype(),
+                grad_output.device(),
+                false,
+            ),
+        )?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 macro_rules! max_pool_backward {
     ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
         fn $name(

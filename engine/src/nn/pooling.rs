@@ -234,3 +234,154 @@ impl Layer for AvgPool1d {
         Vec::new()
     }
 }
+
+/// Average pooling to a fixed output size over `[N, C, H, W]` signals.
+///
+/// The layer a classifier head is made of: a fixed-window pool needs a kernel
+/// chosen for one input size, while this derives its windows from the ratio of
+/// the extents and so hands the next layer the same shape whatever came in.
+///
+/// `output_size` of `(1, 1)` is the global average pool that ends most
+/// convolutional networks.
+#[derive(Clone)]
+pub struct AdaptiveAvgPool2d {
+    output_size: (usize, usize),
+}
+
+impl AdaptiveAvgPool2d {
+    /// Create the layer. `output_size` defaults to `(1, 1)`.
+    pub fn new(output_size: Option<(usize, usize)>) -> Self {
+        Self {
+            output_size: output_size.unwrap_or((1, 1)),
+        }
+    }
+
+    pub fn output_size(&self) -> (usize, usize) {
+        self.output_size
+    }
+}
+
+impl Layer for AdaptiveAvgPool2d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::pooling::adaptive_avg_pool2d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+}
+
+/// Average pooling to a fixed output size over `[N, C, L]` signals.
+///
+/// The layer a classifier head is made of: a fixed-window pool needs a kernel
+/// chosen for one input size, while this derives its windows from the ratio of
+/// the extents and so hands the next layer the same shape whatever came in.
+#[derive(Clone)]
+pub struct AdaptiveAvgPool1d {
+    output_size: usize,
+}
+
+impl AdaptiveAvgPool1d {
+    /// Create the layer. `output_size` defaults to `1`.
+    pub fn new(output_size: Option<usize>) -> Self {
+        Self {
+            output_size: output_size.unwrap_or(1),
+        }
+    }
+
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+}
+
+impl Layer for AdaptiveAvgPool1d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::pooling::adaptive_avg_pool1d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+}
+
+/// Max pooling to a fixed output size over `[N, C, H, W]` signals.
+///
+/// The layer a classifier head is made of: a fixed-window pool needs a kernel
+/// chosen for one input size, while this derives its windows from the ratio of
+/// the extents and so hands the next layer the same shape whatever came in.
+#[derive(Clone)]
+pub struct AdaptiveMaxPool2d {
+    output_size: (usize, usize),
+}
+
+impl AdaptiveMaxPool2d {
+    /// Create the layer. `output_size` defaults to `(1, 1)`.
+    pub fn new(output_size: Option<(usize, usize)>) -> Self {
+        Self {
+            output_size: output_size.unwrap_or((1, 1)),
+        }
+    }
+
+    pub fn output_size(&self) -> (usize, usize) {
+        self.output_size
+    }
+}
+
+impl Layer for AdaptiveMaxPool2d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::pooling::adaptive_max_pool2d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+}
+
+/// Max pooling to a fixed output size over `[N, C, L]` signals.
+///
+/// The layer a classifier head is made of: a fixed-window pool needs a kernel
+/// chosen for one input size, while this derives its windows from the ratio of
+/// the extents and so hands the next layer the same shape whatever came in.
+#[derive(Clone)]
+pub struct AdaptiveMaxPool1d {
+    output_size: usize,
+}
+
+impl AdaptiveMaxPool1d {
+    /// Create the layer. `output_size` defaults to `1`.
+    pub fn new(output_size: Option<usize>) -> Self {
+        Self {
+            output_size: output_size.unwrap_or(1),
+        }
+    }
+
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+}
+
+impl Layer for AdaptiveMaxPool1d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::pooling::adaptive_max_pool1d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+}

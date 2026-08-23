@@ -30,7 +30,10 @@ pub use loss::{
     BCELoss, BCEWithLogitsLoss, CrossEntropyLoss, FocalLoss, HuberLoss, LogCoshLoss, MAELoss,
     MSELoss, SmoothL1Loss,
 };
-pub use pooling::{AvgPool1d, AvgPool2d, MaxPool1d, MaxPool2d};
+pub use pooling::{
+    AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
+    AvgPool2d, MaxPool1d, MaxPool2d,
+};
 pub use recurrent::{CellKind, GRU, LSTM, Recurrent};
 pub use sequential::{Sequential, SequentialBuilder};
 
