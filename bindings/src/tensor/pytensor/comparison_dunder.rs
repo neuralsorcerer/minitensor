@@ -54,6 +54,22 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Determinant of each square matrix. Overflows for large matrices -- see `slogdet`.
+    pub fn det(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(self.inner.det().map_err(_convert_error)?))
+    }
+
+    /// `(sign, logabsdet)` such that `sign * exp(logabsdet)` is the determinant. A singular matrix gives sign 0 and `-inf`.
+    pub fn slogdet(&self) -> PyResult<(Self, Self)> {
+        let (sign, logabsdet) = self.inner.slogdet().map_err(_convert_error)?;
+        Ok((Self::from_tensor(sign), Self::from_tensor(logabsdet)))
+    }
+
+    /// Inverse of each square matrix, solved against the identity.
+    pub fn inv(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(self.inner.inv().map_err(_convert_error)?))
+    }
+
     pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;

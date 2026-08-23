@@ -1180,6 +1180,24 @@ pub fn solve(lhs: &Bound<PyAny>, rhs: &Bound<PyAny>) -> PyResult<PyTensor> {
     lhs_tensor.solve(rhs)
 }
 
+/// Determinant of each square matrix in the stack. Overflows well before it stops being useful -- prefer `slogdet` beyond a few dozen rows.
+#[pyfunction]
+pub fn det(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.det()
+}
+
+/// `(sign, logabsdet)` such that `sign * exp(logabsdet)` is the determinant, which is the form that survives large matrices. A singular matrix gives sign 0 and `-inf`.
+#[pyfunction]
+pub fn slogdet(input: &Bound<PyAny>) -> PyResult<(PyTensor, PyTensor)> {
+    borrow_tensor(input)?.slogdet()
+}
+
+/// Inverse of each square matrix in the stack, solved against the identity rather than factorised separately.
+#[pyfunction]
+pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.inv()
+}
+
 /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
 #[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
@@ -1553,6 +1571,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(diagonal, parent)?)?;
     parent.add_function(wrap_pyfunction!(trace, parent)?)?;
     parent.add_function(wrap_pyfunction!(solve, parent)?)?;
+    parent.add_function(wrap_pyfunction!(det, parent)?)?;
+    parent.add_function(wrap_pyfunction!(slogdet, parent)?)?;
+    parent.add_function(wrap_pyfunction!(inv, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;

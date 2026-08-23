@@ -228,6 +228,94 @@ impl GradientFunction for MatMulBackward {
     }
 }
 /// Gradient function for solving linear systems.
+/// Gradient of [`crate::ops::linalg::det`].
+///
+/// `d det(A) / dA = det(A) * A^-T` -- Jacobi's formula. The inverse is
+/// obtained by solving against the identity rather than by a second
+/// factorisation, which is also how `inv` itself is written, so there is one
+/// place where a matrix gets inverted and one place that can be wrong about it.
+pub struct DetBackward {
+    pub input: Tensor,
+    /// The forward result, kept so the gradient does not factorise again.
+    pub determinant: Tensor,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+/// The transpose of the inverse, which both determinant gradients are built
+/// on. `A^-T` is `(A^T)^-1`, so this transposes first and inverts once.
+fn inverse_transpose(input: &Tensor) -> Result<Tensor> {
+    let transposed = crate::ops::linalg::transpose(
+        input,
+        (input.ndim() - 2) as isize,
+        (input.ndim() - 1) as isize,
+    )?;
+    crate::ops::linalg::inv(&transposed)
+}
+
+/// Give a batch-shaped scalar the two trailing singleton axes that let it
+/// broadcast against `[..., n, n]`. A `det` of a single matrix is 0-d, and a
+/// batched one is `[b]`; the gradient is a matrix either way.
+fn as_matrix_scalar(value: &Tensor) -> Result<Tensor> {
+    let mut out = value.clone();
+    for _ in 0..2 {
+        let axis = out.ndim() as isize;
+        out = crate::ops::shape_ops::unsqueeze(&out, axis)?;
+    }
+    Ok(out)
+}
+
+impl GradientFunction for DetBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let inv_t = inverse_transpose(&self.input)?;
+        let scale = crate::ops::arithmetic::mul(
+            &as_matrix_scalar(grad_output)?,
+            &as_matrix_scalar(&self.determinant)?,
+        )?;
+        let grad = crate::ops::arithmetic::mul(&inv_t, &scale)?;
+        accumulate_grad(&mut gradients, self.input_id, grad)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
+/// Gradient of the `logabsdet` half of [`crate::ops::linalg::slogdet`].
+///
+/// `d log|det(A)| / dA = A^-T`, with no determinant factor -- which is the
+/// whole reason `slogdet` is the numerically useful form: the gradient stays
+/// finite where `det` itself has already overflowed.
+///
+/// The sign has no gradient. It is locally constant wherever it is defined and
+/// undefined exactly where the matrix is singular, so there is nothing to
+/// propagate through it.
+pub struct SlogdetBackward {
+    pub input: Tensor,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl GradientFunction for SlogdetBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let inv_t = inverse_transpose(&self.input)?;
+        let grad = crate::ops::arithmetic::mul(&inv_t, &as_matrix_scalar(grad_output)?)?;
+        accumulate_grad(&mut gradients, self.input_id, grad)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
 pub struct SolveBackward {
     pub lhs: Tensor,
     pub solution: Tensor,

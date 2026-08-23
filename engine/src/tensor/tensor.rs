@@ -2192,6 +2192,21 @@ impl Tensor {
         solve(self, rhs)
     }
 
+    /// Determinant of each square matrix in the stack.
+    pub fn det(&self) -> Result<Self> {
+        crate::ops::linalg::det(self)
+    }
+
+    /// `(sign, log|det|)`, the determinant in the form that does not overflow.
+    pub fn slogdet(&self) -> Result<(Self, Self)> {
+        crate::ops::linalg::slogdet(self)
+    }
+
+    /// Inverse of each square matrix in the stack.
+    pub fn inv(&self) -> Result<Self> {
+        crate::ops::linalg::inv(self)
+    }
+
     /// Layer normalization
     #[inline(always)]
     pub fn layer_norm(
