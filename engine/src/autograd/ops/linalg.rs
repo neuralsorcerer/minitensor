@@ -316,6 +316,75 @@ impl GradientFunction for SlogdetBackward {
     }
 }
 
+/// Gradient of [`crate::ops::linalg::cholesky`].
+///
+/// The factor is the only thing the gradient needs -- not the matrix it came
+/// from -- which is the useful property of this factorisation: `A` is
+/// recoverable from `L` and the reverse pass never has to hold both.
+///
+/// The arithmetic itself lives next to the forward, in
+/// [`crate::ops::linalg::cholesky_backward_batched`], because it is made of the
+/// same two triangular substitutions and the two would drift apart if they were
+/// written in different files.
+pub struct CholeskyBackward {
+    /// The lower factor `L`, detached. `upper = true` composes a transpose on
+    /// top of this node, so what arrives here is always the lower one.
+    pub factor: Tensor,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl GradientFunction for CholeskyBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::linalg::{cholesky_backward_batched, square_extent};
+        use crate::tensor::{DataType, TensorData};
+        use std::sync::Arc;
+
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let shape = self.factor.shape().clone();
+        let (batch, n) = square_extent(&shape);
+        // The incoming gradient is whatever the graph produced; the kernel walks
+        // it row-major alongside the factor.
+        let grad = grad_output.contiguous()?;
+        let mut data = TensorData::zeros_on_device(shape.numel(), grad.dtype(), grad.device());
+
+        macro_rules! run {
+            ($accessor:ident, $accessor_mut:ident) => {{
+                let factor = self.factor.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("cholesky backward: factor dtype")
+                })?;
+                let upstream = grad.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("cholesky backward: grad dtype")
+                })?;
+                let out = data.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("cholesky backward: output dtype")
+                })?;
+                cholesky_backward_batched(factor, upstream, out, n, batch);
+            }};
+        }
+
+        match grad.dtype() {
+            DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut),
+            DataType::Float64 => run!(as_f64_slice, as_f64_slice_mut),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "cholesky backward only supports floating point tensors",
+                ));
+            }
+        }
+
+        let grad_input = Tensor::new(Arc::new(data), shape, grad.dtype(), grad.device(), false);
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
 pub struct SolveBackward {
     pub lhs: Tensor,
     pub solution: Tensor,

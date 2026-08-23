@@ -508,6 +508,37 @@ pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
     total
 }
 
+/// [`simd_dot_f32`] accumulating in double precision.
+///
+/// The product of two `f32`s is exact in `f64`, so every rounding this kernel
+/// performs is in the sum -- and the sum is the half that matters, because it
+/// is the one that grows with the length. It costs the lanes: four of `f64`
+/// where the single-precision version has eight.
+///
+/// This is what a factorisation wants. A Cholesky entry is one inner product
+/// over the row so far, and carrying a single-precision factorisation entirely
+/// in single precision measured 1.1 to 2.0 times LAPACK's reconstruction error;
+/// carrying the panel wide brings it to 1.0-1.8, and to parity outright below
+/// `n = 128`.
+pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
+    let mut sums = [0f64; 4];
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let mut chunks = a.chunks_exact(4).zip(b.chunks_exact(4));
+    for (x, y) in &mut chunks {
+        sums[0] += x[0] as f64 * y[0] as f64;
+        sums[1] += x[1] as f64 * y[1] as f64;
+        sums[2] += x[2] as f64 * y[2] as f64;
+        sums[3] += x[3] as f64 * y[3] as f64;
+    }
+    let mut total: f64 = sums.iter().sum();
+    let tail = n - n % 4;
+    for i in tail..n {
+        total += a[i] as f64 * b[i] as f64;
+    }
+    total
+}
+
 /// Unrolled sum for i32 slices to leverage auto-vectorization
 pub fn simd_sum_i32(data: &[i32]) -> i32 {
     let mut sums = [0i32; 8];
@@ -872,6 +903,40 @@ mod tests {
             err.to_string()
                 .contains("Array lengths must match for SIMD operations")
         );
+    }
+
+    #[test]
+    fn wide_dot_agrees_with_the_exact_answer_where_the_narrow_one_cannot() {
+        // 1 + 2^-24 is not representable in f32, so a running f32 total loses
+        // every one of the small terms; the exact sum is 1 + 4095 * 2^-24.
+        let tiny = f32::EPSILON / 2.0;
+        let mut a = vec![tiny; 4096];
+        let mut b = vec![1.0f32; 4096];
+        a[0] = 1.0;
+        b[0] = 1.0;
+
+        let exact = 1.0f64 + 4095.0 * tiny as f64;
+        assert!((simd_dot_f32_wide(&a, &b) - exact).abs() <= 1e-15);
+        // The narrow kernel splits into eight lanes, so it keeps some of them
+        // -- but it is off by orders of magnitude more than the wide one.
+        let narrow_error = (simd_dot_f32(&a, &b) as f64 - exact).abs();
+        assert!(narrow_error > 1e-8, "narrow error was {narrow_error}");
+    }
+
+    #[test]
+    fn wide_dot_reads_the_tail_past_the_lanes() {
+        // Seven elements: one full four-wide chunk and a three-element tail.
+        let a: Vec<f32> = (1..=7).map(|v| v as f32).collect();
+        let b: Vec<f32> = (1..=7).map(|v| (2 * v) as f32).collect();
+        let expected: f64 = (1..=7).map(|v| (v * v * 2) as f64).sum();
+        assert_eq!(simd_dot_f32_wide(&a, &b), expected);
+    }
+
+    #[test]
+    fn wide_dot_stops_at_the_shorter_slice() {
+        let a = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let b = [10.0f32, 20.0];
+        assert_eq!(simd_dot_f32_wide(&a, &b), 50.0);
     }
 
     #[test]

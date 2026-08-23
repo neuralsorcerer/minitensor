@@ -1233,6 +1233,13 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// Cholesky factor of each symmetric positive-definite matrix: lower-triangular `L` with `A = L @ L.T`, or `U` with `A = U.T @ U` when `upper=True`.
+#[pyfunction]
+#[pyo3(signature = (input, upper=false))]
+pub fn cholesky(input: &Bound<PyAny>, upper: bool) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.cholesky(upper)
+}
+
 /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
 #[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
@@ -1613,6 +1620,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(det, parent)?)?;
     parent.add_function(wrap_pyfunction!(slogdet, parent)?)?;
     parent.add_function(wrap_pyfunction!(inv, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;

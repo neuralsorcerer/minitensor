@@ -70,6 +70,14 @@ impl PyTensor {
         Ok(Self::from_tensor(self.inner.inv().map_err(_convert_error)?))
     }
 
+    /// Cholesky factor `L` with `A = L @ L.T`, or `U` with `A = U.T @ U` when `upper=True`. Only the lower triangle is read; the matrix must be positive definite.
+    #[pyo3(signature = (upper=false))]
+    pub fn cholesky(&self, upper: bool) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.cholesky(upper).map_err(_convert_error)?,
+        ))
+    }
+
     pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;

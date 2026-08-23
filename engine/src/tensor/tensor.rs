@@ -2228,6 +2228,11 @@ impl Tensor {
         crate::ops::linalg::inv(self)
     }
 
+    /// Cholesky factor of each symmetric positive-definite matrix in the stack.
+    pub fn cholesky(&self, upper: bool) -> Result<Self> {
+        crate::ops::linalg::cholesky(self, upper)
+    }
+
     /// Layer normalization
     #[inline(always)]
     pub fn layer_norm(

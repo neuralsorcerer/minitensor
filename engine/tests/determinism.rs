@@ -68,6 +68,45 @@ fn moderate_tensor(rows: usize, cols: usize, seed: u64) -> Tensor {
     )
 }
 
+/// A stack of symmetric positive-definite matrices, built as `R R^T + n I` so
+/// the diagonal dominates and the factorisation is nowhere near failing.
+///
+/// `cholesky` splits two ways at once -- across the batch, and inside the GEMM
+/// that folds each panel into the next -- so it is worth its own fixture rather
+/// than reusing a rectangular one.
+fn spd_batch(batch: usize, n: usize, seed: u64) -> Tensor {
+    let mut state = seed | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut data = vec![0f32; batch * n * n];
+    let mut root = vec![0f32; n * n];
+    for matrix in data.chunks_mut(n * n) {
+        for slot in root.iter_mut() {
+            *slot = (next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0;
+        }
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = 0f32;
+                for k in 0..n {
+                    acc += root[i * n + k] * root[j * n + k];
+                }
+                matrix[i * n + j] = acc + if i == j { n as f32 } else { 0.0 };
+            }
+        }
+    }
+    Tensor::new(
+        Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
+        Shape::new(vec![batch, n, n]),
+        DataType::Float32,
+        Device::cpu(),
+        false,
+    )
+}
+
 fn sum_dim0_bits(tensor: &Tensor, threads: usize) -> Vec<u32> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -406,5 +445,18 @@ fn the_parallel_kernels_are_bitwise_stable_across_thread_counts() {
     });
     assert_thread_invariant("slice", || {
         engine::ops::shape_ops::slice(&a, 0, 100, 600, 3).unwrap()
+    });
+
+    // The factorisation splits across the batch *and* inside the GEMM that
+    // folds each finished panel into the next, so both splits are on trial
+    // here. The wide matrix is deliberately past one panel: a single-panel
+    // matrix never reaches the GEMM at all and would test only the batching.
+    let narrow = spd_batch(24, 12, 0x51ED);
+    let wide = spd_batch(3, 150, 0xC0FF);
+    assert_thread_invariant("cholesky (batched, one panel)", || {
+        engine::ops::linalg::cholesky(&narrow, false).unwrap()
+    });
+    assert_thread_invariant("cholesky (panelled)", || {
+        engine::ops::linalg::cholesky(&wide, false).unwrap()
     });
 }

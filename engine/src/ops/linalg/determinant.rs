@@ -35,7 +35,10 @@ use crate::{
 use std::sync::Arc;
 
 /// The batch shape and matrix order of a stack of square matrices.
-fn square_layout(tensor: &Tensor, op: &str) -> Result<(Vec<usize>, usize)> {
+///
+/// Shared with [`crate::ops::linalg::cholesky`], which asks the same three
+/// questions of its input and must refuse the same inputs in the same words.
+pub(crate) fn square_layout(tensor: &Tensor, op: &str) -> Result<(Vec<usize>, usize)> {
     let ndim = tensor.ndim();
     if ndim < 2 {
         return Err(MinitensorError::invalid_operation(format!(

@@ -111,6 +111,7 @@ _FUNCTIONAL_FORWARDERS = (
     "det",
     "slogdet",
     "inv",
+    "cholesky",
     "flatten",
     "ravel",
     "transpose",
