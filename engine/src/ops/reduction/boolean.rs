@@ -285,6 +285,111 @@ fn column_band(inner: usize) -> usize {
     inner
 }
 
+/// The index of every element that counts as true, one row per element.
+///
+/// The result is `[found, ndim]` of `Int64`, in row-major order: row `i` is the
+/// multi-index of the `i`-th truthy element, so `result[i]` indexes straight
+/// back into the input. A 0-d input gives `[0, 0]` or `[1, 0]` -- there is no
+/// index to report, only whether there is a row at all.
+///
+/// This is the piece boolean masking could not supply. Selecting *values*
+/// already worked (`tensor[mask]`, and [`masked_select`] below), but there was
+/// no way to learn *where* they were, which is what anything wanting to write
+/// back, cross-reference another tensor, or report which sample failed
+/// actually needs.
+///
+/// "Counts as true" is the same predicate `any` and `all` use -- nonzero for
+/// the numeric dtypes, the value itself for `Bool` -- because it comes from the
+/// same macro. NaN is nonzero, so it counts; that is NumPy's answer too.
+///
+/// The scan is sequential. Its output length is not known until the scan is
+/// done, so a parallel version would have to count every chunk, prefix-sum the
+/// counts and then fill -- three passes over the input to save part of one, for
+/// an operation whose output is almost always a small fraction of its input.
+pub fn nonzero(tensor: &Tensor) -> Result<Tensor> {
+    let dims = tensor.shape().dims().to_vec();
+    let ndim = dims.len();
+    let contiguous = tensor.contiguous()?;
+
+    let found: Vec<usize> = with_truthy_slice!(&contiguous, |input, truthy| {
+        input
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &v)| truthy(v).then_some(i))
+            .collect()
+    });
+
+    let mut flat = vec![0i64; found.len() * ndim];
+    for (row, &linear) in found.iter().enumerate() {
+        // Unravel right to left, which is the order row-major strides divide in.
+        let mut rest = linear;
+        for axis in (0..ndim).rev() {
+            flat[row * ndim + axis] = (rest % dims[axis]) as i64;
+            rest /= dims[axis];
+        }
+    }
+
+    let shape = Shape::new(vec![found.len(), ndim]);
+    Ok(Tensor::new(
+        Arc::new(TensorData::from_vec_i64(flat, tensor.device())),
+        shape,
+        DataType::Int64,
+        tensor.device(),
+        false,
+    ))
+}
+
+/// How many elements count as true, over one dimension or the whole tensor.
+///
+/// Reported as `Int64` for the reason every accumulating reduction is: a count
+/// over a large tensor leaves the range of the thing being counted, and `Bool`
+/// has no room for a count at all.
+pub fn count_nonzero(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
+    // Written as a sum of the mask rather than a fresh reduction: `sum` already
+    // knows how to reduce one dimension, how to keep it, and how to widen the
+    // accumulator, and a second implementation of any of that is a second thing
+    // that can disagree.
+    let mut mask_data =
+        TensorData::zeros_on_device(tensor.numel(), DataType::Int64, tensor.device());
+    let contiguous = tensor.contiguous()?;
+    {
+        let out = mask_data
+            .as_i64_slice_mut()
+            .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+        with_truthy_slice!(&contiguous, |input, truthy| {
+            for (slot, &v) in out.iter_mut().zip(input.iter()) {
+                *slot = truthy(v) as i64;
+            }
+        });
+    }
+    let mask = Tensor::new(
+        Arc::new(mask_data),
+        tensor.shape().clone(),
+        DataType::Int64,
+        tensor.device(),
+        false,
+    );
+    let dims = dim.map(|d| vec![d]);
+    crate::ops::reduction::sum(&mask, dims, keepdim)
+}
+
+/// The values a boolean mask selects, as a 1-D tensor.
+///
+/// The named form of what `tensor[mask]` already did, which is worth having
+/// under the name everyone reaches for -- and it is the same call underneath,
+/// so the two cannot drift apart. Differentiable: the gradient scatters back to
+/// the positions that were selected.
+pub fn masked_select(tensor: &Tensor, mask: &Tensor) -> Result<Tensor> {
+    if mask.shape().dims() != tensor.shape().dims() {
+        return Err(MinitensorError::invalid_argument(format!(
+            "masked_select expects the mask to have the tensor's shape, got {:?} against {:?}",
+            mask.shape().dims(),
+            tensor.shape().dims()
+        )));
+    }
+    crate::ops::selection::masked_index(tensor, mask)
+}
+
 /// Logical `all` reduction, over one dimension or the whole tensor.
 pub fn all(tensor: &Tensor, dim: Option<isize>, keepdim: bool) -> Result<Tensor> {
     match dim {

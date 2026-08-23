@@ -861,6 +861,21 @@ impl Tensor {
         any(self, dim, keepdim)
     }
 
+    /// Indices of every element that counts as true, one row each.
+    pub fn nonzero(&self) -> Result<Self> {
+        crate::ops::reduction::nonzero(self)
+    }
+
+    /// How many elements count as true.
+    pub fn count_nonzero(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        crate::ops::reduction::count_nonzero(self, dim, keepdim)
+    }
+
+    /// The values a boolean mask selects, as a 1-D tensor.
+    pub fn masked_select(&self, mask: &Self) -> Result<Self> {
+        crate::ops::reduction::masked_select(self, mask)
+    }
+
     /// Cumulative sum along a dimension
     #[inline(always)]
     pub fn cumsum(&self, dim: isize) -> Result<Self> {

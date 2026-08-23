@@ -824,6 +824,29 @@ pub fn any(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<
     tensor.any(dim, Some(keepdim))
 }
 
+/// Indices of every non-zero (or true) element, as an `[found, ndim]` int64 tensor in row-major order. Row `i` indexes straight back into the input.
+#[pyfunction]
+pub fn nonzero(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.nonzero()
+}
+
+/// How many elements are non-zero (or true), over `dim` or the whole tensor. Reported as int64.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn count_nonzero(
+    input: &Bound<PyAny>,
+    dim: Option<isize>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.count_nonzero(dim, Some(keepdim))
+}
+
+/// The values a boolean mask selects, as a 1-D tensor. The named form of `tensor[mask]`, and the same call underneath.
+#[pyfunction]
+pub fn masked_select(input: &Bound<PyAny>, mask: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.masked_select(mask)
+}
+
 /// Largest element over `dim`, values only.
 ///
 /// `max(dim=...)` reports the index alongside, and finding it is most of the
@@ -1497,6 +1520,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(mean, parent)?)?;
     parent.add_function(wrap_pyfunction!(all, parent)?)?;
     parent.add_function(wrap_pyfunction!(any, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nonzero, parent)?)?;
+    parent.add_function(wrap_pyfunction!(count_nonzero, parent)?)?;
+    parent.add_function(wrap_pyfunction!(masked_select, parent)?)?;
     parent.add_function(wrap_pyfunction!(max, parent)?)?;
     parent.add_function(wrap_pyfunction!(min, parent)?)?;
     parent.add_function(wrap_pyfunction!(amax, parent)?)?;

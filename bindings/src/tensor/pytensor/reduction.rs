@@ -101,6 +101,33 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Indices of every non-zero (or true) element, as an `[found, ndim]` int64 tensor in row-major order.
+    pub fn nonzero(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.nonzero().map_err(_convert_error)?,
+        ))
+    }
+
+    /// How many elements are non-zero (or true), over `dim` or the whole tensor.
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn count_nonzero(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let result = self
+            .inner
+            .count_nonzero(dim, keepdim.unwrap_or(false))
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// The values a boolean mask selects, as a 1-D tensor. The named form of `tensor[mask]`.
+    pub fn masked_select(&self, mask: &Bound<PyAny>) -> PyResult<Self> {
+        let mask_tensor = tensor_from_py_value(&self.inner, mask)?;
+        let result = self
+            .inner
+            .masked_select(&mask_tensor)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Running sum along `dim`, keeping the input's shape.
     #[pyo3(signature = (dim))]
     pub fn cumsum(&self, dim: isize) -> PyResult<Self> {
