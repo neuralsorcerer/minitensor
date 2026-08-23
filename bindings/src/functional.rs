@@ -1233,6 +1233,18 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// `(w, V)` for each symmetric matrix in the stack, with `w` ascending and `A @ V == V @ diag(w)`. Only the lower triangle is read; eigenvectors are determined up to sign.
+#[pyfunction]
+pub fn eigh(input: &Bound<PyAny>) -> PyResult<(PyTensor, PyTensor)> {
+    borrow_tensor(input)?.eigh()
+}
+
+/// The eigenvalues of each symmetric matrix, ascending.
+#[pyfunction]
+pub fn eigvalsh(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.eigvalsh()
+}
+
 /// Cholesky factor of each symmetric positive-definite matrix: lower-triangular `L` with `A = L @ L.T`, or `U` with `A = U.T @ U` when `upper=True`.
 #[pyfunction]
 #[pyo3(signature = (input, upper=false))]
@@ -1629,6 +1641,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(inv, parent)?)?;
     parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
+    parent.add_function(wrap_pyfunction!(eigh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(eigvalsh, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;

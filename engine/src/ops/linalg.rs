@@ -10,6 +10,8 @@ mod cholesky_impl;
 mod determinant_impl;
 #[path = "linalg/diagonal.rs"]
 mod diagonal_impl;
+#[path = "linalg/eigen.rs"]
+mod eigen_impl;
 #[path = "linalg/linear.rs"]
 mod linear_impl;
 #[path = "linalg/matmul.rs"]
@@ -22,6 +24,7 @@ mod triangular_impl;
 pub use self::cholesky_impl::*;
 pub use self::determinant_impl::*;
 pub use self::diagonal_impl::*;
+pub use self::eigen_impl::*;
 pub use self::linear_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;

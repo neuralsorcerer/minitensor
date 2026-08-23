@@ -86,6 +86,19 @@ impl PyTensor {
         Ok((Self::from_tensor(q), Self::from_tensor(r)))
     }
 
+    /// `(w, V)` for a symmetric matrix, with `w` ascending and `A @ V == V @ diag(w)`. Only the lower triangle is read. Eigenvectors are determined up to sign.
+    pub fn eigh(&self) -> PyResult<(Self, Self)> {
+        let (values, vectors) = self.inner.eigh().map_err(_convert_error)?;
+        Ok((Self::from_tensor(values), Self::from_tensor(vectors)))
+    }
+
+    /// The eigenvalues of a symmetric matrix, ascending. Cheaper than `eigh` when the vectors are not wanted.
+    pub fn eigvalsh(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.eigvalsh().map_err(_convert_error)?,
+        ))
+    }
+
     pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;

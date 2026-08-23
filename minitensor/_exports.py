@@ -113,6 +113,8 @@ _FUNCTIONAL_FORWARDERS = (
     "inv",
     "cholesky",
     "qr",
+    "eigh",
+    "eigvalsh",
     "flatten",
     "ravel",
     "transpose",

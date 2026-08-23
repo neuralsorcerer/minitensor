@@ -2233,6 +2233,16 @@ impl Tensor {
         crate::ops::linalg::cholesky(self, upper)
     }
 
+    /// Eigenvalues and eigenvectors of each symmetric matrix in the stack.
+    pub fn eigh(&self) -> Result<(Self, Self)> {
+        crate::ops::linalg::eigh(self)
+    }
+
+    /// The eigenvalues alone, ascending.
+    pub fn eigvalsh(&self) -> Result<Self> {
+        crate::ops::linalg::eigvalsh(self)
+    }
+
     /// `(Q, R)` for each matrix in the stack, with `A = Q @ R`.
     pub fn qr(&self, mode: crate::ops::linalg::QrMode) -> Result<(Self, Self)> {
         crate::ops::linalg::qr(self, mode)

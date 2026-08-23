@@ -558,6 +558,161 @@ impl GradientFunction for QrBackward {
     }
 }
 
+/// Gradient of [`crate::ops::linalg::eigh`].
+///
+/// With `A = V diag(w) V^T`,
+///
+/// ```text
+/// Abar = V ( diag(wbar) + F * (V^T Vbar) ) V^T,   F_ij = 1 / (w_j - w_i)
+/// ```
+///
+/// with `F` zero on its diagonal, and the result symmetrised. The `1 / (w_j -
+/// w_i)` is the whole character of this gradient: eigenvectors of a matrix with
+/// a repeated eigenvalue are not unique -- any rotation within the shared
+/// eigenspace is as good -- so there is no derivative to report there, and the
+/// formula says so by dividing by zero. A caller differentiating through a
+/// matrix with degenerate eigenvalues gets infinities, which is the honest
+/// answer.
+///
+/// Like `qr`, this has two outputs and the graph hands a node one gradient at a
+/// time, so each output gets its own node and the engine adds them. The
+/// gradient is linear in the pair, so that is exact rather than an
+/// approximation, and each node computes its half with the other term absent
+/// rather than multiplied by zeros.
+pub struct EighBackward {
+    pub values: Tensor,
+    pub vectors: Tensor,
+    /// Which of the two outputs this node stands for.
+    pub from_values: bool,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl GradientFunction for EighBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::{arithmetic, linalg, shape_ops};
+
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let vectors = &self.vectors;
+        let ndim = vectors.ndim();
+        let inner = if self.from_values {
+            // diag(wbar): the gradient of the values alone rotates nothing.
+            let column = shape_ops::unsqueeze(grad_output, ndim as isize - 1)?;
+            let eye = diagonal_like(vectors, 1.0)?;
+            arithmetic::mul(&eye, &column)?
+        } else {
+            // F * (V^T Vbar), with F zero on the diagonal.
+            let projected = linalg::matmul(&swap_last_two(vectors)?, grad_output)?;
+            let gaps = eigenvalue_gaps(&self.values)?;
+            arithmetic::div(&projected, &gaps)?
+        };
+
+        let rotated = linalg::matmul(&linalg::matmul(vectors, &inner)?, &swap_last_two(vectors)?)?;
+        // `A` is symmetric by assumption, so only the symmetric part of the
+        // perturbation is realisable -- the same reasoning as `cholesky`'s.
+        let doubled = arithmetic::add(&rotated, &swap_last_two(&rotated)?)?;
+        let grad = arithmetic::div(&doubled, &constant_like(&doubled, 2.0)?)?;
+        accumulate_grad(&mut gradients, self.input_id, grad)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
+/// A one-element tensor holding `value`, in `like`'s dtype and device, for the
+/// scalar operands the elementwise ops broadcast against.
+fn constant_like(like: &Tensor, value: f64) -> Result<Tensor> {
+    use crate::tensor::{Shape, TensorData};
+    use std::sync::Arc;
+
+    let mut data = TensorData::zeros_on_device(1, like.dtype(), like.device());
+    match like.dtype() {
+        crate::tensor::DataType::Float32 => {
+            let slice = data.as_f32_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("eigh backward: failed to build a constant")
+            })?;
+            slice[0] = value as f32;
+        }
+        _ => {
+            let slice = data.as_f64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("eigh backward: failed to build a constant")
+            })?;
+            slice[0] = value;
+        }
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        Shape::new(vec![1]),
+        like.dtype(),
+        like.device(),
+        false,
+    ))
+}
+
+/// A stack of matrices shaped like `like`, holding `value` on the diagonal and
+/// zero elsewhere.
+///
+/// Built directly rather than as an identity scaled by `value`, which matters
+/// for exactly one caller: the gaps matrix wants infinity on its diagonal, and
+/// `0 * inf` is NaN, so scaling would poison every off-diagonal entry and take
+/// the whole gradient with it.
+fn diagonal_like(like: &Tensor, value: f64) -> Result<Tensor> {
+    use crate::tensor::TensorData;
+    use std::sync::Arc;
+
+    let dims = like.shape().dims();
+    let n = dims[dims.len() - 1];
+    let batch: usize = dims[..dims.len() - 2].iter().product();
+    let mut data = TensorData::zeros_on_device(like.numel(), like.dtype(), like.device());
+    macro_rules! fill {
+        ($accessor:ident) => {{
+            let slice = data.$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("eigh backward: failed to build the diagonal")
+            })?;
+            for b in 0..batch.max(1) {
+                for i in 0..n {
+                    slice[b * n * n + i * n + i] = value as _;
+                }
+            }
+        }};
+    }
+    match like.dtype() {
+        crate::tensor::DataType::Float32 => fill!(as_f32_slice_mut),
+        _ => fill!(as_f64_slice_mut),
+    }
+    Ok(Tensor::new(
+        Arc::new(data),
+        like.shape().clone(),
+        like.dtype(),
+        like.device(),
+        false,
+    ))
+}
+
+/// `w_j - w_i` as a matrix, with the diagonal set to infinity.
+///
+/// Infinity rather than zero so that dividing by it gives zero without a
+/// special case -- the diagonal of `V^T Vbar` corresponds to scaling an
+/// eigenvector, which changes nothing about the decomposition and so carries no
+/// gradient. A repeated eigenvalue puts a zero *off* the diagonal, and that one
+/// is left to divide, because there really is no derivative there.
+fn eigenvalue_gaps(values: &Tensor) -> Result<Tensor> {
+    use crate::ops::{arithmetic, shape_ops};
+
+    let ndim = values.ndim() as isize;
+    let rows = shape_ops::unsqueeze(values, ndim)?;
+    let columns = shape_ops::unsqueeze(values, ndim - 1)?;
+    let gaps = arithmetic::sub(&columns, &rows)?;
+    // Adding infinity on the diagonal leaves everything else untouched, and
+    // makes the division there give zero without a special case.
+    let infinite = diagonal_like(&gaps, f64::INFINITY)?;
+    arithmetic::add(&gaps, &infinite)
+}
+
 pub struct SolveBackward {
     pub lhs: Tensor,
     pub solution: Tensor,
