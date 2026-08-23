@@ -366,6 +366,10 @@ type UpdateWork<'a, T> = &'a (dyn Fn(&mut [T], &[T], &mut [&mut [T]]) + Sync);
 /// [`OutWork`] for chunk work that can fail.
 type TryOutWork<'a, T, E> = &'a (dyn Fn(usize, &mut [T]) -> Result<(), E> + Sync);
 
+/// [`TryOutWork`] for work that fills two outputs at once, given the index of
+/// the first item in its group.
+type TryOutWork2<'a, T, U, E> = &'a (dyn Fn(usize, &mut [T], &mut [U]) -> Result<(), E> + Sync);
+
 /// Split `rows` rows of work across threads, cutting **several output buffers
 /// at the same row boundary** — each with its own number of elements per row.
 ///
@@ -573,6 +577,43 @@ pub(crate) fn try_par_out_chunks<T: Send, E: Send>(
     out.par_chunks_mut(chunk)
         .enumerate()
         .map(|(index, out_chunk)| work(index * chunk, out_chunk))
+        .collect()
+}
+
+/// [`try_par_out_chunks`] over two outputs whose per-item sizes differ.
+///
+/// [`par_out_chunks2`] cuts both slices at the *same* offsets, which is right
+/// for a value/index pair and wrong for a factorisation: `qr` produces a `Q` and
+/// an `R` of different shapes for each matrix in a batch. Here each slice is cut
+/// by its own stride, so the two cuts land on the same batch items even though
+/// they land on different element offsets. `work` is handed the index of the
+/// first item in its group rather than an offset, because with two strides there
+/// is no single offset to hand it.
+///
+/// Both slices must hold `items` items exactly.
+pub(crate) fn try_par_out_chunks_pair<T: Send, U: Send, E: Send>(
+    first: &mut [T],
+    first_stride: usize,
+    second: &mut [U],
+    second_stride: usize,
+    items: usize,
+    per_task: usize,
+    work: TryOutWork2<T, U, E>,
+) -> Result<(), E> {
+    debug_assert_eq!(first.len(), items * first_stride);
+    debug_assert_eq!(second.len(), items * second_stride);
+    if items == 0 {
+        return Ok(());
+    }
+    let per_task = per_task.clamp(1, items);
+    if per_task >= items {
+        return work(0, first, second);
+    }
+    first
+        .par_chunks_mut(per_task * first_stride)
+        .zip(second.par_chunks_mut(per_task * second_stride))
+        .enumerate()
+        .map(|(group, (a, b))| work(group * per_task, a, b))
         .collect()
 }
 

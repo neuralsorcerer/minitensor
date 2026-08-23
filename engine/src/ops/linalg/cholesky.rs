@@ -30,7 +30,10 @@ use crate::{
     autograd::{CholeskyBackward, with_grad_fn},
     error::{MinitensorError, Result},
     ops::{
-        linalg::{gemm_nt_f32, gemm_nt_f64, gemm_tn_f32, gemm_tn_f64, square_layout, transpose},
+        linalg::{
+            gemm_f32, gemm_f64, gemm_nt_f32, gemm_nt_f64, gemm_tn_f32, gemm_tn_f64, square_layout,
+            transpose,
+        },
         map::{PAR_THRESHOLD, try_par_out_chunks},
         simd::{simd_dot_f32_wide, simd_dot_f64},
         util::{Accumulate, accurate_pair_sum},
@@ -86,6 +89,14 @@ pub(crate) trait Factorable: Float + Send + Sync + 'static {
     /// elements, writable for `c`.
     unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
 
+    /// `c = a * b`, everything row-major and contiguous.
+    ///
+    /// # Safety
+    ///
+    /// `a`, `b` and `c` must point to at least `m * k`, `k * n` and `m * n`
+    /// elements, writable for `c`.
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const Self, b: *const Self, c: *mut Self);
+
     /// The full dot product, blocked and folded pairwise above one chunk.
     ///
     /// Every entry of `L` is one of these, so an inner product that grows its
@@ -125,6 +136,11 @@ impl Factorable for f32 {
     unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
         unsafe { gemm_nt_f32(m, k, n, a, b, c) }
     }
+
+    #[inline]
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) {
+        unsafe { gemm_f32(m, k, n, a, b, c) }
+    }
 }
 
 impl Factorable for f64 {
@@ -153,6 +169,11 @@ impl Factorable for f64 {
     #[inline]
     unsafe fn gemm_nt(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
         unsafe { gemm_nt_f64(m, k, n, a, b, c) }
+    }
+
+    #[inline]
+    unsafe fn gemm(m: usize, k: usize, n: usize, a: *const f64, b: *const f64, c: *mut f64) {
+        unsafe { gemm_f64(m, k, n, a, b, c) }
     }
 }
 

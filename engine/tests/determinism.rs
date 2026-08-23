@@ -459,4 +459,23 @@ fn the_parallel_kernels_are_bitwise_stable_across_thread_counts() {
     assert_thread_invariant("cholesky (panelled)", || {
         engine::ops::linalg::cholesky(&wide, false).unwrap()
     });
+
+    // `qr` splits across the batch and, above a size threshold, folds each
+    // panel into the trailing block with GEMMs instead of one reflector at a
+    // time. Both shapes below are here so both paths are on trial: the small
+    // one never reaches the blocked update, the tall one does.
+    let short = moderate_tensor(40, 9, 0x1234);
+    let tall = moderate_tensor(300, 120, 0xFEED);
+    for (name, matrix) in [("qr (direct)", &short), ("qr (blocked)", &tall)] {
+        assert_thread_invariant(&format!("{name} Q"), || {
+            engine::ops::linalg::qr(matrix, engine::ops::linalg::QrMode::Reduced)
+                .unwrap()
+                .0
+        });
+        assert_thread_invariant(&format!("{name} R"), || {
+            engine::ops::linalg::qr(matrix, engine::ops::linalg::QrMode::Reduced)
+                .unwrap()
+                .1
+        });
+    }
 }

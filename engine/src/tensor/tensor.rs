@@ -2233,6 +2233,11 @@ impl Tensor {
         crate::ops::linalg::cholesky(self, upper)
     }
 
+    /// `(Q, R)` for each matrix in the stack, with `A = Q @ R`.
+    pub fn qr(&self, mode: crate::ops::linalg::QrMode) -> Result<(Self, Self)> {
+        crate::ops::linalg::qr(self, mode)
+    }
+
     /// Layer normalization
     #[inline(always)]
     pub fn layer_norm(

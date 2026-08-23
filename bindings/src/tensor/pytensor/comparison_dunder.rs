@@ -78,6 +78,14 @@ impl PyTensor {
         ))
     }
 
+    /// `(Q, R)` with `A = Q @ R`, `Q` orthonormal and `R` upper triangular. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`.
+    #[pyo3(signature = (mode="reduced"))]
+    pub fn qr(&self, mode: &str) -> PyResult<(Self, Self)> {
+        let parsed = engine::ops::linalg::QrMode::from_name(mode).map_err(_convert_error)?;
+        let (q, r) = self.inner.qr(parsed).map_err(_convert_error)?;
+        Ok((Self::from_tensor(q), Self::from_tensor(r)))
+    }
+
     pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;

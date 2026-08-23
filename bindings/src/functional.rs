@@ -1240,6 +1240,13 @@ pub fn cholesky(input: &Bound<PyAny>, upper: bool) -> PyResult<PyTensor> {
     borrow_tensor(input)?.cholesky(upper)
 }
 
+/// `(Q, R)` for each matrix in the stack, with `A = Q @ R`. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`.
+#[pyfunction]
+#[pyo3(signature = (input, mode="reduced"))]
+pub fn qr(input: &Bound<PyAny>, mode: &str) -> PyResult<(PyTensor, PyTensor)> {
+    borrow_tensor(input)?.qr(mode)
+}
+
 /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
 #[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
@@ -1621,6 +1628,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(slogdet, parent)?)?;
     parent.add_function(wrap_pyfunction!(inv, parent)?)?;
     parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
+    parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;
     parent.add_function(wrap_pyfunction!(sort, parent)?)?;
     parent.add_function(wrap_pyfunction!(argsort, parent)?)?;

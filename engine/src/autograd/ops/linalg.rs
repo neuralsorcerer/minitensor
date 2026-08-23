@@ -385,6 +385,179 @@ impl GradientFunction for CholeskyBackward {
     }
 }
 
+/// Gradient of [`crate::ops::linalg::qr`].
+///
+/// The factorisation has two outputs and the graph gives a node one gradient at
+/// a time, so `Q` and `R` get one of these each and the engine adds what they
+/// produce. That is not an approximation: the gradient is linear in the pair, so
+/// `grad(gQ, gR) = grad(gQ, 0) + grad(0, gR)` exactly, and each node computes
+/// its half with the other term simply absent rather than multiplied by zeros.
+///
+/// The formula, for `A` at least as tall as it is wide:
+///
+/// ```text
+/// M  = R gR^T - gQ^T Q
+/// gA = [gQ + Q copyltu(M)] R^-T
+/// ```
+///
+/// where `copyltu` mirrors the lower triangle into the upper. The mirroring is
+/// what encodes the constraint that `Q^T Q` stays the identity: only the
+/// symmetric part of the perturbation is realisable, and the antisymmetric part
+/// would move `Q` off the orthogonal matrices where the factorisation has no
+/// meaning.
+///
+/// A wide `A` is handled by splitting it at the square block. `Q` is fixed by
+/// the first `m` columns alone, so `R2 = Q^T A2` is an ordinary product whose
+/// gradient adds into `Q`'s before the square case runs on the rest.
+pub struct QrBackward {
+    pub input: Tensor,
+    pub q: Tensor,
+    pub r: Tensor,
+    /// Which of the two outputs this node stands for.
+    pub from_q: bool,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+/// A tensor of zeros shaped like `tensor`, carrying no gradient of its own.
+fn zeros_like(tensor: &Tensor) -> Tensor {
+    Tensor::zeros(
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    )
+}
+
+/// `transpose` on the last two axes, which is all this file ever wants.
+fn swap_last_two(tensor: &Tensor) -> Result<Tensor> {
+    crate::ops::linalg::transpose(
+        tensor,
+        (tensor.ndim() - 2) as isize,
+        (tensor.ndim() - 1) as isize,
+    )
+}
+
+/// The lower triangle of `m`, mirrored into the upper.
+///
+/// `tril(M) + tril(M, -1)^T` -- the diagonal is taken once, everything below it
+/// twice, and nothing above it is read at all.
+fn copy_lower_to_upper(m: &Tensor) -> Result<Tensor> {
+    let lower = crate::ops::linalg::tril(m, 0)?;
+    let strict = crate::ops::linalg::tril(m, -1)?;
+    crate::ops::arithmetic::add(&lower, &swap_last_two(&strict)?)
+}
+
+/// The gradient for a `Q R` whose `R` is square, given whichever of the two
+/// output gradients is present.
+fn qr_grad_square(
+    q: &Tensor,
+    r: &Tensor,
+    grad_q: Option<&Tensor>,
+    grad_r: Option<&Tensor>,
+) -> Result<Tensor> {
+    // M = R gR^T - gQ^T Q, with an absent term left out rather than zeroed.
+    let mut m = match grad_r {
+        Some(gr) => Some(crate::ops::linalg::matmul(r, &swap_last_two(gr)?)?),
+        None => None,
+    };
+    if let Some(gq) = grad_q {
+        let term = crate::ops::linalg::matmul(&swap_last_two(gq)?, q)?;
+        m = Some(match m {
+            Some(existing) => crate::ops::arithmetic::sub(&existing, &term)?,
+            None => crate::ops::arithmetic::neg(&term)?,
+        });
+    }
+
+    let mut inner = match m {
+        Some(m) => Some(crate::ops::linalg::matmul(q, &copy_lower_to_upper(&m)?)?),
+        None => None,
+    };
+    if let Some(gq) = grad_q {
+        inner = Some(match inner {
+            Some(existing) => crate::ops::arithmetic::add(&existing, gq)?,
+            None => gq.clone(),
+        });
+    }
+    let inner = match inner {
+        Some(inner) => inner,
+        // Nothing reached this node, so nothing leaves it.
+        None => return Ok(zeros_like(q)),
+    };
+
+    // gA = inner R^-T, which is R gA^T = inner^T -- one solve rather than an
+    // inverse, and the one place a singular `R` is reported.
+    let solved = crate::ops::linalg::solve(r, &swap_last_two(&inner)?)?;
+    swap_last_two(&solved)
+}
+
+impl GradientFunction for QrBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let dims = self.input.shape().dims();
+        let (rows, cols) = (dims[dims.len() - 2], dims[dims.len() - 1]);
+        let (grad_q, grad_r) = if self.from_q {
+            (Some(grad_output), None)
+        } else {
+            (None, Some(grad_output))
+        };
+
+        let grad_input = if rows >= cols {
+            qr_grad_square(&self.q, &self.r, grad_q, grad_r)?
+        } else {
+            // A = [A1 | A2] with A1 square. `Q` comes from A1 alone, and
+            // `R2 = Q^T A2` contributes to both halves.
+            let last = dims.len() - 1;
+            let r1 = crate::ops::shape_ops::slice(&self.r, last as isize, 0, rows, 1)?;
+            let r2 = crate::ops::shape_ops::slice(&self.r, last as isize, rows, cols, 1)?;
+            let a2 = crate::ops::shape_ops::slice(&self.input, last as isize, rows, cols, 1)?;
+            let _ = r2;
+
+            let (grad_r1, grad_r2) = match grad_r {
+                Some(gr) => (
+                    Some(crate::ops::shape_ops::slice(gr, last as isize, 0, rows, 1)?),
+                    Some(crate::ops::shape_ops::slice(
+                        gr,
+                        last as isize,
+                        rows,
+                        cols,
+                        1,
+                    )?),
+                ),
+                None => (None, None),
+            };
+
+            // R2 = Q^T A2 sends gradient to both operands.
+            let effective_q = match &grad_r2 {
+                Some(gr2) => {
+                    let term = crate::ops::linalg::matmul(&a2, &swap_last_two(gr2)?)?;
+                    Some(match grad_q {
+                        Some(gq) => crate::ops::arithmetic::add(gq, &term)?,
+                        None => term,
+                    })
+                }
+                None => grad_q.cloned(),
+            };
+
+            let grad_a1 = qr_grad_square(&self.q, &r1, effective_q.as_ref(), grad_r1.as_ref())?;
+            let grad_a2 = match &grad_r2 {
+                Some(gr2) => crate::ops::linalg::matmul(&self.q, gr2)?,
+                None => zeros_like(&a2),
+            };
+            crate::ops::shape_ops::concatenate(&[&grad_a1, &grad_a2], last as isize)?
+        };
+
+        accumulate_grad(&mut gradients, self.input_id, grad_input)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
 pub struct SolveBackward {
     pub lhs: Tensor,
     pub solution: Tensor,

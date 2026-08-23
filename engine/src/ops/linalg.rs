@@ -14,6 +14,8 @@ mod diagonal_impl;
 mod linear_impl;
 #[path = "linalg/matmul.rs"]
 mod matmul_impl;
+#[path = "linalg/qr.rs"]
+mod qr_impl;
 #[path = "linalg/triangular.rs"]
 mod triangular_impl;
 
@@ -22,4 +24,5 @@ pub use self::determinant_impl::*;
 pub use self::diagonal_impl::*;
 pub use self::linear_impl::*;
 pub use self::matmul_impl::*;
+pub use self::qr_impl::*;
 pub(crate) use self::triangular_impl::*;
