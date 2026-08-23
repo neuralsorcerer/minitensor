@@ -86,6 +86,24 @@ impl PyTensor {
         Ok((Self::from_tensor(q), Self::from_tensor(r)))
     }
 
+    /// `(U, s, Vh)` for a matrix, with `A = U @ diag(s) @ Vh` and `s` descending. Columns of `U` and rows of `Vh` are determined up to sign.
+    #[pyo3(signature = (full_matrices=true))]
+    pub fn svd(&self, full_matrices: bool) -> PyResult<(Self, Self, Self)> {
+        let (u, s, vt) = self.inner.svd(full_matrices).map_err(_convert_error)?;
+        Ok((
+            Self::from_tensor(u),
+            Self::from_tensor(s),
+            Self::from_tensor(vt),
+        ))
+    }
+
+    /// The singular values of a matrix, descending.
+    pub fn svdvals(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.svdvals().map_err(_convert_error)?,
+        ))
+    }
+
     /// `(w, V)` for a symmetric matrix, with `w` ascending and `A @ V == V @ diag(w)`. Only the lower triangle is read. Eigenvectors are determined up to sign.
     pub fn eigh(&self) -> PyResult<(Self, Self)> {
         let (values, vectors) = self.inner.eigh().map_err(_convert_error)?;

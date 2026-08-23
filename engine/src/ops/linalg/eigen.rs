@@ -32,7 +32,7 @@
 use crate::{
     autograd::{EighBackward, with_grad_fn},
     error::{MinitensorError, Result},
-    ops::linalg::square_layout,
+    ops::linalg::{Factorable, reflector, rotation, square_layout},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use num_traits::Float;
@@ -54,25 +54,42 @@ use std::sync::Arc;
 ///
 /// so each step touches the trailing block once rather than twice, and the
 /// result is symmetric by construction rather than by rounding.
-fn tridiagonalize<T: Float>(
+///
+/// Both matrix-vector products go through [`Factorable::dot`] rather than a sum
+/// written out inline. A running sum makes each addition wait on the previous
+/// one, so the loop runs at the latency of a floating-point add rather than its
+/// throughput -- four cycles an element against a fraction of one -- and it is
+/// also the less accurate of the two, since the error accumulates down a single
+/// chain instead of dividing across the lanes.
+///
+/// `Q` is not accumulated here. Each reflector is written into `stored` in the
+/// layout [`reflector::accumulate`] reads, and `Q` is built from all of them
+/// afterwards. Accumulating as it goes would touch every row of an `n x n`
+/// matrix at every one of the `n` steps -- `n^3 / 2` element updates at two
+/// flops each, which is memory-bound and was a fifth of this routine's time --
+/// where building it afterwards runs in reverse, touches only the trailing
+/// block at each step, and goes through the blocked path as three matrix
+/// products a panel.
+///
+/// A reflector here spans rows `k + 1 ..`, one later than the accumulation's
+/// convention, so it is stored as reflector `k + 1`. Reflector `0` is then an
+/// identity whose `tau` is zero, which costs nothing.
+fn tridiagonalize<T: Factorable>(
     work: &mut [T],
     n: usize,
     diagonal: &mut [T],
     offdiagonal: &mut [T],
-    vectors: &mut [T],
-    want_vectors: bool,
+    stored: &mut [T],
+    taus: &mut [T],
 ) {
     let half = T::one() / (T::one() + T::one());
     let mut v = vec![T::zero(); n];
     let mut p = vec![T::zero(); n];
-
-    if want_vectors {
-        for value in vectors.iter_mut() {
-            *value = T::zero();
-        }
-        for i in 0..n {
-            vectors[i * n + i] = T::one();
-        }
+    for value in stored.iter_mut() {
+        *value = T::zero();
+    }
+    for value in taus.iter_mut() {
+        *value = T::zero();
     }
 
     for k in 0..n.saturating_sub(2) {
@@ -105,27 +122,27 @@ fn tridiagonalize<T: Float>(
         // p = tau * A22 * v, reading the trailing block by rows.
         for (row, slot) in p[..rows].iter_mut().enumerate() {
             let base = (k + 1 + row) * n + k + 1;
-            let mut total = T::zero();
-            for (col, &component) in v[..rows].iter().enumerate() {
-                total = total + work[base + col] * component;
-            }
-            *slot = total * tau;
+            *slot = T::narrow(T::dot(&work[base..base + rows], &v[..rows])) * tau;
         }
         // w = p - (tau / 2)(v . p) v, written back over `p`.
-        let mut inner = T::zero();
-        for (component, &value) in v[..rows].iter().zip(p[..rows].iter()) {
-            inner = inner + *component * value;
-        }
+        let inner = T::narrow(T::dot(&v[..rows], &p[..rows]));
         let shift = tau * inner * half;
         for (slot, &component) in p[..rows].iter_mut().zip(v[..rows].iter()) {
             *slot = *slot - shift * component;
         }
-        // A22 <- A22 - v w^T - w v^T, symmetric by construction.
+        // A22 <- A22 - v w^T - w v^T, symmetric by construction. Sliced to the
+        // row rather than indexed into the whole matrix, so the bounds checks
+        // fall away and the two rank-one subtractions vectorise as one pass.
         for row in 0..rows {
             let base = (k + 1 + row) * n + k + 1;
             let (vr, wr) = (v[row], p[row]);
-            for col in 0..rows {
-                work[base + col] = work[base + col] - vr * p[col] - wr * v[col];
+            let target = &mut work[base..base + rows];
+            for ((slot, &pc), &vc) in target
+                .iter_mut()
+                .zip(p[..rows].iter())
+                .zip(v[..rows].iter())
+            {
+                *slot = *slot - vr * pc - wr * vc;
             }
         }
 
@@ -138,19 +155,9 @@ fn tridiagonalize<T: Float>(
             work[k * n + i] = T::zero();
         }
 
-        if want_vectors {
-            // Q <- Q H, which touches only the columns the reflector spans.
-            for row in 0..n {
-                let base = row * n + k + 1;
-                let mut total = T::zero();
-                for (col, &component) in v[..rows].iter().enumerate() {
-                    total = total + vectors[base + col] * component;
-                }
-                let total = total * tau;
-                for (col, &component) in v[..rows].iter().enumerate() {
-                    vectors[base + col] = vectors[base + col] - total * component;
-                }
-            }
+        taus[k + 1] = tau;
+        for i in (k + 2)..n {
+            stored[i * n + k + 1] = v[i - k - 1];
         }
     }
 
@@ -162,20 +169,6 @@ fn tridiagonalize<T: Float>(
     }
     if n >= 1 {
         offdiagonal[n - 1] = T::zero();
-    }
-}
-
-/// `sqrt(a^2 + b^2)` without the overflow the obvious spelling has.
-fn hypotenuse<T: Float>(a: T, b: T) -> T {
-    let (a, b) = (a.abs(), b.abs());
-    if a > b {
-        let ratio = b / a;
-        a * (T::one() + ratio * ratio).sqrt()
-    } else if b > T::zero() {
-        let ratio = a / b;
-        b * (T::one() + ratio * ratio).sqrt()
-    } else {
-        T::zero()
     }
 }
 
@@ -191,12 +184,13 @@ fn hypotenuse<T: Float>(a: T, b: T) -> T {
 ///
 /// `vectors` is rotated alongside when it is wanted, so the columns come out
 /// matched to the eigenvalues without a second pass.
-fn diagonalize<T: Float>(
+fn diagonalize<T: Float + Send + Sync>(
     diagonal: &mut [T],
     offdiagonal: &mut [T],
     vectors: &mut [T],
     n: usize,
     want_vectors: bool,
+    chain: &mut rotation::Chain<T>,
 ) -> Result<()> {
     if n == 0 {
         return Ok(());
@@ -221,28 +215,25 @@ fn diagonalize<T: Float>(
                 break;
             }
             iterations += 1;
-            if iterations > 50 {
-                return Err(MinitensorError::invalid_operation(
-                    "eigh did not converge; the matrix may contain NaN or infinity",
-                ));
-            }
+            rotation::check_sweeps(iterations, "eigh")?;
 
             // Wilkinson's shift, as the eigenvalue of the trailing 2x2 nearer
             // to its corner -- written so the subtraction never cancels.
             let mut g = (diagonal[l + 1] - diagonal[l]) / (two * offdiagonal[l]);
-            let mut r = hypotenuse(g, T::one());
+            let mut r = rotation::hypotenuse(g, T::one());
             let signed = if g >= T::zero() { r.abs() } else { -r.abs() };
             g = diagonal[m] - diagonal[l] + offdiagonal[l] / (g + signed);
 
+            chain.start(m - 1, rotation::Order::Falling);
             let (mut s, mut c) = (T::one(), T::one());
             let mut p = T::zero();
             let mut split = false;
             let mut i = m;
             while i > l {
                 i -= 1;
-                let mut f = s * offdiagonal[i];
+                let f = s * offdiagonal[i];
                 let b = c * offdiagonal[i];
-                r = hypotenuse(f, g);
+                r = rotation::hypotenuse(f, g);
                 offdiagonal[i + 1] = r;
                 if r == T::zero() {
                     // The band separated underneath the bulge; take the
@@ -261,14 +252,10 @@ fn diagonalize<T: Float>(
                 g = c * r - b;
 
                 if want_vectors {
-                    for row in 0..n {
-                        let base = row * n;
-                        f = vectors[base + i + 1];
-                        vectors[base + i + 1] = s * vectors[base + i] + c * f;
-                        vectors[base + i] = c * vectors[base + i] - s * f;
-                    }
+                    chain.push(c, s);
                 }
             }
+            chain.apply(vectors, n, n);
             if split {
                 continue;
             }
@@ -278,32 +265,6 @@ fn diagonalize<T: Float>(
         }
     }
     Ok(())
-}
-
-/// Sort the eigenvalues ascending, carrying their vectors with them.
-///
-/// The iteration produces them in whatever order it converged, and every
-/// caller -- and NumPy, and LAPACK's `syevd` -- expects ascending. Selection
-/// sort rather than anything cleverer: `n` is the matrix order, the comparison
-/// count is `n^2 / 2` against the `n^3` that produced them, and swapping a pair
-/// of columns is the expensive half either way.
-fn sort_ascending<T: Float>(diagonal: &mut [T], vectors: &mut [T], n: usize, want_vectors: bool) {
-    for i in 0..n {
-        let mut best = i;
-        for j in (i + 1)..n {
-            if diagonal[j] < diagonal[best] {
-                best = j;
-            }
-        }
-        if best != i {
-            diagonal.swap(i, best);
-            if want_vectors {
-                for row in 0..n {
-                    vectors.swap(row * n + i, row * n + best);
-                }
-            }
-        }
-    }
 }
 
 macro_rules! eigh_kernel {
@@ -325,6 +286,12 @@ macro_rules! eigh_kernel {
             let mut work = vec![0 as $ty; stride];
             let mut offdiagonal = vec![0 as $ty; n.max(1)];
             let mut scratch = vec![0 as $ty; stride];
+            let mut stored = vec![0 as $ty; stride];
+            let mut taus = vec![0 as $ty; n.max(1)];
+            let mut gathered = vec![0 as $ty; n.max(1)];
+            let mut z = vec![0f64; n.max(1)];
+            let mut blocks = reflector::Blocks::new();
+            let mut chain = rotation::Chain::new();
 
             for b in 0..batch {
                 // Only the lower triangle is read; the upper is mirrored from
@@ -343,11 +310,39 @@ macro_rules! eigh_kernel {
                     n,
                     diagonal,
                     &mut offdiagonal,
-                    &mut scratch,
-                    want_vectors,
+                    &mut stored,
+                    &mut taus,
                 );
-                diagonalize(diagonal, &mut offdiagonal, &mut scratch, n, want_vectors)?;
-                sort_ascending(diagonal, &mut scratch, n, want_vectors);
+                if want_vectors {
+                    for value in scratch.iter_mut() {
+                        *value = 0 as $ty;
+                    }
+                    reflector::accumulate(
+                        &stored,
+                        n,
+                        n,
+                        &taus,
+                        &mut scratch,
+                        n,
+                        &mut gathered,
+                        &mut z,
+                        &mut blocks,
+                    );
+                }
+                diagonalize(
+                    diagonal,
+                    &mut offdiagonal,
+                    &mut scratch,
+                    n,
+                    want_vectors,
+                    &mut chain,
+                )?;
+                let mut carried = [(&mut scratch[..], n)];
+                rotation::sort_carrying_columns(
+                    diagonal,
+                    false,
+                    &mut carried[..usize::from(want_vectors)],
+                );
                 if want_vectors {
                     all_vectors[b * stride..(b + 1) * stride].copy_from_slice(&scratch);
                 }

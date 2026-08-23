@@ -369,6 +369,8 @@ type TryOutWork<'a, T, E> = &'a (dyn Fn(usize, &mut [T]) -> Result<(), E> + Sync
 /// [`TryOutWork`] for work that fills two outputs at once, given the index of
 /// the first item in its group.
 type TryOutWork2<'a, T, U, E> = &'a (dyn Fn(usize, &mut [T], &mut [U]) -> Result<(), E> + Sync);
+type TryOutWork3<'a, T, E> =
+    &'a (dyn Fn(usize, &mut [T], &mut [T], &mut [T]) -> Result<(), E> + Sync);
 
 /// Split `rows` rows of work across threads, cutting **several output buffers
 /// at the same row boundary** — each with its own number of elements per row.
@@ -614,6 +616,42 @@ pub(crate) fn try_par_out_chunks_pair<T: Send, U: Send, E: Send>(
         .zip(second.par_chunks_mut(per_task * second_stride))
         .enumerate()
         .map(|(group, (a, b))| work(group * per_task, a, b))
+        .collect()
+}
+
+/// [`try_par_out_chunks_pair`] over three outputs rather than two.
+///
+/// `svd` produces a `U`, a vector of singular values and a `V^T` per matrix,
+/// each with its own stride. Rust has no way to write this once for any number
+/// of outputs -- there are no variadic generics -- so the arity that a caller
+/// needs is the arity that exists, and this is the third and last one.
+pub(crate) fn try_par_out_chunks_triple<T: Send, E: Send>(
+    first: &mut [T],
+    first_stride: usize,
+    second: &mut [T],
+    second_stride: usize,
+    third: &mut [T],
+    third_stride: usize,
+    items: usize,
+    per_task: usize,
+    work: TryOutWork3<T, E>,
+) -> Result<(), E> {
+    debug_assert_eq!(first.len(), items * first_stride);
+    debug_assert_eq!(second.len(), items * second_stride);
+    debug_assert_eq!(third.len(), items * third_stride);
+    if items == 0 {
+        return Ok(());
+    }
+    let per_task = per_task.clamp(1, items);
+    if per_task >= items {
+        return work(0, first, second, third);
+    }
+    first
+        .par_chunks_mut(per_task * first_stride)
+        .zip(second.par_chunks_mut(per_task * second_stride))
+        .zip(third.par_chunks_mut(per_task * third_stride))
+        .enumerate()
+        .map(|(group, ((a, b), c))| work(group * per_task, a, b, c))
         .collect()
 }
 

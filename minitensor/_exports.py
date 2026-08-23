@@ -115,6 +115,8 @@ _FUNCTIONAL_FORWARDERS = (
     "qr",
     "eigh",
     "eigvalsh",
+    "svd",
+    "svdvals",
     "flatten",
     "ravel",
     "transpose",

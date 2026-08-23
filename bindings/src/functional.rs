@@ -1233,6 +1233,19 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// `(U, s, Vh)` for each matrix in the stack, with `A = U @ diag(s) @ Vh` and `s` descending. `full_matrices=False` cuts `U` and `Vh` to the `min(m, n)` columns that carry a singular value.
+#[pyfunction]
+#[pyo3(signature = (input, full_matrices=true))]
+pub fn svd(input: &Bound<PyAny>, full_matrices: bool) -> PyResult<(PyTensor, PyTensor, PyTensor)> {
+    borrow_tensor(input)?.svd(full_matrices)
+}
+
+/// The singular values of each matrix, descending.
+#[pyfunction]
+pub fn svdvals(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.svdvals()
+}
+
 /// `(w, V)` for each symmetric matrix in the stack, with `w` ascending and `A @ V == V @ diag(w)`. Only the lower triangle is read; eigenvectors are determined up to sign.
 #[pyfunction]
 pub fn eigh(input: &Bound<PyAny>) -> PyResult<(PyTensor, PyTensor)> {
@@ -1641,6 +1654,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(inv, parent)?)?;
     parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
+    parent.add_function(wrap_pyfunction!(svd, parent)?)?;
+    parent.add_function(wrap_pyfunction!(svdvals, parent)?)?;
     parent.add_function(wrap_pyfunction!(eigh, parent)?)?;
     parent.add_function(wrap_pyfunction!(eigvalsh, parent)?)?;
     parent.add_function(wrap_pyfunction!(topk, parent)?)?;

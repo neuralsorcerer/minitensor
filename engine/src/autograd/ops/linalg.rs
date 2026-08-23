@@ -623,6 +623,156 @@ impl GradientFunction for EighBackward {
     }
 }
 
+/// Which of `svd`'s three outputs a [`SvdBackward`] node stands for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SvdOutput {
+    U,
+    Values,
+    Vt,
+}
+
+/// Gradient of [`crate::ops::linalg::svd`].
+///
+/// With `A = U diag(s) V^T` and `F_ij = 1 / (s_j^2 - s_i^2)` off the diagonal,
+///
+/// ```text
+/// Abar = U [ (J + J^T) S + S (K + K^T) + diag(sbar) ] V^T
+///      + (I - U U^T) Ubar S^-1 V^T
+///      + U S^-1 Vbar^T (I - V V^T)
+/// ```
+///
+/// where `J = F * (U^T Ubar)` and `K = F * (V^T Vbar)`. The three lines are
+/// three different questions. The first is how the factorisation turns inside
+/// its own span, and it is the one that divides by `s_j^2 - s_i^2`: two equal
+/// singular values leave their shared subspace free to rotate, so no particular
+/// pair of columns is determined and there is no derivative to report. The
+/// formula says so by dividing by zero, which is the honest answer and is
+/// pinned by a test.
+///
+/// The last two lines are how the factorisation reaches *outside* its span, and
+/// they exist only for a matrix that is not square -- a square orthogonal `U`
+/// has `I - U U^T = 0` exactly. That is why they carry the `1 / s` that a
+/// rank-deficient rectangular matrix makes infinite, and why a square one never
+/// touches it: perturbing a tall `A` can tilt a singular direction out of the
+/// column space it currently spans, and how far it tilts goes as one over the
+/// singular value it belongs to.
+///
+/// Three outputs and one gradient at a time, so each gets its own node and the
+/// engine adds them -- exact, because the whole expression is linear in the
+/// triple. Each node computes only the terms its own gradient appears in.
+pub struct SvdBackward {
+    pub u: Tensor,
+    pub values: Tensor,
+    pub vt: Tensor,
+    /// Which of the three outputs this node stands for.
+    pub from: SvdOutput,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl SvdBackward {
+    /// `s` shaped to multiply a matrix's columns, `M * as_row(s)` being
+    /// `M diag(s)`.
+    fn as_row(&self, values: &Tensor) -> Result<Tensor> {
+        crate::ops::shape_ops::unsqueeze(values, self.u.ndim() as isize - 2)
+    }
+
+    /// `s` shaped to multiply a matrix's rows, `as_column(s) * M` being
+    /// `diag(s) M`.
+    fn as_column(&self, values: &Tensor) -> Result<Tensor> {
+        crate::ops::shape_ops::unsqueeze(values, self.u.ndim() as isize - 1)
+    }
+
+    /// `F * (X^T Xbar)`, symmetrised into the `J + J^T` the formula wants.
+    ///
+    /// `F` is antisymmetric and `X^T Xbar - Xbar^T X` is too, so their product
+    /// is symmetric, and `J + J^T` is that product written without forming the
+    /// difference.
+    fn coupling(&self, x: &Tensor, grad_x: &Tensor) -> Result<Tensor> {
+        use crate::ops::{arithmetic, linalg};
+        let projected = linalg::matmul(&swap_last_two(x)?, grad_x)?;
+        let squares = arithmetic::mul(&self.values, &self.values)?;
+        let inner = arithmetic::div(&projected, &eigenvalue_gaps(&squares)?)?;
+        arithmetic::add(&inner, &swap_last_two(&inner)?)
+    }
+
+    /// `Xbar - X (X^T Xbar)`, which is `(I - X X^T) Xbar` without ever forming
+    /// the projector -- it is the larger of the two matrices and it is never
+    /// needed on its own.
+    fn outside_span(&self, x: &Tensor, grad_x: &Tensor) -> Result<Tensor> {
+        use crate::ops::{arithmetic, linalg};
+        let inside = linalg::matmul(x, &linalg::matmul(&swap_last_two(x)?, grad_x)?)?;
+        arithmetic::sub(grad_x, &inside)
+    }
+}
+
+impl GradientFunction for SvdBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        use crate::ops::{arithmetic, linalg};
+
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+
+        let dims = self.u.shape().dims();
+        let rows = dims[dims.len() - 2];
+        let vt_dims = self.vt.shape().dims();
+        let cols = vt_dims[vt_dims.len() - 1];
+        let rank = self.values.shape().dims()[self.values.ndim() - 1];
+        let v = swap_last_two(&self.vt)?;
+
+        let mut grad = match self.from {
+            // U diag(sbar) V^T: the values alone rotate nothing.
+            SvdOutput::Values => {
+                let scaled = arithmetic::mul(&self.u, &self.as_row(grad_output)?)?;
+                linalg::matmul(&scaled, &self.vt)?
+            }
+            SvdOutput::U => {
+                let coupled = arithmetic::mul(
+                    &self.coupling(&self.u, grad_output)?,
+                    &self.as_row(&self.values)?,
+                )?;
+                linalg::matmul(&linalg::matmul(&self.u, &coupled)?, &self.vt)?
+            }
+            SvdOutput::Vt => {
+                // The output is `V^T`, so the gradient arriving here is
+                // `Vbar^T` already and `V`'s own gradient is its transpose.
+                let grad_v = swap_last_two(grad_output)?;
+                let coupled =
+                    arithmetic::mul(&self.as_column(&self.values)?, &self.coupling(&v, &grad_v)?)?;
+                linalg::matmul(&linalg::matmul(&self.u, &coupled)?, &self.vt)?
+            }
+        };
+
+        // The reach outside the span, for whichever side has room for one.
+        if self.from == SvdOutput::U && rows > rank {
+            let residual = self.outside_span(&self.u, grad_output)?;
+            let scaled = arithmetic::mul(&residual, &self.as_row(&reciprocal(&self.values)?)?)?;
+            grad = arithmetic::add(&grad, &linalg::matmul(&scaled, &self.vt)?)?;
+        }
+        if self.from == SvdOutput::Vt && cols > rank {
+            // `grad_output` is `Vbar^T`, so `Vbar^T (I - V V^T)` is the same
+            // projection with the operands the other way round.
+            let inside = linalg::matmul(&linalg::matmul(grad_output, &v)?, &self.vt)?;
+            let residual = arithmetic::sub(grad_output, &inside)?;
+            let scaled = arithmetic::mul(&self.u, &self.as_row(&reciprocal(&self.values)?)?)?;
+            grad = arithmetic::add(&grad, &linalg::matmul(&scaled, &residual)?)?;
+        }
+
+        accumulate_grad(&mut gradients, self.input_id, grad)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
+/// `1 / values`, which is infinite where a singular value is zero and is meant
+/// to be -- see [`SvdBackward`].
+fn reciprocal(values: &Tensor) -> Result<Tensor> {
+    crate::ops::arithmetic::div(&constant_like(values, 1.0)?, values)
+}
+
 /// A one-element tensor holding `value`, in `like`'s dtype and device, for the
 /// scalar operands the elementwise ops broadcast against.
 fn constant_like(like: &Tensor, value: f64) -> Result<Tensor> {

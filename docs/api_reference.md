@@ -561,10 +561,68 @@ substitution does not have to be worked out from the rule.
 
 ### Linear algebra & matrix ops
 
-- `dot`, `bmm`
-- `solve`
+- `matmul`, `dot`, `bmm`
+- `solve`, `inv`, `det`, `slogdet`
 - `diagonal`, `trace`
 - `triu`, `tril`
+
+#### Factorisations
+
+Each takes a stack of matrices — anything with two or more dimensions — and
+factors every matrix in it. All of them are `float32` or `float64` only.
+
+- `cholesky(input, upper=False)` — `A = L @ L.T` for symmetric positive-definite
+  `A`, or `A = U.T @ U` with `upper=True`. Reads only the lower triangle, and
+  reports which leading minor failed when the matrix is not positive definite.
+- `qr(input, mode="reduced")` — `A = Q @ R` with `Q` orthonormal and `R` upper
+  triangular. `mode="complete"` returns a square `Q`; that shape is not
+  differentiable when there are more rows than columns, because the extra
+  columns are an arbitrary completion of the basis.
+- `eigh(input)` — `(w, V)` for a symmetric matrix, with `w` **ascending** and
+  `A @ V == V @ diag(w)`. Reads only the lower triangle.
+  `eigvalsh(input)` returns the eigenvalues alone and skips accumulating the
+  vectors, which is most of the work.
+- `svd(input, full_matrices=True)` — `(U, s, Vh)` with
+  `A == U @ diag(s) @ Vh` and `s` **descending** and non-negative. With
+  `full_matrices=False` the two orthogonal factors are cut to the `min(m, n)`
+  columns that carry a singular value, which is the shape that reconstructs `A`.
+  `svdvals(input)` returns the singular values alone.
+
+The orders differ on purpose: ascending eigenvalues and descending singular
+values are what LAPACK, NumPy and PyTorch all return.
+
+Eigenvectors and singular vectors are determined only up to the sign of each
+column, and within a repeated value's subspace only up to a rotation. Nothing
+here imposes a convention, so compare what the vectors *do* —
+`A @ V == V @ diag(w)`, `V.T @ V == I` — rather than comparing them against
+another implementation's elementwise.
+
+That freedom is also where the gradients stop existing. Differentiating the
+vectors of a matrix with a repeated eigenvalue or singular value gives
+infinities, because any rotation inside the shared subspace is as good and there
+is no derivative to report; the *values* stay perfectly well defined there.
+`svd` additionally divides by the singular values in the terms that reach
+outside the column space, so a rank-deficient **rectangular** matrix has no
+vector gradient either — a square one never forms those terms.
+
+```python
+import minitensor as mt
+
+a = mt.Tensor([[3.0, 1.0], [0.0, 2.0]], dtype="float64")
+u, s, vh = a.svd(full_matrices=False)
+print(s.numpy())                                # descending
+print(a.allclose(u @ (s.unsqueeze(-1) * vh)))   # back to a
+
+cov = mt.Tensor([[2.0, 1.0], [1.0, 2.0]], dtype="float64")
+w, v = cov.eigh()
+print(w.numpy())                          # ascending: [1., 3.]
+```
+
+```text
+[3.25661654 1.84240298]
+True
+[1. 3.]
+```
 
 ### Reductions, statistics, and equality
 

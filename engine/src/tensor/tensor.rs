@@ -2243,6 +2243,16 @@ impl Tensor {
         crate::ops::linalg::eigvalsh(self)
     }
 
+    /// `(U, s, V^T)` for each matrix in the stack, with `A = U @ diag(s) @ V^T`.
+    pub fn svd(&self, full_matrices: bool) -> Result<(Self, Self, Self)> {
+        crate::ops::linalg::svd(self, full_matrices)
+    }
+
+    /// The singular values alone, descending.
+    pub fn svdvals(&self) -> Result<Self> {
+        crate::ops::linalg::svdvals(self)
+    }
+
     /// `(Q, R)` for each matrix in the stack, with `A = Q @ R`.
     pub fn qr(&self, mode: crate::ops::linalg::QrMode) -> Result<(Self, Self)> {
         crate::ops::linalg::qr(self, mode)
