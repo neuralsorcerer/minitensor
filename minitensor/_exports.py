@@ -196,6 +196,7 @@ _FUNCTIONAL_ONLY = (
     "max_pool2d",
     "mse_loss",
     "smooth_l1_loss",
+    "interpolate",
     "huber_loss",
     "l1_loss",
     "kl_div",

@@ -44,6 +44,120 @@ pub struct AvgPool2dBackward {
     pub count_include_pad: bool,
 }
 
+/// Gradient of [`crate::ops::interpolate::interpolate`].
+///
+/// Interpolation is linear in its input, so the gradient is the transpose of
+/// the forward: the same source indices and the same weights, scattered where
+/// the forward gathered. Nothing else is stored -- the axis maps are `O(out)`
+/// numbers and cheaper to rebuild than to carry, and rebuilding them from the
+/// same function is what stops the two directions from ever disagreeing.
+pub struct InterpolateBackward {
+    pub input_id: TensorId,
+    pub input_shape: Vec<usize>,
+    pub output_size: Vec<usize>,
+    pub mode: crate::ops::interpolate::InterpolateMode,
+    pub align_corners: bool,
+}
+
+macro_rules! interpolate_backward {
+    ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
+        fn $name(
+            grad_output: &Tensor,
+            planes: usize,
+            in_h: usize,
+            in_w: usize,
+            rows: &crate::ops::interpolate::AxisMap,
+            cols: &crate::ops::interpolate::AxisMap,
+        ) -> Result<TensorData> {
+            let grad = grad_output.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("interpolate backward: mismatched dtype")
+            })?;
+            let (out_h, out_w) = (rows.len(), cols.len());
+            let (plane_in, plane_out) = (in_h * in_w, out_h * out_w);
+            let mut values = vec![0 as $ty; planes * plane_in];
+            if plane_in == 0 || plane_out == 0 {
+                return Ok(TensorData::$from_vec(values, grad_output.device()));
+            }
+
+            // One task per plane: several output positions read the same source,
+            // so the scatter inside a plane is serial, but planes are disjoint.
+            par_out_chunks(&mut values, plane_in, &|first, image| {
+                let base = (first / plane_in) * plane_out;
+                for oh in 0..out_h {
+                    let (top, bottom) = (rows.lower(oh) * in_w, rows.upper(oh) * in_w);
+                    let row_weight = rows.weight(oh) as $ty;
+                    for ow in 0..out_w {
+                        let (left, right) = (cols.lower(ow), cols.upper(ow));
+                        let column_weight = cols.weight(ow) as $ty;
+                        let share = grad[base + oh * out_w + ow];
+                        // The four coefficients the forward multiplied by, in
+                        // the same order it formed them.
+                        let upper_share = share * row_weight;
+                        let lower_share = share - upper_share;
+                        image[top + left] += lower_share * (1.0 as $ty - column_weight);
+                        image[top + right] += lower_share * column_weight;
+                        image[bottom + left] += upper_share * (1.0 as $ty - column_weight);
+                        image[bottom + right] += upper_share * column_weight;
+                    }
+                }
+            });
+            Ok(TensorData::$from_vec(values, grad_output.device()))
+        }
+    };
+}
+
+interpolate_backward!(interpolate_backward_f32, f32, as_f32_slice, from_vec_f32);
+interpolate_backward!(interpolate_backward_f64, f64, as_f64_slice, from_vec_f64);
+
+impl GradientFunction for InterpolateBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let dims = &self.input_shape;
+        let spatial = &dims[2..];
+        let (in_h, in_w) = if spatial.len() == 2 {
+            (spatial[0], spatial[1])
+        } else {
+            (1, spatial[0])
+        };
+        let (out_h, out_w) = if self.output_size.len() == 2 {
+            (self.output_size[0], self.output_size[1])
+        } else {
+            (1, self.output_size[0])
+        };
+        let planes = dims[0] * dims[1];
+        let rows = crate::ops::interpolate::axis_map(in_h, out_h, self.mode, self.align_corners);
+        let cols = crate::ops::interpolate::axis_map(in_w, out_w, self.mode, self.align_corners);
+
+        let grad = grad_output.contiguous()?;
+        let data = match grad.dtype() {
+            DataType::Float32 => interpolate_backward_f32(&grad, planes, in_h, in_w, &rows, &cols)?,
+            DataType::Float64 => interpolate_backward_f64(&grad, planes, in_h, in_w, &rows, &cols)?,
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "interpolate backward only supports floating point tensors",
+                ));
+            }
+        };
+
+        let mut gradients = FxHashMap::default();
+        accumulate_grad(
+            &mut gradients,
+            self.input_id,
+            Tensor::new(
+                Arc::new(data),
+                Shape::new(dims.clone()),
+                grad.dtype(),
+                grad.device(),
+                false,
+            ),
+        )?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Spread each output gradient evenly over the window it averaged, where the
 /// windows came from the ratio of the extents rather than a fixed kernel.
 ///

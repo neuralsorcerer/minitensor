@@ -30,7 +30,7 @@ use engine::nn::{
     normalization::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm},
     pooling::{
         AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
-        AvgPool2d, MaxPool1d, MaxPool2d,
+        AvgPool2d, MaxPool1d, MaxPool2d, Upsample,
     },
     recurrent::{CellKind, Recurrent},
     utils::{LayerUtils, SequentialUtils},
@@ -40,6 +40,7 @@ use engine::ops::conv_transpose1d as conv_transpose1d_op;
 use engine::ops::conv_transpose2d as conv_transpose2d_op;
 use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
+use engine::ops::interpolate::{InterpolateMode, interpolate as interpolate_op};
 use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::ops::loss::{
     focal_loss as focal_loss_op, huber_loss as huber_loss_op, kl_div_loss as kl_div_loss_op,
@@ -345,6 +346,62 @@ fn max_pool2d(
     let result =
         max_pool2d_op(input_tensor.tensor(), kernel, stride, padding).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
+}
+
+/// Resample a `[N, C, L]` or `[N, C, H, W]` signal to a different size, without parameters. Give exactly one of `size` and `scale_factor`. `mode` is `"nearest"`, or `"linear"`/`"bilinear"` for a weighted average of neighbours. `align_corners` puts the first and last output positions exactly on the first and last input samples; the default spaces them as cell centres instead, which is what makes resampling twice by two match resampling once by four.
+#[pyfunction]
+#[pyo3(signature = (input, size=None, scale_factor=None, mode="nearest", align_corners=false))]
+fn interpolate(
+    input: &Bound<PyAny>,
+    size: Option<&Bound<PyAny>>,
+    scale_factor: Option<&Bound<PyAny>>,
+    mode: &str,
+    align_corners: bool,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let spatial = input_tensor.tensor().ndim().saturating_sub(2);
+    let parsed_mode = InterpolateMode::from_name(mode).map_err(_convert_error)?;
+
+    let sizes = match size {
+        Some(value) => Some(parse_spatial_usize("size", value, spatial)?),
+        None => None,
+    };
+    let factors = match scale_factor {
+        Some(value) => Some(parse_spatial_f64("scale_factor", value, spatial)?),
+        None => None,
+    };
+
+    let result = interpolate_op(
+        input_tensor.tensor(),
+        sizes.as_deref(),
+        factors.as_deref(),
+        parsed_mode,
+        align_corners,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Accept a scalar (broadcast to every spatial axis) or a sequence of exactly that many.
+fn parse_spatial_usize(name: &str, value: &Bound<PyAny>, spatial: usize) -> PyResult<Vec<usize>> {
+    if let Ok(scalar) = value.extract::<usize>() {
+        return Ok(vec![scalar; spatial]);
+    }
+    let seq = value.extract::<Vec<usize>>().map_err(|_| {
+        PyTypeError::new_err(format!("{name} must be an int or a sequence of ints"))
+    })?;
+    Ok(seq)
+}
+
+/// [`parse_spatial_usize`] for a scale factor, which may be fractional.
+fn parse_spatial_f64(name: &str, value: &Bound<PyAny>, spatial: usize) -> PyResult<Vec<f64>> {
+    if let Ok(scalar) = value.extract::<f64>() {
+        return Ok(vec![scalar; spatial]);
+    }
+    let seq = value.extract::<Vec<f64>>().map_err(|_| {
+        PyTypeError::new_err(format!("{name} must be a number or a sequence of numbers"))
+    })?;
+    Ok(seq)
 }
 
 /// Average pooling to a fixed `output_size`, whatever the input's spatial size is. Windows come from the ratio of the extents, so they can overlap and vary in size; `output_size=1` is the global average pool that ends most convolutional networks.
@@ -759,6 +816,7 @@ module_types! {
     AdaptiveMaxPool2d(AdaptiveMaxPool2d),
     AdaptiveAvgPool1d(AdaptiveAvgPool1d),
     AdaptiveMaxPool1d(AdaptiveMaxPool1d),
+    Upsample(Upsample),
 }
 
 #[pymethods]
@@ -925,6 +983,13 @@ impl PyModule {
                 layer.out_channels(),
                 layer.kernel_size()
             ),
+            ModuleType::Upsample(layer) => match (layer.size(), layer.scale_factor()) {
+                (Some(size), _) => format!("Upsample(size={size:?}, mode={:?})", layer.mode()),
+                (None, Some(factor)) => {
+                    format!("Upsample(scale_factor={factor:?}, mode={:?})", layer.mode())
+                }
+                (None, None) => "Upsample(mode=?)".to_string(),
+            },
             ModuleType::AdaptiveAvgPool2d(layer) => {
                 format!("AdaptiveAvgPool2d(output_size={:?})", layer.output_size())
             }
@@ -1144,6 +1209,12 @@ impl PyModule {
         }
     }
 
+    pub fn from_upsample(layer: Upsample) -> Self {
+        Self {
+            inner: ModuleType::Upsample(Box::new(layer)),
+        }
+    }
+
     pub fn from_adaptive_avg_pool2d(layer: AdaptiveAvgPool2d) -> Self {
         Self {
             inner: ModuleType::AdaptiveAvgPool2d(Box::new(layer)),
@@ -1301,6 +1372,7 @@ impl PyModule {
             ModuleType::AdaptiveMaxPool2d(layer) => layer.clone(),
             ModuleType::AdaptiveAvgPool1d(layer) => layer.clone(),
             ModuleType::AdaptiveMaxPool1d(layer) => layer.clone(),
+            ModuleType::Upsample(layer) => layer.clone(),
         };
 
         Ok(layer)

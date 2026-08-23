@@ -790,6 +790,53 @@ impl PyConvTranspose1d {
     }
 }
 
+/// Upsample layer
+#[pyclass(name = "Upsample", extends = PyModule)]
+pub struct PyUpsample;
+
+#[pymethods]
+impl PyUpsample {
+    /// Create a new Upsample layer
+    #[new]
+    #[pyo3(signature = (size=None, scale_factor=None, mode="nearest", align_corners=false))]
+    fn new(
+        size: Option<&Bound<PyAny>>,
+        scale_factor: Option<&Bound<PyAny>>,
+        mode: &str,
+        align_corners: bool,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let parsed_mode =
+            engine::ops::interpolate::InterpolateMode::from_name(mode).map_err(_convert_error)?;
+        let sizes = match size {
+            Some(value) => Some(match value.extract::<usize>() {
+                Ok(scalar) => vec![scalar],
+                Err(_) => value.extract::<Vec<usize>>()?,
+            }),
+            None => None,
+        };
+        let factors = match scale_factor {
+            Some(value) => Some(match value.extract::<f64>() {
+                Ok(scalar) => vec![scalar],
+                Err(_) => value.extract::<Vec<f64>>()?,
+            }),
+            None => None,
+        };
+        let layer = Upsample::new(sizes, factors, parsed_mode, align_corners);
+        Ok(PyClassInitializer::from(PyModule::from_upsample(layer)).add_subclass(Self))
+    }
+
+    /// Whether the first and last output positions sit on the first and last inputs
+    #[getter]
+    fn align_corners(slf: PyRef<Self>) -> PyResult<bool> {
+        match &slf.as_ref().inner {
+            ModuleType::Upsample(layer) => Ok(layer.align_corners()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
 /// AdaptiveAvgPool2d layer
 #[pyclass(name = "AdaptiveAvgPool2d", extends = PyModule)]
 pub struct PyAdaptiveAvgPool2d;
@@ -1846,6 +1893,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyConv2d>()?;
     nn_module.add_class::<PyConvTranspose2d>()?;
     nn_module.add_class::<PyConvTranspose1d>()?;
+    nn_module.add_class::<PyUpsample>()?;
     nn_module.add_class::<PyAdaptiveAvgPool2d>()?;
     nn_module.add_class::<PyAdaptiveAvgPool1d>()?;
     nn_module.add_class::<PyAdaptiveMaxPool2d>()?;
@@ -1864,6 +1912,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(interpolate, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(adaptive_avg_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(adaptive_max_pool2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(adaptive_avg_pool1d, &nn_module)?)?;

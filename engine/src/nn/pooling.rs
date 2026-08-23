@@ -385,3 +385,90 @@ impl Layer for AdaptiveMaxPool1d {
         Vec::new()
     }
 }
+
+/// Resample a signal to a fixed size or by a fixed factor, without parameters.
+///
+/// The layer a decoder's skip connections are built on: `conv_transpose2d`
+/// grows a map with weights it has to learn, while this one just puts the
+/// samples where the earlier resolution had them, which is what lets a
+/// concatenation line up.
+#[derive(Clone)]
+pub struct Upsample {
+    size: Option<Vec<usize>>,
+    scale_factor: Option<Vec<f64>>,
+    mode: crate::ops::interpolate::InterpolateMode,
+    align_corners: bool,
+}
+
+impl Upsample {
+    /// Create the layer. Give exactly one of `size` and `scale_factor`; the
+    /// forward pass reports the error if neither or both arrive.
+    pub fn new(
+        size: Option<Vec<usize>>,
+        scale_factor: Option<Vec<f64>>,
+        mode: crate::ops::interpolate::InterpolateMode,
+        align_corners: bool,
+    ) -> Self {
+        Self {
+            size,
+            scale_factor,
+            mode,
+            align_corners,
+        }
+    }
+
+    pub fn size(&self) -> Option<&[usize]> {
+        self.size.as_deref()
+    }
+
+    pub fn scale_factor(&self) -> Option<&[f64]> {
+        self.scale_factor.as_deref()
+    }
+
+    pub fn mode(&self) -> crate::ops::interpolate::InterpolateMode {
+        self.mode
+    }
+
+    pub fn align_corners(&self) -> bool {
+        self.align_corners
+    }
+}
+
+impl Layer for Upsample {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        // A scalar given once has to become one entry per spatial axis, and the
+        // rank is only known here.
+        let spatial = input.ndim().saturating_sub(2);
+        let broadcast_usize = |v: &Vec<usize>| -> Vec<usize> {
+            if v.len() == 1 && spatial > 1 {
+                vec![v[0]; spatial]
+            } else {
+                v.clone()
+            }
+        };
+        let broadcast_f64 = |v: &Vec<f64>| -> Vec<f64> {
+            if v.len() == 1 && spatial > 1 {
+                vec![v[0]; spatial]
+            } else {
+                v.clone()
+            }
+        };
+        let size = self.size.as_ref().map(broadcast_usize);
+        let factors = self.scale_factor.as_ref().map(broadcast_f64);
+        crate::ops::interpolate::interpolate(
+            input,
+            size.as_deref(),
+            factors.as_deref(),
+            self.mode,
+            self.align_corners,
+        )
+    }
+
+    fn parameters(&self) -> Vec<&Tensor> {
+        Vec::new()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut Tensor> {
+        Vec::new()
+    }
+}

@@ -32,7 +32,7 @@ pub use loss::{
 };
 pub use pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
-    AvgPool2d, MaxPool1d, MaxPool2d,
+    AvgPool2d, MaxPool1d, MaxPool2d, Upsample,
 };
 pub use recurrent::{CellKind, GRU, LSTM, Recurrent};
 pub use sequential::{Sequential, SequentialBuilder};
