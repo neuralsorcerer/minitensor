@@ -590,6 +590,206 @@ impl PyConv2d {
     }
 }
 
+/// ConvTranspose2d layer
+#[pyclass(name = "ConvTranspose2d", extends = PyModule)]
+pub struct PyConvTranspose2d;
+
+#[pymethods]
+impl PyConvTranspose2d {
+    /// Create a new ConvTranspose2d layer
+    #[new]
+    #[pyo3(signature = (
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=None,
+        padding=None,
+        output_padding=None,
+        dilation=None,
+        groups=None,
+        bias=None,
+        device=None,
+        dtype=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: &Bound<PyAny>,
+        stride: Option<&Bound<PyAny>>,
+        padding: Option<&Bound<PyAny>>,
+        output_padding: Option<&Bound<PyAny>>,
+        dilation: Option<&Bound<PyAny>>,
+        groups: Option<usize>,
+        bias: Option<bool>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let kernel_size = parse_tuple2(kernel_size)?;
+        let stride = match stride {
+            Some(s) => parse_tuple2(s)?,
+            None => (1, 1),
+        };
+        let padding = match padding {
+            Some(p) => parse_tuple2(p)?,
+            None => (0, 0),
+        };
+        let output_padding = match output_padding {
+            Some(p) => parse_tuple2(p)?,
+            None => (0, 0),
+        };
+        let dilation = match dilation {
+            Some(d) => parse_tuple2(d)?,
+            None => (1, 1),
+        };
+        let layer = ConvTranspose2d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            Some(stride),
+            Some(padding),
+            Some(output_padding),
+            Some(dilation),
+            Some(groups.unwrap_or(1)),
+            bias.unwrap_or(true),
+            resolve_device(device)?,
+            dtype::resolve_dtype_arg(dtype)?,
+        )
+        .map_err(_convert_error)?;
+        Ok(PyClassInitializer::from(PyModule::from_conv_transpose2d(layer)).add_subclass(Self))
+    }
+
+    /// Get input channels count
+    #[getter]
+    fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose2d(layer) => Ok(layer.in_channels()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+
+    /// Get output channels count
+    #[getter]
+    fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose2d(layer) => Ok(layer.out_channels()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+
+    /// Get kernel size
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose2d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+
+    /// Get output padding
+    #[getter]
+    fn output_padding(slf: PyRef<Self>) -> PyResult<(usize, usize)> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose2d(layer) => Ok(layer.output_padding()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
+/// ConvTranspose1d layer
+#[pyclass(name = "ConvTranspose1d", extends = PyModule)]
+pub struct PyConvTranspose1d;
+
+#[pymethods]
+impl PyConvTranspose1d {
+    /// Create a new ConvTranspose1d layer
+    #[new]
+    #[pyo3(signature = (
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding=0,
+        output_padding=0,
+        dilation=1,
+        groups=None,
+        bias=None,
+        device=None,
+        dtype=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: Option<usize>,
+        bias: Option<bool>,
+        device: Option<&PyDevice>,
+        dtype: Option<&str>,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        let layer = ConvTranspose1d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            Some(stride),
+            Some(padding),
+            Some(output_padding),
+            Some(dilation),
+            Some(groups.unwrap_or(1)),
+            bias.unwrap_or(true),
+            resolve_device(device)?,
+            dtype::resolve_dtype_arg(dtype)?,
+        )
+        .map_err(_convert_error)?;
+        Ok(PyClassInitializer::from(PyModule::from_conv_transpose1d(layer)).add_subclass(Self))
+    }
+
+    /// Get input channels count
+    #[getter]
+    fn in_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose1d(layer) => Ok(layer.in_channels()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+
+    /// Get output channels count
+    #[getter]
+    fn out_channels(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose1d(layer) => Ok(layer.out_channels()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+
+    /// Get kernel size
+    #[getter]
+    fn kernel_size(slf: PyRef<Self>) -> PyResult<usize> {
+        match &slf.as_ref().inner {
+            ModuleType::ConvTranspose1d(layer) => Ok(layer.kernel_size()),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Invalid layer type",
+            )),
+        }
+    }
+}
+
 /// BatchNorm1d layer
 #[pyclass(name = "BatchNorm1d", extends = PyModule)]
 pub struct PyBatchNorm1d;
@@ -1524,6 +1724,8 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_class::<PyDropout>()?;
     nn_module.add_class::<PyDropout2d>()?;
     nn_module.add_class::<PyConv2d>()?;
+    nn_module.add_class::<PyConvTranspose2d>()?;
+    nn_module.add_class::<PyConvTranspose1d>()?;
     nn_module.add_class::<PyMaxPool2d>()?;
     nn_module.add_class::<PyAvgPool2d>()?;
     nn_module.add_class::<PyBatchNorm1d>()?;
@@ -1538,6 +1740,8 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(dense_layer, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv2d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(conv1d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(conv_transpose2d, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(conv_transpose1d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(max_pool1d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(avg_pool1d, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(max_pool2d, &nn_module)?)?;

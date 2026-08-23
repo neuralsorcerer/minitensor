@@ -366,6 +366,266 @@ impl Layer for Conv1d {
     crate::weight_and_optional_bias_parameters!();
 }
 
+/// 2-D transposed convolutional layer over `[N, C_in, H, W]` signals.
+///
+/// The layer a decoder is made of. Where [`Conv2d`] gathers a neighbourhood
+/// into each output position, this scatters each input position across one, so
+/// it grows the grid instead of shrinking it.
+///
+/// The weight is `[in_channels, out_channels / groups, kH, kW]` -- input
+/// channels first, the reverse of [`Conv2d`]. That is not an arbitrary choice:
+/// it is the same tensor a convolution would hold, and storing it the other way
+/// round would mean a transpose on every forward pass.
+#[derive(Clone)]
+pub struct ConvTranspose2d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+    output_padding: (usize, usize),
+    dilation: (usize, usize),
+    groups: usize,
+}
+
+impl ConvTranspose2d {
+    /// Create a 2-D transposed convolutional layer.
+    ///
+    /// `stride` defaults to `(1, 1)`, `padding` and `output_padding` to
+    /// `(0, 0)`, `dilation` to `(1, 1)` and `groups` to 1, matching [`Conv2d`].
+    /// `output_padding` must be smaller than `stride`; see
+    /// [`crate::ops::conv_transpose2d`] for why.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: (usize, usize),
+        stride: Option<(usize, usize)>,
+        padding: Option<(usize, usize)>,
+        output_padding: Option<(usize, usize)>,
+        dilation: Option<(usize, usize)>,
+        groups: Option<usize>,
+        bias: bool,
+        device: Device,
+        dtype: DataType,
+    ) -> Result<Self> {
+        let stride = stride.unwrap_or((1, 1));
+        let padding = padding.unwrap_or((0, 0));
+        let output_padding = output_padding.unwrap_or((0, 0));
+        let dilation = dilation.unwrap_or((1, 1));
+        let groups = groups.unwrap_or(1);
+        check_groups(in_channels, out_channels, groups)?;
+
+        let weight_shape = Shape::new(vec![
+            in_channels,
+            out_channels / groups,
+            kernel_size.0,
+            kernel_size.1,
+        ]);
+        let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
+        let bias_tensor = if bias {
+            Some(init_bias(Shape::new(vec![out_channels]), dtype, device)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            bias: bias_tensor,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        })
+    }
+
+    /// Get input channels count
+    pub fn in_channels(&self) -> usize {
+        self.in_channels
+    }
+
+    /// Get output channels count
+    pub fn out_channels(&self) -> usize {
+        self.out_channels
+    }
+
+    /// Get kernel size
+    pub fn kernel_size(&self) -> (usize, usize) {
+        self.kernel_size
+    }
+
+    /// Get stride
+    pub fn stride(&self) -> (usize, usize) {
+        self.stride
+    }
+
+    /// Get padding
+    pub fn padding(&self) -> (usize, usize) {
+        self.padding
+    }
+
+    /// Get output padding
+    pub fn output_padding(&self) -> (usize, usize) {
+        self.output_padding
+    }
+
+    /// Get dilation
+    pub fn dilation(&self) -> (usize, usize) {
+        self.dilation
+    }
+
+    /// Get groups
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+}
+
+impl Layer for ConvTranspose2d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::conv_transpose2d(
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+            self.output_padding,
+            self.dilation,
+            self.groups,
+        )
+    }
+
+    crate::weight_and_optional_bias_parameters!();
+}
+
+/// 1-D transposed convolutional layer over `[N, C_in, L]` signals.
+///
+/// Wraps [`crate::ops::conv_transpose1d`], which defers to the 2-D kernel with
+/// a singleton height, so there is one implementation of the scatter and one
+/// backward pass rather than two to keep in step.
+#[derive(Clone)]
+pub struct ConvTranspose1d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    stride: usize,
+    padding: usize,
+    output_padding: usize,
+    dilation: usize,
+    groups: usize,
+}
+
+impl ConvTranspose1d {
+    /// Create a 1-D transposed convolutional layer. Defaults match
+    /// [`ConvTranspose2d`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: Option<usize>,
+        output_padding: Option<usize>,
+        dilation: Option<usize>,
+        groups: Option<usize>,
+        bias: bool,
+        device: Device,
+        dtype: DataType,
+    ) -> Result<Self> {
+        let stride = stride.unwrap_or(1);
+        let padding = padding.unwrap_or(0);
+        let output_padding = output_padding.unwrap_or(0);
+        let dilation = dilation.unwrap_or(1);
+        let groups = groups.unwrap_or(1);
+        check_groups(in_channels, out_channels, groups)?;
+
+        let weight_shape = Shape::new(vec![in_channels, out_channels / groups, kernel_size]);
+        let weight = init_parameter(weight_shape, InitMethod::HeUniform, dtype, device)?;
+        let bias_tensor = if bias {
+            Some(init_bias(Shape::new(vec![out_channels]), dtype, device)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            bias: bias_tensor,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        })
+    }
+
+    /// Get input channels count
+    pub fn in_channels(&self) -> usize {
+        self.in_channels
+    }
+
+    /// Get output channels count
+    pub fn out_channels(&self) -> usize {
+        self.out_channels
+    }
+
+    /// Get kernel size
+    pub fn kernel_size(&self) -> usize {
+        self.kernel_size
+    }
+
+    /// Get stride
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Get padding
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
+    /// Get output padding
+    pub fn output_padding(&self) -> usize {
+        self.output_padding
+    }
+
+    /// Get dilation
+    pub fn dilation(&self) -> usize {
+        self.dilation
+    }
+
+    /// Get groups
+    pub fn groups(&self) -> usize {
+        self.groups
+    }
+}
+
+impl Layer for ConvTranspose1d {
+    fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        crate::ops::conv_transpose1d(
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+            self.output_padding,
+            self.dilation,
+            self.groups,
+        )
+    }
+
+    crate::weight_and_optional_bias_parameters!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

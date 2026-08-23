@@ -24,7 +24,7 @@ use engine::nn::{
     LogCoshLoss, MAELoss, MSELoss, ReLU, Sequential, Sigmoid, SmoothL1Loss, Softmax, Tanh,
     activation::{ELU, GELU, LeakyReLU},
     attention::MultiheadAttention,
-    conv::{Conv1d, Conv2d},
+    conv::{Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d},
     dropout::{Dropout, Dropout2d},
     embedding::Embedding,
     normalization::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm},
@@ -33,6 +33,8 @@ use engine::nn::{
     utils::{LayerUtils, SequentialUtils},
 };
 use engine::ops::batch_norm as batch_norm_op;
+use engine::ops::conv_transpose1d as conv_transpose1d_op;
+use engine::ops::conv_transpose2d as conv_transpose2d_op;
 use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
 use engine::ops::loss::cross_entropy as cross_entropy_op;
@@ -180,6 +182,72 @@ fn conv2d(
         bias_tensor.as_ref().map(|b| b.tensor()),
         stride,
         padding,
+        dilation,
+        groups,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// 2-D transposed convolution: scatters each input position across a neighbourhood, growing the grid where `conv2d` shrinks it. `weight` is `[C_in, C_out // groups, kH, kW]` -- input channels first. `output_padding` picks among the input sizes that convolve to the same output size, and must be smaller than `stride`.
+#[pyfunction]
+#[pyo3(signature = (input, weight, bias=None, stride=None, padding=None, output_padding=None, dilation=None, groups=1))]
+#[allow(clippy::too_many_arguments)]
+fn conv_transpose2d(
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+    stride: Option<&Bound<PyAny>>,
+    padding: Option<&Bound<PyAny>>,
+    output_padding: Option<&Bound<PyAny>>,
+    dilation: Option<&Bound<PyAny>>,
+    groups: usize,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    let stride = parse_pair_arg("stride", stride, (1, 1))?;
+    let padding = parse_pair_arg("padding", padding, (0, 0))?;
+    let output_padding = parse_pair_arg("output_padding", output_padding, (0, 0))?;
+    let dilation = parse_pair_arg("dilation", dilation, (1, 1))?;
+    let result = conv_transpose2d_op(
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
+        stride,
+        padding,
+        output_padding,
+        dilation,
+        groups,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// 1-D transposed convolution. See `conv_transpose2d`; `weight` is `[C_in, C_out // groups, K]`.
+#[pyfunction]
+#[pyo3(signature = (input, weight, bias=None, stride=1, padding=0, output_padding=0, dilation=1, groups=1))]
+#[allow(clippy::too_many_arguments)]
+fn conv_transpose1d(
+    input: &Bound<PyAny>,
+    weight: &Bound<PyAny>,
+    bias: Option<&Bound<PyAny>>,
+    stride: usize,
+    padding: usize,
+    output_padding: usize,
+    dilation: usize,
+    groups: usize,
+) -> PyResult<PyTensor> {
+    let input_tensor = borrow_tensor(input)?;
+    let weight_tensor = borrow_tensor(weight)?;
+    let bias_tensor = borrow_optional_tensor(bias)?;
+    let result = conv_transpose1d_op(
+        input_tensor.tensor(),
+        weight_tensor.tensor(),
+        bias_tensor.as_ref().map(|b| b.tensor()),
+        stride,
+        padding,
+        output_padding,
         dilation,
         groups,
     )
@@ -640,6 +708,8 @@ module_types! {
     Conv1d(Conv1d),
     MaxPool1d(MaxPool1d),
     AvgPool1d(AvgPool1d),
+    ConvTranspose2d(ConvTranspose2d),
+    ConvTranspose1d(ConvTranspose1d),
 }
 
 #[pymethods]
@@ -790,6 +860,18 @@ impl PyModule {
             ModuleType::Sequential(_) => "Sequential(...)".to_string(),
             ModuleType::Conv2d(layer) => format!(
                 "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",
+                layer.in_channels(),
+                layer.out_channels(),
+                layer.kernel_size()
+            ),
+            ModuleType::ConvTranspose2d(layer) => format!(
+                "ConvTranspose2d(in_channels={}, out_channels={}, kernel_size={:?})",
+                layer.in_channels(),
+                layer.out_channels(),
+                layer.kernel_size()
+            ),
+            ModuleType::ConvTranspose1d(layer) => format!(
+                "ConvTranspose1d(in_channels={}, out_channels={}, kernel_size={})",
                 layer.in_channels(),
                 layer.out_channels(),
                 layer.kernel_size()
@@ -1001,6 +1083,18 @@ impl PyModule {
         }
     }
 
+    pub fn from_conv_transpose2d(layer: ConvTranspose2d) -> Self {
+        Self {
+            inner: ModuleType::ConvTranspose2d(Box::new(layer)),
+        }
+    }
+
+    pub fn from_conv_transpose1d(layer: ConvTranspose1d) -> Self {
+        Self {
+            inner: ModuleType::ConvTranspose1d(Box::new(layer)),
+        }
+    }
+
     pub fn from_max_pool2d(max_pool2d: MaxPool2d) -> Self {
         Self {
             inner: ModuleType::MaxPool2d(Box::new(max_pool2d)),
@@ -1116,6 +1210,8 @@ impl PyModule {
             ModuleType::Conv1d(layer) => layer.clone(),
             ModuleType::MaxPool1d(layer) => layer.clone(),
             ModuleType::AvgPool1d(layer) => layer.clone(),
+            ModuleType::ConvTranspose2d(layer) => layer.clone(),
+            ModuleType::ConvTranspose1d(layer) => layer.clone(),
         };
 
         Ok(layer)

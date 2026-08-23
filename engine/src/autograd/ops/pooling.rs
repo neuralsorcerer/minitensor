@@ -244,6 +244,160 @@ impl GradientFunction for AvgPool2dBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+/// Gradient of [`crate::ops::conv::conv_transpose2d`].
+///
+/// Every piece of this already existed, because a transposed convolution is a
+/// convolution read from the other side and so is each of its gradients:
+///
+/// * the input gradient *gathers* where the forward scattered, which is a
+///   convolution -- the same `conv2d` a caller would write, on the same weight
+/// * the weight gradient is the same sum a convolution's is, with the two
+///   operands swapping which one plays the image
+/// * the bias gradient is a sum over positions, as always
+///
+/// So this holds no arithmetic of its own. If it did, there would be two
+/// implementations of the same index mapping and one of them would eventually
+/// be wrong.
+pub struct ConvTranspose2dBackward {
+    pub input: Tensor,
+    pub weight: Tensor,
+    pub input_id: TensorId,
+    pub weight_id: TensorId,
+    pub bias_id: Option<TensorId>,
+    pub input_requires_grad: bool,
+    pub weight_requires_grad: bool,
+    pub bias_requires_grad: bool,
+    pub stride: (usize, usize),
+    pub padding: (usize, usize),
+    pub dilation: (usize, usize),
+    pub groups: usize,
+    pub deps: SmallVec<[TensorId; 3]>,
+}
+
+impl ConvTranspose2dBackward {
+    fn backward_typed<T: ConvScalar>(
+        &self,
+        grad_output: &Tensor,
+        gradients: &mut FxHashMap<TensorId, Tensor>,
+    ) -> Result<()> {
+        let in_dims = self.input.shape().dims();
+        let w_dims = self.weight.shape().dims();
+        let go_dims = grad_output.shape().dims();
+        // The forward's geometry, unchanged: the grid it wrote is `grad_output`
+        // and the signal it read is `input`.
+        let geometry = crate::ops::conv::ConvGeometry {
+            batch_size: in_dims[0],
+            in_channels: go_dims[1],
+            input_height: go_dims[2],
+            input_width: go_dims[3],
+            out_channels: in_dims[1],
+            kernel_h: w_dims[2],
+            kernel_w: w_dims[3],
+            output_height: in_dims[2],
+            output_width: in_dims[3],
+            stride: self.stride,
+            padding: self.padding,
+            dilation: self.dilation,
+            groups: self.groups,
+        };
+
+        let device = self.input.device();
+        let dtype = T::DTYPE;
+
+        if self.weight_requires_grad || self.bias_requires_grad {
+            let go = T::slice(grad_output.data()).ok_or_else(|| {
+                MinitensorError::internal_error(
+                    "conv_transpose2d backward: failed to read grad_output",
+                )
+            })?;
+
+            if self.weight_requires_grad {
+                let input = T::slice(self.input.data()).ok_or_else(|| {
+                    MinitensorError::internal_error(
+                        "conv_transpose2d backward: input dtype does not match gradient",
+                    )
+                })?;
+                // The image is the gradient of the grid that was written, and
+                // the signal is the input that was scattered -- the convolution
+                // weight gradient with the roles the forward gave them.
+                let signal = crate::ops::conv::to_channel_major(
+                    input,
+                    geometry.batch_size,
+                    geometry.out_channels,
+                    geometry.output_height * geometry.output_width,
+                );
+                let grad_weight =
+                    crate::ops::conv::column_weight_gradient::<T>(go, &signal, &geometry);
+                let grad = Tensor::new(
+                    Arc::new(T::into_tensor_data(grad_weight, device)),
+                    self.weight.shape().clone(),
+                    dtype,
+                    device,
+                    false,
+                );
+                accumulate_grad(gradients, self.weight_id, grad)?;
+            }
+
+            if self.bias_requires_grad
+                && let Some(bias_id) = self.bias_id
+            {
+                let grad_bias = crate::ops::conv::channel_sums(
+                    go,
+                    geometry.batch_size,
+                    geometry.in_channels,
+                    geometry.input_height * geometry.input_width,
+                );
+                let grad = Tensor::new(
+                    Arc::new(T::into_tensor_data(grad_bias, device)),
+                    Shape::new(vec![geometry.in_channels]),
+                    dtype,
+                    device,
+                    false,
+                );
+                accumulate_grad(gradients, bias_id, grad)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl GradientFunction for ConvTranspose2dBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+
+        // Gathering where the forward scattered is exactly a convolution, so
+        // this is the public op rather than a second index mapping. The
+        // operands are detached, so nothing is recorded.
+        if self.input_requires_grad {
+            let grad_input = crate::ops::conv::conv2d(
+                grad_output,
+                &self.weight,
+                None,
+                self.stride,
+                self.padding,
+                self.dilation,
+                self.groups,
+            )?;
+            accumulate_grad(&mut gradients, self.input_id, grad_input.detach())?;
+        }
+
+        match grad_output.dtype() {
+            DataType::Float32 => self.backward_typed::<f32>(grad_output, &mut gradients)?,
+            DataType::Float64 => self.backward_typed::<f64>(grad_output, &mut gradients)?,
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "conv_transpose2d backward supports only floating point tensors",
+                ));
+            }
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.deps
+    }
+}
+
 /// Gradient function for 2D convolution (`ops::conv2d`).
 ///
 /// Given `grad_output` of shape `[N, C_out, OH, OW]`, produces:
@@ -280,14 +434,22 @@ impl Conv2dBackward {
     ) -> Result<()> {
         let in_dims = self.input.shape().dims();
         let w_dims = self.weight.shape().dims();
-        let (batch, in_channels, in_h, in_w) = (in_dims[0], in_dims[1], in_dims[2], in_dims[3]);
-        let (out_channels, kernel_h, kernel_w) = (w_dims[0], w_dims[2], w_dims[3]);
         let go_dims = grad_output.shape().dims();
-        let (out_h, out_w) = (go_dims[2], go_dims[3]);
-        let stride = self.stride;
-        let padding = self.padding;
-        let dilation = self.dilation;
-        let groups = self.groups;
+        let geometry = crate::ops::conv::ConvGeometry {
+            batch_size: in_dims[0],
+            in_channels: in_dims[1],
+            input_height: in_dims[2],
+            input_width: in_dims[3],
+            out_channels: w_dims[0],
+            kernel_h: w_dims[2],
+            kernel_w: w_dims[3],
+            output_height: go_dims[2],
+            output_width: go_dims[3],
+            stride: self.stride,
+            padding: self.padding,
+            dilation: self.dilation,
+            groups: self.groups,
+        };
 
         let input = T::slice(self.input.data()).ok_or_else(|| {
             MinitensorError::internal_error("conv2d backward: input dtype does not match gradient")
@@ -301,104 +463,26 @@ impl Conv2dBackward {
 
         let device = self.input.device();
         let dtype = T::DTYPE;
+        let plane = geometry.output_height * geometry.output_width;
 
-        let ohw = out_h * out_w;
-        let n_ohw = batch * ohw;
-        let k_dim = in_channels * kernel_h * kernel_w;
-        let kh_kw = kernel_h * kernel_w;
-        // The forward's grouping, seen from the other side. `k` runs
-        // channel-major, so a group owns a contiguous row-block of every
-        // `[k_dim, ...]` buffer here, and the weight owns a contiguous
-        // row-block of `[C_out, group_k]`.
-        let group_in = in_channels / groups;
-        let group_out = out_channels / groups;
-        let group_k = group_in * kh_kw;
-
-        // Transpose grad_output [N, C_out, OH*OW] into `go_mat` [C_out, N*OH*OW],
-        // the layout both weight- and input-gradient GEMMs contract against.
-        let go_mat = if n_ohw > 0 && (self.input_requires_grad || self.weight_requires_grad) {
-            let mut gm = vec![T::default(); out_channels * n_ohw];
-            par_out_chunks(&mut gm, n_ohw, &|start, row| {
-                let oc = start / n_ohw;
-                for n in 0..batch {
-                    let src = (n * out_channels + oc) * ohw;
-                    row[n * ohw..n * ohw + ohw].copy_from_slice(&go[src..src + ohw]);
-                }
-            });
-            gm
+        // Both gradient GEMMs contract against `grad_output` with the channel
+        // outermost, so it is rearranged once rather than once each.
+        let needs_gemm = self.input_requires_grad || self.weight_requires_grad;
+        let go_mat = if needs_gemm {
+            crate::ops::conv::to_channel_major(
+                go,
+                geometry.batch_size,
+                geometry.out_channels,
+                plane,
+            )
         } else {
             Vec::new()
         };
 
-        // grad_input = col2im(weightᵀ @ go_mat). The GEMM yields grad_cols
-        // [K, N*OH*OW]; col2im scatters each column back to the input positions it
-        // was gathered from. Parallel over the batch (disjoint grad_input regions),
-        // with a serial scatter-add within each batch, so there are no races.
+        // The input gradient scatters the signal back through the kernel, which
+        // is the operation `conv_transpose2d` performs forwards.
         if self.input_requires_grad {
-            let in_stride = in_channels * in_h * in_w;
-            let mut grad_input = vec![T::default(); batch * in_stride];
-            if n_ohw > 0 {
-                let mut grad_cols = vec![T::default(); k_dim * n_ohw];
-                // SAFETY: the logical `[K, C_out]` operand is `weight`, stored
-                // `[C_out, K]`, so the GEMM reads it transposed by stride --
-                // this used to materialise it with a serial strided-write copy,
-                // which for a 512-channel layer is 9 MB moved per backward.
-                // `go_mat` is [C_out, N*OH*OW] and `grad_cols` [K, N*OH*OW],
-                // both contiguous row-major.
-                for g in 0..groups {
-                    // SAFETY: group `g` reads `weight` rows
-                    // `[g*group_out, (g+1)*group_out)` -- stored `[group_out,
-                    // group_k]` and read transposed by stride -- against
-                    // `go_mat` rows `[g*group_out, ..)`, writing `grad_cols`
-                    // rows `[g*group_k, ..)`. Each is a row-block of a
-                    // contiguous buffer exactly `groups` times its size.
-                    unsafe {
-                        T::gemm_tn(
-                            group_k,
-                            group_out,
-                            n_ohw,
-                            weight.as_ptr().add(g * group_out * group_k),
-                            go_mat.as_ptr().add(g * group_out * n_ohw),
-                            grad_cols.as_mut_ptr().add(g * group_k * n_ohw),
-                        );
-                    }
-                }
-                // Output positions are walked as nested loops and their
-                // in-bounds range is hoisted, for the reason the forward's
-                // im2col does the same: recovering `(oh, ow)` from a flat `p`
-                // cost two runtime-divisor divisions per element, over 4.7M
-                // elements for a 16x32x32x32 conv.
-                par_out_chunks(&mut grad_input, in_stride, &|start, gi| {
-                    let n = start / in_stride;
-                    {
-                        for k in 0..k_dim {
-                            let ic = k / kh_kw;
-                            let rem = k % kh_kw;
-                            let ky = rem / kernel_w;
-                            let kx = rem % kernel_w;
-                            let row_base = k * n_ohw + n * ohw;
-                            let ic_base = ic * in_h * in_w;
-                            let ky_off = ky * dilation.0;
-                            let kx_off = kx * dilation.1;
-                            let (oh_lo, oh_hi) = crate::ops::conv::in_bounds_range(
-                                ky_off, padding.0, in_h, stride.0, out_h,
-                            );
-                            let (ow_lo, ow_hi) = crate::ops::conv::in_bounds_range(
-                                kx_off, padding.1, in_w, stride.1, out_w,
-                            );
-                            for oh in oh_lo..oh_hi {
-                                let ih = oh * stride.0 + ky_off - padding.0;
-                                let dst = ic_base + ih * in_w;
-                                let src = row_base + oh * out_w;
-                                for ow in ow_lo..ow_hi {
-                                    let iw = ow * stride.1 + kx_off - padding.1;
-                                    gi[dst + iw] += grad_cols[src + ow];
-                                }
-                            }
-                        }
-                    }
-                });
-            }
+            let grad_input = crate::ops::conv::scatter_columns::<T>(&go_mat, weight, &geometry);
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_input, device)),
                 self.input.shape().clone(),
@@ -409,66 +493,9 @@ impl Conv2dBackward {
             accumulate_grad(gradients, self.input_id, grad)?;
         }
 
-        // grad_weight = go_mat @ cols, where `cols` [N*OH*OW, K] is the im2col of
-        // the input (the same lowering as the forward). One GEMM replaces the
-        // naive per-element accumulation.
         if self.weight_requires_grad {
-            let mut grad_weight = vec![T::default(); out_channels * group_k];
-            if n_ohw > 0 {
-                // This lowering is transposed relative to the forward's --
-                // `[N*OH*OW, K]`, one row per output position -- so a group's
-                // `k` values are a column-block, not a row-block, and cannot be
-                // handed to a GEMM by pointer offset. It is rebuilt per group
-                // instead, into a buffer sized for one group rather than all of
-                // them, so the memory is `1/groups` of what it was.
-                let mut cols = vec![T::default(); n_ohw * group_k];
-                for g in 0..groups {
-                    cols.fill(T::default());
-                    // `k` is walked as nested (ic, ky, kx) loops rather than
-                    // decomposed: three divisions per element, and this buffer
-                    // has the same 4.7M elements as the one above.
-                    par_out_chunks(&mut cols, group_k, &|start, prow| {
-                        let r = start / group_k;
-                        {
-                            let n = r / ohw;
-                            let p = r % ohw;
-                            let oh = p / out_w;
-                            let ow = p % out_w;
-                            let mut k = 0usize;
-                            for ic in g * group_in..(g + 1) * group_in {
-                                let plane = (n * in_channels + ic) * in_h * in_w;
-                                for ky in 0..kernel_h {
-                                    let ih = oh * stride.0 + ky * dilation.0;
-                                    let row_ok = ih >= padding.0 && ih < in_h + padding.0;
-                                    let ih = ih.wrapping_sub(padding.0);
-                                    for kx in 0..kernel_w {
-                                        let iw = ow * stride.1 + kx * dilation.1;
-                                        if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
-                                            prow[k] = input[plane + ih * in_w + (iw - padding.1)];
-                                        }
-                                        k += 1;
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    // SAFETY: `go_mat` rows [g*group_out, ..) form a
-                    // [group_out, N*OH*OW] block, `cols` is [N*OH*OW, group_k]
-                    // in full, and `grad_weight` rows [g*group_out, ..) form a
-                    // [group_out, group_k] block. All contiguous row-major with
-                    // matching dimensions.
-                    unsafe {
-                        T::gemm(
-                            group_out,
-                            n_ohw,
-                            group_k,
-                            go_mat.as_ptr().add(g * group_out * n_ohw),
-                            cols.as_ptr(),
-                            grad_weight.as_mut_ptr().add(g * group_out * group_k),
-                        );
-                    }
-                }
-            }
+            let grad_weight =
+                crate::ops::conv::column_weight_gradient::<T>(input, &go_mat, &geometry);
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_weight, device)),
                 self.weight.shape().clone(),
@@ -479,31 +506,24 @@ impl Conv2dBackward {
             accumulate_grad(gradients, self.weight_id, grad)?;
         }
 
-        // grad_bias: parallel over output channels.
         if self.bias_requires_grad
             && let Some(bias_id) = self.bias_id
         {
-            let mut grad_bias = vec![T::default(); out_channels];
-            par_out_chunks(&mut grad_bias, 1, &|oc, gb| {
-                let mut sum = T::default();
-                for n in 0..batch {
-                    let base = (n * out_channels + oc) * out_h * out_w;
-                    for k in 0..out_h * out_w {
-                        sum += go[base + k];
-                    }
-                }
-                gb[0] = sum;
-            });
+            let grad_bias = crate::ops::conv::channel_sums(
+                go,
+                geometry.batch_size,
+                geometry.out_channels,
+                plane,
+            );
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_bias, device)),
-                Shape::new(vec![out_channels]),
+                Shape::new(vec![geometry.out_channels]),
                 dtype,
                 device,
                 false,
             );
             accumulate_grad(gradients, bias_id, grad)?;
         }
-
         Ok(())
     }
 }

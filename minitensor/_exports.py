@@ -181,6 +181,8 @@ _FUNCTIONAL_ONLY = (
     "binary_cross_entropy_with_logits",
     "conv1d",
     "conv2d",
+    "conv_transpose1d",
+    "conv_transpose2d",
     "cross_entropy",
     "dense_layer",
     "dropout",
