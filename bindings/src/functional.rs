@@ -1233,6 +1233,92 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// Where each element of `values` would be inserted into `sorted_sequence` to keep it sorted, as `int64`. `right=True` inserts after any equals rather than before. A batched sequence is matched row for row.
+#[pyfunction]
+#[pyo3(signature = (sorted_sequence, values, right=false))]
+pub fn searchsorted(
+    sorted_sequence: &Bound<PyAny>,
+    values: &Bound<PyAny>,
+    right: bool,
+) -> PyResult<PyTensor> {
+    let sequence = PyTensor::from_python_value(sorted_sequence)?;
+    let needles = PyTensor::from_python_value(values)?;
+    let result = engine::ops::searchsorted(sequence.tensor(), needles.tensor(), right)
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Which bucket each element of `input` falls in, given one-dimensional `boundaries`. `searchsorted` with the arguments the other way round.
+#[pyfunction]
+#[pyo3(signature = (input, boundaries, right=false))]
+pub fn bucketize(
+    input: &Bound<PyAny>,
+    boundaries: &Bound<PyAny>,
+    right: bool,
+) -> PyResult<PyTensor> {
+    let values = PyTensor::from_python_value(input)?;
+    let edges = PyTensor::from_python_value(boundaries)?;
+    let result =
+        engine::ops::bucketize(values.tensor(), edges.tensor(), right).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// The counts in each bin and the edges that defined them, as `(hist, edges)`. `bins` is a bin count or a one-dimensional tensor of edges. Values outside the outermost edges are dropped; the last bin is closed on the right.
+#[pyfunction]
+#[pyo3(signature = (input, bins=None, range=None, weights=None, density=false))]
+pub fn histogram(
+    input: &Bound<PyAny>,
+    bins: Option<&Bound<PyAny>>,
+    range: Option<(f64, f64)>,
+    weights: Option<&Bound<PyAny>>,
+    density: bool,
+) -> PyResult<(PyTensor, PyTensor)> {
+    let values = PyTensor::from_python_value(input)?;
+    let weighted = match weights {
+        Some(tensor) => Some(PyTensor::from_python_value(tensor)?),
+        None => None,
+    };
+    let edges;
+    // Ten bins is NumPy's default, and `bins` may equally be the edges
+    // themselves -- an integer means "this many", anything else is a sequence.
+    let requested = match bins {
+        None => engine::ops::Bins::Count(10),
+        Some(value) => match value.extract::<i64>() {
+            Ok(count) if count >= 0 => engine::ops::Bins::Count(count as usize),
+            Ok(_) => {
+                return Err(PyValueError::new_err(
+                    "histogram: the bin count cannot be negative",
+                ));
+            }
+            Err(_) => {
+                edges = PyTensor::from_python_value(value)?;
+                engine::ops::Bins::Edges(edges.tensor())
+            }
+        },
+    };
+    let (counts, boundaries) = engine::ops::histogram(
+        values.tensor(),
+        requested,
+        range,
+        weighted.as_ref().map(|tensor| tensor.tensor()),
+        density,
+    )
+    .map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(counts),
+        PyTensor::from_tensor(boundaries),
+    ))
+}
+
+/// Counts over `bins` equal-width bins spanning `[min, max]`, or the data's own range when they are equal. PyTorch's spelling of `histogram`.
+#[pyfunction]
+#[pyo3(signature = (input, bins=100, min=0.0, max=0.0))]
+pub fn histc(input: &Bound<PyAny>, bins: usize, min: f64, max: f64) -> PyResult<PyTensor> {
+    let values = PyTensor::from_python_value(input)?;
+    let result = engine::ops::histc(values.tensor(), bins, min, max).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 /// Einstein summation: `einsum("ij,jk->ik", a, b)` is a matrix product, `"ii"` a trace, `"i,j->ij"` an outer product, `"...ij,...jk->...ik"` a batched one. Omit `->` and the result keeps every subscript used exactly once, in sorted order.
 #[pyfunction]
 #[pyo3(signature = (equation, *operands))]
@@ -1729,6 +1815,10 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(svd, parent)?)?;
     parent.add_function(wrap_pyfunction!(einsum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(searchsorted, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bucketize, parent)?)?;
+    parent.add_function(wrap_pyfunction!(histogram, parent)?)?;
+    parent.add_function(wrap_pyfunction!(histc, parent)?)?;
     parent.add_function(wrap_pyfunction!(pinv, parent)?)?;
     parent.add_function(wrap_pyfunction!(matrix_rank, parent)?)?;
     parent.add_function(wrap_pyfunction!(cond, parent)?)?;

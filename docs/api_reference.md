@@ -559,6 +559,56 @@ print(t.flip(1)[:, ::2].tolist())  # what t[:, ::-2] would give
 The error names the axis and spells out the equivalent call, so the
 substitution does not have to be worked out from the rule.
 
+### Sorted search, bucketing and histograms
+
+Four operations and one binary search, none of which composes out of the rest of
+the library: comparing every value against every boundary is
+`O(values × boundaries)` and still leaves the counting to do.
+
+- `searchsorted(sorted_sequence, values, right=False)` — where each value would
+  be inserted to keep the sequence sorted, as `int64`. `right` chooses which end
+  of a run of equal elements the insertion lands on. A one-dimensional sequence
+  is searched by every value; a batched one is matched row for row along its
+  last axis. The sequence is *assumed* sorted and never checked, since checking
+  costs the linear scan the search exists to avoid.
+- `bucketize(input, boundaries, right=False)` — the same call with the arguments
+  the other way round, which is the reading that fits when the sequence is a
+  fixed set of bucket boundaries.
+- `histogram(input, bins=10, range=None, weights=None, density=False)` —
+  `(counts, edges)`. `bins` is a count or a one-dimensional tensor of edges. The
+  input is flattened; a histogram is a question about a collection of numbers,
+  not about their arrangement.
+- `histc(input, bins=100, min=0.0, max=0.0)` — PyTorch's spelling: counts alone,
+  and equal bounds mean "span the data" rather than "an empty range".
+
+Two conventions worth stating because they are easy to get backwards. Values
+outside the outermost edges are **dropped, not clamped** — clamping would pile
+everything below the range into the first bin, which is a different answer. And
+the last bin is **closed on the right** while every other bin is half-open,
+without which the largest value in the data would fall out of its own histogram.
+
+None of these is differentiable, and not for convenience: the result is an index
+or a count, an integer that moves in jumps as a value crosses a boundary. There
+is no derivative to report, so they return `int64` (or `float64` counts) and
+detach.
+
+```python
+import minitensor as mt
+
+table = mt.Tensor([0.0, 1.0, 2.0, 3.0])
+print(mt.searchsorted(table, mt.Tensor([-1.0, 1.0, 2.5, 9.0])).numpy())
+print(mt.searchsorted(table, mt.Tensor([1.0]), right=True).numpy())
+
+counts, edges = mt.histogram(mt.Tensor([0.0, 0.5, 1.0]), bins=2, range=(0.0, 1.0))
+print(counts.numpy())          # the last bin is closed on the right
+```
+
+```text
+[0 1 3 4]
+[2]
+[1. 2.]
+```
+
 ### Einstein summation
 
 `einsum(equation, *operands)` is one notation for every product-and-sum over
