@@ -130,11 +130,43 @@ def test_a_zero_in_the_corner_is_not_a_problem():
     assert np.allclose(x, [[4.0], [3.0]])
 
 
+@pytest.mark.parametrize(
+    "matrix,pivots",
+    [
+        # The diagonal wins on magnitude, so nothing moves.
+        ([[3.0, 9.0], [1.0, 4.0]], [0, 1]),
+        # Still wins when it is negative -- the search compares magnitudes, and
+        # a signed comparison would let the smaller positive entry below it win.
+        ([[-5.0, 1.0], [2.0, 3.0]], [0, 1]),
+        # And loses to a larger magnitude below it, sign notwithstanding.
+        ([[1.0, 0.0], [-9.0, 1.0]], [1, 1]),
+        # The zero corner must move; this is the case that makes pivoting
+        # necessary rather than merely advisable.
+        ([[0.0, 1.0], [1.0, 0.0]], [1, 1]),
+        # Nothing to gain by moving anything.
+        ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0, 1, 2]),
+    ],
+)
+def test_the_pivot_choice_itself(matrix, pivots):
+    """What partial pivoting *is*, rather than what it implies.
+
+    The residual and reconstruction tests cannot see a bad pivot choice: a
+    poorly pivoted factorisation still multiplies back to its input exactly,
+    it is only worse conditioned. So the choice needs asserting directly, and
+    each row here disagrees with at least one plausible way to get it wrong --
+    reading the row instead of the column, comparing signed values, or taking
+    the smallest instead of the largest.
+    """
+    assert np.array_equal(mt.lu_factor(_t(matrix))[1].numpy(), pivots)
+
+
 def test_every_multiplier_is_at_most_one():
     """What pivoting buys, stated as the property it guarantees: the largest
-    remaining entry goes on the diagonal, so nothing below it can exceed it."""
+    remaining entry goes on the diagonal, so nothing below it can exceed it.
+
+    Sized past the panel width so the blocked path is covered too."""
     rng = np.random.default_rng(6)
-    packed = mt.lu_factor(_t(rng.normal(size=(40, 40))))[0].numpy()
+    packed = mt.lu_factor(_t(rng.normal(size=(100, 100))))[0].numpy()
     below = np.tril(packed, -1)
     assert np.abs(below).max() <= 1.0 + 1e-15
 
@@ -176,16 +208,21 @@ def test_a_zero_matrix_is_singular_rather_than_an_error_to_factor():
 # --------------------------------------------------------------------------
 
 
-def test_lu_solve_agrees_with_solve():
+@pytest.mark.parametrize("n", [11, 96])
+def test_lu_solve_agrees_with_solve(n):
+    """The agreement is worth knowing, but it cannot stand alone: `lu_solve`
+    and `solve` run the same factorisation and the same substitutions, so a bug
+    in either would make both wrong together and this assertion happy. The
+    residual is the anchor outside the implementation.
+
+    `n = 96` crosses the panel width, where the blocked update runs at all."""
     rng = np.random.default_rng(7)
-    a = rng.normal(size=(11, 11))
-    b = rng.normal(size=(11, 3))
+    a = rng.normal(size=(n, n))
+    b = rng.normal(size=(n, 3))
     packed, pivots = mt.lu_factor(_t(a))
-    assert np.allclose(
-        mt.lu_solve(packed, pivots, _t(b)).numpy(),
-        mt.solve(_t(a), _t(b)).numpy(),
-        atol=1e-11,
-    )
+    got = mt.lu_solve(packed, pivots, _t(b)).numpy()
+    assert np.allclose(got, mt.solve(_t(a), _t(b)).numpy(), atol=1e-10)
+    assert np.allclose(a @ got, b, atol=1e-10)
 
 
 def test_one_factorisation_serves_many_right_hand_sides():
@@ -394,7 +431,21 @@ def test_both_spellings_of_the_factor_agree():
     from_lower = mt.cholesky_solve(_t(b), _t(lower)).numpy()
     from_upper = mt.cholesky_solve(_t(b), _t(lower.T.copy()), upper=True).numpy()
     assert np.array_equal(from_lower, from_upper)
+    # Both sides get an anchor outside the implementation, not just one: this
+    # is the path where the two solves were shipped in the wrong order.
     assert np.allclose(a @ from_lower, b, atol=1e-11)
+    assert np.allclose(a @ from_upper, b, atol=1e-11)
+
+
+def test_cholesky_solve_from_an_upper_factor():
+    """Its own matrix and its own residual, so the upper spelling is verified
+    by something other than agreeing with the lower one."""
+    rng = np.random.default_rng(27)
+    a = _spd(rng, 11)
+    upper = np.linalg.cholesky(a).T.copy()
+    b = rng.normal(size=(11, 2))
+    x = mt.cholesky_solve(_t(b), _t(upper), upper=True).numpy()
+    assert np.allclose(a @ x, b, atol=1e-11)
 
 
 def test_cholesky_solve_is_differentiable_through_the_two_solves():
@@ -417,12 +468,15 @@ def test_cholesky_solve_is_differentiable_through_the_two_solves():
     assert np.allclose(tb.grad.numpy(), want, atol=1e-6 * max(np.abs(want).max(), 1))
 
 
-def test_cholesky_solve_is_batched():
+@pytest.mark.parametrize("upper", [False, True])
+def test_cholesky_solve_is_batched(upper):
     rng = np.random.default_rng(21)
     a = np.stack([_spd(rng, 5) for _ in range(3)])
     factor = np.linalg.cholesky(a)
+    if upper:
+        factor = factor.transpose(0, 2, 1).copy()
     b = rng.normal(size=(3, 5, 2))
-    x = mt.cholesky_solve(_t(b), _t(factor)).numpy()
+    x = mt.cholesky_solve(_t(b), _t(factor), upper=upper).numpy()
     assert np.allclose(a @ x, b, atol=1e-11)
 
 
@@ -431,7 +485,7 @@ def test_cholesky_solve_is_batched():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("n", [1, 2, 7, 33])
+@pytest.mark.parametrize("n", [1, 2, 7, 33, 100])
 def test_det_still_matches_numpy(n):
     rng = np.random.default_rng(100 + n)
     a = rng.normal(size=(2, n, n))
@@ -456,7 +510,7 @@ def test_det_and_slogdet_agree_about_singularity():
     assert sign == 0.0 and logabs == -np.inf
 
 
-@pytest.mark.parametrize("n", [1, 4, 20])
+@pytest.mark.parametrize("n", [1, 4, 20, 100])
 def test_solve_still_matches_numpy(n):
     rng = np.random.default_rng(200 + n)
     a = rng.normal(size=(n, n)) + n * np.eye(n)
