@@ -280,6 +280,35 @@ def test_the_input_gradient_matches_central_differences(padding, align_corners):
     assert np.allclose(got, want, atol=1e-6)
 
 
+def _smooth_grid(rng, shape, sizes, align_corners, reach=1.0):
+    """Coordinates a difference quotient can be taken at.
+
+    The blend's derivative genuinely jumps where a coordinate crosses a sample,
+    and reflection's jumps where it crosses a fold, so a random grid has to be
+    nudged off those before it means anything. `reach` above one lets the grid
+    leave the image, which is the only way the padding modes' own contribution
+    to the derivative -- clamped to zero, or reversed by a fold -- is exercised
+    at all.
+    """
+    grid = rng.uniform(-reach, reach, size=shape)
+    for axis in range(shape[-1]):
+        # Grid axis `axis` indexes spatial axis `-1 - axis`; both maps put
+        # samples one apart in source units, and folds land on them too.
+        size = sizes[-1 - axis]
+        scale = (size - 1) / 2 if align_corners else size / 2
+        if scale == 0:
+            continue
+        values = grid[..., axis]
+        source = (values + 1) * scale - (0.0 if align_corners else 0.5)
+        # Push anything within a fifth of a sample of a boundary to the middle
+        # of its cell, where both one-sided derivatives agree.
+        offset = source - np.floor(source)
+        bad = (offset < 0.2) | (offset > 0.8)
+        source = np.where(bad, np.floor(source) + 0.5, source)
+        grid[..., axis] = (source + (0.0 if align_corners else 0.5)) / scale - 1
+    return grid
+
+
 @pytest.mark.parametrize("padding", ["zeros", "border", "reflection"])
 @pytest.mark.parametrize("align_corners", [False, True])
 def test_the_grid_gradient_matches_central_differences(padding, align_corners):
@@ -287,13 +316,57 @@ def test_the_grid_gradient_matches_central_differences(padding, align_corners):
     sign here turns training into a slow drift the wrong way."""
     rng = np.random.default_rng(3)
     image = rng.normal(size=(1, 2, 4, 3))
-    # Kept away from sample centres and from the edges, where the blend's
-    # derivative genuinely jumps and a difference quotient means nothing.
-    grid = rng.uniform(-0.6, 0.6, size=(1, 3, 3, 2))
+    grid = _smooth_grid(rng, (1, 3, 3, 2), (4, 3), align_corners)
     options = dict(padding_mode=padding, align_corners=align_corners)
     _, got = _grads(image, grid, want=("grid",), **options)
     want = _numeric(lambda v: _call(image, v, **options).sum(), grid)
     assert np.allclose(got, want, atol=1e-6)
+
+
+@pytest.mark.parametrize("padding", ["zeros", "border", "reflection"])
+@pytest.mark.parametrize("align_corners", [False, True])
+def test_the_grid_gradient_matches_central_differences_off_the_edge(
+    padding, align_corners
+):
+    """The same check with the grid reaching well outside the image, which is
+    the only way the padding mode's own contribution to the derivative is
+    exercised -- `border` flattening it to zero, `reflection` turning it around.
+    Inside the image every padding mode agrees, so a test that stays inside
+    passes with that contribution deleted entirely."""
+    rng = np.random.default_rng(11)
+    image = rng.normal(size=(1, 2, 4, 3))
+    grid = _smooth_grid(rng, (1, 4, 4, 2), (4, 3), align_corners, reach=2.6)
+    assert np.abs(grid).max() > 1.0, "the point of this test is coordinates outside"
+    options = dict(padding_mode=padding, align_corners=align_corners)
+    _, got = _grads(image, grid, want=("grid",), **options)
+    want = _numeric(lambda v: _call(image, v, **options).sum(), grid)
+    assert np.allclose(got, want, atol=1e-6)
+
+
+def test_the_border_gradient_really_reaches_zero_somewhere():
+    """Guards the test above: if every drawn coordinate stayed inside, it would
+    pass without ever clamping anything, which is how the first version of it
+    missed a wrong rate entirely."""
+    rng = np.random.default_rng(11)
+    image = rng.normal(size=(1, 2, 4, 3))
+    grid = _smooth_grid(rng, (1, 4, 4, 2), (4, 3), True, reach=2.6)
+    _, got = _grads(image, grid, want=("grid",), padding_mode="border", align_corners=True)
+    assert np.any(got == 0.0)
+
+
+def test_reflection_gradients_come_back_with_both_signs():
+    """The companion guard: a fold reverses the direction of travel, so over a
+    grid that reaches past the edge the coordinate gradient has to take both
+    signs. It cannot if the reversal is dropped."""
+    rng = np.random.default_rng(11)
+    image = rng.normal(size=(1, 2, 4, 3))
+    grid = _smooth_grid(rng, (1, 4, 4, 2), (4, 3), True, reach=2.6)
+    options = dict(padding_mode="reflection", align_corners=True)
+    _, folded = _grads(image, grid, want=("grid",), **options)
+    _, plain = _grads(image, grid, want=("grid",), padding_mode="zeros", align_corners=True)
+    # Somewhere a fold has turned the gradient around relative to the unfolded
+    # reading of the same coordinate.
+    assert np.any(np.sign(folded) * np.sign(plain) < 0)
 
 
 def test_nearest_has_no_gradient_in_the_coordinate():
