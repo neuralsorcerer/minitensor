@@ -1233,6 +1233,27 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// Einstein summation: `einsum("ij,jk->ik", a, b)` is a matrix product, `"ii"` a trace, `"i,j->ij"` an outer product, `"...ij,...jk->...ik"` a batched one. Omit `->` and the result keeps every subscript used exactly once, in sorted order.
+#[pyfunction]
+#[pyo3(signature = (equation, *operands))]
+pub fn einsum(equation: &str, operands: &Bound<PyTuple>) -> PyResult<PyTensor> {
+    if operands.is_empty() {
+        return Err(PyValueError::new_err(
+            "einsum: at least one operand is required",
+        ));
+    }
+    let mut tensors = Vec::with_capacity(operands.len());
+    for index in 0..operands.len() {
+        let item = operands.get_item(index)?;
+        tensors.push(match borrow_tensor(&item) {
+            Ok(tensor) => tensor.tensor().clone(),
+            Err(_) => PyTensor::from_python_value(&item)?.tensor().clone(),
+        });
+    }
+    let result = engine::ops::einsum(equation, &tensors).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 /// The Moore-Penrose pseudo-inverse of each matrix. `rcond` is relative to the largest singular value; `None` uses `max(m, n) * eps`. Defined for rank-deficient and non-square matrices, where `inv` is not.
 #[pyfunction]
 #[pyo3(signature = (input, rcond=None))]
@@ -1707,6 +1728,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(svd, parent)?)?;
+    parent.add_function(wrap_pyfunction!(einsum, parent)?)?;
     parent.add_function(wrap_pyfunction!(pinv, parent)?)?;
     parent.add_function(wrap_pyfunction!(matrix_rank, parent)?)?;
     parent.add_function(wrap_pyfunction!(cond, parent)?)?;

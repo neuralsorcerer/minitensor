@@ -117,6 +117,7 @@ _FUNCTIONAL_FORWARDERS = (
     "eigvalsh",
     "svd",
     "svdvals",
+    "einsum",
     "pinv",
     "matrix_rank",
     "cond",

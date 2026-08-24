@@ -559,6 +559,60 @@ print(t.flip(1)[:, ::2].tolist())  # what t[:, ::-2] would give
 The error names the axis and spells out the equivalent call, so the
 substitution does not have to be worked out from the rule.
 
+### Einstein summation
+
+`einsum(equation, *operands)` is one notation for every product-and-sum over
+axes. Name each operand's axes with a letter, name the axes the result keeps,
+and every axis you do not keep is summed:
+
+```python
+import minitensor as mt
+
+a = mt.ones((3, 3))
+b = mt.ones((3, 4))
+u, v = mt.ones((3,)), mt.ones((4,))
+q, k = mt.ones((2, 5, 7, 4)), mt.ones((2, 5, 9, 4))
+
+print(mt.einsum("ij,jk->ik", a, b).shape)           # a matrix product
+print(mt.einsum("ij->ji", b).shape)                 # a transpose
+print(mt.einsum("ii->i", a).shape)                  # the diagonal
+print(mt.einsum("ii", a).shape)                     # the trace: `i` is not kept
+print(mt.einsum("i,j->ij", u, v).shape)             # an outer product
+print(mt.einsum("ij,ij->", b, b).shape)             # a Frobenius inner product
+print(mt.einsum("...ij,...jk->...ik", a, b).shape)  # batched over leading axes
+print(mt.einsum("bhqd,bhkd->bhqk", q, k).shape)     # attention scores
+```
+
+```text
+Shape([3, 4])
+Shape([4, 3])
+Shape([3])
+Shape([])
+Shape([3, 4])
+Shape([])
+Shape([3, 4])
+Shape([2, 5, 7, 9])
+```
+
+The last line is why this exists rather than being a convenience: a contraction
+over four axes with two of them batched has no other spelling here, only a chain
+of permutes and reshapes the caller has to get right.
+
+Omit `->` and the result keeps every subscript used exactly once, ordered by how
+the letters sort — NumPy's rule, so `"ij,jk"` is a matrix product and `"ii"` is a
+trace. `...` stands for any number of leading axes and broadcasts across a rank
+mismatch, aligned from the right as broadcasting is everywhere else. A subscript
+repeated within one operand takes its diagonal; a size-1 axis broadcasts against
+a longer one with the same subscript.
+
+Operands are contracted a pair at a time, each pair permuted into
+`(batch, left, contracted)` against `(batch, contracted, right)` and handed to
+the same matrix multiply as `matmul` — so `"ij,jk->ik"` never builds the
+`i × j × k` intermediate the naive reading would, and runs at the speed of the
+matrix product it is. Every step is an operation that already carries a
+gradient, so `einsum` is differentiable in every operand without a backward pass
+of its own.
+
 ### Linear algebra & matrix ops
 
 - `matmul`, `dot`, `bmm`
