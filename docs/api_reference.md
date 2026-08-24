@@ -559,6 +559,55 @@ print(t.flip(1)[:, ::2].tolist())  # what t[:, ::-2] would give
 The error names the axis and spells out the equivalent call, so the
 substitution does not have to be worked out from the rule.
 
+### Distinct values, runs, and the most common one
+
+- `unique(input, return_inverse=False, return_counts=False)` — the distinct
+  values, ascending. The input is flattened: this asks which values occur, not
+  where. `return_inverse` gives, in the input's shape, the position of each
+  element's value in the output, so indexing the output by it rebuilds the
+  input. `return_counts` gives how many times each value occurred. With no flags
+  the values come back on their own rather than in a one-tuple.
+- `unique_consecutive(input, return_inverse=False, return_counts=False)` — the
+  same, but collapsing only *adjacent* runs and sorting nothing, so a value that
+  recurs after something else appears again. This is run-length encoding, and it
+  is what `unique` would destroy.
+- `mode(input, dim=-1, keepdim=False)` — `(values, indices)`: the value
+  occurring most often along `dim`, and where it is. A tie goes to the smaller
+  value and the index is its *first* position along `dim`. Both are choices — a
+  tie has no natural winner and a repeated value has no natural occurrence — so
+  both are fixed and tested rather than left to fall out of the sort.
+
+`NaN` gets the treatment NumPy gives it, and it is worth being explicit because
+the two obvious implementations are both wrong in different ways. `NaN` is not
+ordered against anything, so a comparison sort over raw floating-point order has
+no defined result; and `NaN != NaN`, so a run detector over `==` emits every
+`NaN` as its own distinct value. Here one comparison puts `NaN` after every
+number and calls it equal to itself, so `unique` answers `[1.0, nan]` for
+`[nan, 1.0, nan]`.
+
+None of these is differentiable: `unique` returns a subset of its input and
+which subset changes discontinuously as values collide, and `mode` returns a
+value that jumps as counts cross.
+
+```python
+import minitensor as mt
+
+symbols = mt.Tensor([7.0, 3.0, 7.0, 9.0, 3.0, 7.0])
+vocabulary, encoded = mt.unique(symbols, return_inverse=True)
+print(vocabulary.numpy())
+print(encoded.numpy())
+
+labels = mt.Tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0])
+runs, lengths = mt.unique_consecutive(labels, return_counts=True)
+print(runs.numpy(), lengths.numpy())
+```
+
+```text
+[3. 7. 9.]
+[1 0 1 2 0 1]
+[0. 1. 0.] [3 2 1]
+```
+
 ### Sorted search, bucketing and histograms
 
 Four operations and one binary search, none of which composes out of the rest of

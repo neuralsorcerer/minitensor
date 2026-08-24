@@ -24,6 +24,7 @@ pub mod search;
 pub mod selection;
 pub mod shape_ops;
 pub mod simd;
+pub mod unique;
 pub(crate) mod util;
 
 // Re-export common operations
@@ -44,6 +45,7 @@ pub use search::*;
 pub use selection::*;
 pub use shape_ops::*;
 pub use simd::*;
+pub use unique::*;
 
 // Exported so the Python bindings resolve `dim` arguments the same way the
 // engine does, and report a bad one with the same message.

@@ -1233,6 +1233,76 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// The distinct values of `input`, ascending, with NaN last and collapsed. Returns the values, or a tuple with the inverse and/or the counts when asked for them.
+#[pyfunction]
+#[pyo3(signature = (input, return_inverse=false, return_counts=false))]
+pub fn unique(
+    py: Python<'_>,
+    input: &Bound<PyAny>,
+    return_inverse: bool,
+    return_counts: bool,
+) -> PyResult<Py<PyAny>> {
+    let values = PyTensor::from_python_value(input)?;
+    let wanted = engine::ops::UniqueWanted {
+        inverse: return_inverse,
+        counts: return_counts,
+    };
+    let found = engine::ops::unique(values.tensor(), wanted).map_err(_convert_error)?;
+    unique_result(py, found)
+}
+
+/// The distinct values of *adjacent* runs, in the order they appear. Nothing is sorted, so a value that recurs after something else appears again.
+#[pyfunction]
+#[pyo3(signature = (input, return_inverse=false, return_counts=false))]
+pub fn unique_consecutive(
+    py: Python<'_>,
+    input: &Bound<PyAny>,
+    return_inverse: bool,
+    return_counts: bool,
+) -> PyResult<Py<PyAny>> {
+    let values = PyTensor::from_python_value(input)?;
+    let wanted = engine::ops::UniqueWanted {
+        inverse: return_inverse,
+        counts: return_counts,
+    };
+    let found = engine::ops::unique_consecutive(values.tensor(), wanted).map_err(_convert_error)?;
+    unique_result(py, found)
+}
+
+/// Hand back the values alone, or a tuple of whatever was asked for.
+///
+/// NumPy and PyTorch both vary their arity with the flags, so this does too:
+/// asking for nothing extra should not force a caller to unpack a one-tuple.
+fn unique_result(
+    py: Python<'_>,
+    found: (Tensor, Option<Tensor>, Option<Tensor>),
+) -> PyResult<Py<PyAny>> {
+    let (values, inverse, counts) = found;
+    let mut parts: Vec<Py<PyAny>> = vec![Py::new(py, PyTensor::from_tensor(values))?.into()];
+    for extra in [inverse, counts].into_iter().flatten() {
+        parts.push(Py::new(py, PyTensor::from_tensor(extra))?.into());
+    }
+    if parts.len() == 1 {
+        Ok(parts.remove(0))
+    } else {
+        let tuple: Py<PyTuple> = PyTuple::new(py, parts)?.into();
+        Ok(tuple.into())
+    }
+}
+
+/// The value occurring most often along `dim`, as `(values, indices)`. Ties go to the smaller value and the index is its first position along `dim`.
+#[pyfunction]
+#[pyo3(signature = (input, dim=-1, keepdim=false))]
+pub fn mode(input: &Bound<PyAny>, dim: isize, keepdim: bool) -> PyResult<(PyTensor, PyTensor)> {
+    let values = PyTensor::from_python_value(input)?;
+    let (found, positions) =
+        engine::ops::mode(values.tensor(), dim, keepdim).map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(found),
+        PyTensor::from_tensor(positions),
+    ))
+}
+
 /// Where each element of `values` would be inserted into `sorted_sequence` to keep it sorted, as `int64`. `right=True` inserts after any equals rather than before. A batched sequence is matched row for row.
 #[pyfunction]
 #[pyo3(signature = (sorted_sequence, values, right=false))]
@@ -1815,6 +1885,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(svd, parent)?)?;
     parent.add_function(wrap_pyfunction!(einsum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(unique, parent)?)?;
+    parent.add_function(wrap_pyfunction!(unique_consecutive, parent)?)?;
+    parent.add_function(wrap_pyfunction!(mode, parent)?)?;
     parent.add_function(wrap_pyfunction!(searchsorted, parent)?)?;
     parent.add_function(wrap_pyfunction!(bucketize, parent)?)?;
     parent.add_function(wrap_pyfunction!(histogram, parent)?)?;
