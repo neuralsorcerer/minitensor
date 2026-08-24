@@ -2293,6 +2293,37 @@ impl Tensor {
         crate::ops::linalg::qr(self, mode)
     }
 
+    /// The packed `LU` of each matrix in the stack, with its row exchanges.
+    pub fn lu_factor(&self) -> Result<(Self, Self)> {
+        crate::ops::linalg::lu_factor(self)
+    }
+
+    /// `(P, L, U)` for each matrix in the stack, with `A = P @ L @ U`.
+    pub fn lu(&self) -> Result<(Self, Self, Self)> {
+        crate::ops::linalg::lu(self)
+    }
+
+    /// Solve `A X = other` from the factorisation `lu_factor` produced.
+    pub fn lu_solve(&self, pivots: &Self, other: &Self) -> Result<Self> {
+        crate::ops::linalg::lu_solve(self, pivots, other)
+    }
+
+    /// Solve `self X = other` for triangular `self`.
+    pub fn solve_triangular(
+        &self,
+        other: &Self,
+        upper: bool,
+        left: bool,
+        unitriangular: bool,
+    ) -> Result<Self> {
+        crate::ops::linalg::solve_triangular(self, other, upper, left, unitriangular)
+    }
+
+    /// Solve `A X = self` from the Cholesky factor of `A`.
+    pub fn cholesky_solve(&self, factor: &Self, upper: bool) -> Result<Self> {
+        crate::ops::linalg::cholesky_solve(self, factor, upper)
+    }
+
     /// Layer normalization
     #[inline(always)]
     pub fn layer_norm(

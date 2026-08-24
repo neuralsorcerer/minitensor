@@ -749,9 +749,46 @@ factors every matrix in it. All of them are `float32` or `float64` only.
   `full_matrices=False` the two orthogonal factors are cut to the `min(m, n)`
   columns that carry a singular value, which is the shape that reconstructs `A`.
   `svdvals(input)` returns the singular values alone.
+- `lu_factor(input)` — `(LU, pivots)`: the packed factorisation of a general
+  square matrix, with `L` unit lower triangular strictly below the diagonal and
+  `U` on and above it. `pivots` is `int64` and **zero-based**: step `i` exchanged
+  row `i` with row `pivots[..., i]`. `lu(input)` spells the same thing out as
+  `(P, L, U)` with `A == P @ L @ U`, built from the packed form rather than
+  computed separately.
 
 The orders differ on purpose: ascending eigenvalues and descending singular
 values are what LAPACK, NumPy and PyTorch all return.
+
+The `LU` factors come back detached. A pivoted factorisation's derivative is not
+implemented here; `solve`, `det`, `slogdet` and `inv` carry theirs and run this
+very factorisation, so they are the differentiable way to ask about a general
+square matrix.
+
+#### Solving against a factorisation you already have
+
+- `lu_solve(lu, pivots, b)` — solve `A X = B` from what `lu_factor` returned,
+  without factorising again. That is the reason the packed form is worth
+  keeping: several right-hand sides against one matrix cost one factorisation
+  and a pair of substitutions each, rather than a full elimination every time.
+- `solve_triangular(a, b, upper=False, left=True, unitriangular=False)` — solve
+  `A X = B` for triangular `A`, reading **only** the named triangle. Whatever is
+  in the other half is ignored rather than checked, which is what lets a packed
+  factorisation be passed straight in. `unitriangular=True` additionally ignores
+  the diagonal and treats it as ones. `left=False` solves `X A = B` instead,
+  which is the same routine on transposes.
+- `cholesky_solve(b, factor, upper=False)` — solve `A X = B` given the Cholesky
+  factor of `A` rather than `A` itself. Two triangular solves and nothing else,
+  written as exactly that composition, which is why it needs no kernel of its
+  own and no gradient of its own.
+
+`solve_triangular` is differentiable in both arguments, and `cholesky_solve`
+inherits that by composition. The matrix gradient is zero in the triangle that
+was never read — the half that did not touch the answer cannot be told to
+change.
+
+`b` may be a matrix of right-hand sides, `(..., n, k)`, or a single vector
+written without the trailing one, `(..., n)`, and the result matches whichever
+was given.
 
 #### What a decomposition is usually for
 
@@ -786,6 +823,34 @@ absolutely.
 and `cond` is a ratio of two extreme singular values whose gradient is a
 subgradient at best, so both detach rather than hand back something that looks
 differentiable and is not.
+
+```python
+import minitensor as mt
+import numpy as np
+
+rng = np.random.default_rng(0)
+a = mt.Tensor(rng.standard_normal((5, 5)))
+
+# One factorisation, then a solve per right-hand side.
+packed, pivots = mt.lu_factor(a)
+first = mt.lu_solve(packed, pivots, mt.Tensor(rng.standard_normal((5, 2))))
+print(first.numpy().shape)
+
+# The factors spelled out, and the claim they make.
+p, l, u = mt.lu(a)
+print(bool(np.allclose((p @ l @ u).numpy(), a.numpy())))
+
+# Only the named triangle is read, so the packed form goes straight in.
+identity = mt.Tensor(np.eye(5))
+below = mt.solve_triangular(packed, identity, unitriangular=True)
+print(bool(np.allclose(below.numpy(), np.linalg.inv(np.tril(packed.numpy(), -1) + np.eye(5)))))
+```
+
+```text
+(5, 2)
+True
+True
+```
 
 ```python
 import minitensor as mt

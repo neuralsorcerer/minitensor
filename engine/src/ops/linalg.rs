@@ -16,6 +16,8 @@ mod diagonal_impl;
 mod eigen_impl;
 #[path = "linalg/linear.rs"]
 mod linear_impl;
+#[path = "linalg/lu.rs"]
+mod lu_impl;
 #[path = "linalg/matmul.rs"]
 mod matmul_impl;
 #[path = "linalg/qr.rs"]
@@ -35,6 +37,7 @@ pub use self::determinant_impl::*;
 pub use self::diagonal_impl::*;
 pub use self::eigen_impl::*;
 pub use self::linear_impl::*;
+pub use self::lu_impl::*;
 pub use self::matmul_impl::*;
 pub use self::qr_impl::*;
 pub use self::svd_impl::*;

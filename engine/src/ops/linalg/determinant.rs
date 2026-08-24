@@ -18,15 +18,18 @@
 //! any of them: the gradient of `A^-1 B` with respect to `A` is
 //! `-A^-T G X^T`, and at `B = I` that is exactly the derivative of the inverse.
 //!
-//! [`det`] and [`slogdet`] do need their own elimination, because the pivot
-//! sign and the diagonal of `U` are what the answer is made of and `solve`
-//! discards both. `slogdet` exists next to `det` for the reason it does
+//! [`det`] and [`slogdet`] want more from the elimination than `solve` does --
+//! the pivot sign and the diagonal of `U` are what the answer is made of, and
+//! `solve` discards both. For a while that was reason enough for a second
+//! copy of the elimination to live here. It is not: the factorisation in
+//! [`crate::ops::linalg::lu`] keeps what it computed, and both callers read
+//! what they need off it. `slogdet` exists next to `det` for the reason it does
 //! everywhere: the determinant of a large matrix overflows long before it
 //! stops being useful -- a 200x200 matrix of standard normals has a
 //! determinant around 1e186, and one twice that size has none that a float64
 //! can hold -- while its logarithm is an ordinary number.
 
-use crate::ops::linalg::solve;
+use crate::ops::linalg::{EXTRA, Record, Scratch, factor_loaded, solve};
 use crate::{
     autograd::{DetBackward, NoGradGuard, SlogdetBackward, with_grad_fn},
     error::{MinitensorError, Result},
@@ -60,81 +63,6 @@ pub(crate) fn square_layout(tensor: &Tensor, op: &str) -> Result<(Vec<usize>, us
     Ok((dims[..ndim - 2].to_vec(), n))
 }
 
-/// Row-reduce one matrix in place, returning `(sign, diagonal of U)`.
-///
-/// The same partial-pivoting elimination `solve` runs, kept separate because it
-/// answers a different question: `solve` throws the factorisation away once the
-/// right-hand side has been updated, while the determinant *is* the
-/// factorisation -- the product of the pivots, negated once per row swap.
-///
-/// A singular matrix is not an error here, unlike in `solve`. A determinant of
-/// zero is a fact about the matrix and the caller asked for it; a zero pivot is
-/// how that fact arrives.
-fn lu_pivots<T>(matrix: &mut [T], n: usize) -> (bool, Vec<T>)
-where
-    T: Copy
-        + Default
-        + PartialOrd
-        + std::ops::SubAssign
-        + std::ops::Mul<Output = T>
-        + std::ops::Div<Output = T>
-        + std::ops::Neg<Output = T>,
-{
-    let mut negated = false;
-    for k in 0..n {
-        let mut pivot_row = k;
-        let mut pivot_val = abs(matrix[k * n + k]);
-        for i in (k + 1)..n {
-            let candidate = abs(matrix[i * n + k]);
-            if candidate > pivot_val {
-                pivot_val = candidate;
-                pivot_row = i;
-            }
-        }
-
-        if pivot_val == T::default() {
-            // A zero column below the diagonal: the matrix is singular and the
-            // determinant is zero. Returning the zero pivot lets the caller say
-            // so without a special case.
-            let mut diag = vec![T::default(); n];
-            for (i, slot) in diag.iter_mut().enumerate() {
-                *slot = matrix[i * n + i];
-            }
-            return (negated, diag);
-        }
-
-        if pivot_row != k {
-            for col in 0..n {
-                matrix.swap(k * n + col, pivot_row * n + col);
-            }
-            negated = !negated;
-        }
-
-        let pivot = matrix[k * n + k];
-        for i in (k + 1)..n {
-            let factor = matrix[i * n + k] / pivot;
-            matrix[i * n + k] = T::default();
-            for j in (k + 1)..n {
-                let idx = i * n + j;
-                matrix[idx] -= factor * matrix[k * n + j];
-            }
-        }
-    }
-
-    let mut diag = vec![T::default(); n];
-    for (i, slot) in diag.iter_mut().enumerate() {
-        *slot = matrix[i * n + i];
-    }
-    (negated, diag)
-}
-
-fn abs<T>(value: T) -> T
-where
-    T: Copy + PartialOrd + std::ops::Neg<Output = T> + Default,
-{
-    if value < T::default() { -value } else { value }
-}
-
 macro_rules! determinant_kernel {
     ($name:ident, $ty:ty, $accessor:ident) => {
         /// `(determinant, sign, log|determinant|)` for every matrix in the
@@ -152,9 +80,16 @@ macro_rules! determinant_kernel {
             let mut logs = vec![0 as $ty; batch];
             let mut scratch = vec![0 as $ty; stride];
 
+            let mut record = vec![0i64; n + EXTRA];
+            let mut work = Scratch::new();
             for b in 0..batch {
                 scratch.copy_from_slice(&data[b * stride..(b + 1) * stride]);
-                let (negated, diag) = lu_pivots(&mut scratch, n);
+                // The same factorisation `solve` runs, and now literally the
+                // same code: the determinant is the product of `U`'s diagonal,
+                // negated once per row exchange.
+                factor_loaded(&mut scratch, n, &mut record, &mut work)?;
+                let negated = Record::new(&record, n).negated();
+                let diag: Vec<$ty> = (0..n).map(|i| scratch[i * n + i]).collect();
 
                 let mut det = if negated { -1.0 } else { 1.0 } as $ty;
                 let mut sign = det;
@@ -167,7 +102,7 @@ macro_rules! determinant_kernel {
                     // `ln(0)` is `-inf`, which is the right answer: a singular
                     // matrix has log-determinant negative infinity, and any
                     // model scoring one should see that rather than a number.
-                    log_abs += abs(d).ln();
+                    log_abs += d.abs().ln();
                 }
                 if !log_abs.is_finite() && log_abs.is_sign_negative() {
                     // Singular: the sign carries no information, and every

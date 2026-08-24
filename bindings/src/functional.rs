@@ -1501,6 +1501,48 @@ pub fn qr(input: &Bound<PyAny>, mode: &str) -> PyResult<(PyTensor, PyTensor)> {
     borrow_tensor(input)?.qr(mode)
 }
 
+/// The packed `LU` of each matrix in the stack, with its row exchanges as zero-based `int64`. `L` is unit lower triangular and lives strictly below the diagonal; `U` is on and above it.
+#[pyfunction]
+pub fn lu_factor(input: &Bound<PyAny>) -> PyResult<(PyTensor, PyTensor)> {
+    borrow_tensor(input)?.lu_factor()
+}
+
+/// `(P, L, U)` for each matrix in the stack, with `A = P @ L @ U`.
+#[pyfunction]
+pub fn lu(input: &Bound<PyAny>) -> PyResult<(PyTensor, PyTensor, PyTensor)> {
+    borrow_tensor(input)?.lu()
+}
+
+/// Solve `A X = B` from the factorisation `lu_factor` produced for `A`, without factorising again.
+#[pyfunction]
+pub fn lu_solve(
+    factors: &Bound<PyAny>,
+    pivots: &Bound<PyAny>,
+    rhs: &Bound<PyAny>,
+) -> PyResult<PyTensor> {
+    borrow_tensor(factors)?.lu_solve(pivots, rhs)
+}
+
+/// Solve `A X = B` for triangular `A`, reading only the named triangle. `left=False` solves `X A = B`; `unitriangular=True` treats the diagonal as ones.
+#[pyfunction]
+#[pyo3(signature = (a, b, upper=false, left=true, unitriangular=false))]
+pub fn solve_triangular(
+    a: &Bound<PyAny>,
+    b: &Bound<PyAny>,
+    upper: bool,
+    left: bool,
+    unitriangular: bool,
+) -> PyResult<PyTensor> {
+    borrow_tensor(a)?.solve_triangular(b, upper, left, unitriangular)
+}
+
+/// Solve `A X = B` given the Cholesky factor of `A` rather than `A` itself.
+#[pyfunction]
+#[pyo3(signature = (b, factor, upper=false))]
+pub fn cholesky_solve(b: &Bound<PyAny>, factor: &Bound<PyAny>, upper: bool) -> PyResult<PyTensor> {
+    borrow_tensor(b)?.cholesky_solve(factor, upper)
+}
+
 /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
 #[pyfunction]
 #[pyo3(signature = (input, k, dim=None, largest=true, sorted=true))]
@@ -1885,6 +1927,11 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(svd, parent)?)?;
     parent.add_function(wrap_pyfunction!(einsum, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lu_factor, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lu, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lu_solve, parent)?)?;
+    parent.add_function(wrap_pyfunction!(solve_triangular, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cholesky_solve, parent)?)?;
     parent.add_function(wrap_pyfunction!(unique, parent)?)?;
     parent.add_function(wrap_pyfunction!(unique_consecutive, parent)?)?;
     parent.add_function(wrap_pyfunction!(mode, parent)?)?;

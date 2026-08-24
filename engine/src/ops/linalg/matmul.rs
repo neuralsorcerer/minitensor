@@ -1255,25 +1255,13 @@ fn solve_f64(lhs: &Tensor, rhs: &Tensor, output: &mut TensorData, rhs_cols: usiz
 /// destructive), so the batches share nothing and run in parallel. Each task
 /// allocates its scratch once and reuses it across the batches it is handed,
 /// rather than once per system.
-fn solve_batched<T>(
+fn solve_batched<T: crate::ops::linalg::Factorable>(
     lhs_shape: &[usize],
     rhs_cols: usize,
     lhs_slice: &[T],
     rhs_slice: &[T],
     out_slice: &mut [T],
-) -> Result<()>
-where
-    T: Copy
-        + Send
-        + Sync
-        + std::ops::SubAssign
-        + std::ops::Mul<Output = T>
-        + std::ops::Div<Output = T>
-        + std::ops::Neg<Output = T>
-        + PartialOrd
-        + Default
-        + PartialEq,
-{
+) -> Result<()> {
     let n = *lhs_shape.last().expect("lhs has at least 2 dims");
     let batch = lhs_shape[..lhs_shape.len() - 2]
         .iter()
@@ -1287,8 +1275,8 @@ where
     // solution into `out_group`. The scratch buffers are allocated once per
     // call rather than once per system.
     let solve_group = |first: usize, count: usize, out_group: &mut [T]| -> Result<()> {
-        let mut matrix = vec![T::default(); matrix_stride];
-        let mut rhs_buf = vec![T::default(); rhs_stride];
+        let mut matrix = vec![T::zero(); matrix_stride];
+        let mut rhs_buf = vec![T::zero(); rhs_stride];
         for local in 0..count {
             let batch_idx = first + local;
             let lhs_offset = batch_idx * matrix_stride;
@@ -1297,9 +1285,9 @@ where
             matrix.copy_from_slice(&lhs_slice[lhs_offset..lhs_offset + matrix_stride]);
             rhs_buf.copy_from_slice(&rhs_slice[rhs_offset..rhs_offset + rhs_stride]);
 
-            // Runs even with no right-hand-side columns: elimination is what
-            // detects a singular `lhs`, and that must still be reported.
-            gaussian_elimination(&mut matrix, &mut rhs_buf, n, rhs_cols)?;
+            // Runs even with no right-hand-side columns: the factorisation is
+            // what detects a singular `lhs`, and that must still be reported.
+            crate::ops::linalg::factor_and_solve(&mut matrix, &mut rhs_buf, n, rhs_cols)?;
 
             out_group[local * rhs_stride..(local + 1) * rhs_stride].copy_from_slice(&rhs_buf);
         }
@@ -1328,88 +1316,6 @@ where
             out_group,
         )
     })
-}
-
-fn gaussian_elimination<T>(matrix: &mut [T], rhs: &mut [T], n: usize, rhs_cols: usize) -> Result<()>
-where
-    T: Copy
-        + Send
-        + Sync
-        + std::ops::SubAssign
-        + std::ops::Mul<Output = T>
-        + std::ops::Div<Output = T>
-        + std::ops::Neg<Output = T>
-        + PartialOrd
-        + Default
-        + PartialEq,
-{
-    for k in 0..n {
-        // Pivot selection
-        let mut pivot_row = k;
-        let mut pivot_val = abs(matrix[k * n + k]);
-        for i in (k + 1)..n {
-            let candidate = abs(matrix[i * n + k]);
-            if candidate > pivot_val {
-                pivot_val = candidate;
-                pivot_row = i;
-            }
-        }
-
-        if pivot_val == T::default() {
-            return Err(MinitensorError::invalid_operation(
-                "solve received a singular matrix",
-            ));
-        }
-
-        if pivot_row != k {
-            for col in 0..n {
-                matrix.swap(k * n + col, pivot_row * n + col);
-            }
-            for col in 0..rhs_cols {
-                rhs.swap(k * rhs_cols + col, pivot_row * rhs_cols + col);
-            }
-        }
-
-        let pivot = matrix[k * n + k];
-
-        for i in (k + 1)..n {
-            let factor = matrix[i * n + k] / pivot;
-            matrix[i * n + k] = T::default();
-            for j in (k + 1)..n {
-                let idx = i * n + j;
-                matrix[idx] -= factor * matrix[k * n + j];
-            }
-            for col in 0..rhs_cols {
-                let idx = i * rhs_cols + col;
-                rhs[idx] -= factor * rhs[k * rhs_cols + col];
-            }
-        }
-    }
-
-    for i in (0..n).rev() {
-        let pivot = matrix[i * n + i];
-        if abs(pivot) == T::default() {
-            return Err(MinitensorError::invalid_operation(
-                "solve received a singular matrix",
-            ));
-        }
-        for col in 0..rhs_cols {
-            let mut value = rhs[i * rhs_cols + col];
-            for j in (i + 1)..n {
-                value -= matrix[i * n + j] * rhs[j * rhs_cols + col];
-            }
-            rhs[i * rhs_cols + col] = value / pivot;
-        }
-    }
-
-    Ok(())
-}
-
-fn abs<T>(value: T) -> T
-where
-    T: Copy + PartialOrd + std::ops::Neg<Output = T> + Default,
-{
-    if value < T::default() { -value } else { value }
 }
 
 /// Batched matrix multiplication specialized for 3D tensors.

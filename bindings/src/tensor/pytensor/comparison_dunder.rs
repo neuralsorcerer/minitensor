@@ -86,6 +86,61 @@ impl PyTensor {
         Ok((Self::from_tensor(q), Self::from_tensor(r)))
     }
 
+    /// The packed `LU` of each matrix, with its row exchanges as zero-based `int64`. `L` is unit lower triangular and lives strictly below the diagonal; `U` is on and above it. Returned detached -- the differentiable ways to ask about these matrices are `solve`, `det`, `slogdet` and `inv`, which share this factorisation.
+    pub fn lu_factor(&self) -> PyResult<(Self, Self)> {
+        let (factors, pivots) = self.inner.lu_factor().map_err(_convert_error)?;
+        Ok((Self::from_tensor(factors), Self::from_tensor(pivots)))
+    }
+
+    /// `(P, L, U)` for each matrix, with `A = P @ L @ U`. Built from the packed form rather than computed separately.
+    pub fn lu(&self) -> PyResult<(Self, Self, Self)> {
+        let (p, l, u) = self.inner.lu().map_err(_convert_error)?;
+        Ok((
+            Self::from_tensor(p),
+            Self::from_tensor(l),
+            Self::from_tensor(u),
+        ))
+    }
+
+    /// Solve `A X = other` from the factorisation `lu_factor` produced, without factorising again.
+    pub fn lu_solve(&self, pivots: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<Self> {
+        let exchanges = tensor_from_py_value(&self.inner, pivots)?;
+        let rhs = tensor_from_py_value(&self.inner, other)?;
+        Ok(Self::from_tensor(
+            self.inner
+                .lu_solve(&exchanges, &rhs)
+                .map_err(_convert_error)?,
+        ))
+    }
+
+    /// Solve `self X = other` for triangular `self`. Only the named triangle is read. `left=False` solves `X self = other` instead; `unitriangular=True` treats the diagonal as ones.
+    #[pyo3(signature = (other, upper=false, left=true, unitriangular=false))]
+    pub fn solve_triangular(
+        &self,
+        other: &Bound<PyAny>,
+        upper: bool,
+        left: bool,
+        unitriangular: bool,
+    ) -> PyResult<Self> {
+        let rhs = tensor_from_py_value(&self.inner, other)?;
+        Ok(Self::from_tensor(
+            self.inner
+                .solve_triangular(&rhs, upper, left, unitriangular)
+                .map_err(_convert_error)?,
+        ))
+    }
+
+    /// Solve `A X = self` given the Cholesky factor of `A` rather than `A`. Two triangular solves and nothing else.
+    #[pyo3(signature = (factor, upper=false))]
+    pub fn cholesky_solve(&self, factor: &Bound<PyAny>, upper: bool) -> PyResult<Self> {
+        let l = tensor_from_py_value(&self.inner, factor)?;
+        Ok(Self::from_tensor(
+            self.inner
+                .cholesky_solve(&l, upper)
+                .map_err(_convert_error)?,
+        ))
+    }
+
     /// The Moore-Penrose pseudo-inverse. `rcond` is relative to the largest singular value; `None` uses `max(m, n) * eps`.
     #[pyo3(signature = (rcond=None))]
     pub fn pinv(&self, rcond: Option<f64>) -> PyResult<Self> {

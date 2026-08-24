@@ -863,6 +863,69 @@ fn eigenvalue_gaps(values: &Tensor) -> Result<Tensor> {
     arithmetic::add(&gaps, &infinite)
 }
 
+/// Gradient of [`crate::ops::linalg::solve_triangular`].
+///
+/// `A X = B` differentiates to `dX = A^-1 (dB - dA X)`, so the two cotangents
+/// are `B_bar = A^-T G` -- one more triangular solve -- and `A_bar = -B_bar X^T`
+/// projected back onto the triangle that was read. The projection is the part
+/// that is easy to forget and impossible to see: the half of `A` this operation
+/// never looked at cannot have moved the answer, so a gradient there would be
+/// telling a caller to change numbers that did nothing.
+pub struct TriangularSolveBackward {
+    pub matrix: Tensor,
+    pub solution: Tensor,
+    pub upper: bool,
+    pub unitriangular: bool,
+    pub input_ids: [TensorId; 2],
+    pub input_requires_grad: [bool; 2],
+}
+
+impl GradientFunction for TriangularSolveBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+
+        // A^-T G, which is the same routine against the transposed triangle.
+        let transposed = crate::ops::linalg::transpose(&self.matrix, -2, -1)?;
+        let for_rhs = crate::ops::linalg::solve_triangular(
+            &transposed,
+            grad_output,
+            !self.upper,
+            true,
+            self.unitriangular,
+        )?;
+
+        if self.input_requires_grad[0] {
+            let solution_t = crate::ops::linalg::transpose(&self.solution, -2, -1)?;
+            let outer = crate::ops::linalg::matmul(&for_rhs, &solution_t)?;
+            let signed = crate::ops::arithmetic::neg(&outer)?;
+            // Only the triangle that was read, and not its diagonal when the
+            // diagonal was never read either.
+            let offset = if self.upper {
+                self.unitriangular as i64
+            } else {
+                -(self.unitriangular as i64)
+            };
+            let masked = if self.upper {
+                crate::ops::linalg::triu(&signed, offset)?
+            } else {
+                crate::ops::linalg::tril(&signed, offset)?
+            };
+            accumulate_grad(&mut gradients, self.input_ids[0], masked)?;
+        }
+
+        if self.input_requires_grad[1] {
+            accumulate_grad(&mut gradients, self.input_ids[1], for_rhs)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 pub struct SolveBackward {
     pub lhs: Tensor,
     pub solution: Tensor,

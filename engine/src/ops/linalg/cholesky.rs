@@ -207,7 +207,7 @@ fn not_positive_definite(order: usize) -> MinitensorError {
 ///
 /// A matrix this size or smaller is one panel, never takes the `first > 0`
 /// branch, and is exactly the unblocked routine -- there is no second path.
-const PANEL: usize = 64;
+pub(crate) const PANEL: usize = 64;
 
 /// Copy the lower triangle of an `n x n` matrix. The strict upper triangle of
 /// the destination is left as it was, which for a fresh output is zero.
@@ -220,7 +220,7 @@ fn copy_lower<T: Copy>(src: &[T], dst: &mut [T], n: usize) {
 /// Grow `buffer` to hold at least `need` elements, keeping what is already
 /// allocated. Scratch only ever grows, so a task that factors many matrices
 /// pays for the largest one once.
-fn ensure<T: Factorable>(buffer: &mut Vec<T>, need: usize) {
+pub(crate) fn ensure<T: Factorable>(buffer: &mut Vec<T>, need: usize) {
     if buffer.len() < need {
         buffer.resize(need, T::zero());
     }
