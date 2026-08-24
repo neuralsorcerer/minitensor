@@ -121,6 +121,34 @@ def test_the_dynamic_program_sums_the_same_paths_as_enumerating_them(trial):
         assert not np.isfinite(got)
 
 
+@pytest.mark.parametrize("trial", range(6))
+def test_the_dynamic_program_enumerates_the_same_paths_across_a_batch(trial):
+    """The same reference, pointed at more than one sample.
+
+    At batch size one the time-major and sample-major index expressions
+    coincide, so every single-sample test here -- including the enumeration
+    above, which is otherwise the strongest check in the file -- is blind to a
+    transposed input. And most of the batched tests compare two spellings that
+    share that transpose, so they agree on the same wrong answer. This is the
+    independent anchor the batched path was missing.
+    """
+    rng = np.random.default_rng(300 + trial)
+    batch = int(rng.integers(2, 4))
+    steps = int(rng.integers(2, 6))
+    classes = int(rng.integers(2, 5))
+    lengths = [int(rng.integers(0, min(steps, 3) + 1)) for _ in range(batch)]
+    targets = [[int(v) for v in rng.integers(1, classes, n)] for n in lengths]
+    logs = _random_logs(rng, steps, batch, classes)
+
+    got = _call(logs, targets, [steps] * batch, lengths, reduction="none").numpy()
+    for sample in range(batch):
+        want = _by_enumeration(logs[:, sample, :], targets[sample])
+        if np.isfinite(want):
+            assert abs(got[sample] - want) < 1e-9, f"sample {sample}"
+        else:
+            assert not np.isfinite(got[sample]), f"sample {sample}"
+
+
 def test_a_target_that_uses_every_step_has_exactly_one_path():
     """With `len(target) == steps` and no repeats, the only alignment is the
     target itself, so the loss is the plain sum of its log probabilities."""
@@ -299,12 +327,31 @@ def test_mean_divides_each_loss_by_its_own_target_length():
 
 
 def test_an_empty_target_divides_by_one_rather_than_by_zero():
+    """Target lengths [3, 0], not [1, 0]: with [1, 0] the clamped divisor is
+    [1, 1], which is the same as not dividing at all, so the test would pass
+    against an implementation that skipped the division entirely -- while being
+    named after the division."""
     rng = np.random.default_rng(13)
-    logs = _random_logs(rng, 4, 2, 3)
-    args = (logs, [[1], [0]], [4, 4], [1, 0])
+    logs = _random_logs(rng, 6, 2, 3)
+    args = (logs, [[1, 2, 1], []], [6, 6], [3, 0])
     each = _call(*args, reduction="none").numpy()
-    want = (each / np.array([1, 1])).mean()
+    want = (each / np.array([3, 1])).mean()
     assert _call(*args, reduction="mean").item() == pytest.approx(want)
+    # And the divisor really is doing something here.
+    assert want != pytest.approx(each.mean())
+
+
+def test_mean_is_not_the_mean_of_none():
+    """The convention stated directly. `mean` divides each loss by its own
+    target length first, so the two coincide only when every target has length
+    one -- and a batch of unequal targets is exactly when it matters."""
+    rng = np.random.default_rng(40)
+    logs = _random_logs(rng, 9, 3, 5)
+    args = (logs, [[1, 2, 3, 4], [2, 1], [3]], [9, 9, 9], [4, 2, 1])
+    each = _call(*args, reduction="none").numpy()
+    averaged = _call(*args, reduction="mean").item()
+    assert averaged == pytest.approx((each / np.array([4, 2, 1])).mean())
+    assert averaged != pytest.approx(each.mean())
 
 
 def test_the_reduction_scales_the_gradient_the_same_way():
@@ -394,11 +441,23 @@ def test_an_unreachable_target_asks_for_no_gradient_of_its_own():
 
 
 def test_an_input_length_of_zero_asks_for_no_gradient_either():
+    """The zero-input sample is given a target it cannot spell, so this covers
+    the unreachable case too. With a zero-length target its loss would be zero
+    either way, and the test would pass against an implementation where an
+    empty input admitted any target at all."""
     rng = np.random.default_rng(39)
     logs = _random_logs(rng, 3, 2, 4)
-    _, grad = _grad_of(logs, [[1], [1]], [0, 3], [0, 1], reduction="sum")
+    out, grad = _grad_of(
+        logs, [[1], [1]], [0, 3], [1, 1], reduction="sum", zero_infinity=True
+    )
     assert np.all(grad[:, 0] == 0.0)
     assert not np.all(grad[:, 1] == 0.0)
+
+    # Without zero_infinity the same sample is infinite, which is the fact the
+    # zeroed gradient stands in for.
+    loose = _call(logs, [[1], [1]], [0, 3], [1, 1], reduction="none").numpy()
+    assert not np.isfinite(loose[0])
+    assert np.isfinite(loose[1])
 
 
 def test_an_input_length_of_zero_admits_only_an_empty_target():
