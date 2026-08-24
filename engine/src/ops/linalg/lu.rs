@@ -64,18 +64,20 @@ use crate::{
 use num_traits::{Float, Zero};
 use std::sync::Arc;
 
-/// Which triangle is being solved against, and how it is read.
+/// Which triangle is being solved against, and how its diagonal is read.
 ///
-/// Four spellings, one loop. `A X = B` for a lower `A` walks the rows forwards;
-/// for an upper `A` it walks them backwards; and transposing swaps which of
-/// those applies, because the transpose of a lower triangle is an upper one. So
-/// the direction is `upper != transposed`, and the only other difference is
-/// whether an element is read at `[i][j]` or at `[j][i]`.
+/// Two spellings, one loop: `A X = B` for a lower `A` walks the rows forwards
+/// and for an upper `A` backwards, and that is the only structural difference
+/// between them.
+///
+/// There is deliberately no "solve against `A^T`" flag. Every caller that wants
+/// one transposes the tensor and asks for the opposite triangle, which is the
+/// same composition `cholesky(upper=true)` next door is built from -- one path
+/// instead of two, and a gradient that follows through `transpose`'s own
+/// backward rather than needing a second case here.
 #[derive(Clone, Copy, Debug)]
 pub struct Triangle {
     pub upper: bool,
-    /// Solve against `A^T` without forming it.
-    pub transposed: bool,
     /// Treat the diagonal as ones and never read it. The `L` this factorisation
     /// produces is stored that way -- the diagonal it shares is `U`'s.
     pub unit: bool,
@@ -102,7 +104,7 @@ pub(crate) fn substitute<T: Factorable>(
     if cols == 0 {
         return Ok(());
     }
-    let descending = triangle.upper != triangle.transposed;
+    let descending = triangle.upper;
     for step in 0..n {
         let i = if descending { n - 1 - step } else { step };
         let (above, from_here) = x.split_at_mut(i * ldx);
@@ -113,12 +115,7 @@ pub(crate) fn substitute<T: Factorable>(
         // those above it when walking forwards.
         let solved = if descending { i + 1..n } else { 0..i };
         for j in solved {
-            let coefficient = if triangle.transposed {
-                a[j * lda + i]
-            } else {
-                a[i * lda + j]
-            }
-            .widen();
+            let coefficient = a[i * lda + j].widen();
             if coefficient == T::Acc::zero() {
                 continue;
             }
@@ -298,7 +295,6 @@ pub(crate) fn factor_loaded<T: Factorable>(
                 nb,
                 Triangle {
                     upper: false,
-                    transposed: false,
                     unit: true,
                 },
             )?;
@@ -384,7 +380,6 @@ pub(crate) fn factor_and_solve<T: Factorable>(
         cols,
         Triangle {
             upper: false,
-            transposed: false,
             unit: true,
         },
     )?;
@@ -397,7 +392,6 @@ pub(crate) fn factor_and_solve<T: Factorable>(
         cols,
         Triangle {
             upper: true,
-            transposed: false,
             unit: false,
         },
     )
@@ -701,7 +695,6 @@ pub fn solve_triangular(
     let found = systems(b, n, &batch_dims, "solve_triangular")?;
     let triangle = Triangle {
         upper,
-        transposed: false,
         unit: unitriangular,
     };
     let matrices = a.contiguous()?;
@@ -863,7 +856,6 @@ pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor>
                 &found,
                 Triangle {
                     upper: false,
-                    transposed: false,
                     unit: true,
                 },
             )?;
@@ -874,7 +866,6 @@ pub fn lu_solve(factors: &Tensor, pivots: &Tensor, b: &Tensor) -> Result<Tensor>
                 &found,
                 Triangle {
                     upper: true,
-                    transposed: false,
                     unit: false,
                 },
             )?;
@@ -923,17 +914,12 @@ mod tests {
 
     /// `A X` for a dense `A`, so the substitutions can be checked against the
     /// definition rather than against each other.
-    fn apply(a: &[f64], n: usize, x: &[f64], cols: usize, transposed: bool) -> Vec<f64> {
+    fn apply(a: &[f64], n: usize, x: &[f64], cols: usize) -> Vec<f64> {
         let mut out = vec![0.0; n * cols];
         for i in 0..n {
             for j in 0..n {
-                let coefficient = if transposed {
-                    a[j * n + i]
-                } else {
-                    a[i * n + j]
-                };
                 for c in 0..cols {
-                    out[i * cols + c] += coefficient * x[j * cols + c];
+                    out[i * cols + c] += a[i * n + j] * x[j * cols + c];
                 }
             }
         }
@@ -964,37 +950,66 @@ mod tests {
     #[test]
     fn every_spelling_of_the_substitution_solves_what_it_says() {
         for &upper in &[false, true] {
-            for &transposed in &[false, true] {
-                for &unit in &[false, true] {
-                    let n = 6;
-                    let cols = 3;
-                    let a = triangle(n, upper, unit);
-                    let b: Vec<f64> = (0..n * cols).map(|i| (i as f64 * 0.37).sin()).collect();
-                    let mut x = b.clone();
-                    substitute(
-                        &a,
-                        n,
-                        n,
-                        &mut x,
-                        cols,
-                        cols,
-                        Triangle {
-                            upper,
-                            transposed,
-                            unit,
-                        },
-                    )
-                    .unwrap();
-                    let back = apply(&a, n, &x, cols, transposed);
-                    for (got, want) in back.iter().zip(&b) {
-                        assert!(
-                            (got - want).abs() < 1e-12,
-                            "upper={upper} transposed={transposed} unit={unit}: {got} != {want}"
-                        );
-                    }
+            for &unit in &[false, true] {
+                let n = 6;
+                let cols = 3;
+                let a = triangle(n, upper, unit);
+                let b: Vec<f64> = (0..n * cols).map(|i| (i as f64 * 0.37).sin()).collect();
+                let mut x = b.clone();
+                substitute(&a, n, n, &mut x, cols, cols, Triangle { upper, unit }).unwrap();
+                let back = apply(&a, n, &x, cols);
+                for (got, want) in back.iter().zip(&b) {
+                    assert!(
+                        (got - want).abs() < 1e-12,
+                        "upper={upper} unit={unit}: {got} != {want}"
+                    );
                 }
             }
         }
+    }
+
+    /// The two directions really are different systems, so a substitution that
+    /// ignored `upper` would be caught rather than quietly solving one of them
+    /// twice.
+    #[test]
+    fn the_two_directions_solve_different_systems() {
+        let n = 5;
+        let a = triangle(n, false, false);
+        let b: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0).ln()).collect();
+        let mut forwards = b.clone();
+        substitute(
+            &a,
+            n,
+            n,
+            &mut forwards,
+            1,
+            1,
+            Triangle {
+                upper: false,
+                unit: false,
+            },
+        )
+        .unwrap();
+        let mut backwards = b.clone();
+        substitute(
+            &a,
+            n,
+            n,
+            &mut backwards,
+            1,
+            1,
+            Triangle {
+                upper: true,
+                unit: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            forwards
+                .iter()
+                .zip(&backwards)
+                .any(|(x, y)| (x - y).abs() > 1e-6)
+        );
     }
 
     #[test]
@@ -1004,7 +1019,6 @@ mod tests {
         let b: Vec<f64> = (0..n).map(|i| i as f64 + 1.0).collect();
         let triangle_spec = Triangle {
             upper: false,
-            transposed: false,
             unit: true,
         };
         let mut want = b.clone();
@@ -1030,7 +1044,6 @@ mod tests {
             1,
             Triangle {
                 upper: false,
-                transposed: false,
                 unit: false,
             },
         );
