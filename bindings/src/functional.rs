@@ -1233,6 +1233,58 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
+/// The Moore-Penrose pseudo-inverse of each matrix. `rcond` is relative to the largest singular value; `None` uses `max(m, n) * eps`. Defined for rank-deficient and non-square matrices, where `inv` is not.
+#[pyfunction]
+#[pyo3(signature = (input, rcond=None))]
+pub fn pinv(input: &Bound<PyAny>, rcond: Option<f64>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.pinv(rcond)
+}
+
+/// The number of singular values above the tolerance, as `int64` -- the only numerically meaningful rank for inexact entries.
+#[pyfunction]
+#[pyo3(signature = (input, tol=None))]
+pub fn matrix_rank(input: &Bound<PyAny>, tol: Option<f64>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.matrix_rank(tol)
+}
+
+/// The 2-norm condition number: the largest singular value over the smallest. Infinity for a singular matrix, which is the true answer.
+#[pyfunction]
+pub fn cond(input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.cond()
+}
+
+/// The least-squares solution of `a @ x = b`, and of smallest norm when there are many. Needs neither a square `a` nor full rank.
+#[pyfunction]
+#[pyo3(signature = (a, b, rcond=None))]
+pub fn lstsq(a: &Bound<PyAny>, b: &Bound<PyAny>, rcond: Option<f64>) -> PyResult<PyTensor> {
+    borrow_tensor(a)?.lstsq(b, rcond)
+}
+
+/// `input` raised to an integer matrix power, by repeated squaring. Zero gives the identity; a negative power inverts first.
+#[pyfunction]
+pub fn matrix_power(input: &Bound<PyAny>, power: i64) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.matrix_power(power)
+}
+
+/// A tensor whose diagonal is `input`: the inverse of `diagonal`.
+#[pyfunction]
+#[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+pub fn diag_embed(
+    input: &Bound<PyAny>,
+    offset: isize,
+    dim1: isize,
+    dim2: isize,
+) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.diag_embed(offset, dim1, dim2)
+}
+
+/// A matrix from a vector, or the diagonal of a matrix -- whichever the rank of `input` calls for.
+#[pyfunction]
+#[pyo3(signature = (input, offset=0))]
+pub fn diag(input: &Bound<PyAny>, offset: isize) -> PyResult<PyTensor> {
+    borrow_tensor(input)?.diag(offset)
+}
+
 /// `(U, s, Vh)` for each matrix in the stack, with `A = U @ diag(s) @ Vh` and `s` descending. `full_matrices=False` cuts `U` and `Vh` to the `min(m, n)` columns that carry a singular value.
 #[pyfunction]
 #[pyo3(signature = (input, full_matrices=true))]
@@ -1655,6 +1707,13 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(cholesky, parent)?)?;
     parent.add_function(wrap_pyfunction!(qr, parent)?)?;
     parent.add_function(wrap_pyfunction!(svd, parent)?)?;
+    parent.add_function(wrap_pyfunction!(pinv, parent)?)?;
+    parent.add_function(wrap_pyfunction!(matrix_rank, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cond, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lstsq, parent)?)?;
+    parent.add_function(wrap_pyfunction!(matrix_power, parent)?)?;
+    parent.add_function(wrap_pyfunction!(diag_embed, parent)?)?;
+    parent.add_function(wrap_pyfunction!(diag, parent)?)?;
     parent.add_function(wrap_pyfunction!(svdvals, parent)?)?;
     parent.add_function(wrap_pyfunction!(eigh, parent)?)?;
     parent.add_function(wrap_pyfunction!(eigvalsh, parent)?)?;

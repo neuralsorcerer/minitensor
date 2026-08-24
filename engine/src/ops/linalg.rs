@@ -6,6 +6,8 @@
 
 #[path = "linalg/cholesky.rs"]
 mod cholesky_impl;
+#[path = "linalg/derived.rs"]
+mod derived_impl;
 #[path = "linalg/determinant.rs"]
 mod determinant_impl;
 #[path = "linalg/diagonal.rs"]
@@ -28,6 +30,7 @@ mod svd_impl;
 mod triangular_impl;
 
 pub use self::cholesky_impl::*;
+pub use self::derived_impl::*;
 pub use self::determinant_impl::*;
 pub use self::diagonal_impl::*;
 pub use self::eigen_impl::*;

@@ -2243,6 +2243,41 @@ impl Tensor {
         crate::ops::linalg::eigvalsh(self)
     }
 
+    /// The Moore-Penrose pseudo-inverse of each matrix in the stack.
+    pub fn pinv(&self, rcond: Option<f64>) -> Result<Self> {
+        crate::ops::linalg::pinv(self, rcond)
+    }
+
+    /// How many singular values of each matrix are above the tolerance.
+    pub fn matrix_rank(&self, tol: Option<f64>) -> Result<Self> {
+        crate::ops::linalg::matrix_rank(self, tol)
+    }
+
+    /// The 2-norm condition number of each matrix.
+    pub fn cond(&self) -> Result<Self> {
+        crate::ops::linalg::cond(self)
+    }
+
+    /// The least-squares solution of `self @ x = other`.
+    pub fn lstsq(&self, other: &Self, rcond: Option<f64>) -> Result<Self> {
+        crate::ops::linalg::lstsq(self, other, rcond)
+    }
+
+    /// `self` raised to an integer matrix power.
+    pub fn matrix_power(&self, power: i64) -> Result<Self> {
+        crate::ops::linalg::matrix_power(self, power)
+    }
+
+    /// A tensor whose diagonal is `self`: the inverse of `diagonal`.
+    pub fn diag_embed(&self, offset: isize, dim1: isize, dim2: isize) -> Result<Self> {
+        crate::ops::linalg::diag_embed(self, offset, dim1, dim2)
+    }
+
+    /// A matrix from a vector, or a matrix's diagonal.
+    pub fn diag(&self, offset: isize) -> Result<Self> {
+        crate::ops::linalg::diag(self, offset)
+    }
+
     /// `(U, s, V^T)` for each matrix in the stack, with `A = U @ diag(s) @ V^T`.
     pub fn svd(&self, full_matrices: bool) -> Result<(Self, Self, Self)> {
         crate::ops::linalg::svd(self, full_matrices)

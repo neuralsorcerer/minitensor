@@ -865,6 +865,35 @@ impl GradientFunction for WhereBackward {
     }
 }
 
+/// Gradient of [`crate::ops::linalg::diag_embed`].
+///
+/// The forward writes its input along a diagonal and zeros everywhere else, so
+/// the gradient is whatever landed on that diagonal and nothing else -- which
+/// is [`crate::ops::linalg::diagonal`] itself. The two operations are each
+/// other's derivative, which is what a permutation of elements into a larger
+/// zeroed tensor always gives.
+pub struct DiagEmbedBackward {
+    pub offset: isize,
+    pub dim1: isize,
+    pub dim2: isize,
+    pub input_id: TensorId,
+    pub ids: [TensorId; 1],
+}
+
+impl GradientFunction for DiagEmbedBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        let grad = crate::ops::linalg::diagonal(grad_output, self.offset, self.dim1, self.dim2)?;
+        accumulate_grad(&mut gradients, self.input_id, grad)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.ids
+    }
+}
+
 /// Gradient function for diagonal extraction.
 pub struct DiagonalBackward {
     pub input_shape: Vec<usize>,

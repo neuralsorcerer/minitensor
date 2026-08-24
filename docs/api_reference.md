@@ -563,8 +563,17 @@ substitution does not have to be worked out from the rule.
 
 - `matmul`, `dot`, `bmm`
 - `solve`, `inv`, `det`, `slogdet`
-- `diagonal`, `trace`
+- `diagonal`, `trace`, `diag`, `diag_embed`
 - `triu`, `tril`
+- `matrix_power(input, power)` -- by repeated squaring, so a large exponent
+  costs `log2(power)` products rather than `power` of them. Zero gives the
+  identity; a negative power inverts the *base* before squaring, since
+  inverting the result would invert its condition number too.
+
+`diag` is NumPy's: a vector in gives a matrix with it on the diagonal, a matrix
+in gives its diagonal. `diagonal` and `diag_embed` are the batched forms that
+take an axis pair and an offset, and they are each other's inverse -- and each
+other's derivative.
 
 #### Factorisations
 
@@ -591,6 +600,58 @@ factors every matrix in it. All of them are `float32` or `float64` only.
 The orders differ on purpose: ascending eigenvalues and descending singular
 values are what LAPACK, NumPy and PyTorch all return.
 
+#### What a decomposition is usually for
+
+Four operations are a singular value decomposition read out a particular way,
+and none of them is reachable without one. `inv` and `solve` need a square
+non-singular matrix and `qr` needs full column rank; these need nothing.
+
+- `pinv(input, rcond=None)` -- the Moore-Penrose pseudo-inverse, the unique
+  matrix satisfying the four Penrose conditions. For an invertible square matrix
+  it is the inverse; for anything else it inverts the directions that are
+  invertible and sends the rest to zero, which is what makes it the
+  least-squares answer rather than a failure.
+- `lstsq(a, b, rcond=None)` -- the `x` minimising `||a @ x - b||`, and the one of
+  smallest norm when there are many. `b` may be a matrix of right-hand sides or
+  a single vector, and the result matches.
+- `matrix_rank(input, tol=None)` -- how many singular values are
+  distinguishable from zero, as `int64`. The only numerically meaningful rank
+  for inexact entries: a matrix one rounding away from rank three has rank
+  three, whatever exact arithmetic on its stored digits would say.
+- `cond(input)` -- the 2-norm condition number, the largest singular value over
+  the smallest. A singular matrix gives infinity rather than an error, because
+  that is the true answer and a caller comparing against a threshold should not
+  have to catch it.
+
+They share one tolerance rule. A singular value is never exactly zero in
+floating point, so each of these has to decide which ones count, and the answer
+is `max(m, n) * eps` relative to the largest -- the accuracy the factorisation
+itself offers. `rcond` and `tol` override it, `rcond` relatively and `tol`
+absolutely.
+
+`pinv` and `lstsq` are differentiable; `matrix_rank` counts and so is an integer,
+and `cond` is a ratio of two extreme singular values whose gradient is a
+subgradient at best, so both detach rather than hand back something that looks
+differentiable and is not.
+
+```python
+import minitensor as mt
+import numpy as np
+
+a = mt.Tensor(np.random.default_rng(0).standard_normal((9, 4)))
+b = mt.Tensor(np.random.default_rng(1).standard_normal((9,)))
+
+print(mt.matrix_rank(a).item())          # 4
+print(mt.lstsq(a, b).numpy().shape)      # (4,)
+print(mt.pinv(a).numpy().shape)          # (4, 9) -- the transposed shape
+```
+
+```text
+4
+(4,)
+(4, 9)
+```
+
 Eigenvectors and singular vectors are determined only up to the sign of each
 column, and within a repeated value's subspace only up to a rotation. Nothing
 here imposes a convention, so compare what the vectors *do* —
@@ -611,7 +672,7 @@ import minitensor as mt
 a = mt.Tensor([[3.0, 1.0], [0.0, 2.0]], dtype="float64")
 u, s, vh = a.svd(full_matrices=False)
 print(s.numpy())                                # descending
-print(a.allclose(u @ (s.unsqueeze(-1) * vh)))   # back to a
+print(a.allclose(u @ mt.diag_embed(s) @ vh))    # back to a
 
 cov = mt.Tensor([[2.0, 1.0], [1.0, 2.0]], dtype="float64")
 w, v = cov.eigh()

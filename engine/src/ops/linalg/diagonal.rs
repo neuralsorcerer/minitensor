@@ -11,7 +11,7 @@ use crate::ops::reduction;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData},
 };
 use std::sync::Arc;
 
@@ -208,6 +208,129 @@ pub fn diagonal(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Res
     }
 
     Ok(output)
+}
+
+/// Build a tensor whose diagonal is `tensor`: the inverse of [`diagonal`].
+///
+/// The last axis of the input becomes a pair of axes at `dim1` and `dim2`, each
+/// of length `n + |offset|`, with the input laid along the diagonal `offset`
+/// names and zeros everywhere else. Every other axis is carried through in
+/// order.
+///
+/// This is the operation that reconstructs a matrix from a factorisation --
+/// `U @ diag_embed(s) @ Vh` for a singular value decomposition, `V @
+/// diag_embed(w) @ V.T` for a symmetric eigendecomposition -- which is why it
+/// arrived with them. Scaling a matrix's columns by broadcasting is cheaper and
+/// is what those routines do internally; this is for when the matrix is what
+/// you actually want.
+pub fn diag_embed(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Result<Tensor> {
+    if tensor.ndim() < 1 {
+        return Err(MinitensorError::invalid_operation(
+            "diag_embed requires tensors with at least 1 dimension",
+        ));
+    }
+    if !tensor.device().is_cpu() {
+        return Err(MinitensorError::invalid_operation(
+            "diag_embed currently supports only CPU tensors",
+        ));
+    }
+
+    // The two new axes are positions in the *output*, which has one more.
+    let out_ndim = tensor.ndim() + 1;
+    let dim1 = normalize_dim(dim1, out_ndim)?;
+    let dim2 = normalize_dim(dim2, out_ndim)?;
+    if dim1 == dim2 {
+        return Err(MinitensorError::invalid_operation(
+            "diag_embed dimensions must be distinct",
+        ));
+    }
+
+    let dims = tensor.shape().dims();
+    let side = dims[dims.len() - 1] + offset.unsigned_abs();
+    let mut batch = dims[..dims.len() - 1].iter();
+    let out_dims: Vec<usize> = (0..out_ndim)
+        .map(|position| {
+            if position == dim1 || position == dim2 {
+                side
+            } else {
+                // One batch axis per position that is not one of the two, in
+                // the order they arrived.
+                *batch.next().expect("one batch axis per remaining position")
+            }
+        })
+        .collect();
+
+    let out_shape = Shape::new(out_dims.clone());
+    let out_strides = Strides::from_shape(&out_shape);
+    let spec = compute_diagonal_spec(&out_dims, out_strides.as_slice(), dim1, dim2, offset)?;
+    debug_assert_eq!(spec.output_dims, dims);
+
+    let dtype = tensor.dtype();
+    let device = tensor.device();
+    let contiguous = tensor.contiguous()?;
+    let mut out_data = TensorData::zeros_on_device(out_shape.numel(), dtype, device);
+
+    if out_shape.numel() > 0 {
+        macro_rules! place {
+            ($accessor:ident, $accessor_mut:ident) => {{
+                let input = contiguous.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error("diag_embed: dtype does not match the input")
+                })?;
+                let output = out_data.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("diag_embed: dtype does not match the output")
+                })?;
+                diagonal_place(input, output, &out_dims, out_strides.as_slice(), &spec);
+            }};
+        }
+        match dtype {
+            DataType::Float32 => place!(as_f32_slice, as_f32_slice_mut),
+            DataType::Float64 => place!(as_f64_slice, as_f64_slice_mut),
+            DataType::Int32 => place!(as_i32_slice, as_i32_slice_mut),
+            DataType::Int64 => place!(as_i64_slice, as_i64_slice_mut),
+            DataType::Bool => place!(as_bool_slice, as_bool_slice_mut),
+        }
+    }
+
+    let mut output = Tensor::new(
+        Arc::new(out_data),
+        out_shape,
+        dtype,
+        device,
+        tensor.requires_grad(),
+    );
+
+    if tensor.requires_grad() {
+        // Whatever reached the diagonal is what reaches the input; the zeros
+        // around it came from nowhere and lead nowhere.
+        output = with_grad_fn(
+            output,
+            Arc::new(crate::autograd::DiagEmbedBackward {
+                offset,
+                dim1: dim1 as isize,
+                dim2: dim2 as isize,
+                input_id: tensor.id(),
+                ids: [tensor.id()],
+            }),
+        )?;
+    }
+
+    Ok(output)
+}
+
+/// NumPy's `diag`: build a matrix from a vector, or read a matrix's diagonal.
+///
+/// One name for the two directions because that is the name everyone reaches
+/// for, and the rank of the argument says unambiguously which was meant.
+/// [`diagonal`] and [`diag_embed`] are the ones that take an axis pair and
+/// batch.
+pub fn diag(tensor: &Tensor, offset: isize) -> Result<Tensor> {
+    match tensor.ndim() {
+        1 => diag_embed(tensor, offset, -2, -1),
+        2 => diagonal(tensor, offset, 0, 1),
+        other => Err(MinitensorError::invalid_operation(format!(
+            "diag expects a 1- or 2-dimensional tensor, got {other} dimensions"
+        ))),
+    }
 }
 
 /// Sum of the diagonal elements along two dimensions.

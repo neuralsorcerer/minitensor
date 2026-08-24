@@ -382,6 +382,14 @@ _GRADCHECK_OPS = [
     ("squeeze", lambda t: t.reshape((1, 9, 1)).squeeze(), _ANY),
     ("to", lambda t: t.to("float64"), _ANY),
     ("norm_default", lambda t: t.norm(), _ANY),
+    # Placing values on a diagonal and reading them back are each other's
+    # derivative, so both directions are checked rather than just the one.
+    ("diag_from_vector", lambda t: t.diag(), _ANY),
+    ("diag_from_matrix", lambda t: t.reshape((3, 3)).diag(), _ANY),
+    ("diag_offset", lambda t: t.diag(2), _ANY),
+    ("diag_embed", lambda t: t.diag_embed(), _ANY),
+    ("diag_embed_offset", lambda t: t.diag_embed(-1), _ANY),
+    ("diag_embed_batched", lambda t: t.reshape((3, 3)).diag_embed(), _ANY),
 ]
 
 # Ops a no-arg probe reaches but this list deliberately does not gradcheck.

@@ -104,34 +104,37 @@ pub(crate) fn compute_diagonal_spec(
     })
 }
 
-pub(crate) fn diagonal_copy<T: Copy + Send + Sync>(
-    input: &[T],
-    output: &mut [T],
-    dims: &[usize],
-    strides: &[usize],
-    spec: &DiagonalSpec,
-) {
-    if output.is_empty() {
-        return;
-    }
-
+/// Walk the diagonal `spec` describes, handing each stop to `visit` as the pair
+/// `(position along the diagonal, offset into the strided tensor)`.
+///
+/// Reading a diagonal out, writing one in, and scattering a gradient back into
+/// one are the same walk over the same index arithmetic; only what happens at
+/// each stop differs. Written out once each they were three places for the
+/// carry across `kept_dims` to be wrong, and three places to fix when it was.
+fn walk_diagonal<F>(dims: &[usize], strides: &[usize], spec: &DiagonalSpec, mut visit: F)
+where
+    F: FnMut(usize, usize),
+{
     let mut axis_sizes: Vec<usize> = spec.kept_dims.iter().map(|&dim| dims[dim]).collect();
     axis_sizes.push(spec.diag_len);
+    if axis_sizes.contains(&0) {
+        return;
+    }
 
     let mut axis_strides: Vec<usize> = spec.kept_dims.iter().map(|&dim| strides[dim]).collect();
     axis_strides.push(spec.diag_stride);
 
     let axes = axis_sizes.len();
     let mut indices = vec![0usize; axes];
-    let mut out_idx = 0usize;
+    let mut along = 0usize;
 
     loop {
-        let mut input_offset = spec.base_offset;
+        let mut offset = spec.base_offset;
         for axis in 0..axes {
-            input_offset += indices[axis] * axis_strides[axis];
+            offset += indices[axis] * axis_strides[axis];
         }
-        output[out_idx] = input[input_offset];
-        out_idx += 1;
+        visit(along, offset);
+        along += 1;
 
         let mut done = true;
         for axis in (0..axes).rev() {
@@ -148,6 +151,38 @@ pub(crate) fn diagonal_copy<T: Copy + Send + Sync>(
     }
 }
 
+/// Read the diagonal out of `input` into a contiguous `output`.
+pub(crate) fn diagonal_copy<T: Copy + Send + Sync>(
+    input: &[T],
+    output: &mut [T],
+    dims: &[usize],
+    strides: &[usize],
+    spec: &DiagonalSpec,
+) {
+    walk_diagonal(dims, strides, spec, |along, offset| {
+        output[along] = input[offset]
+    });
+}
+
+/// Write a contiguous `source` onto the diagonal of `target`.
+///
+/// The inverse of [`diagonal_copy`], and what `diag_embed` is made of. Every
+/// position on a diagonal is distinct, so this assigns rather than accumulates
+/// and needs nothing of the elements but that they can be copied -- which is how
+/// it reaches the `bool` case that the gradient path has no meaning for.
+pub(crate) fn diagonal_place<T: Copy + Send + Sync>(
+    source: &[T],
+    target: &mut [T],
+    dims: &[usize],
+    strides: &[usize],
+    spec: &DiagonalSpec,
+) {
+    walk_diagonal(dims, strides, spec, |along, offset| {
+        target[offset] = source[along]
+    });
+}
+
+/// Add a contiguous `grad_output` onto the diagonal of `grad_input`.
 pub(crate) fn diagonal_scatter<T>(
     grad_output: &[T],
     grad_input: &mut [T],
@@ -157,41 +192,9 @@ pub(crate) fn diagonal_scatter<T>(
 ) where
     T: Copy + Send + Sync + std::ops::AddAssign,
 {
-    if grad_output.is_empty() {
-        return;
-    }
-
-    let mut axis_sizes: Vec<usize> = spec.kept_dims.iter().map(|&dim| dims[dim]).collect();
-    axis_sizes.push(spec.diag_len);
-
-    let mut axis_strides: Vec<usize> = spec.kept_dims.iter().map(|&dim| strides[dim]).collect();
-    axis_strides.push(spec.diag_stride);
-
-    let axes = axis_sizes.len();
-    let mut indices = vec![0usize; axes];
-    let mut out_idx = 0usize;
-
-    loop {
-        let mut input_offset = spec.base_offset;
-        for axis in 0..axes {
-            input_offset += indices[axis] * axis_strides[axis];
-        }
-        grad_input[input_offset] += grad_output[out_idx];
-        out_idx += 1;
-
-        let mut done = true;
-        for axis in (0..axes).rev() {
-            indices[axis] += 1;
-            if indices[axis] < axis_sizes[axis] {
-                done = false;
-                break;
-            }
-            indices[axis] = 0;
-        }
-        if done {
-            break;
-        }
-    }
+    walk_diagonal(dims, strides, spec, |along, offset| {
+        grad_input[offset] += grad_output[along]
+    });
 }
 
 /// # Safety

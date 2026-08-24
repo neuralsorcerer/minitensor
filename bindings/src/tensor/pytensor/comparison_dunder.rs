@@ -86,6 +86,63 @@ impl PyTensor {
         Ok((Self::from_tensor(q), Self::from_tensor(r)))
     }
 
+    /// The Moore-Penrose pseudo-inverse. `rcond` is relative to the largest singular value; `None` uses `max(m, n) * eps`.
+    #[pyo3(signature = (rcond=None))]
+    pub fn pinv(&self, rcond: Option<f64>) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.pinv(rcond).map_err(_convert_error)?,
+        ))
+    }
+
+    /// The number of singular values above the tolerance, as `int64`.
+    #[pyo3(signature = (tol=None))]
+    pub fn matrix_rank(&self, tol: Option<f64>) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.matrix_rank(tol).map_err(_convert_error)?,
+        ))
+    }
+
+    /// The 2-norm condition number: the largest singular value over the smallest.
+    pub fn cond(&self) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.cond().map_err(_convert_error)?,
+        ))
+    }
+
+    /// The least-squares solution of `self @ x = other`, of smallest norm when there are many.
+    #[pyo3(signature = (other, rcond=None))]
+    pub fn lstsq(&self, other: &Bound<PyAny>, rcond: Option<f64>) -> PyResult<Self> {
+        let rhs = tensor_from_py_value(&self.inner, other)?;
+        Ok(Self::from_tensor(
+            self.inner.lstsq(&rhs, rcond).map_err(_convert_error)?,
+        ))
+    }
+
+    /// `self` raised to an integer matrix power. Zero gives the identity; a negative power inverts first.
+    pub fn matrix_power(&self, power: i64) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.matrix_power(power).map_err(_convert_error)?,
+        ))
+    }
+
+    /// A tensor whose diagonal is `self`, the inverse of `diagonal`.
+    #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    pub fn diag_embed(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner
+                .diag_embed(offset, dim1, dim2)
+                .map_err(_convert_error)?,
+        ))
+    }
+
+    /// A matrix from a vector, or the diagonal of a matrix.
+    #[pyo3(signature = (offset=0))]
+    pub fn diag(&self, offset: isize) -> PyResult<Self> {
+        Ok(Self::from_tensor(
+            self.inner.diag(offset).map_err(_convert_error)?,
+        ))
+    }
+
     /// `(U, s, Vh)` for a matrix, with `A = U @ diag(s) @ Vh` and `s` descending. Columns of `U` and rows of `Vh` are determined up to sign.
     #[pyo3(signature = (full_matrices=true))]
     pub fn svd(&self, full_matrices: bool) -> PyResult<(Self, Self, Self)> {
