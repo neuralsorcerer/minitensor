@@ -1513,6 +1513,7 @@ when you already hold the weights and do not want a module:
 | `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy over probabilities. |
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
+| `ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=False)` | Connectionist temporal classification. See below -- it takes more explaining than a table row allows. |
 
 ```python
 import minitensor as mt
@@ -1554,6 +1555,78 @@ True
 0.417
 30.0
 [[-1.0]]
+```
+
+### Connectionist temporal classification
+
+`ctc_loss` is for a model whose output is longer than its target and unaligned
+with it: speech against a transcript, handwriting against characters. Nothing
+says which input step produced which symbol, so the loss is the total
+probability of *every* alignment that collapses to the target, where collapsing
+merges adjacent equal classes and then deletes the blank. That is exponentially
+many paths, summed by a dynamic program over the time axis -- which is why this
+is the one loss here that is not an expression over tensors.
+
+- `log_probs` is `(steps, batch, classes)` and is expected to hold log
+  probabilities already, the output of a `log_softmax` over the class axis.
+  Nothing normalises it here: a caller who has a numerically careful
+  log-softmax should not have it undone and redone.
+- `targets` is either a padded `(batch, length)` block, read up to each row's
+  own target length, or the rows concatenated into a vector -- the second is
+  what a caller with wildly uneven targets wants. It may not contain `blank`,
+  which stands for emitting nothing and so has no reading inside a target.
+- `input_lengths` and `target_lengths` are integer vectors -- `int32` or
+  `int64`, one entry per batch element. Steps beyond a sample's input length take no part in its loss and
+  receive no gradient.
+- `reduction="mean"` divides each loss by its *own* target length before
+  averaging, which is what makes the number comparable across batches with
+  different targets -- so it is not the mean of what `reduction="none"` returns.
+- `zero_infinity=True` replaces the infinite loss of a target too long to fit
+  its input, and its gradient, with zero. That is a data problem rather than a
+  modelling one, and left alone a single such sample takes the whole batch's
+  gradient with it.
+
+Everything runs in the log domain and in `float64` regardless of the input's
+dtype. A path probability is a product of `steps` numbers below one, so at the
+few thousand steps of a real utterance it underflows `float64` many times over;
+an implementation that multiplied probabilities would report that every path
+had probability zero.
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+# Six input steps for a three-symbol target, over an alphabet of four
+# symbols plus the blank at index 0.
+scores = mt.Tensor(
+    [[[0.1, 0.9, 0.2, 0.1, 0.0]]] * 6, dtype="float64", requires_grad=True
+)
+log_probs = mt.log_softmax(scores, -1)
+targets = mt.Tensor([[1, 2, 1]], dtype="int64")
+inputs = mt.Tensor([6], dtype="int64")
+lengths = mt.Tensor([3], dtype="int64")
+
+each = nn.ctc_loss(log_probs, targets, inputs, lengths, reduction="none")
+print(round(float(each.numpy()[0]), 4))
+
+# "mean" divides by the target length, so multiplying it back by the three
+# symbols recovers the same number for this one-element batch.
+averaged = nn.ctc_loss(log_probs, targets, inputs, lengths, reduction="mean")
+print(round(float(averaged.numpy()) * 3, 4))
+
+# The gradient with respect to the log probabilities sums to -1 at every
+# step. Carried back through the softmax that produced them it sums to
+# zero instead, since shifting every score by the same amount changes
+# nothing.
+each.sum().backward()
+gradient = scores.grad.numpy()
+print(max(abs(float(gradient[t].sum())) for t in range(6)) < 1e-12)
+```
+
+```text
+3.8573
+3.8573
+True
 ```
 
 ## 6) Neural network module (`minitensor.nn`)

@@ -8,6 +8,9 @@
 mod classification_impl;
 #[path = "loss/regression.rs"]
 mod regression_impl;
+#[path = "loss/sequence.rs"]
+mod sequence_impl;
 
 pub(crate) use self::classification_impl::*;
 pub use self::regression_impl::*;
+pub use self::sequence_impl::*;

@@ -802,3 +802,37 @@ fn tensor_power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         false,
     ))
 }
+
+/// Gradient function for the CTC loss.
+///
+/// The forward-backward pass already produced the exact gradient of the loss
+/// with respect to `log_probs`, with the reduction's per-sample scaling folded
+/// in, so nothing is recomputed here. What is left is the upstream factor --
+/// and for `"none"` that is one number per batch element, which has to meet the
+/// *batch* axis of a `(steps, batch, classes)` gradient rather than the last
+/// axis that broadcasting from the right would line it up with.
+pub struct CtcLossBackward {
+    pub input_id: TensorId,
+    pub reduction: String,
+    pub gradient: Tensor,
+}
+
+impl GradientFunction for CtcLossBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let scaled = if self.reduction == "none" {
+            let batch = grad_output.numel();
+            let lined_up =
+                crate::ops::shape_ops::reshape(grad_output, Shape::new(vec![1, batch, 1]))?;
+            arithmetic::mul(&self.gradient, &lined_up)?
+        } else {
+            arithmetic::mul(&self.gradient, grad_output)?
+        };
+        let mut gradients = FxHashMap::default();
+        accumulate_grad(&mut gradients, self.input_id, scaled)?;
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}

@@ -43,8 +43,8 @@ use engine::ops::conv2d as conv2d_op;
 use engine::ops::interpolate::{InterpolateMode, interpolate as interpolate_op};
 use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::ops::loss::{
-    focal_loss as focal_loss_op, huber_loss as huber_loss_op, kl_div_loss as kl_div_loss_op,
-    mae_loss as mae_loss_op, smooth_l1_loss as smooth_l1_loss_op,
+    ctc_loss as ctc_loss_op, focal_loss as focal_loss_op, huber_loss as huber_loss_op,
+    kl_div_loss as kl_div_loss_op, mae_loss as mae_loss_op, smooth_l1_loss as smooth_l1_loss_op,
 };
 use engine::ops::pooling::{
     adaptive_avg_pool1d as adaptive_avg_pool1d_op, adaptive_avg_pool2d as adaptive_avg_pool2d_op,
@@ -673,6 +673,36 @@ fn focal_loss_functional(
         alpha,
         gamma,
         reduction,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Connectionist temporal classification: the total probability of every alignment of `targets` to `log_probs`, for a model whose output is longer than its target and unaligned with it. `log_probs` is `(steps, batch, classes)` and is expected to be log probabilities already. `targets` is either a padded `(batch, length)` block or the rows concatenated into a vector, and may not contain the blank class. `reduction="mean"` divides each loss by its own target length before averaging. `zero_infinity` replaces the infinite loss of a target too long to fit its input, and its gradient, with zero.
+#[pyfunction(name = "ctc_loss")]
+#[pyo3(signature = (log_probs, targets, input_lengths, target_lengths, blank=0, reduction=None, zero_infinity=false))]
+#[allow(clippy::too_many_arguments)]
+fn ctc_loss_functional(
+    log_probs: &Bound<PyAny>,
+    targets: &Bound<PyAny>,
+    input_lengths: &Bound<PyAny>,
+    target_lengths: &Bound<PyAny>,
+    blank: usize,
+    reduction: Option<&str>,
+    zero_infinity: bool,
+) -> PyResult<PyTensor> {
+    let probabilities = borrow_tensor(log_probs)?;
+    let labels = PyTensor::from_python_value(targets)?;
+    let inputs = PyTensor::from_python_value(input_lengths)?;
+    let lengths = PyTensor::from_python_value(target_lengths)?;
+    let result = ctc_loss_op(
+        probabilities.tensor(),
+        labels.tensor(),
+        inputs.tensor(),
+        lengths.tensor(),
+        blank,
+        reduction.unwrap_or("mean"),
+        zero_infinity,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

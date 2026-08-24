@@ -39,7 +39,7 @@ pub(crate) const CHUNK: usize = 1024;
 /// With recording off the loss no longer propagates `requires_grad` on its
 /// own, which is what this decides instead -- call it *before* opening the
 /// guard, then mark the finished loss with `requires_grad_(true)`.
-fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
+pub(crate) fn manual_backward_needed(inputs: &[&Tensor]) -> bool {
     crate::autograd::is_grad_enabled() && inputs.iter().any(|t| t.requires_grad())
 }
 
