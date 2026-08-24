@@ -59,6 +59,53 @@ pub struct InterpolateBackward {
     pub align_corners: bool,
 }
 
+/// Gradient of [`crate::ops::grid_sample::grid_sample`], for both of its
+/// inputs.
+///
+/// The taps are recomputed rather than carried. Finding them again costs
+/// exactly what the forward pass paid, which is less than storing a
+/// `2^axes`-wide weight table for every output position -- and much less when
+/// only one of the two gradients is wanted, which is the usual case.
+pub struct GridSampleBackward {
+    pub input_ids: [TensorId; 2],
+    /// Which of [input, grid] actually need a gradient. A warp against a fixed
+    /// grid needs only the first, and a spatial transformer reading a frozen
+    /// feature map needs only the second.
+    pub input_requires_grad: [bool; 2],
+    pub input: Tensor,
+    pub grid: Tensor,
+    pub mode: crate::ops::grid_sample::SampleMode,
+    pub padding: crate::ops::grid_sample::Padding,
+    pub align_corners: bool,
+}
+
+impl GradientFunction for GridSampleBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let (for_input, for_grid) = crate::ops::grid_sample::grid_sample_backward(
+            &self.input,
+            &self.grid,
+            grad_output,
+            self.input_requires_grad,
+            self.mode,
+            self.padding,
+            self.align_corners,
+        )?;
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+        if let Some(gradient) = for_input {
+            accumulate_grad(&mut gradients, self.input_ids[0], gradient)?;
+        }
+        if let Some(gradient) = for_grid {
+            accumulate_grad(&mut gradients, self.input_ids[1], gradient)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
 macro_rules! interpolate_backward {
     ($name:ident, $ty:ty, $accessor:ident, $from_vec:ident) => {
         fn $name(

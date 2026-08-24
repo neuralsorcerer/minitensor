@@ -221,6 +221,7 @@ _FUNCTIONAL_ONLY = (
     "kl_div",
     "focal_loss",
     "ctc_loss",
+    "grid_sample",
     # Gradient utilities. `nn` is the conventional place to look for these,
     # so they stay under `mt.nn` rather than becoming `mt.clip_grad_norm_`.
     "clip_grad_norm_",

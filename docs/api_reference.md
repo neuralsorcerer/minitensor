@@ -1514,6 +1514,7 @@ when you already hold the weights and do not want a module:
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
 | `ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=False)` | Connectionist temporal classification. See below -- it takes more explaining than a table row allows. |
+| `grid_sample(input, grid, mode="bilinear", padding_mode="zeros", align_corners=False)` | Read `input` at the coordinates in `grid`, differentiably in both. See below. |
 
 ```python
 import minitensor as mt
@@ -1555,6 +1556,69 @@ True
 0.417
 30.0
 [[-1.0]]
+```
+
+### Sampling at coordinates
+
+`grid_sample` reads its input at the normalised coordinates in a grid, and
+differentiates with respect to *those coordinates* as well as the input. That
+is the whole point: it is what makes a spatial transformer, an optical-flow
+warp or a deformable convolution trainable, because the network can learn where
+to look rather than only what to do with what it found. `interpolate` resamples
+onto a regular grid it works out for you; this takes the grid as an argument.
+
+- `input` is `(batch, channels, height, width)` or
+  `(batch, channels, depth, height, width)`. `grid` matches its rank and holds
+  one coordinate per spatial axis in its last position; the output takes its
+  shape from the grid, `(batch, channels, ...grid spatial)`.
+- The grid's last axis is in `x, y` order -- and `x, y, z` for a volume -- which
+  is the **reverse** of the `H, W` (or `D, H, W`) it indexes. Every framework
+  does this and reading it the other way transposes the output silently.
+- Coordinates run from `-1` to `1` across the input, whatever its size, so one
+  grid works against several resolutions. `align_corners` decides whether those
+  two values name the centres of the corner samples or their outer edges.
+  Neither is more correct; they differ by half a pixel, and a model trained
+  under one reads the wrong place under the other.
+- `padding_mode` says what lies outside: `"zeros"` reads nothing there,
+  `"border"` holds the edge value, `"reflection"` folds back inside. The last
+  two move the coordinate before any neighbour is chosen; `"zeros"` instead
+  drops the individual neighbours that fall outside, which is why a coordinate
+  half a pixel past the edge still reads half of the edge sample and half of
+  nothing.
+- `mode="nearest"` takes the single closest sample. Its gradient in the
+  coordinate is exactly zero -- rounding is flat between samples -- so a model
+  that has to learn *where* to look needs `"bilinear"`.
+
+Folding and clamping are not smooth, and the coordinate gradient says so: one
+held against an edge by `"border"` moves the output not at all, and one folded
+back by `"reflection"` moves it the other way. Both are invisible in the
+forward pass, which is why they are worth stating.
+
+Bicubic sampling is not here, for the same reason `interpolate` stops at
+linear: a third resampling rule belongs in both or in neither.
+
+```python
+import minitensor as mt
+from minitensor import nn
+
+image = mt.Tensor([[[[0.0, 1.0, 2.0, 3.0]]]], dtype="float64")
+
+# x = -1 is sample 0's centre when the corners are aligned; -0.5 is three
+# quarters of the way from sample 0 to sample 1.
+grid = mt.Tensor([[[[-0.5, 0.0]]]], dtype="float64", requires_grad=True)
+read = nn.grid_sample(image, grid, align_corners=True)
+print(round(float(read.numpy()[0, 0, 0, 0]), 4))
+
+# The gradient in the coordinate is the local slope of the image, carried
+# through the normalisation: one unit per sample, times 3/2 samples per unit
+# of coordinate.
+read.sum().backward()
+print(round(float(grid.grad.numpy()[0, 0, 0, 0]), 4))
+```
+
+```text
+0.75
+1.5
 ```
 
 ### Connectionist temporal classification

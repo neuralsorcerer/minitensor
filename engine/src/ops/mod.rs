@@ -11,6 +11,7 @@ pub mod binary;
 pub mod comparison;
 pub mod conv;
 pub mod einsum;
+pub mod grid_sample;
 pub mod interpolate;
 pub(crate) mod kernels;
 pub mod linalg;

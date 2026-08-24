@@ -40,6 +40,7 @@ use engine::ops::conv_transpose1d as conv_transpose1d_op;
 use engine::ops::conv_transpose2d as conv_transpose2d_op;
 use engine::ops::conv1d as conv1d_op;
 use engine::ops::conv2d as conv2d_op;
+use engine::ops::grid_sample::{Padding as GridPadding, SampleMode, grid_sample as grid_sample_op};
 use engine::ops::interpolate::{InterpolateMode, interpolate as interpolate_op};
 use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::ops::loss::{
@@ -703,6 +704,29 @@ fn ctc_loss_functional(
         blank,
         reduction.unwrap_or("mean"),
         zero_infinity,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// Read `input` at the normalised coordinates in `grid`, and differentiate with respect to both. `input` is `(batch, channels, height, width)` or `(batch, channels, depth, height, width)`; `grid` matches its rank and holds one coordinate per spatial axis in its last, in `x, y` (or `x, y, z`) order -- the reverse of the axes they index. Coordinates run from -1 to 1 across the input, with `align_corners` deciding whether those name the corner samples' centres or their outer edges. `padding_mode` says what lies outside: `"zeros"`, `"border"` or `"reflection"`. `mode="nearest"` has no gradient in the coordinates; `"bilinear"` is the one a spatial transformer can train through.
+#[pyfunction(name = "grid_sample")]
+#[pyo3(signature = (input, grid, mode="bilinear", padding_mode="zeros", align_corners=false))]
+fn grid_sample_functional(
+    input: &Bound<PyAny>,
+    grid: &Bound<PyAny>,
+    mode: &str,
+    padding_mode: &str,
+    align_corners: bool,
+) -> PyResult<PyTensor> {
+    let image = borrow_tensor(input)?;
+    let coordinates = borrow_tensor(grid)?;
+    let result = grid_sample_op(
+        image.tensor(),
+        coordinates.tensor(),
+        SampleMode::from_name(mode).map_err(_convert_error)?,
+        GridPadding::from_name(padding_mode).map_err(_convert_error)?,
+        align_corners,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

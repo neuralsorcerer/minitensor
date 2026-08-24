@@ -1934,6 +1934,7 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(kl_div_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(focal_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(ctc_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(grid_sample_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(log_cosh_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(
         binary_cross_entropy_functional,
