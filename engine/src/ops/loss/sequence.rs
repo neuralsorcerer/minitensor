@@ -35,8 +35,9 @@
 //! `f32` after a few dozen steps and `f64` after a few hundred -- and a real
 //! utterance is thousands of steps. The recursion therefore runs on log
 //! probabilities throughout, adding where the definition multiplies and using
-//! `log_add` where it adds. `log_add` never forms either exponential and never
-//! subtracts, so nothing cancels.
+//! [`log_add_exp`] where it adds -- the same one the elementwise `logaddexp`
+//! and the cumulative form use, rather than a third copy. It never forms either
+//! exponential and never subtracts, so nothing cancels.
 //!
 //! The whole computation is in `f64` regardless of the input's dtype. It is
 //! `O(T x S)` per sample against the `O(T x C)` of the layer that produced the
@@ -57,27 +58,13 @@ use super::regression_impl::manual_backward_needed;
 use crate::{
     autograd::{CtcLossBackward, NoGradGuard, with_grad_fn},
     error::{MinitensorError, Result},
+    ops::util::log_add_exp,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
 use std::sync::Arc;
 
 const NEG_INF: f64 = f64::NEG_INFINITY;
-
-/// `log(exp(a) + exp(b))`, without forming either exponential.
-///
-/// `ln_1p` rather than `ln` of the sum: when the two terms are far apart the
-/// ratio is tiny and `ln(1 + x)` is the form that keeps its digits.
-fn log_add(a: f64, b: f64) -> f64 {
-    if a == NEG_INF {
-        return b;
-    }
-    if b == NEG_INF {
-        return a;
-    }
-    let (high, low) = if a > b { (a, b) } else { (b, a) };
-    high + (low - high).exp().ln_1p()
-}
 
 /// One sample's forward-backward over the extended label sequence.
 ///
@@ -128,10 +115,10 @@ fn align(
         for s in 0..width {
             let mut total = previous[s];
             if s >= 1 {
-                total = log_add(total, previous[s - 1]);
+                total = log_add_exp(total, previous[s - 1]);
             }
             if skippable[s] {
-                total = log_add(total, previous[s - 2]);
+                total = log_add_exp(total, previous[s - 2]);
             }
             current[s] = total + row[extended[s]];
         }
@@ -141,7 +128,7 @@ fn align(
     let last = (steps - 1) * width;
     let mut evidence = alpha[last + width - 1];
     if width > 1 {
-        evidence = log_add(evidence, alpha[last + width - 2]);
+        evidence = log_add_exp(evidence, alpha[last + width - 2]);
     }
     if !evidence.is_finite() || !want_gradient {
         return (-evidence, empty);
@@ -159,10 +146,10 @@ fn align(
         for s in 0..width {
             let mut total = later[s] + row[extended[s]];
             if s + 1 < width {
-                total = log_add(total, later[s + 1] + row[extended[s + 1]]);
+                total = log_add_exp(total, later[s + 1] + row[extended[s + 1]]);
             }
             if s + 2 < width && skippable[s + 2] {
-                total = log_add(total, later[s + 2] + row[extended[s + 2]]);
+                total = log_add_exp(total, later[s + 2] + row[extended[s + 2]]);
             }
             current[s] = total;
         }
@@ -562,14 +549,14 @@ mod tests {
             (-12.25, -12.25),
             (-100.0, -101.5),
         ] {
-            assert!((log_add(a, b) - naively(a, b)).abs() < 1e-12);
+            assert!((log_add_exp(a, b) - naively(a, b)).abs() < 1e-12);
         }
     }
 
     #[test]
     fn log_add_is_symmetric() {
         for &(a, b) in &[(-1.0, -900.0), (-900.0, -1.0), (-3.5, -3.5)] {
-            assert_eq!(log_add(a, b), log_add(b, a));
+            assert_eq!(log_add_exp(a, b), log_add_exp(b, a));
         }
     }
 
@@ -580,15 +567,15 @@ mod tests {
         // reason the recursion is in the log domain.
         let (a, b) = (-5000.0, -5001.0);
         assert!(naively(a, b).is_infinite());
-        let got = log_add(a, b);
+        let got = log_add_exp(a, b);
         assert!((got - (a + (1.0f64 + (-1.0f64).exp()).ln())).abs() < 1e-12);
     }
 
     #[test]
     fn an_impossible_term_contributes_nothing() {
-        assert_eq!(log_add(NEG_INF, -3.0), -3.0);
-        assert_eq!(log_add(-3.0, NEG_INF), -3.0);
-        assert_eq!(log_add(NEG_INF, NEG_INF), NEG_INF);
+        assert_eq!(log_add_exp(NEG_INF, -3.0), -3.0);
+        assert_eq!(log_add_exp(-3.0, NEG_INF), -3.0);
+        assert_eq!(log_add_exp(NEG_INF, NEG_INF), NEG_INF);
     }
 
     #[test]

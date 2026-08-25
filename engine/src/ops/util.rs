@@ -15,6 +15,7 @@ use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use num_traits::Float;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -455,6 +456,35 @@ pub(crate) fn stable_sigmoid_f64(x: f64) -> f64 {
         let exp_pos = x.exp();
         exp_pos / (1.0 + exp_pos)
     }
+}
+
+/// `log(exp(a) + exp(b))`, without forming either exponential.
+///
+/// One implementation for every caller that needs it -- the elementwise
+/// `logaddexp`, the CTC forward-backward, and the cumulative form. There were
+/// two before, and they were not equally right.
+///
+/// `ln_1p` rather than `ln` of the sum is the whole point. Writing it as
+/// `max + ln(exp(a - max) + exp(b - max))` adds a number near 1 to a tiny one
+/// and then takes the logarithm, so the tiny one is rounded away entirely:
+/// `logaddexp(1e-20, -39)` came back as `1e-20` where the answer is `1.15e-17`,
+/// three orders out. `ln(1 + x)` evaluated as `ln_1p(x)` keeps it.
+///
+/// The infinite guard is not decoration either. Without it `+inf` against
+/// `+inf` reaches `inf - inf`, which is NaN, and a sum of two certainties comes
+/// back as no answer at all.
+#[inline]
+pub(crate) fn log_add_exp<T: Float>(a: T, b: T) -> T {
+    if a.is_nan() || b.is_nan() {
+        return T::nan();
+    }
+    let (high, low) = if a > b { (a, b) } else { (b, a) };
+    if high.is_infinite() {
+        // `+inf` swallows anything; `-inf` here means both were `-inf`, and
+        // the log of nothing at all is still `-inf`.
+        return high;
+    }
+    high + (low - high).exp().ln_1p()
 }
 
 /// Map a linear index into an output tensor onto the corresponding element of

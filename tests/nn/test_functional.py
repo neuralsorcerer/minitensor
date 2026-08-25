@@ -262,6 +262,37 @@ def test_softplus_matches_numpy_and_grad():
     np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-5)
 
 
+def test_logaddexp_keeps_a_correction_far_below_the_larger_term():
+    """`log(exp(a) + exp(b))` written as `max + log(exp(a-max) + exp(b-max))`
+    adds a number near one to a tiny one and then takes the logarithm, which
+    rounds the tiny one away entirely. `logaddexp(1e-20, -39)` came back as
+    `1e-20` where the answer is `1.156e-17` -- three orders out -- until the
+    shared implementation switched to `log1p`.
+
+    Both terms are ordinary here. What makes the case hard is only that they
+    are far apart, which is the common case for log-probabilities.
+    """
+    a = np.array([1e-20, 1e-30, -5.0], dtype=np.float64)
+    b = np.array([-39.0, -80.0, -300.0], dtype=np.float64)
+    # float64 explicitly: `mt.Tensor` defaults to float32 whatever the array
+    # holds, and at float32 precision the correction this test is about is
+    # below the noise floor.
+    got = mt.Tensor(a, dtype="float64").logaddexp(mt.Tensor(b, dtype="float64")).numpy()
+    np.testing.assert_allclose(got, np.logaddexp(a, b), rtol=1e-15)
+    # And the correction is genuinely there rather than rounded off.
+    assert got[0] != a[0]
+
+
+def test_logaddexp_of_two_infinities_is_infinite_rather_than_nan():
+    """`inf - inf` is NaN, so the shift-by-the-maximum has to be skipped when
+    the maximum is infinite: a sum of two certainties is a certainty."""
+    a = np.array([np.inf, np.inf, -np.inf], dtype=np.float64)
+    b = np.array([np.inf, 1.0, -np.inf], dtype=np.float64)
+    got = mt.Tensor(a, dtype="float64").logaddexp(mt.Tensor(b, dtype="float64")).numpy()
+    assert np.array_equal(got, np.logaddexp(a, b))
+    assert not np.isnan(got).any()
+
+
 def test_logaddexp_matches_numpy_and_grad():
     a_vals = np.array([[1.0, 2.0, -100.0], [0.5, -0.75, 3.0]], dtype=np.float32)
     b_vals = np.array([[0.0, -2.0, -100.0], [1.5, 0.25, -4.0]], dtype=np.float32)

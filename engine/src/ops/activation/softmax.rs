@@ -38,20 +38,7 @@ pub(crate) fn logaddexp_f32(
         lhs.shape(),
         rhs.shape(),
         output_shape,
-        |a: f32, b: f32| {
-            if a.is_nan() || b.is_nan() {
-                f32::NAN
-            } else {
-                let max = a.max(b);
-                if max.is_infinite() {
-                    max
-                } else {
-                    let exp_a = (a - max).exp();
-                    let exp_b = (b - max).exp();
-                    max + (exp_a + exp_b).ln()
-                }
-            }
-        },
+        crate::ops::util::log_add_exp::<f32>,
     )?;
     Ok(TensorData::from_vec::<f32>(
         out,
@@ -78,20 +65,7 @@ pub(crate) fn logaddexp_f64(
         lhs.shape(),
         rhs.shape(),
         output_shape,
-        |a: f64, b: f64| {
-            if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                let max = a.max(b);
-                if max.is_infinite() {
-                    max
-                } else {
-                    let exp_a = (a - max).exp();
-                    let exp_b = (b - max).exp();
-                    max + (exp_a + exp_b).ln()
-                }
-            }
-        },
+        crate::ops::util::log_add_exp::<f64>,
     )?;
     Ok(TensorData::from_vec::<f64>(
         out,
