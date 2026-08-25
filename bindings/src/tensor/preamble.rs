@@ -9,6 +9,8 @@
 // field and inherit this file's imports via `use super::*`.
 #[path = "pytensor/arithmetic.rs"]
 mod arithmetic;
+#[path = "pytensor/bitwise.rs"]
+mod bitwise;
 #[path = "pytensor/comparison.rs"]
 mod comparison;
 #[path = "pytensor/comparison_dunder.rs"]

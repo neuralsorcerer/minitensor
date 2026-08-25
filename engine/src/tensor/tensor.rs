@@ -10,7 +10,7 @@
 //! access to `Tensor`'s private fields; everything public is re-exported up to
 //! `crate::tensor`.
 
-pub use crate::tensor::dtype::DataType;
+pub use crate::tensor::dtype::{DataType, TensorElement};
 pub use crate::tensor::shape::{Shape, Strides};
 pub use crate::tensor::storage::{DataMut, TensorData};
 

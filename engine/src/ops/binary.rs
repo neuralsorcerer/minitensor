@@ -6,7 +6,7 @@
 
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{DataType, Tensor},
+    tensor::{DataType, Shape, Tensor},
 };
 use std::borrow::Cow;
 
@@ -21,6 +21,10 @@ pub enum BinaryOpKind {
     Rem,
     Maximum,
     Minimum,
+    /// `&`, `|`, `^`: integers and booleans only, result in the promoted dtype.
+    Bitwise,
+    /// `<<`, `>>`: integers only, result in the promoted dtype.
+    Shift,
 }
 
 /// Cast the two operands using the promotion rules for the supplied binary operation.
@@ -33,6 +37,30 @@ pub fn coerce_binary_operands<'a>(
     let lhs_cast = cast_tensor_to_dtype(lhs, result_dtype)?;
     let rhs_cast = cast_tensor_to_dtype(rhs, result_dtype)?;
     Ok((lhs_cast, rhs_cast, result_dtype))
+}
+
+/// The preamble every non-differentiable binary op shares: reject a device
+/// mismatch, promote both operands to the result dtype, and work out the
+/// broadcast output shape.
+///
+/// Differentiable ops keep their own copy because the graph bookkeeping they
+/// interleave (the zero-element early return in particular) has to happen
+/// between these steps.
+pub fn coerce_and_broadcast<'a>(
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+    op: BinaryOpKind,
+) -> Result<(Cow<'a, Tensor>, Cow<'a, Tensor>, DataType, Shape)> {
+    if lhs.device() != rhs.device() {
+        return Err(MinitensorError::device_mismatch(
+            format!("{:?}", lhs.device()),
+            format!("{:?}", rhs.device()),
+        ));
+    }
+
+    let (lhs_cast, rhs_cast, dtype) = coerce_binary_operands(lhs, rhs, op)?;
+    let output_shape = lhs_cast.shape().broadcast_with(rhs_cast.shape())?;
+    Ok((lhs_cast, rhs_cast, dtype, output_shape))
 }
 
 fn cast_tensor_to_dtype<'a>(tensor: &'a Tensor, dtype: DataType) -> Result<Cow<'a, Tensor>> {
@@ -66,6 +94,27 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
             }
         }
         Div => Ok(promote_division_dtype(lhs, rhs)),
+        // A bit pattern is what these operate on, so a float operand has
+        // nothing to offer them; that is where NumPy and PyTorch stop too.
+        Bitwise => {
+            reject_float_operand(lhs, rhs, "Bitwise AND, OR and XOR")?;
+            Ok(promote_arithmetic_dtype(lhs, rhs))
+        }
+        // Shifting additionally needs somewhere for the shifted bits to go, and
+        // a boolean has one bit. `mask << 1` promotes to whatever the shift
+        // count is; only two booleans leave no integer result type.
+        Shift => {
+            reject_float_operand(lhs, rhs, "Bit shifts")?;
+            let promoted = promote_arithmetic_dtype(lhs, rhs);
+            if promoted == DataType::Bool {
+                Err(MinitensorError::invalid_operation(
+                    "Bit shifts are not defined for two boolean tensors; cast one \
+                     operand to an integer dtype first",
+                ))
+            } else {
+                Ok(promoted)
+            }
+        }
         // Unlike true division, floor division and remainder keep integer
         // operands integral (Python's semantics).
         FloorDiv | Rem => {
@@ -80,6 +129,15 @@ fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) ->
             }
         }
     }
+}
+
+fn reject_float_operand(lhs: DataType, rhs: DataType, what: &str) -> Result<()> {
+    if lhs.is_float() || rhs.is_float() {
+        return Err(MinitensorError::invalid_operation(format!(
+            "{what} are only defined for boolean and integer tensors, got {lhs} and {rhs}"
+        )));
+    }
+    Ok(())
 }
 
 fn promote_arithmetic_dtype(lhs: DataType, rhs: DataType) -> DataType {
@@ -177,6 +235,44 @@ mod tests {
         assert!(
             result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::Rem).is_err()
         );
+    }
+
+    #[test]
+    fn test_bitwise_and_shift_promotion() {
+        // `&`, `|`, `^` promote like `+` over the dtypes they accept.
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::Bitwise)
+                .unwrap(),
+            DataType::Bool
+        );
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Int32, BinaryOpKind::Bitwise)
+                .unwrap(),
+            DataType::Int32
+        );
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Int32, DataType::Int64, BinaryOpKind::Bitwise)
+                .unwrap(),
+            DataType::Int64
+        );
+        // Shifts agree with them everywhere a result type exists...
+        assert_eq!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Int64, BinaryOpKind::Shift)
+                .unwrap(),
+            DataType::Int64
+        );
+        // ...and part company only on two booleans, which have no bits to move.
+        assert!(
+            result_dtype_for_binary_op(DataType::Bool, DataType::Bool, BinaryOpKind::Shift)
+                .is_err()
+        );
+        // Floats are out for both.
+        for float in [DataType::Float32, DataType::Float64] {
+            for kind in [BinaryOpKind::Bitwise, BinaryOpKind::Shift] {
+                assert!(result_dtype_for_binary_op(float, DataType::Int64, kind).is_err());
+                assert!(result_dtype_for_binary_op(DataType::Int64, float, kind).is_err());
+            }
+        }
     }
 
     #[test]

@@ -509,6 +509,7 @@ unary_forwarders!(
     log10 => "Element-wise base-10 logarithm.",
     log1p => "Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.",
     log2 => "Element-wise base-2 logarithm.",
+    logical_not => "Element-wise logical NOT over truth values, giving a boolean tensor.",
     ravel => "A contiguous 1-D view of every element, in row-major order.",
     reciprocal => "Element-wise `1 / x`.",
     relu => "Element-wise `max(x, 0)`.",
@@ -526,6 +527,11 @@ unary_forwarders!(
 );
 
 binary_forwarders!(
+    bitwise_and => "Element-wise bitwise AND, and logical AND for booleans.",
+    bitwise_left_shift => "Element-wise left shift. Counts at or past the dtype's width give 0.",
+    bitwise_or => "Element-wise bitwise OR, and logical OR for booleans.",
+    bitwise_right_shift => "Element-wise arithmetic right shift, preserving sign. Counts at or past the dtype's width give 0 for non-negative values and -1 for negative ones.",
+    bitwise_xor => "Element-wise bitwise XOR, and logical XOR for booleans.",
     bmm => "Batched matrix product of two 3-D tensors with matching batch sizes.",
     dot => "Inner product of two 1-D tensors.",
     eq => "Element-wise equality, giving a boolean tensor.",
@@ -534,6 +540,9 @@ binary_forwarders!(
     gt => "Element-wise `>`, giving a boolean tensor.",
     le => "Element-wise `<=`, giving a boolean tensor.",
     logaddexp => "`log(exp(a) + exp(b))`, shifted so neither term overflows.",
+    logical_and => "Element-wise logical AND over truth values, giving a boolean tensor.",
+    logical_or => "Element-wise logical OR over truth values, giving a boolean tensor.",
+    logical_xor => "Element-wise logical XOR over truth values, giving a boolean tensor.",
     lt => "Element-wise `<`, giving a boolean tensor.",
     matmul => "Matrix product, broadcasting over leading batch dimensions.",
     maximum => "Element-wise larger of two tensors.",
@@ -1968,7 +1977,16 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(exp, parent)?)?;
     parent.add_function(wrap_pyfunction!(log, parent)?)?;
     parent.add_function(wrap_pyfunction!(pow, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_and, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_left_shift, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_not, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_or, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_right_shift, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_xor, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logical_and, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logical_not, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logical_or, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logical_xor, parent)?)?;
     parent.add_function(wrap_pyfunction!(matmul, parent)?)?;
     parent.add_function(wrap_pyfunction!(eq, parent)?)?;
     parent.add_function(wrap_pyfunction!(ne, parent)?)?;

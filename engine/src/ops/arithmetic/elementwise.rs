@@ -609,43 +609,4 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
-/// Element-wise bitwise NOT (`~`): logical NOT for bool tensors, two's
-/// complement NOT for integer tensors, rejected for floats.
-/// Non-differentiable by construction.
-pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
-    /// Applies `!` for one dtype into a fresh buffer, parallel above
-    /// `PAR_THRESHOLD`.
-    macro_rules! not_arm {
-        ($accessor:ident, $dtype:ident, $tyname:literal) => {{
-            let input = tensor.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get ",
-                    $tyname,
-                    " slice from tensor"
-                ))
-            })?;
-            TensorData::from_vec(unary_map(input, |i| !i), DataType::$dtype, tensor.device())
-        }};
-    }
-
-    let output_data = match tensor.dtype() {
-        DataType::Bool => not_arm!(as_bool_slice, Bool, "bool"),
-        DataType::Int32 => not_arm!(as_i32_slice, Int32, "i32"),
-        DataType::Int64 => not_arm!(as_i64_slice, Int64, "i64"),
-        DataType::Float32 | DataType::Float64 => {
-            return Err(MinitensorError::invalid_operation(
-                "Bitwise NOT only supported for boolean and integer tensors",
-            ));
-        }
-    };
-
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        false,
-    ))
-}
-
 // Helper functions for type-specific operations

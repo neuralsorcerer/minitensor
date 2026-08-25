@@ -108,12 +108,6 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    fn __invert__(&self) -> PyResult<Self> {
-        use engine::ops::arithmetic::bitwise_not;
-        let result = bitwise_not(&self.inner).map_err(_convert_error)?;
-        Ok(Self::from_tensor(result))
-    }
-
     /// Element-wise division rounded towards negative infinity, matching Python's `//`.
     pub fn floor_divide(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.__floordiv__(other)
@@ -122,10 +116,5 @@ impl PyTensor {
     /// Element-wise modulo taking the sign of the divisor, matching Python's `%`.
     pub fn remainder(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.__mod__(other)
-    }
-
-    /// Element-wise bitwise complement, and logical NOT for booleans.
-    pub fn bitwise_not(&self) -> PyResult<Self> {
-        self.__invert__()
     }
 }

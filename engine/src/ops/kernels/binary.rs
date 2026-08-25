@@ -12,7 +12,7 @@ use crate::ops::map::{
 use crate::ops::simd::*;
 use crate::{
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Strides, Tensor, TensorData},
+    tensor::{DataType, Shape, Strides, Tensor, TensorData, TensorElement},
 };
 use smallvec::SmallVec;
 use smallvec::smallvec;
@@ -562,6 +562,69 @@ where
         unsafe { build_vec_with::<U, Infallible, _>(numel, fill) }.unwrap_or_else(|e| match e {});
     Ok(out)
 }
+
+/// [`broadcast_binary_map`] wrapped as `TensorData`, with the output dtype
+/// taken from the closure's return type rather than passed in beside it.
+///
+/// The families whose kernels are per-dtype *closures* rather than one fixed
+/// operator -- comparison, bitwise -- all need the same five lines, and a
+/// dtype argument they could get wrong. `U: TensorElement` makes the tag and
+/// the buffer impossible to disagree.
+pub(crate) fn broadcast_binary_data<T, U, F>(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    lhs_data: &[T],
+    rhs_data: &[T],
+    output_shape: &Shape,
+    op: F,
+) -> Result<TensorData>
+where
+    T: Copy + Send + Sync,
+    U: TensorElement,
+    F: Fn(T, T) -> U + Send + Sync,
+{
+    let out = broadcast_binary_map(
+        lhs_data,
+        rhs_data,
+        lhs.shape(),
+        rhs.shape(),
+        output_shape,
+        op,
+    )?;
+    Ok(TensorData::from_vec(out, U::DTYPE, lhs.device()))
+}
+
+/// One arm of a dtype-dispatched binary kernel: fetch both operands' slices
+/// for the dtype named by `$accessor` and feed them to
+/// [`broadcast_binary_data`].
+///
+/// Expands to an expression of type `TensorData`, so a `match` over
+/// [`DataType`] reads as one arm per dtype.
+macro_rules! broadcast_binary_arm {
+    ($lhs:expr, $rhs:expr, $out_shape:expr, $accessor:ident, $tyname:literal, $op:expr) => {{
+        let lhs = $lhs;
+        let rhs = $rhs;
+        let lhs_slice = lhs.data().$accessor().ok_or_else(|| {
+            $crate::error::MinitensorError::internal_error(concat!(
+                "Failed to get ",
+                $tyname,
+                " slice from lhs tensor"
+            ))
+        })?;
+        let rhs_slice = rhs.data().$accessor().ok_or_else(|| {
+            $crate::error::MinitensorError::internal_error(concat!(
+                "Failed to get ",
+                $tyname,
+                " slice from rhs tensor"
+            ))
+        })?;
+        $crate::ops::kernels::broadcast_binary_data(
+            lhs, rhs, lhs_slice, rhs_slice, $out_shape, $op,
+        )?
+    }};
+}
+
+pub(crate) use broadcast_binary_arm;
 
 #[cfg(test)]
 mod tests {

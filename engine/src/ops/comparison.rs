@@ -7,54 +7,40 @@
 use crate::{
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
-    tensor::{DataType, Shape, Tensor, TensorData},
+    ops::kernels::broadcast_binary_arm,
+    tensor::{DataType, Tensor},
 };
 use std::sync::Arc;
 
-/// Generates a dtype-specialized comparison kernel: fetch both input slices
-/// for the dtype and apply `op` element-wise with broadcasting into a fresh
-/// bool buffer. The generic-output `broadcast_binary_map` replaces the
-/// bool-specialized broadcast walker this file used to duplicate.
-macro_rules! cmp_kernel {
-    ($name:ident, $ty:ty, $accessor:ident, $tyname:literal) => {
-        fn $name(
-            lhs: &Tensor,
-            rhs: &Tensor,
-            output_shape: &Shape,
-            op: impl Fn($ty, $ty) -> bool + Sync + Send,
-        ) -> Result<TensorData> {
-            let lhs_slice = lhs.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get ",
-                    $tyname,
-                    " slice from lhs tensor"
-                ))
-            })?;
-            let rhs_slice = rhs.data().$accessor().ok_or_else(|| {
-                MinitensorError::internal_error(concat!(
-                    "Failed to get ",
-                    $tyname,
-                    " slice from rhs tensor"
-                ))
-            })?;
-            let out = crate::ops::kernels::broadcast_binary_map(
-                lhs_slice,
-                rhs_slice,
-                lhs.shape(),
-                rhs.shape(),
-                output_shape,
-                op,
-            )?;
-            Ok(TensorData::from_vec(out, DataType::Bool, lhs.device()))
+/// Dispatches a comparison over the promoted dtype, producing a boolean
+/// tensor. The five arms differ only in which slice accessor they name; the
+/// broadcasting walk and the `TensorData` wrapping come from
+/// [`crate::ops::kernels::broadcast_binary_arm`], which this file used to
+/// carry its own bool-specialized copy of.
+macro_rules! cmp_dispatch {
+    ($lhs:expr, $rhs:expr, $dtype:expr, $out_shape:expr, $op:expr) => {{
+        let lhs = $lhs;
+        let rhs = $rhs;
+        let out_shape = $out_shape;
+        match $dtype {
+            DataType::Float32 => {
+                broadcast_binary_arm!(lhs, rhs, out_shape, as_f32_slice, "f32", $op)
+            }
+            DataType::Float64 => {
+                broadcast_binary_arm!(lhs, rhs, out_shape, as_f64_slice, "f64", $op)
+            }
+            DataType::Int32 => {
+                broadcast_binary_arm!(lhs, rhs, out_shape, as_i32_slice, "i32", $op)
+            }
+            DataType::Int64 => {
+                broadcast_binary_arm!(lhs, rhs, out_shape, as_i64_slice, "i64", $op)
+            }
+            DataType::Bool => {
+                broadcast_binary_arm!(lhs, rhs, out_shape, as_bool_slice, "bool", $op)
+            }
         }
-    };
+    }};
 }
-
-cmp_kernel!(cmp_f32, f32, as_f32_slice, "f32");
-cmp_kernel!(cmp_f64, f64, as_f64_slice, "f64");
-cmp_kernel!(cmp_i32, i32, as_i32_slice, "i32");
-cmp_kernel!(cmp_i64, i64, as_i64_slice, "i64");
-cmp_kernel!(cmp_bool, bool, as_bool_slice, "bool");
 
 macro_rules! cmp_op {
     ($fn_name:ident, $op:tt) => {
@@ -72,13 +58,8 @@ macro_rules! cmp_op {
             let rhs_ref = rhs_cast.as_ref();
 
             let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
-            let output_data = match common_dtype {
-                DataType::Float32 => cmp_f32(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-                DataType::Float64 => cmp_f64(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-                DataType::Int32 => cmp_i32(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-                DataType::Int64 => cmp_i64(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-                DataType::Bool => cmp_bool(lhs_ref, rhs_ref, &output_shape, |a, b| a $op b)?,
-            };
+            let output_data =
+                cmp_dispatch!(lhs_ref, rhs_ref, common_dtype, &output_shape, |a, b| a $op b);
 
             Ok(Tensor::new(
                 Arc::new(output_data),
@@ -142,16 +123,26 @@ pub fn isclose(
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
     let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    // `rtol`/`atol` only mean anything for the float dtypes; an exact-integer or
+    // boolean comparison is what "close" reduces to elsewhere.
     let output_data = match common_dtype {
-        DataType::Float32 => cmp_f32(lhs_ref, rhs_ref, &output_shape, |a, b| {
-            isclose_f32(a, b, rtol as f32, atol as f32, equal_nan)
-        })?,
-        DataType::Float64 => cmp_f64(lhs_ref, rhs_ref, &output_shape, |a, b| {
-            isclose_f64(a, b, rtol, atol, equal_nan)
-        })?,
-        DataType::Int32 => cmp_i32(lhs_ref, rhs_ref, &output_shape, |a, b| a == b)?,
-        DataType::Int64 => cmp_i64(lhs_ref, rhs_ref, &output_shape, |a, b| a == b)?,
-        DataType::Bool => cmp_bool(lhs_ref, rhs_ref, &output_shape, |a, b| a == b)?,
+        DataType::Float32 => broadcast_binary_arm!(
+            lhs_ref,
+            rhs_ref,
+            &output_shape,
+            as_f32_slice,
+            "f32",
+            |a, b| isclose_f32(a, b, rtol as f32, atol as f32, equal_nan)
+        ),
+        DataType::Float64 => broadcast_binary_arm!(
+            lhs_ref,
+            rhs_ref,
+            &output_shape,
+            as_f64_slice,
+            "f64",
+            |a, b| isclose_f64(a, b, rtol, atol, equal_nan)
+        ),
+        dtype => cmp_dispatch!(lhs_ref, rhs_ref, dtype, &output_shape, |a, b| a == b),
     };
 
     Ok(Tensor::new(

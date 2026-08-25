@@ -1166,7 +1166,10 @@ assert row_std.shape == (2, 3)
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors
-- `floor_divide`, `remainder`, `bitwise_not`
+- `floor_divide`, `remainder`
+- `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`,
+  `bitwise_left_shift`, `bitwise_right_shift`
+- `logical_and`, `logical_or`, `logical_xor`, `logical_not`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
   `negative_slope`, the same side `relu` takes, matching PyTorch
@@ -1193,8 +1196,19 @@ assert row_std.shape == (2, 3)
 - `remainder` / `%` — Python-style remainder (takes the divisor's sign;
   `a == (a // b) * b + a % b` holds for every dtype; differentiable for
   float dtypes)
-- `bitwise_not` / `~` — logical NOT for bool, two's complement NOT for
-  ints; rejected for floats
+- `bitwise_and` / `&`, `bitwise_or` / `|`, `bitwise_xor` / `^`,
+  `bitwise_not` / `~` — bit operations on integers, the matching truth table on
+  bools; rejected for floats. A bool paired with an integer promotes to that
+  integer dtype, as it does for `+`.
+- `bitwise_left_shift` / `<<`, `bitwise_right_shift` / `>>` — integers only
+  (two bools have no bits to move). The right shift is arithmetic, so it
+  preserves sign and floors. Counts at or past the dtype's width are undefined
+  in C, and so in NumPy; here they give the limit of the operation — `0`,
+  or `-1` for a right-shifted negative. Negative counts raise.
+- `logical_and`, `logical_or`, `logical_xor`, `logical_not` — the same truth
+  tables over *truth values* rather than bits, so they accept every dtype and
+  always return bool. Each operand is reduced by `x != 0`, which makes every
+  non-zero float true (NaN included) and both signed zeros false.
 
 ### Normalization
 
@@ -1322,7 +1336,9 @@ mean, all, any, max, min, amax, amin, argmax, argmin, cumsum, cumprod, std, var,
 hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
 layer_norm, rms_norm, scaled_dot_product_attention, rope, glu,
 rsqrt, reciprocal, sign, abs, sqrt, exp, log, pow, matmul, leaky_relu,
-eq, ne, lt, le, gt, ge, floor_divide, remainder, bitwise_not,
+eq, ne, lt, le, gt, ge, floor_divide, remainder,
+bitwise_and, bitwise_or, bitwise_xor, bitwise_not, bitwise_left_shift,
+bitwise_right_shift, logical_and, logical_or, logical_xor, logical_not,
 reshape, view, triu, tril, diagonal,
 trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
