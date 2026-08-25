@@ -7,17 +7,100 @@
 use crate::autograd::with_grad_fn;
 use crate::ops::map::par_out_chunks;
 use crate::{
-    autograd::{ScatterAddBackward, ScatterBackward},
+    autograd::{ScatterAddBackward, ScatterBackward, ScatterReduceBackward},
     error::{MinitensorError, Result},
     ops::util::normalize_dim,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
+/// How a value already at a destination and one arriving there are combined.
+///
+/// `scatter` and `scatter_add` are two of these, and were a `bool` until the
+/// others arrived. The kernel already took the combination as a function, so
+/// this names what that function is rather than adding machinery.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reduction {
+    /// The arriving value wins. Duplicate indices resolve in a fixed order --
+    /// see [`scatter`] -- and only the survivor carries gradient.
+    Replace,
+    /// Every arriving value is added. The adjoint of `gather`.
+    Sum,
+    /// Every arriving value is multiplied in.
+    Prod,
+    /// The largest of what is there and what arrives.
+    Amax,
+    /// The smallest of the same.
+    Amin,
+    /// The mean of everything that arrived, and of what was there when
+    /// `include_self`.
+    Mean,
+}
+
+impl Reduction {
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name {
+            "sum" => Ok(Reduction::Sum),
+            "prod" => Ok(Reduction::Prod),
+            "amax" => Ok(Reduction::Amax),
+            "amin" => Ok(Reduction::Amin),
+            "mean" => Ok(Reduction::Mean),
+            other => Err(MinitensorError::invalid_argument(format!(
+                "unknown scatter_reduce reduction {other:?}; expected \"sum\", \"prod\", \"amax\", \"amin\" or \"mean\""
+            ))),
+        }
+    }
+
+    /// What a destination starts from when it is not to count its own value.
+    ///
+    /// `Replace` has no identity and needs none -- it overwrites. `Mean`
+    /// accumulates as a sum and divides afterwards, so it starts where `Sum`
+    /// does.
+    fn identity<T: Seedable>(self) -> Option<T> {
+        match self {
+            Reduction::Replace => None,
+            Reduction::Sum | Reduction::Mean => Some(T::ZERO),
+            Reduction::Prod => Some(T::ONE),
+            Reduction::Amax => Some(T::LOWEST),
+            Reduction::Amin => Some(T::HIGHEST),
+        }
+    }
+}
+
+/// The four constants a reduction can start from, for every dtype that can be
+/// reduced.
+///
+/// Floats go to infinity at the ends and integers to their extremes, which is
+/// the same statement -- "nothing here yet, and anything beats it" -- in the
+/// arithmetic each type actually has. `bool` implements none of it: the only
+/// reduction it accepts is replacement, which has no identity.
+pub(crate) trait Seedable: Copy {
+    const ZERO: Self;
+    const ONE: Self;
+    const LOWEST: Self;
+    const HIGHEST: Self;
+}
+
+macro_rules! seedable {
+    ($ty:ty, $zero:expr, $one:expr, $low:expr, $high:expr) => {
+        impl Seedable for $ty {
+            const ZERO: Self = $zero;
+            const ONE: Self = $one;
+            const LOWEST: Self = $low;
+            const HIGHEST: Self = $high;
+        }
+    };
+}
+
+seedable!(f32, 0.0, 1.0, f32::NEG_INFINITY, f32::INFINITY);
+seedable!(f64, 0.0, 1.0, f64::NEG_INFINITY, f64::INFINITY);
+seedable!(i32, 0, 1, i32::MIN, i32::MAX);
+seedable!(i64, 0, 1, i64::MIN, i64::MAX);
+
 /// Geometry shared by both scatter kernels, in the same terms `gather` uses:
 /// the tensor is a stack of `outer` chunks, each holding `dim_size` rows of
 /// `inner` contiguous elements.
-pub(crate) struct ScatterLayout {
+pub struct ScatterLayout {
     pub dim: usize,
     pub inner: usize,
     pub input_dim: usize,
@@ -132,13 +215,19 @@ pub(crate) fn surviving_writers(layout: &ScatterLayout, outer: usize) -> Vec<usi
 }
 
 /// Write `src` into a copy of `tensor` at the positions named by `index`,
-/// either overwriting (`accumulate = false`) or adding (`accumulate = true`).
+/// combining with whatever is already there according to `reduce`.
+///
+/// `include_self` decides whether the destination's existing value takes part.
+/// It changes nothing for `Replace`, which overwrites regardless, and nothing
+/// for `Sum`, where starting from zero and adding to zero agree -- so it is only
+/// ever consulted for the other three.
 fn scatter_impl(
     tensor: &Tensor,
     dim: isize,
     index: &Tensor,
     src: &Tensor,
-    accumulate: bool,
+    reduce: Reduction,
+    include_self: bool,
 ) -> Result<Tensor> {
     let layout = scatter_layout(tensor, dim, index, src)?;
     let dtype = tensor.dtype();
@@ -152,7 +241,7 @@ fn scatter_impl(
     // `combine` is a macro parameter rather than a runtime branch because bool
     // has no addition: the accumulating form must not even be generated for it.
     macro_rules! scatter_kernel {
-        ($ty:ty, $slice:ident, $mut_slice:ident, $combine:expr) => {{
+        ($ty:ty, $slice:ident, $mut_slice:ident, $combine:expr, $seed:expr) => {{
             let base = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for scatter")
             })?;
@@ -161,6 +250,7 @@ fn scatter_impl(
             })?;
             let mut out = TensorData::from_vec::<$ty>(base.to_vec(), dtype, device);
             let combine: fn($ty, $ty) -> $ty = $combine;
+            let seed: Option<$ty> = $seed;
             {
                 let dst = out.$mut_slice().ok_or_else(|| {
                     MinitensorError::internal_error("Failed to write scatter output")
@@ -175,6 +265,17 @@ fn scatter_impl(
                         let o = start / in_chunk;
                         let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
                         let upd = &updates[o * idx_chunk..(o + 1) * idx_chunk];
+                        // Only the destinations something actually writes are
+                        // reset: one nothing addresses keeps its own value, for
+                        // every reduction and either way round on
+                        // `include_self`.
+                        if let Some(start_from) = seed {
+                            for i in 0..layout.index_dim {
+                                for j in 0..inner {
+                                    dst_chunk[idx[i * inner + j] as usize * inner + j] = start_from;
+                                }
+                            }
+                        }
                         for i in 0..layout.index_dim {
                             for j in 0..inner {
                                 let pos = i * inner + j;
@@ -189,12 +290,56 @@ fn scatter_impl(
         }};
     }
 
+    // Where each written destination starts when it is not to count itself.
+    fn seed_of<T: Seedable>(reduce: Reduction, include_self: bool) -> Option<T> {
+        if include_self {
+            None
+        } else {
+            reduce.identity::<T>()
+        }
+    }
+    // `combine` stays a macro parameter rather than a runtime branch: `bool` has
+    // no addition, so the accumulating forms must not even be generated for it.
     macro_rules! dispatch {
         ($ty:ty, $slice:ident, $mut_slice:ident) => {
-            if accumulate {
-                scatter_kernel!($ty, $slice, $mut_slice, |old, new| old + new)
-            } else {
-                scatter_kernel!($ty, $slice, $mut_slice, |_old, new| new)
+            match reduce {
+                Reduction::Replace => {
+                    scatter_kernel!($ty, $slice, $mut_slice, |_old, new| new, None)
+                }
+                Reduction::Sum | Reduction::Mean => {
+                    scatter_kernel!(
+                        $ty,
+                        $slice,
+                        $mut_slice,
+                        |old, new| old + new,
+                        seed_of::<$ty>(reduce, include_self)
+                    )
+                }
+                Reduction::Prod => scatter_kernel!(
+                    $ty,
+                    $slice,
+                    $mut_slice,
+                    |old, new| old * new,
+                    seed_of::<$ty>(reduce, include_self)
+                ),
+                Reduction::Amax => {
+                    scatter_kernel!(
+                        $ty,
+                        $slice,
+                        $mut_slice,
+                        |old: $ty, new: $ty| if new > old { new } else { old },
+                        seed_of::<$ty>(reduce, include_self)
+                    )
+                }
+                Reduction::Amin => {
+                    scatter_kernel!(
+                        $ty,
+                        $slice,
+                        $mut_slice,
+                        |old: $ty, new: $ty| if new < old { new } else { old },
+                        seed_of::<$ty>(reduce, include_self)
+                    )
+                }
             }
         };
     }
@@ -205,14 +350,52 @@ fn scatter_impl(
         DataType::Int32 => dispatch!(i32, as_i32_slice, as_i32_slice_mut),
         DataType::Int64 => dispatch!(i64, as_i64_slice, as_i64_slice_mut),
         DataType::Bool => {
-            if accumulate {
+            if reduce != Reduction::Replace {
                 return Err(MinitensorError::invalid_operation(
-                    "scatter_add is not supported for boolean tensors",
+                    "scatter reductions other than replacement are not supported for boolean tensors",
                 ));
             }
-            scatter_kernel!(bool, as_bool_slice, as_bool_slice_mut, |_old, new| new)
+            scatter_kernel!(
+                bool,
+                as_bool_slice,
+                as_bool_slice_mut,
+                |_old, new| new,
+                None
+            )
         }
     };
+
+    let outer: usize = tensor.shape().dims()[..layout.dim].iter().product();
+
+    // `Mean` accumulates as a sum and divides here, because the divisor is not
+    // known until every contribution has arrived. A destination nothing wrote
+    // keeps its own value and is not divided -- its count is zero, and averaging
+    // an untouched entry would change a value nobody scattered to.
+    let mut data = data;
+    if reduce == Reduction::Mean {
+        let counts = contribution_counts(&layout, outer, include_self);
+        macro_rules! average {
+            ($accessor_mut:ident, $ty:ty) => {{
+                let out = data.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("scatter_reduce: dtype does not match")
+                })?;
+                for (slot, &count) in out.iter_mut().zip(&counts) {
+                    if count > 0 {
+                        *slot /= count as $ty;
+                    }
+                }
+            }};
+        }
+        match dtype {
+            DataType::Float32 => average!(as_f32_slice_mut, f32),
+            DataType::Float64 => average!(as_f64_slice_mut, f64),
+            _ => {
+                return Err(MinitensorError::invalid_operation(
+                    "scatter_reduce with \"mean\" requires a floating point tensor",
+                ));
+            }
+        }
+    }
 
     let output = Tensor::new(
         Arc::new(data),
@@ -223,9 +406,22 @@ fn scatter_impl(
     );
 
     if requires_grad && dtype.is_float() {
-        let outer: usize = tensor.shape().dims()[..layout.dim].iter().product();
         let mut output = output;
-        if accumulate {
+        if !matches!(reduce, Reduction::Replace | Reduction::Sum) {
+            let grad_fn = Arc::new(ScatterReduceBackward {
+                input_ids: [tensor.id(), src.id()],
+                input_requires_grad: [tensor.requires_grad(), src.requires_grad()],
+                input: tensor.detach(),
+                src: src.detach(),
+                output: output.detach(),
+                layout,
+                outer,
+                reduce,
+                include_self,
+            });
+            return with_grad_fn(output, grad_fn);
+        }
+        if reduce == Reduction::Sum {
             let grad_fn = Arc::new(ScatterAddBackward {
                 input_ids: [tensor.id(), src.id()],
                 input_requires_grad: [tensor.requires_grad(), src.requires_grad()],
@@ -266,7 +462,7 @@ fn scatter_impl(
 /// partitioned across tasks so the order is fixed, and the gradient follows
 /// it — only the writer whose value survived receives any.
 pub fn scatter(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
-    scatter_impl(tensor, dim, index, src, false)
+    scatter_impl(tensor, dim, index, src, Reduction::Replace, true)
 }
 
 /// Add `src` into a copy of `tensor` at the positions named by `index`.
@@ -281,7 +477,76 @@ pub fn scatter(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Res
 /// own disjoint destination chunks and walk each chunk in index order, so the
 /// result is bit-for-bit deterministic.
 pub fn scatter_add(tensor: &Tensor, dim: isize, index: &Tensor, src: &Tensor) -> Result<Tensor> {
-    scatter_impl(tensor, dim, index, src, true)
+    scatter_impl(tensor, dim, index, src, Reduction::Sum, true)
+}
+
+/// How many values arrived at each destination, plus one for the destination
+/// itself when it counted.
+///
+/// `Mean` needs this to divide by, and its gradient needs the same numbers, so
+/// they are computed once and handed to both.
+pub(crate) fn contribution_counts(
+    layout: &ScatterLayout,
+    outer: usize,
+    include_self: bool,
+) -> Vec<i64> {
+    let ScatterLayout {
+        inner,
+        input_dim,
+        index_dim,
+        indices,
+        ..
+    } = layout;
+    let mut counts = vec![0i64; outer * input_dim * inner];
+    for o in 0..outer {
+        let idx = &indices[o * index_dim * inner..(o + 1) * index_dim * inner];
+        let block = &mut counts[o * input_dim * inner..(o + 1) * input_dim * inner];
+        for i in 0..*index_dim {
+            for j in 0..*inner {
+                block[idx[i * inner + j] as usize * inner + j] += 1;
+            }
+        }
+        if include_self {
+            // A destination nothing wrote keeps its own value and is not
+            // averaged, so it stays at zero rather than becoming one -- the
+            // division below skips it entirely.
+            for slot in block.iter_mut() {
+                if *slot > 0 {
+                    *slot += 1;
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// Read `input` at the positions named by `index`, combining what arrives at
+/// each destination according to `reduce`.
+///
+/// `scatter` and `scatter_add` are `"replace"` and `"sum"` -- they keep their
+/// own names because those two are what most callers want, and because their
+/// gradients are the two the library already had.
+///
+/// `include_self` decides whether a destination's existing value takes part in
+/// the reduction. It changes nothing for replacement, which overwrites anyway,
+/// nor for summation, where starting from zero and adding to a zero agree.
+pub fn scatter_reduce(
+    tensor: &Tensor,
+    dim: isize,
+    index: &Tensor,
+    src: &Tensor,
+    reduce: Reduction,
+    include_self: bool,
+) -> Result<Tensor> {
+    if reduce == Reduction::Replace {
+        return scatter_impl(tensor, dim, index, src, reduce, include_self);
+    }
+    if reduce == Reduction::Mean && !tensor.dtype().is_float() {
+        return Err(MinitensorError::invalid_operation(
+            "scatter_reduce with \"mean\" over an integer tensor would truncate every average; cast to a float first",
+        ));
+    }
+    scatter_impl(tensor, dim, index, src, reduce, include_self)
 }
 
 /// Gather `grad` at the scatter positions — the source-side gradient shared by
@@ -384,6 +649,220 @@ pub(crate) fn mask_overwritten(grad: &Tensor, winners: &[usize]) -> Result<Tenso
         grad.device(),
         false,
     ))
+}
+
+/// The gradient of the four reductions `scatter` and `scatter_add` do not
+/// cover.
+///
+/// Two passes, because the index maps source to destination and three of the
+/// four need to know something about *every* contributor to a destination
+/// before any one of them can be answered.
+///
+/// Returns the gradient for the destination tensor and for the source, either
+/// of which the caller may not have asked for.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scatter_reduce_backward(
+    input: &Tensor,
+    src: &Tensor,
+    output: &Tensor,
+    grad_output: &Tensor,
+    layout: &ScatterLayout,
+    outer: usize,
+    reduce: Reduction,
+    include_self: bool,
+    wanted: [bool; 2],
+) -> Result<(Option<Tensor>, Option<Tensor>)> {
+    let inner = layout.inner;
+    let in_chunk = layout.input_dim * inner;
+    let idx_chunk = layout.index_dim * inner;
+
+    let base_t = input.contiguous()?;
+    let src_t = src.contiguous()?;
+    let out_t = output.contiguous()?;
+    let grad_t = grad_output.contiguous()?;
+
+    let dtype = grad_output.dtype();
+    let device = grad_output.device();
+    let mut into_input = TensorData::zeros_on_device(input.numel(), dtype, device);
+    let mut into_src = TensorData::zeros_on_device(src.numel(), dtype, device);
+
+    macro_rules! route {
+        ($accessor:ident, $accessor_mut:ident, $ty:ty) => {{
+            let base = base_t.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+            })?;
+            let values = src_t.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+            })?;
+            let result = out_t.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+            })?;
+            let seeds = grad_t.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+            })?;
+
+            let zero = <$ty>::default();
+            let mut for_input = vec![zero; input.numel()];
+            let mut for_src = vec![zero; src.numel()];
+
+            for o in 0..outer {
+                let idx = &layout.indices[o * idx_chunk..(o + 1) * idx_chunk];
+                let dst_base = o * in_chunk;
+                let src_base = o * idx_chunk;
+
+                // How many contributions reached each destination, and -- for
+                // `Prod` -- how many were zero and what the rest multiply to.
+                let mut arrivals = vec![0usize; in_chunk];
+                let mut zeros = vec![0usize; in_chunk];
+                let mut nonzero = vec![1 as $ty; in_chunk];
+                for pos in 0..idx_chunk {
+                    let d = idx[pos] as usize * inner + pos % inner;
+                    arrivals[d] += 1;
+                    let v = values[src_base + pos];
+                    if v == zero {
+                        zeros[d] += 1;
+                    } else {
+                        nonzero[d] *= v;
+                    }
+                }
+                if include_self {
+                    for d in 0..in_chunk {
+                        if arrivals[d] > 0 {
+                            let v = base[dst_base + d];
+                            if v == zero {
+                                zeros[d] += 1;
+                            } else {
+                                nonzero[d] *= v;
+                            }
+                        }
+                    }
+                }
+
+                // The destination's own gradient. A destination nothing wrote
+                // to is the input untouched, so its gradient passes straight
+                // through -- whatever the reduction, and either way round on
+                // `include_self`.
+                let mut claimed = vec![false; in_chunk];
+                for d in 0..in_chunk {
+                    let seed = seeds[dst_base + d];
+                    if arrivals[d] == 0 {
+                        for_input[dst_base + d] = seed;
+                        continue;
+                    }
+                    if !include_self {
+                        continue;
+                    }
+                    let own = base[dst_base + d];
+                    match reduce {
+                        Reduction::Mean => {
+                            let n = (arrivals[d] + 1) as $ty;
+                            for_input[dst_base + d] = seed / n;
+                        }
+                        Reduction::Prod => {
+                            for_input[dst_base + d] =
+                                seed * excluding(zeros[d], nonzero[d], own, zero);
+                        }
+                        Reduction::Amax | Reduction::Amin => {
+                            // It was there before anything arrived, so it is the
+                            // earliest claimant of a tie.
+                            if own == result[dst_base + d] {
+                                for_input[dst_base + d] = seed;
+                                claimed[d] = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                for pos in 0..idx_chunk {
+                    let d = idx[pos] as usize * inner + pos % inner;
+                    let seed = seeds[dst_base + d];
+                    let v = values[src_base + pos];
+                    for_src[src_base + pos] = match reduce {
+                        Reduction::Mean => {
+                            let n = (arrivals[d] + usize::from(include_self)) as $ty;
+                            seed / n
+                        }
+                        Reduction::Prod => seed * excluding(zeros[d], nonzero[d], v, zero),
+                        Reduction::Amax | Reduction::Amin => {
+                            if !claimed[d] && v == result[dst_base + d] {
+                                claimed[d] = true;
+                                seed
+                            } else {
+                                zero
+                            }
+                        }
+                        _ => zero,
+                    };
+                }
+            }
+
+            if wanted[0] {
+                let out = into_input.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+                })?;
+                out.copy_from_slice(&for_input);
+            }
+            if wanted[1] {
+                let out = into_src.$accessor_mut().ok_or_else(|| {
+                    MinitensorError::internal_error("scatter_reduce backward: dtype mismatch")
+                })?;
+                out.copy_from_slice(&for_src);
+            }
+        }};
+    }
+
+    match dtype {
+        DataType::Float32 => route!(as_f32_slice, as_f32_slice_mut, f32),
+        _ => route!(as_f64_slice, as_f64_slice_mut, f64),
+    }
+
+    Ok((
+        wanted[0].then(|| {
+            Tensor::new(
+                Arc::new(into_input),
+                input.shape().clone(),
+                dtype,
+                device,
+                false,
+            )
+        }),
+        wanted[1].then(|| {
+            Tensor::new(
+                Arc::new(into_src),
+                src.shape().clone(),
+                dtype,
+                device,
+                false,
+            )
+        }),
+    ))
+}
+
+/// The product of every contribution to a destination except `mine`.
+///
+/// Counted rather than divided. `total / mine` is the obvious form and it is
+/// wrong exactly when `mine` is zero -- which is the case that makes the
+/// question interesting, since that is when the product collapses and the other
+/// factors still have gradients.
+#[inline]
+fn excluding<T: Copy + PartialEq + std::ops::Div<Output = T>>(
+    zeros: usize,
+    nonzero: T,
+    mine: T,
+    zero: T,
+) -> T {
+    match zeros {
+        // Nothing was zero, so dividing the product of everything by my own
+        // factor is safe and exact.
+        0 => nonzero / mine,
+        // Exactly one zero: every other factor's product includes it and is
+        // therefore zero, and the zero's own excluded product is the rest.
+        1 if mine == zero => nonzero,
+        1 => zero,
+        // Two or more zeros: excluding any single one still leaves a zero.
+        _ => zero,
+    }
 }
 
 #[cfg(test)]

@@ -468,6 +468,7 @@ dimension, including for a zero-length axis, which yields one empty piece.
 
 - `index_select`, `gather`, `narrow`
 - `scatter(dim, index, src)`, `scatter_add(dim, index, src)`
+- `scatter_reduce(input, dim, index, src, reduce, include_self=True)`
 - `flip`, `roll`
 
 `scatter` and `scatter_add` write into a copy of the tensor at the positions
@@ -489,6 +490,32 @@ Duplicate indices are the interesting case, and the two behave differently:
   an input slot that was written over.
 
 `scatter_add` is not defined for boolean tensors, since bool has no addition.
+
+`scatter_reduce(input, dim, index, src, reduce, include_self=True)` is the
+general form the two of them are cases of. `reduce` is `"sum"`, `"prod"`,
+`"amax"`, `"amin"` or `"mean"`; `scatter` is replacement and `scatter_add` is
+summation, and they keep their own names because those two are what most callers
+want.
+
+`include_self` decides whether a destination's existing value takes part in the
+reduction. With it off, a written destination starts from the reduction's
+identity — zero for a sum, one for a product, an infinity for an extremum —
+rather than from what it held. It changes nothing for replacement, which
+overwrites either way, nor for summation, where starting from zero and adding to
+a zero agree. A destination *nothing* writes to keeps its value regardless: it is
+not seeded, not averaged, and not reduced.
+
+`"mean"` over an integer tensor is refused rather than truncated. Every other
+reduction works on integers.
+
+All of them are differentiable. `"amax"`/`"amin"` route each destination's
+gradient to the contributor that won it, with a tie going to the first — the
+rule `max`, `mode` and `cummax` follow here, where PyTorch spreads a tie evenly.
+`"mean"` divides by the same count the forward divided by. `"prod"` needs the
+product of every contribution *except* each one, and computes it by counting
+zeros rather than dividing the total: `total / factor` is the obvious form and
+it is wrong exactly when a factor is zero, which is when the other factors still
+have gradients worth reporting.
 
 ```python
 import minitensor as mt

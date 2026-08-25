@@ -825,3 +825,51 @@ impl GradientFunction for RepeatInterleaveBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+
+/// Gradient of [`crate::ops::scatter_reduce`] for the four reductions that
+/// `scatter` and `scatter_add` do not cover.
+///
+/// All four need to know what arrived where, which the forward does not keep,
+/// so they share one recomputation rather than four near-copies of the same
+/// walk. The input tensor is kept because `prod` and the extrema need to know
+/// what the destination held, not merely what it ended up as.
+pub struct ScatterReduceBackward {
+    pub input_ids: [TensorId; 2],
+    pub input_requires_grad: [bool; 2],
+    pub input: Tensor,
+    pub src: Tensor,
+    pub output: Tensor,
+    pub layout: crate::ops::ScatterLayout,
+    pub outer: usize,
+    pub reduce: crate::ops::Reduction,
+    pub include_self: bool,
+}
+
+impl GradientFunction for ScatterReduceBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let (for_input, for_src) = crate::ops::scatter_reduce_backward(
+            &self.input,
+            &self.src,
+            &self.output,
+            grad_output,
+            &self.layout,
+            self.outer,
+            self.reduce,
+            self.include_self,
+            self.input_requires_grad,
+        )?;
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+        if let Some(gradient) = for_input {
+            accumulate_grad(&mut gradients, self.input_ids[0], gradient)?;
+        }
+        if let Some(gradient) = for_src {
+            accumulate_grad(&mut gradients, self.input_ids[1], gradient)?;
+        }
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}

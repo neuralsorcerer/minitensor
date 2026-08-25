@@ -40,6 +40,7 @@ _FUNCTIONAL_FORWARDERS = (
     "norm",
     "scatter",
     "scatter_add",
+    "scatter_reduce",
     "softmax",
     "log_softmax",
     "masked_softmax",

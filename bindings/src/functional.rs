@@ -958,6 +958,34 @@ pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     tensor.cumsum(dim)
 }
 
+/// Combine `src` into a copy of `input` at the positions named by `index`, reducing what lands on the same destination. `reduce` is `"sum"`, `"prod"`, `"amax"`, `"amin"` or `"mean"`. `include_self=False` starts each written destination from the reduction's identity instead of its own value; a destination nothing writes to keeps its value either way. `scatter` and `scatter_add` are the replacement and summation forms under their own names.
+#[pyfunction]
+#[pyo3(signature = (input, dim, index, src, reduce, include_self=true))]
+pub fn scatter_reduce(
+    input: &Bound<PyAny>,
+    dim: isize,
+    index: &Bound<PyAny>,
+    src: &Bound<PyAny>,
+    reduce: &str,
+    include_self: bool,
+) -> PyResult<PyTensor> {
+    let target = PyTensor::from_python_value(input)?;
+    let positions = PyTensor::from_python_value(index)?;
+    let values = PyTensor::from_python_value(src)?;
+    let how = engine::ops::Reduction::from_name(reduce).map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(
+        engine::ops::scatter_reduce(
+            target.tensor(),
+            dim,
+            positions.tensor(),
+            values.tensor(),
+            how,
+            include_self,
+        )
+        .map_err(_convert_error)?,
+    ))
+}
+
 /// Running maximum along `dim`, as `(values, indices)`. Each index says where the running maximum came from; ties keep the earliest position, and a NaN takes over the running maximum and holds it. Keeps the input's shape.
 #[pyfunction]
 #[pyo3(signature = (input, dim=-1))]
@@ -1888,6 +1916,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(argmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(cumsum, parent)?)?;
     parent.add_function(wrap_pyfunction!(cumprod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(scatter_reduce, parent)?)?;
     parent.add_function(wrap_pyfunction!(cummax, parent)?)?;
     parent.add_function(wrap_pyfunction!(cummin, parent)?)?;
     parent.add_function(wrap_pyfunction!(logcumsumexp, parent)?)?;
