@@ -1326,26 +1326,57 @@ Each of the following names is accessible from:
 - `minitensor.<name>`
 - `minitensor.functional.<name>`
 
+The list is grouped for reading only; the two spellings are the same object
+either way. `test_documented_top_level_names_are_exactly_the_forwarded_ones`
+checks it against the exports, so a name here is one the library really has.
+
 ```
-cat, stack, split, chunk, index_select, gather, scatter, scatter_add, narrow,
-topk, sort, argsort,
-median, nanmedian, quantile, nanquantile, nansum, nanmean, nanmax, nanmin, nanamax, nanamin, isnan,
-isinf, isfinite, nan_to_num, logsumexp, norm, softmax, log_softmax,
-masked_softmax, masked_log_softmax, sum, prod,
-mean, all, any, max, min, amax, amin, argmax, argmin, cumsum, cumprod, std, var, relu,
-hardshrink, sigmoid, softplus, gelu, elu, selu, silu, softsign, tanh,
-layer_norm, rms_norm, scaled_dot_product_attention, rope, glu,
-rsqrt, reciprocal, sign, abs, sqrt, exp, log, pow, matmul, leaky_relu,
-eq, ne, lt, le, gt, ge, floor_divide, remainder,
-bitwise_and, bitwise_or, bitwise_xor, bitwise_not, bitwise_left_shift,
-bitwise_right_shift, logical_and, logical_or, logical_xor, logical_not,
-reshape, view, triu, tril, diagonal,
-trace, solve, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
+# Creation and shape
+reshape, view, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
-clip, clamp, clamp_min, clamp_max, round, floor, ceil, sin, cos, tan, asin,
-acos, atan, sinh, cosh, asinh, acosh, atanh, log1p, log2, log10, erf, erfc,
-expm1, logaddexp, maximum,
-minimum, isclose, array_equal, allclose, where, one_hot, bincount, masked_fill
+pad,
+
+# Joining, splitting and indexing
+cat, stack, split, chunk, index_select, gather, narrow, scatter, scatter_add,
+scatter_reduce, masked_fill, masked_select, nonzero, count_nonzero, where,
+one_hot,
+
+# Reductions and statistics
+sum, prod, mean, std, var, all, any, max, min, amax, amin, argmax, argmin,
+median, nanmedian, quantile, nanquantile, nansum, nanmean, nanmax, nanmin,
+nanamax, nanamin, logsumexp, norm, bincount, mode,
+
+# Scans
+cumsum, cumprod, cummax, cummin, logcumsumexp,
+
+# Ordering and search
+sort, argsort, topk, unique, unique_consecutive, searchsorted, bucketize,
+histogram, histc,
+
+# Elementwise arithmetic and rounding
+abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
+round, floor, ceil, clip, clamp, clamp_min, clamp_max, maximum, minimum, log1p,
+log2, log10, expm1, logaddexp, erf, erfc,
+
+# Trigonometry and hyperbolics
+sin, cos, tan, asin, acos, atan, sinh, cosh, asinh, acosh, atanh,
+
+# Comparison, bitwise and logic
+eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, isnan, isinf, isfinite,
+nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not,
+bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
+logical_not,
+
+# Activations and normalization
+relu, leaky_relu, hardshrink, sigmoid, softplus, gelu, elu, selu, silu,
+softsign, tanh, glu, softmax, log_softmax, masked_softmax, masked_log_softmax,
+layer_norm, rms_norm, scaled_dot_product_attention, rope,
+
+# Linear algebra
+matmul, solve, solve_triangular, trace, diagonal, diag, diag_embed, triu, tril,
+det, slogdet, inv, pinv, matrix_rank, matrix_power, cond, lstsq, einsum,
+cholesky, cholesky_solve, qr, svd, svdvals, eigh, eigvalsh, lu, lu_factor,
+lu_solve
 ```
 
 ### Finite and NaN predicates
