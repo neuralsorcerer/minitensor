@@ -27,7 +27,7 @@ use crate::{
 ///
 /// `reverse` scans from the last index toward the first (the `cumsum`
 /// backward pass).
-fn scan_along_dim<I, A, W, F>(
+pub(crate) fn scan_along_dim<I, A, W, F>(
     output: &mut [A],
     input: &[I],
     dim_size: usize,

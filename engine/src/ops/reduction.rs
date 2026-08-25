@@ -22,6 +22,8 @@ mod nanquantile_impl;
 mod norm_impl;
 #[path = "reduction/quantile.rs"]
 mod quantile_impl;
+#[path = "reduction/scan.rs"]
+mod scan_impl;
 #[path = "reduction/sort.rs"]
 mod sort_impl;
 #[path = "reduction/sum_prod.rs"]
@@ -36,5 +38,6 @@ pub(crate) use self::nan_minmax_impl::*;
 pub use self::nanquantile_impl::*;
 pub use self::norm_impl::*;
 pub(crate) use self::quantile_impl::*;
+pub use self::scan_impl::*;
 pub use self::sort_impl::*;
 pub use self::sum_prod_impl::*;

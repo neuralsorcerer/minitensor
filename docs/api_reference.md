@@ -916,6 +916,48 @@ True
 - `array_equal(other)`
 - `allclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
 
+#### Running totals that are not sums
+
+`cumsum` and `cumprod` accumulate with `+` and `*`. Three more accumulate with
+something else:
+
+- `cummax(input, dim=-1)` and `cummin(input, dim=-1)` return
+  `(values, indices)`: the running extremum and the position it came from. A tie
+  keeps the *earliest* position, and a `NaN` takes over the running extremum and
+  holds it -- including its index, so a later `NaN` does not quietly move the
+  index while leaving the value alone. The gradient goes to the winning
+  positions, and a value that wins several prefixes collects all of them.
+- `logcumsumexp(input, dim=-1)` is the running `log(sum(exp(x)))`.
+
+`logcumsumexp` is not `cumsum` of `exp`, and the difference is the reason it
+exists. `exp` of a log-probability underflows to zero long before a real
+sequence ends, so the naive reading stops accumulating and reports `-inf` for
+everything after that point. Four thousand steps at `-800` is `-inf` everywhere
+under `cumsum` of `exp`, and `-800 + log(4000)` here. Accumulating in the log
+domain keeps every step representable.
+
+```python
+import minitensor as mt
+import numpy as np
+
+scores = mt.Tensor([3.0, 1.0, 4.0, 1.0, 5.0], dtype="float64")
+values, positions = mt.cummax(scores)
+print(values.numpy())
+print(positions.numpy())
+
+# A distribution's total is one, so the log of its running total ends at zero.
+weights = mt.Tensor(np.log(np.full(2000, 1 / 2000)), dtype="float64")
+# `abs` only so the printed sign is stable: the last log-add lands a few
+# ulp either side of zero.
+print(abs(round(float(mt.logcumsumexp(weights).numpy()[-1]), 12)))
+```
+
+```text
+[3. 3. 4. 4. 5.]
+[0 0 2 2 4]
+0.0
+```
+
 #### What dtype a reduction comes back in
 
 The rule turns on whether a reduction *accumulates*.

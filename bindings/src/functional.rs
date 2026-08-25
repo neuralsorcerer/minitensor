@@ -958,6 +958,40 @@ pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     tensor.cumsum(dim)
 }
 
+/// Running maximum along `dim`, as `(values, indices)`. Each index says where the running maximum came from; ties keep the earliest position, and a NaN takes over the running maximum and holds it. Keeps the input's shape.
+#[pyfunction]
+#[pyo3(signature = (input, dim=-1))]
+pub fn cummax(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)> {
+    let tensor = PyTensor::from_python_value(input)?;
+    let (values, indices) = engine::ops::cummax(tensor.tensor(), dim).map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(values),
+        PyTensor::from_tensor(indices),
+    ))
+}
+
+/// Running minimum along `dim`, as `(values, indices)`. The mirror of `cummax`, with the same tie and NaN rules.
+#[pyfunction]
+#[pyo3(signature = (input, dim=-1))]
+pub fn cummin(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)> {
+    let tensor = PyTensor::from_python_value(input)?;
+    let (values, indices) = engine::ops::cummin(tensor.tensor(), dim).map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(values),
+        PyTensor::from_tensor(indices),
+    ))
+}
+
+/// Running `log(sum(exp(x)))` along `dim`. The accumulation stays in the log domain, so a long axis of log-probabilities does not underflow the way `cumsum` of `exp` would.
+#[pyfunction]
+#[pyo3(signature = (input, dim=-1))]
+pub fn logcumsumexp(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+    let tensor = PyTensor::from_python_value(input)?;
+    Ok(PyTensor::from_tensor(
+        engine::ops::logcumsumexp(tensor.tensor(), dim).map_err(_convert_error)?,
+    ))
+}
+
 /// Running product along `dim`, keeping the input's shape.
 #[pyfunction]
 #[pyo3(signature = (input, dim))]
@@ -1854,6 +1888,9 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(argmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(cumsum, parent)?)?;
     parent.add_function(wrap_pyfunction!(cumprod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cummax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cummin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logcumsumexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(std_fn, parent)?)?;
     parent.add_function(wrap_pyfunction!(var, parent)?)?;
     parent.add_function(wrap_pyfunction!(norm, parent)?)?;

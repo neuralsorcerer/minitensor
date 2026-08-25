@@ -1368,3 +1368,60 @@ impl GradientFunction for PowBackward {
         &self.input_ids
     }
 }
+
+/// Gradient of [`crate::ops::reduction::cummax`] and `cummin`.
+///
+/// Each output took its value from exactly one input position, recorded during
+/// the forward pass, so its gradient goes there and nowhere else -- the rule
+/// `max` follows, applied once per prefix. An input position that won several
+/// prefixes collects all of their gradients, which is why this accumulates
+/// rather than assigns.
+pub struct CummaxBackward {
+    pub input_id: TensorId,
+    pub indices: Tensor,
+    pub dim: usize,
+}
+
+impl GradientFunction for CummaxBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        gradients.insert(
+            self.input_id,
+            reduction::cumextreme_backward(&self.indices, grad_output, self.dim)?,
+        );
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
+/// Gradient of [`crate::ops::reduction::logcumsumexp`].
+///
+/// `d(y_k)/d(x_i)` is `exp(x_i - y_k)` for every `k >= i`, so the gradient is a
+/// reverse scan. Both the input and the output are needed to form it, and both
+/// are already computed, so both are kept rather than recomputed.
+pub struct LogcumsumexpBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub output: Tensor,
+    pub dim: usize,
+}
+
+impl GradientFunction for LogcumsumexpBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(1);
+        gradients.insert(
+            self.input_id,
+            reduction::logcumsumexp_backward(&self.input, &self.output, grad_output, self.dim)?,
+        );
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
