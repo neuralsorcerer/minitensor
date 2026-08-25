@@ -68,6 +68,60 @@ def test_the_reported_index_holds_the_reported_value(trial):
         assert np.array_equal(picked, values.numpy())
 
 
+def _reference_cumextreme(a, axis, greater):
+    """The two conventions written out: the earliest position wins a tie, and a
+    NaN takes over the running extremum and holds it, index included."""
+    moved = np.ascontiguousarray(np.moveaxis(a, axis, -1))
+    width = moved.shape[-1]
+    rows = moved.reshape(-1, width)
+    values = np.empty_like(rows)
+    indices = np.zeros(rows.shape, dtype=np.int64)
+    for r in range(rows.shape[0]):
+        running, at = rows[r, 0], 0
+        values[r, 0], indices[r, 0] = running, at
+        for d in range(1, width):
+            candidate = rows[r, d]
+            beats = candidate > running if greater else candidate < running
+            if not np.isnan(running) and (np.isnan(candidate) or beats):
+                running, at = candidate, d
+            values[r, d], indices[r, d] = running, at
+    return (
+        np.moveaxis(values.reshape(moved.shape), -1, axis),
+        np.moveaxis(indices.reshape(moved.shape), -1, axis),
+    )
+
+
+@pytest.mark.parametrize("trial", range(12))
+def test_the_indices_match_a_reference_where_ties_and_nans_are_common(trial):
+    """The conformance tests above draw from `rng.normal` and compare against
+    `np.maximum.accumulate` -- which essentially never ties, never produces a
+    NaN, and returns no indices to compare. So ten parametrised shapes checked
+    values only, and both conventions rested on one hand-written row each.
+
+    Half of these trials draw small integers, where ties are the norm; the other
+    half sprinkle NaNs. Both compare indices as well as values.
+    """
+    rng = np.random.default_rng(500 + trial)
+    if trial % 2 == 0:
+        a = rng.integers(0, 3, (4, 5)).astype(np.float64)
+    else:
+        a = rng.normal(size=(4, 5))
+        a[rng.random((4, 5)) < 0.25] = np.nan
+
+    for dim in (0, 1):
+        for greater, op in ((True, mt.cummax), (False, mt.cummin)):
+            values, indices = op(_t(a), dim)
+            want_values, want_indices = _reference_cumextreme(a, dim, greater)
+            assert np.array_equal(
+                np.isnan(values.numpy()), np.isnan(want_values)
+            ), (dim, greater)
+            present = ~np.isnan(want_values)
+            assert np.array_equal(
+                values.numpy()[present], want_values[present]
+            ), (dim, greater)
+            assert np.array_equal(indices.numpy(), want_indices), (dim, greater)
+
+
 def test_a_tie_keeps_the_earliest_position():
     """A choice rather than a consequence, and the same one `mode` makes: a
     running extremum that is merely equalled does not move."""
