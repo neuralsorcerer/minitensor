@@ -1189,8 +1189,20 @@ assert row_std.shape == (2, 3)
   is precisely the tail `erfc` exists to give you (`erfc(20) ≈ 5.4e-176`).
 - `sin`, `cos`, `tan`
 - `asin`, `acos`, `atan`
+- `atan2(input, other)` — the angle of `(other, input)` from the positive
+  x-axis, in `(-pi, pi]`. Unlike `atan(input / other)` it keeps the quadrant,
+  and it answers on the y-axis instead of dividing by zero.
 - `sinh`, `cosh`, `asinh`, `acosh`, `atanh`
 - `maximum`, `minimum`
+- `hypot(input, other)` — `sqrt(input**2 + other**2)` without forming either
+  square, so it answers for operands whose squares would overflow or flush to
+  zero
+- `copysign(input, other)` — the magnitude of `input` with the sign of
+  `other`. Reads the sign *bit*, so `copysign(1, -0.0)` is `-1`; the gradient
+  reaches `input` only, since nothing differentiable depends on `other`.
+- `xlogy(input, other)` — `input * log(other)`, taken as `0` wherever `input`
+  is zero. That is the limit entropy and cross-entropy need, where the plain
+  product gives `0 * -inf = NaN`. A NaN `other` still propagates.
 - `softplus`, `gelu`, `elu`, `selu`, `silu`
 - `hardshrink`
 - `floor_divide` / `//` — Python floor division (rounds toward negative
@@ -1359,10 +1371,11 @@ histogram, histc,
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
 round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max, maximum,
-minimum, log1p, log2, log10, expm1, logaddexp, erf, erfc,
+minimum, log1p, log2, log10, expm1, logaddexp, erf, erfc, hypot, copysign,
+xlogy,
 
 # Trigonometry and hyperbolics
-sin, cos, tan, asin, acos, atan, sinh, cosh, asinh, acosh, atanh,
+sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,
 
 # Comparison, bitwise and logic
 eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, isnan, isinf, isfinite,

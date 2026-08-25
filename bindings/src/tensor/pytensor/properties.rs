@@ -343,6 +343,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// A contiguous 1-D view of every element, in row-major order.
     pub fn ravel(&self) -> PyResult<Self> {
         self.flatten(0, -1)
     }

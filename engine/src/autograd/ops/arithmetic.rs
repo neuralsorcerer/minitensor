@@ -7,6 +7,7 @@
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
+    ops::binary_math::{FloatBinaryKernel, float_binary_tensor},
     ops::map::{binary_map, outputs_per_task, par_out_chunks, ternary_map, unary_map},
     ops::util::create_scalar_tensor,
     ops::{arithmetic, reduction, shape_ops},
@@ -916,6 +917,54 @@ impl GradientFunction for LogAddExpBackward {
                 &Shape::new(self.input_shapes[1].clone()),
             )?;
             accumulate_grad(&mut gradients, self.input_ids[1], rhs_grad)?;
+        }
+
+        Ok(gradients)
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        &self.input_ids
+    }
+}
+
+/// Gradient function for every op in [`crate::ops::binary_math`].
+///
+/// Those ops differ only in their two partial derivatives, so this holds them
+/// as kernels rather than there being one struct per op: the chain rule, the
+/// broadcast reduction and the frozen-input gating are written once.
+///
+/// Each partial is evaluated in a single walk over the saved operands, which
+/// is why they are kernels and not compositions of tensor ops -- `atan2`'s
+/// would otherwise be four temporaries wide.
+pub struct FloatBinaryBackward {
+    pub lhs: Tensor,
+    pub rhs: Tensor,
+    pub input_ids: [TensorId; 2],
+    pub input_shapes: [Vec<usize>; 2],
+    /// Which inputs actually need a gradient; a frozen input's partial is
+    /// never evaluated.
+    pub input_requires_grad: [bool; 2],
+    /// `d(out)/d(lhs)` and `d(out)/d(rhs)`, as functions of the two promoted
+    /// operands.
+    pub partials: [FloatBinaryKernel; 2],
+}
+
+impl GradientFunction for FloatBinaryBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let mut gradients = FxHashMap::default();
+        gradients.reserve(2);
+
+        for side in 0..2 {
+            if !self.input_requires_grad[side] {
+                continue;
+            }
+            let partial = float_binary_tensor(&self.lhs, &self.rhs, self.partials[side])?;
+            let contribution = arithmetic::mul(&partial, grad_output)?;
+            let grad = reduce_gradient_for_broadcasting(
+                &contribution,
+                &Shape::new(self.input_shapes[side].clone()),
+            )?;
+            accumulate_grad(&mut gradients, self.input_ids[side], grad)?;
         }
 
         Ok(gradients)

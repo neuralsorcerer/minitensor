@@ -32,6 +32,7 @@ impl PyTensor {
         self.ge_from_py(other)
     }
 
+    /// Matrix product, broadcasting over leading batch dimensions.
     pub fn matmul(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.matmul(&other_tensor).map_err(_convert_error)?;
@@ -229,12 +230,14 @@ impl PyTensor {
         ))
     }
 
+    /// Batched matrix product of two 3-D tensors with matching batch sizes.
     pub fn bmm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.bmm(&other_tensor).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
+    /// Inner product of two 1-D tensors.
     pub fn dot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let other_tensor = tensor_from_py_value(&self.inner, other)?;
         let result = self.inner.dot(&other_tensor).map_err(_convert_error)?;
@@ -351,6 +354,7 @@ impl PyTensor {
         cross_impl(self, &other_tensor, axis)
     }
 
+    /// Element-wise larger of two tensors.
     pub fn maximum(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Maximum)?;
@@ -358,6 +362,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise smaller of two tensors.
     pub fn minimum(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Minimum)?;
@@ -365,6 +370,7 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `log(exp(a) + exp(b))`, shifted so neither term overflows.
     pub fn logaddexp(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;

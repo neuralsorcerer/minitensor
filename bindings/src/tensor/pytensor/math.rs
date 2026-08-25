@@ -172,6 +172,38 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The angle of the point `(other, input)` from the positive x-axis, in `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses.
+    pub fn atan2(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.atan2(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.
+    pub fn hypot(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.hypot(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// The magnitude of `input` with the sign of `other`, signed zeros included.
+    pub fn copysign(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.copysign(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `input * log(other)`, taken as `0` wherever `input` is zero rather than as the `0 * -inf` the plain product would give.
+    pub fn xlogy(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.xlogy(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Replace NaN with `nan` and the infinities with `posinf`/`neginf`, defaulting to the dtype's finite extremes.
     #[pyo3(signature = (nan=0.0, posinf=None, neginf=None))]
     pub fn nan_to_num(&self, nan: f64, posinf: Option<f64>, neginf: Option<f64>) -> PyResult<Self> {

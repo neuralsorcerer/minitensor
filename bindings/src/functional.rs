@@ -534,7 +534,9 @@ binary_forwarders!(
     bitwise_or => "Element-wise bitwise OR, and logical OR for booleans.",
     bitwise_right_shift => "Element-wise arithmetic right shift, preserving sign. Counts at or past the dtype's width give 0 for non-negative values and -1 for negative ones.",
     bitwise_xor => "Element-wise bitwise XOR, and logical XOR for booleans.",
+    atan2 => "The angle of the point `(other, input)` from the positive x-axis, in `(-pi, pi]`, keeping the quadrant that `atan(input / other)` loses.",
     bmm => "Batched matrix product of two 3-D tensors with matching batch sizes.",
+    copysign => "The magnitude of `input` with the sign of `other`, signed zeros included.",
     dot => "Inner product of two 1-D tensors.",
     eq => "Element-wise equality, giving a boolean tensor.",
     floor_divide => "Element-wise division rounded towards negative infinity, matching Python's `//`.",
@@ -545,13 +547,15 @@ binary_forwarders!(
     logical_and => "Element-wise logical AND over truth values, giving a boolean tensor.",
     logical_or => "Element-wise logical OR over truth values, giving a boolean tensor.",
     logical_xor => "Element-wise logical XOR over truth values, giving a boolean tensor.",
+    hypot => "`sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.",
     lt => "Element-wise `<`, giving a boolean tensor.",
     matmul => "Matrix product, broadcasting over leading batch dimensions.",
     maximum => "Element-wise larger of two tensors.",
     minimum => "Element-wise smaller of two tensors.",
     ne => "Element-wise inequality, giving a boolean tensor.",
-    pow => "Raise each element of the first tensor to the matching power from the second.",
+    pow => "Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.",
     remainder => "Element-wise modulo taking the sign of the divisor, matching Python's `%`.",
+    xlogy => "`input * log(other)`, taken as `0` wherever `input` is zero rather than as the `0 * -inf` the plain product would give.",
 );
 
 /// Raise every element below `min` up to it.
@@ -1969,6 +1973,10 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(asin, parent)?)?;
     parent.add_function(wrap_pyfunction!(acos, parent)?)?;
     parent.add_function(wrap_pyfunction!(atan, parent)?)?;
+    parent.add_function(wrap_pyfunction!(atan2, parent)?)?;
+    parent.add_function(wrap_pyfunction!(copysign, parent)?)?;
+    parent.add_function(wrap_pyfunction!(hypot, parent)?)?;
+    parent.add_function(wrap_pyfunction!(xlogy, parent)?)?;
     parent.add_function(wrap_pyfunction!(sinh, parent)?)?;
     parent.add_function(wrap_pyfunction!(cosh, parent)?)?;
     parent.add_function(wrap_pyfunction!(asinh, parent)?)?;

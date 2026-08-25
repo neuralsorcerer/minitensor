@@ -2424,6 +2424,30 @@ impl Tensor {
         ceil(self)
     }
 
+    /// Angle of `(other, self)` from the positive x-axis.
+    #[inline(always)]
+    pub fn atan2(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::atan2(self, other)
+    }
+
+    /// `sqrt(self^2 + other^2)` without forming either square.
+    #[inline(always)]
+    pub fn hypot(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::hypot(self, other)
+    }
+
+    /// Magnitude of `self` with the sign of `other`.
+    #[inline(always)]
+    pub fn copysign(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::copysign(self, other)
+    }
+
+    /// `self * log(other)`, taken as zero wherever `self` is zero.
+    #[inline(always)]
+    pub fn xlogy(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::xlogy(self, other)
+    }
+
     /// Round tensor values towards zero element-wise.
     #[inline(always)]
     pub fn trunc(&self) -> Result<Self> {
