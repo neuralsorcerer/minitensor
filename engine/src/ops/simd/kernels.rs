@@ -294,6 +294,26 @@ rounding_kernel!(
     ceil_f64_blocks, f64, |x| x.ceil()
 );
 rounding_kernel!(
+    /// Element-wise `trunc` over a block of f32. `param` is ignored.
+    trunc_f32_blocks, f32, |x| x.trunc()
+);
+rounding_kernel!(
+    /// Element-wise `trunc` over a block of f64. `param` is ignored.
+    trunc_f64_blocks, f64, |x| x.trunc()
+);
+rounding_kernel!(
+    /// Element-wise fractional part of a block of f32. `param` is ignored.
+    ///
+    /// `x - trunc(x)` is exact in floating point -- both terms share an
+    /// exponent range -- so this is the same value `sub(x, trunc(x))` would
+    /// give, in one pass over the buffer instead of two.
+    frac_f32_blocks, f32, |x| x - x.trunc()
+);
+rounding_kernel!(
+    /// Element-wise fractional part of a block of f64. `param` is ignored.
+    frac_f64_blocks, f64, |x| x - x.trunc()
+);
+rounding_kernel!(
     /// Round a block of f32 to `param` decimal places, halves to even.
     round_f32_blocks, f32, |x, m| (x * m).round_ties_even() / m
 );

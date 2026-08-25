@@ -532,12 +532,16 @@ pub(crate) fn accumulate_grad(
     Ok(())
 }
 
-/// Gradient function for tensor cloning operation
-pub struct CloneBackward {
+/// Gradient function for any op whose derivative is 1: the incoming gradient
+/// reaches the input unchanged.
+///
+/// That is `clone` and `detach`-free copies, and also `frac`, whose only
+/// non-linear part (`trunc`) is a step function with zero derivative.
+pub struct IdentityBackward {
     pub input_id: TensorId,
 }
 
-impl GradientFunction for CloneBackward {
+impl GradientFunction for IdentityBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);

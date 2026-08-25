@@ -1175,7 +1175,10 @@ assert row_std.shape == (2, 3)
   `negative_slope`, the same side `relu` takes, matching PyTorch
 - `isnan`, `isinf`, `isfinite`
 - `clip`, `clamp`, `clamp_min`, `clamp_max`
-- `round`, `floor`, `ceil` — `round` sends halves to the even neighbour
+- `round`, `floor`, `ceil`, `trunc`, `frac` — `trunc` rounds towards zero and
+  `frac` is what it leaves behind, `x - trunc(x)`, carrying `x`'s sign. `frac`
+  is the only differentiable one (its gradient is 1); the rest are step
+  functions, so they return a constant. `round` sends halves to the even neighbour
   (`round(0.5) == 0`, `round(2.5) == 2`), matching NumPy, PyTorch and Python's
   built-in `round`. It takes an optional `decimals` argument.
 - `log2`, `log10` — the natural log rescaled; they share `log`'s behaviour at
@@ -1355,8 +1358,8 @@ histogram, histc,
 
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
-round, floor, ceil, clip, clamp, clamp_min, clamp_max, maximum, minimum, log1p,
-log2, log10, expm1, logaddexp, erf, erfc,
+round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max, maximum,
+minimum, log1p, log2, log10, expm1, logaddexp, erf, erfc,
 
 # Trigonometry and hyperbolics
 sin, cos, tan, asin, acos, atan, sinh, cosh, asinh, acosh, atanh,

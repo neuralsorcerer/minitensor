@@ -730,41 +730,70 @@ def test_tensor_round_with_decimals():
     assert rounded.dtype == tensor.dtype
 
 
-def test_floor_and_ceil_match_numpy():
+# The parameterless rounding modes, each against the NumPy function it is
+# named after.
+_ROUNDING_MODES = [
+    ("floor", np.floor),
+    ("ceil", np.ceil),
+    ("trunc", np.trunc),
+    ("frac", lambda a: a - np.trunc(a)),
+]
+
+
+@pytest.mark.parametrize("name, reference", _ROUNDING_MODES)
+def test_rounding_modes_match_numpy(name, reference):
     values = _make_tensor_values()
     tensor = mt.Tensor(values.tolist(), dtype="float32")
+    expected = reference(values)
 
-    floored = tensor.floor()
-    ceiled = tensor.ceil()
-
-    np.testing.assert_allclose(floored.numpy(), np.floor(values))
-    np.testing.assert_allclose(ceiled.numpy(), np.ceil(values))
+    np.testing.assert_allclose(getattr(tensor, name)().numpy(), expected)
+    np.testing.assert_allclose(getattr(mt, name)(tensor).numpy(), expected)
+    np.testing.assert_allclose(getattr(mt.functional, name)(tensor).numpy(), expected)
 
 
-def test_rounding_ops_raise_for_integer_tensors():
+def test_trunc_rounds_towards_zero_where_floor_and_ceil_do_not():
+    # The whole content of "towards zero": trunc agrees with floor above zero
+    # and with ceil below it, so on a symmetric input it agrees with neither
+    # everywhere.
+    tensor = mt.Tensor([-2.7, -0.3, 0.3, 2.7], dtype="float64")
+    np.testing.assert_allclose(tensor.trunc().numpy(), [-2.0, -0.0, 0.0, 2.0])
+    np.testing.assert_allclose(tensor.floor().numpy(), [-3.0, -1.0, 0.0, 2.0])
+    np.testing.assert_allclose(tensor.ceil().numpy(), [-2.0, -0.0, 1.0, 3.0])
+
+
+def test_trunc_and_frac_reconstruct_the_input_exactly():
+    values = np.array([-2.75, -0.5, 0.0, 0.5, 2.75, 1e7 + 0.5], dtype=np.float64)
+    tensor = mt.Tensor(values.tolist(), dtype="float64")
+    whole, fraction = tensor.trunc().numpy(), tensor.frac().numpy()
+
+    # Exactly, not approximately: both terms share an exponent range, so the
+    # subtraction that produced `frac` was lossless.
+    np.testing.assert_array_equal(whole + fraction, values)
+    # `frac` carries the input's sign and never reaches 1.
+    assert np.all(np.abs(fraction) < 1.0)
+    assert np.all(np.sign(fraction[fraction != 0]) == np.sign(values[fraction != 0]))
+
+
+def test_frac_of_a_non_finite_input_is_nan():
+    tensor = mt.Tensor([float("inf"), float("-inf"), float("nan")], dtype="float64")
+    assert np.all(np.isnan(tensor.frac().numpy()))
+
+
+@pytest.mark.parametrize("name", ["round", "floor", "ceil", "trunc", "frac"])
+def test_rounding_ops_raise_for_integer_tensors(name):
     tensor = mt.Tensor.arange(-3, 4, dtype="int32")
 
     with pytest.raises(ValueError):
-        tensor.round()
-
-    with pytest.raises(ValueError):
-        tensor.floor()
-
-    with pytest.raises(ValueError):
-        tensor.ceil()
+        getattr(tensor, name)()
 
 
-def test_functional_round_floor_ceil_forwarders():
+def test_functional_round_forwarder_takes_decimals():
     values = _make_tensor_values()
     tensor = mt.Tensor(values.tolist(), dtype="float32")
 
-    rounded = mt.functional.round(tensor, decimals=1)
-    floored = mt.functional.floor(tensor)
-    ceiled = mt.functional.ceil(tensor)
-
-    np.testing.assert_allclose(rounded.numpy(), np.round(values, 1))
-    np.testing.assert_allclose(floored.numpy(), np.floor(values))
-    np.testing.assert_allclose(ceiled.numpy(), np.ceil(values))
+    np.testing.assert_allclose(
+        mt.functional.round(tensor, decimals=1).numpy(), np.round(values, 1)
+    )
 
 
 def test_clip_float_range():

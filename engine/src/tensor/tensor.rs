@@ -19,7 +19,7 @@ use crate::ops::map::{
     par_any_chunk, par_out_chunks, unary_map, unary_map_threshold,
 };
 use crate::{
-    autograd::{self, CloneBackward, GradientFunction, TensorId},
+    autograd::{self, GradientFunction, IdentityBackward, TensorId},
     device::Device,
     error::{MinitensorError, Result},
     ops::{arithmetic::add, reduction::QuantileInterpolation},
@@ -398,7 +398,7 @@ impl Tensor {
         );
 
         if self.requires_grad {
-            let grad_fn = Arc::new(CloneBackward {
+            let grad_fn = Arc::new(IdentityBackward {
                 input_id: self.tensor_id,
             });
             cloned = autograd::with_grad_fn(cloned, grad_fn)?;
@@ -469,7 +469,7 @@ impl Tensor {
         // The materialized copy passes gradients straight through to the
         // source tensor (identity backward).
         if self.requires_grad {
-            let grad_fn = Arc::new(CloneBackward {
+            let grad_fn = Arc::new(IdentityBackward {
                 input_id: self.tensor_id,
             });
             output = autograd::with_grad_fn(output, grad_fn)?;
@@ -2424,6 +2424,20 @@ impl Tensor {
         ceil(self)
     }
 
+    /// Round tensor values towards zero element-wise.
+    #[inline(always)]
+    pub fn trunc(&self) -> Result<Self> {
+        use crate::ops::activation::trunc;
+        trunc(self)
+    }
+
+    /// Fractional part of each element, `x - trunc(x)`.
+    #[inline(always)]
+    pub fn frac(&self) -> Result<Self> {
+        use crate::ops::activation::frac;
+        frac(self)
+    }
+
     /// Square root
     #[inline(always)]
     pub fn sqrt(&self) -> Result<Self> {
@@ -3268,7 +3282,7 @@ mod tests {
     fn test_contiguous_participates_in_autograd() {
         // `contiguous()` materializes a copy but must keep gradient flow to
         // the source (identity backward). Regression test: the producer-buffer
-        // rewrite once dropped the CloneBackward attachment, which only the
+        // rewrite once dropped the IdentityBackward attachment, which only the
         // Python differential suite caught.
         let data = TensorData::from_vec_f32(vec![1.0, 2.0, 3.0], Device::cpu());
         let tensor = Tensor::new(

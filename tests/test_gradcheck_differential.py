@@ -256,7 +256,7 @@ def test_gradcheck_composite_mlp_layer():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("op", ["ceil", "floor", "round", "sign"])
+@pytest.mark.parametrize("op", ["ceil", "floor", "round", "sign", "trunc"])
 def test_step_functions_produce_constants_not_phantom_leaves(op):
     # These have zero derivative wherever it exists, so no gradient is recorded
     # -- the same convention as norm(p=0). They used to copy the input's
@@ -291,6 +291,10 @@ _ANY = np.random.default_rng(7).standard_normal(9) * 1.3
 _POS = np.abs(np.random.default_rng(5).standard_normal(9)) + 0.4
 _UNIT = np.random.default_rng(9).uniform(-0.85, 0.85, 9)
 _GT1 = np.abs(np.random.default_rng(11).standard_normal(9)) + 1.4
+# `frac` jumps at every non-zero integer, so a central difference straddling one
+# would compare a slope of 1 against a slope of -1e5. These sit at least 0.15
+# away from any integer, and span several of them so `trunc` is not always zero.
+_NON_INTEGRAL = np.array([-3.4, -2.7, -1.25, -0.6, 0.3, 1.45, 2.8, 3.15, 4.5])
 
 _GRADCHECK_OPS = [
     ("abs", lambda t: t.abs(), _ANY),
@@ -310,6 +314,7 @@ _GRADCHECK_OPS = [
     ("exp", lambda t: t.exp(), _ANY),
     ("expm1", lambda t: t.expm1(), _ANY),
     ("gelu", lambda t: t.gelu(), _ANY),
+    ("frac", lambda t: t.frac(), _NON_INTEGRAL),
     ("hardshrink", lambda t: t.hardshrink(lambd=0.3), _ANY),
     ("log", lambda t: t.log(), _POS),
     ("log10", lambda t: t.log10(), _POS),
@@ -563,6 +568,7 @@ _FORWARD_OPS = [
     ("exp", lambda t: t.exp(), _FWD_ANY, np.exp),
     ("expm1", lambda t: t.expm1(), _FWD_ANY, np.expm1),
     ("floor", lambda t: t.floor(), _FWD_ANY, np.floor),
+    ("frac", lambda t: t.frac(), _FWD_ANY, lambda a: a - np.trunc(a)),
     ("log", lambda t: t.log(), _FWD_POS, np.log),
     ("log10", lambda t: t.log10(), _FWD_POS, np.log10),
     ("log1p", lambda t: t.log1p(), _FWD_POS, np.log1p),
@@ -576,6 +582,7 @@ _FORWARD_OPS = [
     ("sqrt", lambda t: t.sqrt(), _FWD_POS, np.sqrt),
     ("tan", lambda t: t.tan(), _FWD_UNIT, np.tan),
     ("tanh", lambda t: t.tanh(), _FWD_ANY, np.tanh),
+    ("trunc", lambda t: t.trunc(), _FWD_ANY, np.trunc),
     ("sigmoid", lambda t: t.sigmoid(), _FWD_ANY, lambda a: 1 / (1 + np.exp(-a))),
     ("relu", lambda t: t.relu(), _FWD_ANY, lambda a: np.maximum(a, 0)),
     ("softplus", lambda t: t.softplus(), _FWD_ANY, lambda a: np.log1p(np.exp(a))),

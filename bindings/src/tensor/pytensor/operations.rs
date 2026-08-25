@@ -187,6 +187,18 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Round towards zero, discarding the fractional part.
+    pub fn trunc(&self) -> PyResult<Self> {
+        let result = self.inner.trunc().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// The fractional part of each element, `x - trunc(x)`, carrying its sign.
+    pub fn frac(&self) -> PyResult<Self> {
+        let result = self.inner.frac().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// -1, 0 or 1 according to each element's sign. NaN gives NaN.
     pub fn sign(&self) -> PyResult<Self> {
         let result = self.inner.sign().map_err(_convert_error)?;

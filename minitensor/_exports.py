@@ -171,6 +171,8 @@ _FUNCTIONAL_FORWARDERS = (
     "clamp_max",
     "round",
     "floor",
+    "trunc",
+    "frac",
     "ceil",
     "sin",
     "cos",

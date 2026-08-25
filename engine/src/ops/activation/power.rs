@@ -7,6 +7,7 @@
 use super::*;
 use crate::autograd::AbsBackward;
 use crate::autograd::ClampBackward;
+use crate::autograd::IdentityBackward;
 use crate::autograd::NanToNumBackward;
 use crate::autograd::RsqrtBackward;
 use crate::autograd::SqrtBackward;
@@ -16,6 +17,24 @@ use crate::{
     tensor::{DataType, Tensor, TensorData},
 };
 use std::sync::Arc;
+
+/// Wraps the result of a step function: same shape and dtype as the input,
+/// never differentiable.
+///
+/// `sign`, `floor`, `ceil`, `trunc` and `round` all have a derivative that is
+/// zero wherever it exists, so no gradient is worth recording. The output is a
+/// constant rather than a tensor that claims `requires_grad` and then behaves
+/// as a leaf -- which is what propagating the input's flag without attaching a
+/// gradient function produced. Matches `norm(p = 0)`.
+fn step_function_output(tensor: &Tensor, data: TensorData) -> Tensor {
+    Tensor::new(
+        Arc::new(data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    )
+}
 
 /// Absolute value function
 pub fn abs(tensor: &Tensor) -> Result<Tensor> {
@@ -64,18 +83,7 @@ pub fn sign(tensor: &Tensor) -> Result<Tensor> {
         }
     };
 
-    Ok(Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        // A step function: its derivative is zero wherever it exists, so no
-        // gradient is worth recording. The output is a constant rather than a
-        // tensor that claims `requires_grad` and then behaves as a leaf --
-        // which is what propagating the input's flag without attaching a
-        // gradient function produced. Matches `norm(p = 0)`.
-        false,
-    ))
+    Ok(step_function_output(tensor, output_data))
 }
 
 /// Square root function.
@@ -250,30 +258,67 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
         }
     };
 
-    let output = Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        // A step function: its derivative is zero wherever it exists, so no
-        // gradient is worth recording. The output is a constant rather than a
-        // tensor that claims `requires_grad` and then behaves as a leaf --
-        // which is what propagating the input's flag without attaching a
-        // gradient function produced. Matches `norm(p = 0)`.
-        false,
-    );
-
-    Ok(output)
+    Ok(step_function_output(tensor, output_data))
 }
 
-/// Floor tensor values
-pub fn floor(tensor: &Tensor) -> Result<Tensor> {
+/// The rounding modes that take no parameter. `round` is written out
+/// separately because it takes `decimals`.
+macro_rules! float_rounding_op {
+    ($name:ident, $f32_kernel:ident, $f64_kernel:ident, $label:literal, $doc:literal) => {
+        #[doc = $doc]
+        pub fn $name(tensor: &Tensor) -> Result<Tensor> {
+            let output_data = match tensor.dtype() {
+                DataType::Float32 => $f32_kernel(tensor, 0.0)?,
+                DataType::Float64 => $f64_kernel(tensor, 0.0)?,
+                _ => {
+                    return Err(MinitensorError::invalid_operation(concat!(
+                        $label,
+                        " only supported for floating point tensors"
+                    )));
+                }
+            };
+
+            Ok(step_function_output(tensor, output_data))
+        }
+    };
+}
+
+float_rounding_op!(
+    floor,
+    floor_f32,
+    floor_f64,
+    "Floor",
+    "Round towards negative infinity."
+);
+float_rounding_op!(
+    ceil,
+    ceil_f32,
+    ceil_f64,
+    "Ceiling",
+    "Round towards positive infinity."
+);
+float_rounding_op!(
+    trunc,
+    trunc_f32,
+    trunc_f64,
+    "Truncation",
+    "Round towards zero, discarding the fractional part."
+);
+
+/// Element-wise fractional part, `x - trunc(x)`, which carries `x`'s sign.
+///
+/// The only differentiable member of the family, and for the same reason the
+/// others are not: `trunc` is a step function with zero derivative, so
+/// `d/dx frac(x) = 1` wherever it exists and the gradient passes straight
+/// through. Non-finite inputs give NaN, since `inf - inf` is what the
+/// definition asks for.
+pub fn frac(tensor: &Tensor) -> Result<Tensor> {
     let output_data = match tensor.dtype() {
-        DataType::Float32 => floor_f32(tensor, 0.0)?,
-        DataType::Float64 => floor_f64(tensor, 0.0)?,
+        DataType::Float32 => frac_f32(tensor, 0.0)?,
+        DataType::Float64 => frac_f64(tensor, 0.0)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
-                "Floor only supported for floating point tensors",
+                "Fractional part only supported for floating point tensors",
             ));
         }
     };
@@ -283,41 +328,17 @@ pub fn floor(tensor: &Tensor) -> Result<Tensor> {
         tensor.shape().clone(),
         tensor.dtype(),
         tensor.device(),
-        // A step function: its derivative is zero wherever it exists, so no
-        // gradient is worth recording. The output is a constant rather than a
-        // tensor that claims `requires_grad` and then behaves as a leaf --
-        // which is what propagating the input's flag without attaching a
-        // gradient function produced. Matches `norm(p = 0)`.
-        false,
+        tensor.requires_grad(),
     );
 
-    Ok(output)
-}
-
-/// Ceiling tensor values
-pub fn ceil(tensor: &Tensor) -> Result<Tensor> {
-    let output_data = match tensor.dtype() {
-        DataType::Float32 => ceil_f32(tensor, 0.0)?,
-        DataType::Float64 => ceil_f64(tensor, 0.0)?,
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Ceiling only supported for floating point tensors",
-            ));
-        }
-    };
-
-    let output = Tensor::new(
-        Arc::new(output_data),
-        tensor.shape().clone(),
-        tensor.dtype(),
-        tensor.device(),
-        // A step function: its derivative is zero wherever it exists, so no
-        // gradient is worth recording. The output is a constant rather than a
-        // tensor that claims `requires_grad` and then behaves as a leaf --
-        // which is what propagating the input's flag without attaching a
-        // gradient function produced. Matches `norm(p = 0)`.
-        false,
-    );
+    if output.requires_grad() {
+        return with_grad_fn(
+            output,
+            Arc::new(IdentityBackward {
+                input_id: tensor.id(),
+            }),
+        );
+    }
 
     Ok(output)
 }
@@ -800,6 +821,24 @@ rounding_op!(
 );
 rounding_op!(ceil_f32, f32, Float32, as_f32_slice, ceil_f32_blocks, "f32");
 rounding_op!(ceil_f64, f64, Float64, as_f64_slice, ceil_f64_blocks, "f64");
+rounding_op!(
+    trunc_f32,
+    f32,
+    Float32,
+    as_f32_slice,
+    trunc_f32_blocks,
+    "f32"
+);
+rounding_op!(
+    trunc_f64,
+    f64,
+    Float64,
+    as_f64_slice,
+    trunc_f64_blocks,
+    "f64"
+);
+rounding_op!(frac_f32, f32, Float32, as_f32_slice, frac_f32_blocks, "f32");
+rounding_op!(frac_f64, f64, Float64, as_f64_slice, frac_f64_blocks, "f64");
 
 fn round_f32(tensor: &Tensor, decimals: i32) -> Result<TensorData> {
     round_f32_scaled(tensor, 10.0_f32.powi(decimals))
@@ -868,57 +907,119 @@ mod rounding_and_clip_tests {
             .map(|i| values[i % values.len()])
             .collect();
 
+        /// One rounding mode: its name, the tensor op, and the scalar it has
+        /// to agree with element for element.
+        type RoundingCase = (&'static str, fn(&Tensor) -> Result<Tensor>, fn(f32) -> f32);
+
+        // Every member of the family, against the scalar it is named after.
+        // `frac` is included because it is the one that has to agree with a
+        // *difference* rather than with a libm call: `x - trunc(x)`.
+        let cases: [RoundingCase; 4] = [
+            ("floor", floor, f32::floor),
+            ("ceil", ceil, f32::ceil),
+            ("trunc", trunc, f32::trunc),
+            ("frac", frac, |x| x - x.trunc()),
+        ];
+
         for data in [values.clone(), long] {
             let t = f32_tensor(data.clone());
 
-            let got = floor(&t).unwrap();
-            for (i, (&g, &x)) in got
-                .data()
-                .as_f32_slice()
-                .unwrap()
-                .iter()
-                .zip(&data)
-                .enumerate()
-            {
-                let want = x.floor();
-                assert!(
-                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
-                    "floor({x}) = {g}, want {want} (index {i})"
-                );
-            }
+            let check = |name: &str, got: &Tensor, want: &dyn Fn(f32) -> f32| {
+                for (i, (&g, &x)) in got
+                    .data()
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .zip(&data)
+                    .enumerate()
+                {
+                    let want = want(x);
+                    // Bit equality, so a `-0.0` answered as `0.0` fails.
+                    assert!(
+                        g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
+                        "{name}({x}) = {g}, want {want} (index {i})"
+                    );
+                }
+            };
 
-            let got = ceil(&t).unwrap();
-            for (i, (&g, &x)) in got
-                .data()
-                .as_f32_slice()
-                .unwrap()
-                .iter()
-                .zip(&data)
-                .enumerate()
-            {
-                let want = x.ceil();
-                assert!(
-                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
-                    "ceil({x}) = {g}, want {want} (index {i})"
-                );
+            for (name, op, scalar) in cases {
+                check(name, &op(&t).unwrap(), &scalar);
             }
-
-            let got = round(&t, 0).unwrap();
-            for (i, (&g, &x)) in got
-                .data()
-                .as_f32_slice()
-                .unwrap()
-                .iter()
-                .zip(&data)
-                .enumerate()
-            {
-                let want = x.round_ties_even();
-                assert!(
-                    g.to_bits() == want.to_bits() || (g.is_nan() && want.is_nan()),
-                    "round({x}) = {g}, want {want} (index {i})"
-                );
-            }
+            check("round", &round(&t, 0).unwrap(), &f32::round_ties_even);
         }
+    }
+
+    /// `trunc` and `floor`/`ceil` are the same function on one side of zero
+    /// each, which is the whole content of "rounds towards zero".
+    #[test]
+    fn trunc_is_floor_above_zero_and_ceil_below_it() {
+        let positive = f32_tensor(vec![0.0, 0.25, 1.5, 2.75, 1e7, f32::INFINITY]);
+        assert_eq!(
+            trunc(&positive).unwrap().data().as_f32_slice().unwrap(),
+            floor(&positive).unwrap().data().as_f32_slice().unwrap()
+        );
+
+        let negative = f32_tensor(vec![-0.0, -0.25, -1.5, -2.75, -1e7, f32::NEG_INFINITY]);
+        assert_eq!(
+            trunc(&negative).unwrap().data().as_f32_slice().unwrap(),
+            ceil(&negative).unwrap().data().as_f32_slice().unwrap()
+        );
+    }
+
+    /// `frac` keeps the sign of its input and reconstructs it exactly:
+    /// `trunc(x) + frac(x) == x` with no rounding, for every finite `x`.
+    #[test]
+    fn frac_carries_the_sign_and_reconstructs_the_input() {
+        let data = vec![2.75f32, -2.75, 0.5, -0.5, 0.0, -0.0, 1e7, -1e7, 3.0, -3.0];
+        let t = f32_tensor(data.clone());
+        let f = frac(&t).unwrap();
+        let whole = trunc(&t).unwrap();
+
+        let f = f.data().as_f32_slice().unwrap();
+        let whole = whole.data().as_f32_slice().unwrap();
+        for (i, &x) in data.iter().enumerate() {
+            assert!(
+                f[i].is_sign_negative() == x.is_sign_negative() || f[i] == 0.0,
+                "frac({x}) = {} flipped the sign",
+                f[i]
+            );
+            assert!(f[i].abs() < 1.0, "frac({x}) = {} is not a fraction", f[i]);
+            assert_eq!(whole[i] + f[i], x, "trunc + frac did not rebuild {x}");
+        }
+
+        // Non-finite inputs have no finite whole part to subtract.
+        let specials = f32_tensor(vec![f32::INFINITY, f32::NEG_INFINITY, f32::NAN]);
+        assert!(
+            frac(&specials)
+                .unwrap()
+                .data()
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .all(|v| v.is_nan())
+        );
+    }
+
+    /// The family is not differentiable, except `frac`, whose gradient is the
+    /// one that comes through unchanged.
+    #[test]
+    fn only_frac_carries_a_gradient() {
+        let t = f32_tensor(vec![1.5, -2.25]).requires_grad_(true);
+
+        for op in [floor, ceil, trunc] {
+            assert!(!op(&t).unwrap().requires_grad());
+        }
+        assert!(!round(&t, 0).unwrap().requires_grad());
+        assert!(!sign(&t).unwrap().requires_grad());
+
+        let out = frac(&t).unwrap();
+        assert!(out.requires_grad());
+        let seed = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = crate::autograd::backward_collect(&out, Some(seed)).unwrap();
+        assert_eq!(
+            grads.get(&t.id()).unwrap().data().as_f32_slice().unwrap(),
+            &[1.0, 1.0]
+        );
     }
 
     /// Halves round to the even neighbour, not away from zero, at every

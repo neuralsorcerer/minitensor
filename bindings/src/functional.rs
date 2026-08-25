@@ -505,6 +505,7 @@ unary_forwarders!(
     exp => "Element-wise `e ** x`.",
     expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
     floor => "Round towards negative infinity.",
+    frac => "The fractional part of each element, `x - trunc(x)`, carrying its sign.",
     log => "Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.",
     log10 => "Element-wise base-10 logarithm.",
     log1p => "Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.",
@@ -524,6 +525,7 @@ unary_forwarders!(
     sqrt => "Element-wise square root. Negative inputs give NaN.",
     tan => "Element-wise tangent, taking radians.",
     tanh => "Element-wise hyperbolic tangent.",
+    trunc => "Round towards zero, discarding the fractional part.",
 );
 
 binary_forwarders!(
@@ -1891,6 +1893,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(clamp_max, parent)?)?;
     parent.add_function(wrap_pyfunction!(round, parent)?)?;
     parent.add_function(wrap_pyfunction!(floor, parent)?)?;
+    parent.add_function(wrap_pyfunction!(frac, parent)?)?;
     parent.add_function(wrap_pyfunction!(ceil, parent)?)?;
     parent.add_function(wrap_pyfunction!(sign, parent)?)?;
     parent.add_function(wrap_pyfunction!(reciprocal, parent)?)?;
@@ -2003,6 +2006,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(tril, parent)?)?;
     parent.add_function(wrap_pyfunction!(diagonal, parent)?)?;
     parent.add_function(wrap_pyfunction!(trace, parent)?)?;
+    parent.add_function(wrap_pyfunction!(trunc, parent)?)?;
     parent.add_function(wrap_pyfunction!(solve, parent)?)?;
     parent.add_function(wrap_pyfunction!(det, parent)?)?;
     parent.add_function(wrap_pyfunction!(slogdet, parent)?)?;

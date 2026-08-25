@@ -76,6 +76,8 @@ UNARY = [
     "atanh",
     "floor",
     "ceil",
+    "trunc",
+    "frac",
     "round",
     "sign",
     "relu",
