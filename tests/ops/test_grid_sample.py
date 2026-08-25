@@ -196,7 +196,9 @@ def test_align_corners_moves_the_reading_by_half_a_pixel():
 def test_zeros_reads_nothing_outside():
     image = np.array([[[[1.0, 2.0, 3.0]]]])
     grid = np.array([[[[3.0, 0.0]]]])
-    assert _call(image, grid, padding_mode="zeros", align_corners=True)[0, 0, 0, 0] == 0.0
+    assert (
+        _call(image, grid, padding_mode="zeros", align_corners=True)[0, 0, 0, 0] == 0.0
+    )
 
 
 def test_border_holds_the_edge_value():
@@ -350,7 +352,9 @@ def test_the_border_gradient_really_reaches_zero_somewhere():
     rng = np.random.default_rng(11)
     image = rng.normal(size=(1, 2, 4, 3))
     grid = _smooth_grid(rng, (1, 4, 4, 2), (4, 3), True, reach=2.6)
-    _, got = _grads(image, grid, want=("grid",), padding_mode="border", align_corners=True)
+    _, got = _grads(
+        image, grid, want=("grid",), padding_mode="border", align_corners=True
+    )
     assert np.any(got == 0.0)
 
 
@@ -363,7 +367,9 @@ def test_reflection_gradients_come_back_with_both_signs():
     grid = _smooth_grid(rng, (1, 4, 4, 2), (4, 3), True, reach=2.6)
     options = dict(padding_mode="reflection", align_corners=True)
     _, folded = _grads(image, grid, want=("grid",), **options)
-    _, plain = _grads(image, grid, want=("grid",), padding_mode="zeros", align_corners=True)
+    _, plain = _grads(
+        image, grid, want=("grid",), padding_mode="zeros", align_corners=True
+    )
     # Somewhere a fold has turned the gradient around relative to the unfolded
     # reading of the same coordinate.
     assert np.any(np.sign(folded) * np.sign(plain) < 0)
@@ -494,9 +500,7 @@ def test_the_input_and_the_grid_must_share_a_dtype():
     image = np.zeros((1, 1, 2, 2), dtype=np.float32)
     grid = np.zeros((1, 1, 1, 2), dtype=np.float64)
     with pytest.raises(Exception, match="dtype"):
-        mt.nn.grid_sample(
-            mt.Tensor.from_numpy(image), mt.Tensor.from_numpy(grid)
-        )
+        mt.nn.grid_sample(mt.Tensor.from_numpy(image), mt.Tensor.from_numpy(grid))
 
 
 def test_the_ranks_must_agree():

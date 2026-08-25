@@ -30,7 +30,9 @@ import minitensor as mt
 def _t(a):
     # Not `ascontiguousarray`: it promotes a 0-d array to shape `(1,)`, which
     # would quietly turn the rank-rejection test below into a 1x1 matrix.
-    return mt.Tensor.from_numpy(np.asarray(a) if a.ndim == 0 else np.ascontiguousarray(a))
+    return mt.Tensor.from_numpy(
+        np.asarray(a) if a.ndim == 0 else np.ascontiguousarray(a)
+    )
 
 
 # --------------------------------------------------------------------------
@@ -100,7 +102,9 @@ def test_diag_embed_batched_matches_per_matrix(shape):
     built = mt.diag_embed(_t(a)).numpy()
     flat = a.reshape(-1, shape[-1])
     for index, row in enumerate(flat):
-        assert np.array_equal(built.reshape(-1, shape[-1], shape[-1])[index], np.diag(row))
+        assert np.array_equal(
+            built.reshape(-1, shape[-1], shape[-1])[index], np.diag(row)
+        )
 
 
 def test_diag_embed_chooses_its_axes():

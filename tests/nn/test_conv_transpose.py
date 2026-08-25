@@ -41,17 +41,35 @@ import pytest
 import minitensor as mt
 
 
-def _reference(x, w, b=None, stride=(1, 1), padding=(0, 0), output_padding=(0, 0),
-               dilation=(1, 1), groups=1):
+def _reference(
+    x,
+    w,
+    b=None,
+    stride=(1, 1),
+    padding=(0, 0),
+    output_padding=(0, 0),
+    dilation=(1, 1),
+    groups=1,
+):
     """The definition, written out: every input position scattered across the
     kernel footprint. Slow and obviously right, which is the point."""
     batch, in_channels, height, width = x.shape
     _, per_group_out, kernel_h, kernel_w = w.shape
     out_channels = per_group_out * groups
-    out_h = ((height - 1) * stride[0] - 2 * padding[0]
-             + dilation[0] * (kernel_h - 1) + output_padding[0] + 1)
-    out_w = ((width - 1) * stride[1] - 2 * padding[1]
-             + dilation[1] * (kernel_w - 1) + output_padding[1] + 1)
+    out_h = (
+        (height - 1) * stride[0]
+        - 2 * padding[0]
+        + dilation[0] * (kernel_h - 1)
+        + output_padding[0]
+        + 1
+    )
+    out_w = (
+        (width - 1) * stride[1]
+        - 2 * padding[1]
+        + dilation[1] * (kernel_w - 1)
+        + output_padding[1]
+        + 1
+    )
     out = np.zeros((batch, out_channels, out_h, out_w))
     group_in = in_channels // groups
     for n in range(batch):
@@ -89,12 +107,24 @@ def _numeric_grad(f, arr, eps=1e-6):
 
 
 CONFIGS = [
-    dict(stride=(1, 1), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=1),
-    dict(stride=(2, 2), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=1),
-    dict(stride=(2, 2), padding=(1, 1), output_padding=(1, 1), dilation=(1, 1), groups=1),
-    dict(stride=(2, 1), padding=(1, 0), output_padding=(1, 0), dilation=(2, 1), groups=2),
-    dict(stride=(3, 2), padding=(0, 1), output_padding=(2, 1), dilation=(1, 2), groups=4),
-    dict(stride=(1, 1), padding=(2, 1), output_padding=(0, 0), dilation=(1, 1), groups=1),
+    dict(
+        stride=(1, 1), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=1
+    ),
+    dict(
+        stride=(2, 2), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=1
+    ),
+    dict(
+        stride=(2, 2), padding=(1, 1), output_padding=(1, 1), dilation=(1, 1), groups=1
+    ),
+    dict(
+        stride=(2, 1), padding=(1, 0), output_padding=(1, 0), dilation=(2, 1), groups=2
+    ),
+    dict(
+        stride=(3, 2), padding=(0, 1), output_padding=(2, 1), dilation=(1, 2), groups=4
+    ),
+    dict(
+        stride=(1, 1), padding=(2, 1), output_padding=(0, 0), dilation=(1, 1), groups=1
+    ),
 ]
 
 
@@ -117,7 +147,9 @@ def test_it_matches_the_definition(config):
         mt.Tensor(b, dtype="float64"),
         **config,
     ).numpy()
-    np.testing.assert_allclose(got, _reference(x, w, b, **config), rtol=1e-12, atol=1e-13)
+    np.testing.assert_allclose(
+        got, _reference(x, w, b, **config), rtol=1e-12, atol=1e-13
+    )
 
 
 @pytest.mark.parametrize("config", CONFIGS)
@@ -142,7 +174,9 @@ def test_it_is_the_adjoint_of_convolution(config):
         groups=config["groups"],
     ).numpy()
 
-    assert gathered.shape == x.shape, "the adjoint has to land back on the input's shape"
+    assert (
+        gathered.shape == x.shape
+    ), "the adjoint has to land back on the input's shape"
     assert float((scattered * y).sum()) == pytest.approx(
         float((x * gathered).sum()), rel=1e-10
     )
@@ -158,12 +192,19 @@ def test_it_is_the_adjoint_of_convolution(config):
         ((4, 4), (3, 3), (1, 1), (0, 0), (0, 0), (2, 2), (8, 8)),
     ],
 )
-def test_the_output_size(shape, kernel, stride, padding, output_padding, dilation, expected):
+def test_the_output_size(
+    shape, kernel, stride, padding, output_padding, dilation, expected
+):
     x = mt.Tensor(np.zeros((1, 2, *shape)), dtype="float64")
     w = mt.Tensor(np.zeros((2, 3, *kernel)), dtype="float64")
     got = mt.nn.conv_transpose2d(
-        x, w, None, stride=stride, padding=padding,
-        output_padding=output_padding, dilation=dilation,
+        x,
+        w,
+        None,
+        stride=stride,
+        padding=padding,
+        output_padding=output_padding,
+        dilation=dilation,
     )
     assert got.numpy().shape == (1, 3, *expected)
 
@@ -184,13 +225,20 @@ def test_output_padding_recovers_the_size_a_convolution_consumed(length):
     x = np.random.default_rng(11).standard_normal((1, 2, length, length))
     weight = np.zeros((3, 2, 3, 3))
     down = mt.nn.conv2d(
-        mt.Tensor(x, dtype="float64"), mt.Tensor(weight, dtype="float64"),
-        None, stride=2, padding=1,
+        mt.Tensor(x, dtype="float64"),
+        mt.Tensor(weight, dtype="float64"),
+        None,
+        stride=2,
+        padding=1,
     )
     # The transposed weight layout is the convolution's, read from the far side.
     up = mt.nn.conv_transpose2d(
-        down, mt.Tensor(weight, dtype="float64"), None,
-        stride=2, padding=1, output_padding=(length + 1) % 2,
+        down,
+        mt.Tensor(weight, dtype="float64"),
+        None,
+        stride=2,
+        padding=1,
+        output_padding=(length + 1) % 2,
     )
     assert up.numpy().shape == x.shape
 
@@ -229,14 +277,17 @@ def test_bias_is_added_per_output_channel():
         mt.Tensor(w, dtype="float64"),
         mt.Tensor(bias, dtype="float64"),
     ).numpy()
-    np.testing.assert_allclose(with_bias - without, bias.reshape(1, -1, 1, 1) * np.ones_like(without))
+    np.testing.assert_allclose(
+        with_bias - without, bias.reshape(1, -1, 1, 1) * np.ones_like(without)
+    )
 
 
 def test_groups_keep_the_channels_apart():
     """A grouped transposed convolution is several independent ones, so zeroing
     one group's weights must leave the other group's output untouched."""
-    config = dict(stride=(1, 1), padding=(0, 0), output_padding=(0, 0),
-                  dilation=(1, 1), groups=2)
+    config = dict(
+        stride=(1, 1), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=2
+    )
     x, w, _ = _operands(config, seed=17)
     full = mt.nn.conv_transpose2d(
         mt.Tensor(x, dtype="float64"), mt.Tensor(w, dtype="float64"), None, **config
@@ -244,7 +295,10 @@ def test_groups_keep_the_channels_apart():
     masked = w.copy()
     masked[: w.shape[0] // 2] = 0.0
     partial = mt.nn.conv_transpose2d(
-        mt.Tensor(x, dtype="float64"), mt.Tensor(masked, dtype="float64"), None, **config
+        mt.Tensor(x, dtype="float64"),
+        mt.Tensor(masked, dtype="float64"),
+        None,
+        **config,
     ).numpy()
     half = full.shape[1] // 2
     assert np.abs(partial[:, :half]).max() == 0.0
@@ -264,9 +318,14 @@ def test_both_float_dtypes_are_supported(dtype):
     tolerance = 1e-4 if dtype == "float32" else 1e-12
     np.testing.assert_allclose(
         got.numpy().astype(np.float64),
-        _reference(x.astype(dtype).astype(np.float64), w.astype(dtype).astype(np.float64),
-                   b.astype(dtype).astype(np.float64), **CONFIGS[2]),
-        rtol=tolerance, atol=tolerance,
+        _reference(
+            x.astype(dtype).astype(np.float64),
+            w.astype(dtype).astype(np.float64),
+            b.astype(dtype).astype(np.float64),
+            **CONFIGS[2],
+        ),
+        rtol=tolerance,
+        atol=tolerance,
     )
 
 
@@ -320,9 +379,15 @@ def test_every_gradient_matches_numerical_differentiation(config):
     out = mt.nn.conv_transpose2d(tx, tw, tb, **config)
     (out * mt.Tensor(probe, dtype="float64")).sum().backward()
 
-    np.testing.assert_allclose(tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7)
-    np.testing.assert_allclose(tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7)
-    np.testing.assert_allclose(tb.grad.numpy(), _numeric_grad(loss, b), rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(
+        tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        tb.grad.numpy(), _numeric_grad(loss, b), rtol=1e-5, atol=1e-7
+    )
 
 
 def test_a_gradient_reaches_only_the_operands_that_asked_for_one():
@@ -342,8 +407,9 @@ def test_a_gradient_reaches_only_the_operands_that_asked_for_one():
     "stride,padding,output_padding,dilation,groups",
     [(1, 0, 0, 1, 1), (2, 1, 1, 1, 1), (2, 0, 1, 2, 2), (3, 2, 2, 1, 4)],
 )
-def test_one_dimensional_agrees_with_the_two_dimensional(stride, padding, output_padding,
-                                                         dilation, groups):
+def test_one_dimensional_agrees_with_the_two_dimensional(
+    stride, padding, output_padding, dilation, groups
+):
     """`conv_transpose1d` gives the signal a singleton height and defers, so
     there is one scatter and one backward rather than two to keep in step."""
     rng = np.random.default_rng(37)
@@ -352,15 +418,24 @@ def test_one_dimensional_agrees_with_the_two_dimensional(stride, padding, output
     b = rng.standard_normal(4)
 
     got = mt.nn.conv_transpose1d(
-        mt.Tensor(x, dtype="float64"), mt.Tensor(w, dtype="float64"),
+        mt.Tensor(x, dtype="float64"),
+        mt.Tensor(w, dtype="float64"),
         mt.Tensor(b, dtype="float64"),
-        stride=stride, padding=padding, output_padding=output_padding,
-        dilation=dilation, groups=groups,
+        stride=stride,
+        padding=padding,
+        output_padding=output_padding,
+        dilation=dilation,
+        groups=groups,
     ).numpy()
     want = _reference(
-        x[:, :, None, :], w[:, :, None, :], b,
-        stride=(1, stride), padding=(0, padding),
-        output_padding=(0, output_padding), dilation=(1, dilation), groups=groups,
+        x[:, :, None, :],
+        w[:, :, None, :],
+        b,
+        stride=(1, stride),
+        padding=(0, padding),
+        output_padding=(0, output_padding),
+        dilation=(1, dilation),
+        groups=groups,
     )[:, :, 0, :]
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-13)
 
@@ -374,15 +449,19 @@ def test_one_dimensional_carries_a_gradient():
     probe = rng.standard_normal(
         mt.nn.conv_transpose1d(
             mt.Tensor(x, dtype="float64"), mt.Tensor(w, dtype="float64"), None, stride=2
-        ).numpy().shape
+        )
+        .numpy()
+        .shape
     )
 
     def loss():
         return float(
             (
                 mt.nn.conv_transpose1d(
-                    mt.Tensor(x, dtype="float64"), mt.Tensor(w, dtype="float64"),
-                    None, stride=2,
+                    mt.Tensor(x, dtype="float64"),
+                    mt.Tensor(w, dtype="float64"),
+                    None,
+                    stride=2,
                 ).numpy()
                 * probe
             ).sum()
@@ -390,8 +469,12 @@ def test_one_dimensional_carries_a_gradient():
 
     out = mt.nn.conv_transpose1d(tx, tw, None, stride=2)
     (out * mt.Tensor(probe, dtype="float64")).sum().backward()
-    np.testing.assert_allclose(tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7)
-    np.testing.assert_allclose(tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(
+        tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7
+    )
 
 
 # --- the layers --------------------------------------------------------------
@@ -417,14 +500,21 @@ def test_the_layer_holds_a_weight_with_input_channels_first():
 def test_the_one_dimensional_layer():
     layer = mt.nn.ConvTranspose1d(4, 2, 3, stride=2, output_padding=1, dtype="float64")
     assert (layer.in_channels, layer.out_channels, layer.kernel_size) == (4, 2, 3)
-    assert layer(mt.Tensor(np.zeros((1, 4, 5)), dtype="float64")).numpy().shape == (1, 2, 12)
+    assert layer(mt.Tensor(np.zeros((1, 4, 5)), dtype="float64")).numpy().shape == (
+        1,
+        2,
+        12,
+    )
 
 
 def test_the_layer_agrees_with_the_functional_form():
-    layer = mt.nn.ConvTranspose2d(3, 5, 3, stride=2, padding=1, output_padding=1,
-                                  dtype="float64")
+    layer = mt.nn.ConvTranspose2d(
+        3, 5, 3, stride=2, padding=1, output_padding=1, dtype="float64"
+    )
     weight, bias = layer.parameters()
-    x = mt.Tensor(np.random.default_rng(43).standard_normal((2, 3, 4, 4)), dtype="float64")
+    x = mt.Tensor(
+        np.random.default_rng(43).standard_normal((2, 3, 4, 4)), dtype="float64"
+    )
     direct = mt.nn.conv_transpose2d(
         x, weight, bias, stride=2, padding=1, output_padding=1
     )
@@ -435,14 +525,19 @@ def test_a_decoder_can_now_be_built_and_trained():
     """The thing the gap actually blocked, end to end: a stack of upsampling
     blocks that grows a small code into an image, and a gradient that reaches
     every parameter in it."""
-    decoder = mt.nn.Sequential([
-        mt.nn.ConvTranspose2d(16, 8, 4, stride=2, padding=1, dtype="float64"),
-        mt.nn.ReLU(),
-        mt.nn.ConvTranspose2d(8, 3, 4, stride=2, padding=1, dtype="float64"),
-    ])
-    code = mt.Tensor(np.random.default_rng(47).standard_normal((2, 16, 4, 4)), dtype="float64")
-    target = mt.Tensor(np.random.default_rng(53).standard_normal((2, 3, 16, 16)),
-                       dtype="float64")
+    decoder = mt.nn.Sequential(
+        [
+            mt.nn.ConvTranspose2d(16, 8, 4, stride=2, padding=1, dtype="float64"),
+            mt.nn.ReLU(),
+            mt.nn.ConvTranspose2d(8, 3, 4, stride=2, padding=1, dtype="float64"),
+        ]
+    )
+    code = mt.Tensor(
+        np.random.default_rng(47).standard_normal((2, 16, 4, 4)), dtype="float64"
+    )
+    target = mt.Tensor(
+        np.random.default_rng(53).standard_normal((2, 3, 16, 16)), dtype="float64"
+    )
     assert decoder(code).numpy().shape == (2, 3, 16, 16)
 
     parameters = decoder.parameters()
@@ -457,14 +552,18 @@ def test_a_decoder_can_now_be_built_and_trained():
         loss.backward()
         optimizer.step()
     assert loss.item() < first * 0.7, "the decoder has to actually learn"
-    assert all(p.grad is not None for p in parameters), "every parameter gets a gradient"
+    assert all(
+        p.grad is not None for p in parameters
+    ), "every parameter gets a gradient"
 
 
 def test_an_encoder_decoder_round_trips_the_shape():
     """Downsample then upsample with the mirrored geometry and the grid comes
     back the size it started -- which is the property a U-Net's skip connections
     are built on."""
-    x = mt.Tensor(np.random.default_rng(59).standard_normal((1, 3, 16, 16)), dtype="float64")
+    x = mt.Tensor(
+        np.random.default_rng(59).standard_normal((1, 3, 16, 16)), dtype="float64"
+    )
     down = mt.nn.Conv2d(3, 8, 4, stride=2, padding=1, dtype="float64")
     up = mt.nn.ConvTranspose2d(8, 3, 4, stride=2, padding=1, dtype="float64")
     encoded = down(x)

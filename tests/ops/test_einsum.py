@@ -97,7 +97,9 @@ def test_agrees_with_matmul_and_trace():
     generalisation: it has to contain what it generalises."""
     a, b = _rand((6, 7), (7, 5), seed=1)
     assert np.allclose(
-        mt.einsum("ij,jk->ik", _t(a), _t(b)).numpy(), (_t(a) @ _t(b)).numpy(), atol=1e-12
+        mt.einsum("ij,jk->ik", _t(a), _t(b)).numpy(),
+        (_t(a) @ _t(b)).numpy(),
+        atol=1e-12,
     )
     square = _rand((5, 5), seed=2)[0]
     assert np.isclose(mt.einsum("ii", _t(square)).item(), mt.trace(_t(square)).item())
@@ -481,7 +483,9 @@ def test_gradient_reaches_every_operand_of_a_chain():
 
 
 def test_no_grad_when_not_required():
-    assert not mt.einsum("ij,jk->ik", _t(np.ones((2, 3))), _t(np.ones((3, 4)))).requires_grad
+    assert not mt.einsum(
+        "ij,jk->ik", _t(np.ones((2, 3))), _t(np.ones((3, 4)))
+    ).requires_grad
 
 
 # --------------------------------------------------------------------------

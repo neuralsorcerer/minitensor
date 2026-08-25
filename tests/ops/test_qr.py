@@ -132,9 +132,7 @@ def test_the_factors_reconstruct_the_matrix(shape):
     """Against the definition rather than against NumPy."""
     values = _matrix(shape, seed=3)
     q, r = mt.Tensor(values, dtype="float64").qr()
-    np.testing.assert_allclose(
-        q.matmul(r).numpy(), values, rtol=1e-10, atol=1e-12
-    )
+    np.testing.assert_allclose(q.matmul(r).numpy(), values, rtol=1e-10, atol=1e-12)
 
 
 @pytest.mark.parametrize("shape", SHAPES)

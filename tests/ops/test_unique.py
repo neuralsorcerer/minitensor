@@ -100,9 +100,7 @@ def test_asking_for_nothing_extra_returns_a_bare_tensor():
     assert result.numpy().shape == (2,)
 
 
-@pytest.mark.parametrize(
-    "dtype", [np.float32, np.float64, np.int32, np.int64]
-)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32, np.int64])
 def test_unique_of_every_numeric_dtype(dtype):
     data = np.array([3, 1, 2, 1, 3], dtype=dtype)
     got = mt.unique(_t(data))

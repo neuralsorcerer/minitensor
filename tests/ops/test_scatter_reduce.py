@@ -86,7 +86,9 @@ def test_against_a_reference(reduce, include_self, trial):
     src = rng.normal(size=9)
     index = rng.integers(0, 6, 9)
     got = _call(base, index, src, reduce, include_self)
-    assert np.allclose(got, _reference(base, index, src, reduce, include_self), atol=1e-12)
+    assert np.allclose(
+        got, _reference(base, index, src, reduce, include_self), atol=1e-12
+    )
 
 
 @pytest.mark.parametrize("reduce", REDUCTIONS)
@@ -136,9 +138,7 @@ def test_mean_over_integers_is_refused():
     """It would truncate every average, which is a surprise rather than a
     result. PyTorch allows it; saying so plainly is better than a wrong number."""
     with pytest.raises(Exception, match="mean"):
-        mt.scatter_reduce(
-            _i([1, 2, 3]), 0, _i([0, 1]), _i([4, 5]), "mean", True
-        )
+        mt.scatter_reduce(_i([1, 2, 3]), 0, _i([0, 1]), _i([4, 5]), "mean", True)
 
 
 def test_an_unknown_reduction_is_refused():
@@ -182,7 +182,9 @@ def test_the_gradients_match_central_differences(reduce, include_self, trial):
     def forward(b, s):
         return float(
             (
-                mt.scatter_reduce(_t(b), 0, _i(index), _t(s), reduce, include_self).numpy()
+                mt.scatter_reduce(
+                    _t(b), 0, _i(index), _t(s), reduce, include_self
+                ).numpy()
                 * weights
             ).sum()
         )

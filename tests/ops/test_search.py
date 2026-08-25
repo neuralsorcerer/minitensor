@@ -98,9 +98,7 @@ def test_the_result_keeps_the_values_shape():
         assert np.array_equal(got.reshape(-1), np.searchsorted(SORTED, PROBES))
 
 
-@pytest.mark.parametrize(
-    "dtype", [np.float32, np.float64, np.int32, np.int64]
-)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32, np.int64])
 def test_every_numeric_dtype(dtype):
     sequence = np.array([1, 3, 5, 7], dtype=dtype)
     probes = np.array([0, 3, 6, 9], dtype=dtype)
@@ -146,9 +144,7 @@ def test_rejects_mismatched_dtypes():
 
 def test_rejects_a_batched_sequence_that_does_not_line_up():
     with pytest.raises(Exception, match="must match its values"):
-        mt.searchsorted(
-            _t(np.zeros((3, 4))), _t(np.zeros((2, 4))), False
-        )
+        mt.searchsorted(_t(np.zeros((3, 4))), _t(np.zeros((2, 4))), False)
 
 
 # --------------------------------------------------------------------------
@@ -273,8 +269,12 @@ def test_density_is_comparable_across_binnings():
     data = np.random.default_rng(7).standard_normal(4000)
     coarse, coarse_edges = mt.histogram(_t(data), 10, (-3.0, 3.0), None, True)
     fine, fine_edges = mt.histogram(_t(data), 40, (-3.0, 3.0), None, True)
-    assert np.isclose((coarse.numpy() * np.diff(coarse_edges.numpy())).sum(), 1.0, atol=0.05)
-    assert np.isclose((fine.numpy() * np.diff(fine_edges.numpy())).sum(), 1.0, atol=0.05)
+    assert np.isclose(
+        (coarse.numpy() * np.diff(coarse_edges.numpy())).sum(), 1.0, atol=0.05
+    )
+    assert np.isclose(
+        (fine.numpy() * np.diff(fine_edges.numpy())).sum(), 1.0, atol=0.05
+    )
     assert abs(coarse.numpy().max() - fine.numpy().max()) < 0.2
 
 

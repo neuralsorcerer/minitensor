@@ -666,9 +666,7 @@ def test_all_three_gradients_together():
 
     def loss(matrix):
         u, s, vt = np.linalg.svd(matrix, full_matrices=False)
-        return float(
-            (left * u * u).sum() + s @ weights + (right * vt.T * vt.T).sum()
-        )
+        return float((left * u * u).sum() + s @ weights + (right * vt.T * vt.T).sum())
 
     expected = _numeric_grad(loss, a.copy())
     tensor_weights = mt.Tensor.from_numpy(weights)
@@ -863,7 +861,9 @@ def test_principal_components_of_a_data_matrix():
     assert np.allclose(variances, reference, atol=1e-10)
 
     projected = centred @ vt.T
-    assert np.allclose(projected.T @ projected / (len(data) - 1), np.diag(variances), atol=1e-10)
+    assert np.allclose(
+        projected.T @ projected / (len(data) - 1), np.diag(variances), atol=1e-10
+    )
 
 
 def test_orthogonal_procrustes():

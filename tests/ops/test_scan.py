@@ -112,13 +112,15 @@ def test_the_indices_match_a_reference_where_ties_and_nans_are_common(trial):
         for greater, op in ((True, mt.cummax), (False, mt.cummin)):
             values, indices = op(_t(a), dim)
             want_values, want_indices = _reference_cumextreme(a, dim, greater)
-            assert np.array_equal(
-                np.isnan(values.numpy()), np.isnan(want_values)
-            ), (dim, greater)
+            assert np.array_equal(np.isnan(values.numpy()), np.isnan(want_values)), (
+                dim,
+                greater,
+            )
             present = ~np.isnan(want_values)
-            assert np.array_equal(
-                values.numpy()[present], want_values[present]
-            ), (dim, greater)
+            assert np.array_equal(values.numpy()[present], want_values[present]), (
+                dim,
+                greater,
+            )
             assert np.array_equal(indices.numpy(), want_indices), (dim, greater)
 
 

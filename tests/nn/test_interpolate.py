@@ -73,12 +73,16 @@ def _reference(x, output_size, mode, align_corners):
     out = np.zeros((batch, channels, out_h, out_w))
     for i in range(out_h):
         for j in range(out_w):
-            above = x[:, :, row_lo[i], col_lo[j]] + (
-                x[:, :, row_lo[i], col_hi[j]] - x[:, :, row_lo[i], col_lo[j]]
-            ) * col_w[j]
-            below = x[:, :, row_hi[i], col_lo[j]] + (
-                x[:, :, row_hi[i], col_hi[j]] - x[:, :, row_hi[i], col_lo[j]]
-            ) * col_w[j]
+            above = (
+                x[:, :, row_lo[i], col_lo[j]]
+                + (x[:, :, row_lo[i], col_hi[j]] - x[:, :, row_lo[i], col_lo[j]])
+                * col_w[j]
+            )
+            below = (
+                x[:, :, row_hi[i], col_lo[j]]
+                + (x[:, :, row_hi[i], col_hi[j]] - x[:, :, row_hi[i], col_lo[j]])
+                * col_w[j]
+            )
             out[:, :, i, j] = above + (below - above) * row_w[i]
     return out
 
@@ -112,14 +116,21 @@ MODES = [("nearest", False), ("bilinear", False), ("bilinear", True)]
 @pytest.mark.parametrize("shape,output_size", CASES)
 @pytest.mark.parametrize("mode,align_corners", MODES)
 def test_it_matches_the_coordinate_rule(shape, output_size, mode, align_corners):
-    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(shape)
+    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(
+        shape
+    )
     got = mt.nn.interpolate(
         mt.Tensor(values, dtype="float64"),
-        size=output_size, mode=mode, align_corners=align_corners,
+        size=output_size,
+        mode=mode,
+        align_corners=align_corners,
     ).numpy()
     assert got.shape == (shape[0], shape[1], *output_size)
     np.testing.assert_allclose(
-        got, _reference(values, output_size, mode, align_corners), rtol=1e-12, atol=1e-14
+        got,
+        _reference(values, output_size, mode, align_corners),
+        rtol=1e-12,
+        atol=1e-14,
     )
 
 
@@ -130,7 +141,9 @@ def test_resampling_to_the_same_size_changes_nothing(mode, align_corners):
     values = np.random.default_rng(3).standard_normal((2, 3, 5, 7))
     got = mt.nn.interpolate(
         mt.Tensor(values, dtype="float64"),
-        size=(5, 7), mode=mode, align_corners=align_corners,
+        size=(5, 7),
+        mode=mode,
+        align_corners=align_corners,
     ).numpy()
     np.testing.assert_array_equal(got, values)
 
@@ -148,7 +161,9 @@ def test_bilinear_reproduces_a_plane_exactly():
     out_h, out_w = 9, 7
     got = mt.nn.interpolate(
         mt.Tensor(plane, dtype="float64"),
-        size=(out_h, out_w), mode="bilinear", align_corners=True,
+        size=(out_h, out_w),
+        mode="bilinear",
+        align_corners=True,
     ).numpy()
 
     sampled_rows = np.arange(out_h) * (height - 1) / (out_h - 1)
@@ -166,7 +181,8 @@ def test_the_default_convention_composes():
     once = mt.nn.interpolate(tensor, scale_factor=4, mode="nearest").numpy()
     twice = mt.nn.interpolate(
         mt.nn.interpolate(tensor, scale_factor=2, mode="nearest"),
-        scale_factor=2, mode="nearest",
+        scale_factor=2,
+        mode="nearest",
     ).numpy()
     np.testing.assert_array_equal(once, twice)
 
@@ -187,7 +203,9 @@ def test_aligned_corners_keep_the_corners():
     values = np.arange(9, dtype=np.float64).reshape(1, 1, 3, 3)
     got = mt.nn.interpolate(
         mt.Tensor(values, dtype="float64"),
-        size=(5, 5), mode="bilinear", align_corners=True,
+        size=(5, 5),
+        mode="bilinear",
+        align_corners=True,
     ).numpy()
     assert got[0, 0, 0, 0] == values[0, 0, 0, 0]
     assert got[0, 0, -1, -1] == values[0, 0, -1, -1]
@@ -204,20 +222,28 @@ def test_a_scale_factor_truncates():
 
 def test_the_axes_can_be_scaled_differently():
     values = mt.Tensor(np.zeros((1, 2, 4, 6)), dtype="float64")
-    assert mt.nn.interpolate(values, scale_factor=(2.0, 0.5)).numpy().shape == (1, 2, 8, 3)
+    assert mt.nn.interpolate(values, scale_factor=(2.0, 0.5)).numpy().shape == (
+        1,
+        2,
+        8,
+        3,
+    )
     assert mt.nn.interpolate(values, size=(3, 12)).numpy().shape == (1, 2, 3, 12)
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_both_float_dtypes_are_supported(dtype):
     values = np.random.default_rng(11).standard_normal((2, 3, 5, 4)).astype(dtype)
-    got = mt.nn.interpolate(mt.Tensor(values, dtype=dtype), size=(7, 9), mode="bilinear")
+    got = mt.nn.interpolate(
+        mt.Tensor(values, dtype=dtype), size=(7, 9), mode="bilinear"
+    )
     assert got.dtype == dtype
     tolerance = 1e-6 if dtype == "float32" else 1e-13
     np.testing.assert_allclose(
         got.numpy().astype(np.float64),
         _reference(values.astype(np.float64), (7, 9), "bilinear", False),
-        rtol=tolerance, atol=tolerance,
+        rtol=tolerance,
+        atol=tolerance,
     )
 
 
@@ -259,13 +285,16 @@ def test_a_wrongly_ranked_input_is_refused():
     with pytest.raises(Exception):
         mt.nn.interpolate(mt.Tensor(np.zeros((4, 4)), dtype="float64"), size=(8, 8))
     with pytest.raises(Exception):
-        mt.nn.interpolate(mt.Tensor(np.zeros((1, 1, 2, 4, 4)), dtype="float64"), size=(8, 8))
+        mt.nn.interpolate(
+            mt.Tensor(np.zeros((1, 1, 2, 4, 4)), dtype="float64"), size=(8, 8)
+        )
 
 
 def test_an_integer_input_is_refused():
     with pytest.raises(Exception):
         mt.nn.interpolate(
-            mt.Tensor(np.zeros((1, 1, 4, 4), dtype=np.int64), dtype="int64"), size=(8, 8)
+            mt.Tensor(np.zeros((1, 1, 4, 4), dtype=np.int64), dtype="int64"),
+            size=(8, 8),
         )
 
 
@@ -280,7 +309,9 @@ def test_resampling_an_empty_axis_into_a_non_empty_one_is_refused():
 
 @pytest.mark.parametrize("shape,output_size", CASES[:5])
 @pytest.mark.parametrize("mode,align_corners", MODES)
-def test_the_gradient_matches_numerical_differentiation(shape, output_size, mode, align_corners):
+def test_the_gradient_matches_numerical_differentiation(
+    shape, output_size, mode, align_corners
+):
     rng = np.random.default_rng(13)
     values = rng.standard_normal(shape)
     probe = rng.standard_normal((shape[0], shape[1], *output_size))
@@ -290,7 +321,9 @@ def test_the_gradient_matches_numerical_differentiation(shape, output_size, mode
             (
                 mt.nn.interpolate(
                     mt.Tensor(values, dtype="float64"),
-                    size=output_size, mode=mode, align_corners=align_corners,
+                    size=output_size,
+                    mode=mode,
+                    align_corners=align_corners,
                 ).numpy()
                 * probe
             ).sum()
@@ -308,7 +341,9 @@ def test_the_gradient_matches_numerical_differentiation(shape, output_size, mode
 
 @pytest.mark.parametrize("shape,output_size", CASES)
 @pytest.mark.parametrize("mode,align_corners", MODES)
-def test_the_gradient_is_the_transpose_of_the_forward(shape, output_size, mode, align_corners):
+def test_the_gradient_is_the_transpose_of_the_forward(
+    shape, output_size, mode, align_corners
+):
     """Interpolation is linear, so `<interpolate(x), y>` and `<x, backward(y)>`
     are the same number -- to the last bit, not approximately. This pins every
     index against every weight in one equation, which finite differences can
@@ -319,7 +354,9 @@ def test_the_gradient_is_the_transpose_of_the_forward(shape, output_size, mode, 
 
     forward = mt.nn.interpolate(
         mt.Tensor(values, dtype="float64"),
-        size=output_size, mode=mode, align_corners=align_corners,
+        size=output_size,
+        mode=mode,
+        align_corners=align_corners,
     ).numpy()
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
     (
@@ -344,18 +381,26 @@ def test_an_upsampled_gradient_sums_to_the_number_of_readers():
 
 
 @pytest.mark.parametrize("length,output_size", [(5, 9), (9, 4), (1, 6), (7, 7)])
-@pytest.mark.parametrize("mode,align_corners", [("nearest", False), ("linear", False), ("linear", True)])
-def test_one_dimensional_agrees_with_the_two_dimensional(length, output_size, mode, align_corners):
+@pytest.mark.parametrize(
+    "mode,align_corners", [("nearest", False), ("linear", False), ("linear", True)]
+)
+def test_one_dimensional_agrees_with_the_two_dimensional(
+    length, output_size, mode, align_corners
+):
     """A 3-D signal is a 4-D one with a singleton height, so there is one kernel
     and one backward rather than two to keep in step."""
     values = np.random.default_rng(19).standard_normal((2, 3, length))
     got = mt.nn.interpolate(
         mt.Tensor(values, dtype="float64"),
-        size=output_size, mode=mode, align_corners=align_corners,
+        size=output_size,
+        mode=mode,
+        align_corners=align_corners,
     ).numpy()
     want = _reference(
-        values[:, :, None, :], (1, output_size),
-        "nearest" if mode == "nearest" else "bilinear", align_corners,
+        values[:, :, None, :],
+        (1, output_size),
+        "nearest" if mode == "nearest" else "bilinear",
+        align_corners,
     )[:, :, 0, :]
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-14)
 
@@ -363,7 +408,9 @@ def test_one_dimensional_agrees_with_the_two_dimensional(length, output_size, mo
 def test_linear_and_bilinear_name_the_same_mode():
     """Which word a caller writes depends only on how many spatial axes they
     have, and the rank already says that."""
-    values = mt.Tensor(np.random.default_rng(23).standard_normal((1, 2, 6)), dtype="float64")
+    values = mt.Tensor(
+        np.random.default_rng(23).standard_normal((1, 2, 6)), dtype="float64"
+    )
     np.testing.assert_array_equal(
         mt.nn.interpolate(values, size=11, mode="linear").numpy(),
         mt.nn.interpolate(values, size=11, mode="bilinear").numpy(),
@@ -376,13 +423,21 @@ def test_one_dimensional_carries_a_gradient():
 
     def loss():
         return float(
-            (mt.nn.interpolate(mt.Tensor(values, dtype="float64"), size=9, mode="linear").numpy()
-             * probe).sum()
+            (
+                mt.nn.interpolate(
+                    mt.Tensor(values, dtype="float64"), size=9, mode="linear"
+                ).numpy()
+                * probe
+            ).sum()
         )
 
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
-    (mt.nn.interpolate(t, size=9, mode="linear") * mt.Tensor(probe, dtype="float64")).sum().backward()
-    np.testing.assert_allclose(t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7)
+    (
+        mt.nn.interpolate(t, size=9, mode="linear") * mt.Tensor(probe, dtype="float64")
+    ).sum().backward()
+    np.testing.assert_allclose(
+        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+    )
 
 
 # --- the layer ---------------------------------------------------------------
@@ -399,15 +454,24 @@ def test_the_layer_reports_itself_and_holds_no_parameters():
 
 def test_the_layer_takes_a_size_too():
     layer = mt.nn.Upsample(size=(16, 20))
-    assert layer(mt.Tensor(np.zeros((2, 3, 8, 8)), dtype="float64")).numpy().shape == (2, 3, 16, 20)
+    assert layer(mt.Tensor(np.zeros((2, 3, 8, 8)), dtype="float64")).numpy().shape == (
+        2,
+        3,
+        16,
+        20,
+    )
 
 
 def test_the_layer_agrees_with_the_functional_form():
     values = np.random.default_rng(37).standard_normal((2, 3, 5, 7))
     tensor = mt.Tensor(values, dtype="float64")
     np.testing.assert_array_equal(
-        mt.nn.Upsample(size=(9, 4), mode="bilinear", align_corners=True)(tensor).numpy(),
-        mt.nn.interpolate(tensor, size=(9, 4), mode="bilinear", align_corners=True).numpy(),
+        mt.nn.Upsample(size=(9, 4), mode="bilinear", align_corners=True)(
+            tensor
+        ).numpy(),
+        mt.nn.interpolate(
+            tensor, size=(9, 4), mode="bilinear", align_corners=True
+        ).numpy(),
     )
 
 
@@ -430,6 +494,6 @@ def test_a_unet_decoder_step_is_now_expressible():
     output = decoder(merged)
     assert output.numpy().shape == (2, 4, 16, 16)
     output.sum().backward()
-    assert all(p.grad is not None for p in encoder.parameters()), (
-        "the gradient has to reach through the resampling to the encoder"
-    )
+    assert all(
+        p.grad is not None for p in encoder.parameters()
+    ), "the gradient has to reach through the resampling to the encoder"

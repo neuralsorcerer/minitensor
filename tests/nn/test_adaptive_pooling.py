@@ -91,7 +91,9 @@ OPS = [
 @pytest.mark.parametrize("shape,output_size", CASES)
 @pytest.mark.parametrize("op,reduce,name", OPS)
 def test_it_matches_the_window_rule(shape, output_size, op, reduce, name):
-    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(shape)
+    values = np.random.default_rng(hash((shape, output_size)) % 1000).standard_normal(
+        shape
+    )
     got = op(mt.Tensor(values, dtype="float64"), output_size).numpy()
     assert got.shape == (shape[0], shape[1], *output_size)
     np.testing.assert_allclose(
@@ -169,7 +171,8 @@ def test_both_float_dtypes_are_supported(dtype, op, reduce, name):
     np.testing.assert_allclose(
         got.numpy().astype(np.float64),
         _reference(values.astype(np.float64), (3, 2), reduce),
-        rtol=tolerance, atol=tolerance,
+        rtol=tolerance,
+        atol=tolerance,
     )
 
 
@@ -199,13 +202,17 @@ def test_pooling_an_empty_axis_into_a_non_empty_one_is_refused():
 
 @pytest.mark.parametrize("shape,output_size", CASES[:5] + [CASES[5]])
 @pytest.mark.parametrize("op,reduce,name", OPS)
-def test_the_gradient_matches_numerical_differentiation(shape, output_size, op, reduce, name):
+def test_the_gradient_matches_numerical_differentiation(
+    shape, output_size, op, reduce, name
+):
     rng = np.random.default_rng(11)
     values = rng.standard_normal(shape)
     probe = rng.standard_normal((shape[0], shape[1], *output_size))
 
     def loss():
-        return float((op(mt.Tensor(values, dtype="float64"), output_size).numpy() * probe).sum())
+        return float(
+            (op(mt.Tensor(values, dtype="float64"), output_size).numpy() * probe).sum()
+        )
 
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
     (op(t, output_size) * mt.Tensor(probe, dtype="float64")).sum().backward()
@@ -218,8 +225,11 @@ def test_an_overlapping_window_collects_from_every_window_it_is_in():
     """Spelled out rather than left to the numerical check. Three rows into two
     gives windows [0, 2) and [1, 3), so the middle row is in both and receives
     half from each while the ends receive half from one."""
-    t = mt.Tensor(np.array([1.0, 2.0, 3.0]).reshape(1, 1, 3, 1),
-                  dtype="float64", requires_grad=True)
+    t = mt.Tensor(
+        np.array([1.0, 2.0, 3.0]).reshape(1, 1, 3, 1),
+        dtype="float64",
+        requires_grad=True,
+    )
     mt.nn.adaptive_avg_pool2d(t, (2, 1)).sum().backward()
     np.testing.assert_allclose(t.grad.numpy().ravel(), [0.5, 1.0, 0.5])
 
@@ -229,8 +239,11 @@ def test_an_upsampling_gradient_counts_every_window_a_row_lands_in():
     `1/1 + 1/2`; row 1 is in three windows and collects `1/2 + 1/1 + 1/2`. Each
     window brings its own divisor, which is what a uniform-window backward
     cannot express."""
-    t = mt.Tensor(np.array([1.0, 2.0, 3.0]).reshape(1, 1, 3, 1),
-                  dtype="float64", requires_grad=True)
+    t = mt.Tensor(
+        np.array([1.0, 2.0, 3.0]).reshape(1, 1, 3, 1),
+        dtype="float64",
+        requires_grad=True,
+    )
     mt.nn.adaptive_avg_pool2d(t, (5, 1)).sum().backward()
     np.testing.assert_allclose(t.grad.numpy().ravel(), [1.5, 2.0, 1.5])
 
@@ -247,9 +260,12 @@ def test_the_max_gradient_reaches_only_the_winner():
 
 @pytest.mark.parametrize("length,output_size", [(10, 4), (7, 7), (9, 2), (3, 6)])
 @pytest.mark.parametrize(
-    "op,reduce", [(mt.nn.adaptive_avg_pool1d, np.mean), (mt.nn.adaptive_max_pool1d, np.max)]
+    "op,reduce",
+    [(mt.nn.adaptive_avg_pool1d, np.mean), (mt.nn.adaptive_max_pool1d, np.max)],
 )
-def test_one_dimensional_agrees_with_the_two_dimensional(length, output_size, op, reduce):
+def test_one_dimensional_agrees_with_the_two_dimensional(
+    length, output_size, op, reduce
+):
     values = np.random.default_rng(13).standard_normal((2, 3, length))
     got = op(mt.Tensor(values, dtype="float64"), output_size).numpy()
     want = _reference(values[:, :, None, :], (1, output_size), reduce)[:, :, 0, :]
@@ -262,12 +278,19 @@ def test_one_dimensional_carries_a_gradient():
 
     def loss():
         return float(
-            (mt.nn.adaptive_avg_pool1d(mt.Tensor(values, dtype="float64"), 3).numpy() * probe).sum()
+            (
+                mt.nn.adaptive_avg_pool1d(mt.Tensor(values, dtype="float64"), 3).numpy()
+                * probe
+            ).sum()
         )
 
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
-    (mt.nn.adaptive_avg_pool1d(t, 3) * mt.Tensor(probe, dtype="float64")).sum().backward()
-    np.testing.assert_allclose(t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7)
+    (
+        mt.nn.adaptive_avg_pool1d(t, 3) * mt.Tensor(probe, dtype="float64")
+    ).sum().backward()
+    np.testing.assert_allclose(
+        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+    )
 
 
 def test_a_wrongly_ranked_one_dimensional_input_is_refused():
@@ -309,18 +332,25 @@ def test_the_layer_agrees_with_the_functional_form():
 def test_the_layer_defaults_to_a_global_pool():
     layer = mt.nn.AdaptiveAvgPool2d()
     assert layer.output_size == (1, 1)
-    assert layer(mt.Tensor(np.zeros((1, 4, 5, 6)), dtype="float64")).numpy().shape == (1, 4, 1, 1)
+    assert layer(mt.Tensor(np.zeros((1, 4, 5, 6)), dtype="float64")).numpy().shape == (
+        1,
+        4,
+        1,
+        1,
+    )
 
 
 def test_a_classifier_head_now_takes_any_input_size():
     """The thing the gap actually blocked: the same network, several input
     resolutions, one output shape -- and a gradient that still reaches the
     convolution underneath it."""
-    head = mt.nn.Sequential([
-        mt.nn.Conv2d(3, 16, 3, padding=1, dtype="float64"),
-        mt.nn.ReLU(),
-        mt.nn.AdaptiveAvgPool2d((1, 1)),
-    ])
+    head = mt.nn.Sequential(
+        [
+            mt.nn.Conv2d(3, 16, 3, padding=1, dtype="float64"),
+            mt.nn.ReLU(),
+            mt.nn.AdaptiveAvgPool2d((1, 1)),
+        ]
+    )
     for height, width in [(8, 8), (17, 23), (33, 9)]:
         batch = mt.Tensor(
             np.random.default_rng(height).standard_normal((2, 3, height, width)),
@@ -330,8 +360,12 @@ def test_a_classifier_head_now_takes_any_input_size():
 
     parameters = head.parameters()
     optimizer = mt.optim.Adam(parameters, lr=0.05)
-    batch = mt.Tensor(np.random.default_rng(29).standard_normal((2, 3, 11, 13)), dtype="float64")
-    target = mt.Tensor(np.random.default_rng(31).standard_normal((2, 16, 1, 1)), dtype="float64")
+    batch = mt.Tensor(
+        np.random.default_rng(29).standard_normal((2, 3, 11, 13)), dtype="float64"
+    )
+    target = mt.Tensor(
+        np.random.default_rng(31).standard_normal((2, 16, 1, 1)), dtype="float64"
+    )
     first = None
     for _ in range(30):
         optimizer.zero_grad()

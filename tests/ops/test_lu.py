@@ -458,9 +458,7 @@ def test_cholesky_solve_is_differentiable_through_the_two_solves():
     weight = rng.normal(size=(4, 2))
 
     def loss(rhs):
-        return float(
-            (mt.cholesky_solve(_t(rhs), _t(factor)).numpy() * weight).sum()
-        )
+        return float((mt.cholesky_solve(_t(rhs), _t(factor)).numpy() * weight).sum())
 
     tb = _t(b, True)
     (mt.cholesky_solve(tb, _t(factor)) * _t(weight)).sum().backward()
@@ -540,7 +538,9 @@ def test_both_floating_dtypes(dtype):
     assert pivots.dtype == "int64"
     b = rng.normal(size=(6, 2)).astype(dtype)
     x = mt.lu_solve(packed, pivots, mt.Tensor.from_numpy(b)).numpy()
-    assert np.allclose(a.astype(np.float64) @ x, b, atol=1e-4 if dtype is np.float32 else 1e-11)
+    assert np.allclose(
+        a.astype(np.float64) @ x, b, atol=1e-4 if dtype is np.float32 else 1e-11
+    )
 
 
 def test_the_matrices_must_be_square():

@@ -145,7 +145,9 @@ def test_a_larger_matrix_still_converges():
     has to work for a while is worth its own case."""
     values = _symmetric((30, 30), seed=11)
     w, v = mt.Tensor(values, dtype="float64").eigh()
-    np.testing.assert_allclose(w.numpy(), np.linalg.eigvalsh(values), rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        w.numpy(), np.linalg.eigvalsh(values), rtol=1e-10, atol=1e-12
+    )
     vectors = v.numpy()
     np.testing.assert_allclose(vectors.T @ vectors, np.eye(30), rtol=0, atol=1e-11)
 
@@ -178,7 +180,8 @@ def test_eigvalsh_matches_numpy():
     np.testing.assert_allclose(
         mt.Tensor(values, dtype="float64").eigvalsh().numpy(),
         np.linalg.eigvalsh(values),
-        rtol=1e-11, atol=1e-13,
+        rtol=1e-11,
+        atol=1e-13,
     )
 
 
@@ -194,7 +197,8 @@ def test_both_float_dtypes_are_supported(dtype):
     np.testing.assert_allclose(
         w.numpy().astype(np.float64),
         np.linalg.eigvalsh(values.astype(np.float64)),
-        rtol=tolerance, atol=tolerance,
+        rtol=tolerance,
+        atol=tolerance,
     )
 
 
@@ -262,7 +266,10 @@ def test_the_eigenvector_gradient_matches_numerical_differentiation(n):
     _, v = t.eigh()
     ((v * v) * mt.Tensor(weights, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _symmetric_numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
+        t.grad.numpy(),
+        _symmetric_numeric_grad(loss, values.copy()),
+        rtol=1e-5,
+        atol=1e-7,
     )
 
 
@@ -290,7 +297,10 @@ def test_the_two_output_gradients_add_up():
         + ((v * v) * mt.Tensor(vector_weights, dtype="float64")).sum()
     ).backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _symmetric_numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
+        t.grad.numpy(),
+        _symmetric_numeric_grad(loss, values.copy()),
+        rtol=1e-5,
+        atol=1e-7,
     )
 
 
@@ -330,7 +340,9 @@ def test_a_batched_gradient_is_the_per_matrix_gradient():
         one = mt.Tensor(values[i].copy(), dtype="float64", requires_grad=True)
         one.eigvalsh().sum().backward()
         singles.append(one.grad.numpy())
-    np.testing.assert_allclose(batched.grad.numpy(), np.stack(singles), rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(
+        batched.grad.numpy(), np.stack(singles), rtol=1e-12, atol=1e-14
+    )
 
 
 # --- the things it unblocks --------------------------------------------------
@@ -384,7 +396,9 @@ def test_the_spectral_norm_is_now_expressible():
     2-norm, which nothing here could produce."""
     values = _symmetric((6, 6), seed=47)
     eigenvalues = mt.Tensor(values, dtype="float64").eigvalsh().numpy()
-    assert np.abs(eigenvalues).max() == pytest.approx(np.linalg.norm(values, 2), rel=1e-10)
+    assert np.abs(eigenvalues).max() == pytest.approx(
+        np.linalg.norm(values, 2), rel=1e-10
+    )
 
 
 def test_positive_definiteness_is_now_checkable():

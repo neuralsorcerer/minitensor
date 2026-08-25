@@ -509,9 +509,9 @@ def test_each_batch_element_is_independent():
     targets = [[1, 2], [3, 4], [2, 2], [4, 1]]
     together = _call(logs, targets, [7] * 4, [2] * 4, reduction="none").numpy()
     for sample, target in enumerate(targets):
-        alone = _one(
-            logs[:, sample : sample + 1, :], target, reduction="none"
-        ).numpy()[0]
+        alone = _one(logs[:, sample : sample + 1, :], target, reduction="none").numpy()[
+            0
+        ]
         assert together[sample] == pytest.approx(alone)
 
 
@@ -521,7 +521,9 @@ def test_both_floating_dtypes(dtype):
     logs = _random_logs(rng, 6, 2, 4).astype(dtype)
     out = _call(logs, [[1, 2], [3, 1]], [6, 6], [2, 2], reduction="none")
     assert out.numpy().dtype == dtype
-    exact = _call(logs.astype(np.float64), [[1, 2], [3, 1]], [6, 6], [2, 2], reduction="none")
+    exact = _call(
+        logs.astype(np.float64), [[1, 2], [3, 1]], [6, 6], [2, 2], reduction="none"
+    )
     assert np.allclose(out.numpy(), exact.numpy(), rtol=1e-6)
 
 
