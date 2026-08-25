@@ -11,6 +11,7 @@ use super::shape::{mask_select_into, zip_mask_into};
 use super::*;
 use crate::{
     error::{MinitensorError, Result},
+    ops::activation::units::{UnitGradKernel, UnitParams},
     ops::map::{binary_map, par_out_chunks},
     ops::util::{broadcast_mask_index, stable_sigmoid_f32, stable_sigmoid_f64},
     tensor::{DataType, Strides, Tensor, TensorData},
@@ -301,6 +302,39 @@ impl GradientFunction for SiluBackward {
         std::slice::from_ref(&self.input_id)
     }
 }
+/// Gradient function for every activation in [`crate::ops::activation::units`].
+///
+/// Those units differ only in their chain rule, so this holds it as a kernel
+/// rather than there being one struct per unit. The saved input is what every
+/// one of them needs -- none is cheaper to differentiate from its output.
+pub struct ActivationUnitBackward {
+    pub input_id: TensorId,
+    pub input: Tensor,
+    pub name: &'static str,
+    pub grad_kernel: UnitGradKernel,
+    pub params: UnitParams<f64>,
+}
+
+impl GradientFunction for ActivationUnitBackward {
+    fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
+        let narrow = [self.params[0] as f32, self.params[1] as f32];
+        let wide = self.params;
+        let (f32_op, f64_op) = self.grad_kernel;
+        let grad = unary_chain_grad(
+            &self.input,
+            grad_output,
+            self.name,
+            move |x: f32, gout: f32| f32_op(x, gout, narrow),
+            move |x: f64, gout: f64| f64_op(x, gout, wide),
+        )?;
+        Ok(single(self.input_id, grad))
+    }
+
+    fn input_ids(&self) -> &[TensorId] {
+        std::slice::from_ref(&self.input_id)
+    }
+}
+
 /// Gradient function for Softsign activation
 pub struct SoftsignBackward {
     pub input_id: TensorId,

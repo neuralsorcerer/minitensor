@@ -1324,6 +1324,72 @@ impl Tensor {
         hardshrink(self, lambd)
     }
 
+    /// `sigmoid` replaced by three straight lines: 0 below -3, 1 above 3, `x/6 + 1/2` between.
+    #[inline(always)]
+    pub fn hardsigmoid(&self) -> Result<Self> {
+        crate::ops::activation::hardsigmoid(self)
+    }
+
+    /// `x * hardsigmoid(x)`: `silu` with the exponential replaced by three straight lines.
+    #[inline(always)]
+    pub fn hardswish(&self) -> Result<Self> {
+        crate::ops::activation::hardswish(self)
+    }
+
+    /// `x - tanh(x)`, what `tanh` leaves behind.
+    #[inline(always)]
+    pub fn tanhshrink(&self) -> Result<Self> {
+        crate::ops::activation::tanhshrink(self)
+    }
+
+    /// `x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative tail.
+    #[inline(always)]
+    pub fn mish(&self) -> Result<Self> {
+        crate::ops::activation::mish(self)
+    }
+
+    /// `log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the direct form underflows.
+    #[inline(always)]
+    pub fn logsigmoid(&self) -> Result<Self> {
+        crate::ops::activation::logsigmoid(self)
+    }
+
+    /// `hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.
+    #[inline(always)]
+    pub fn relu6(&self) -> Result<Self> {
+        crate::ops::activation::relu6(self)
+    }
+
+    /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
+    #[inline(always)]
+    pub fn hardtanh(&self, min_val: f64, max_val: f64) -> Result<Self> {
+        crate::ops::activation::hardtanh(self, min_val, max_val)
+    }
+
+    /// `x` where it exceeds `threshold`, `value` everywhere else.
+    #[inline(always)]
+    pub fn threshold(&self, threshold: f64, value: f64) -> Result<Self> {
+        crate::ops::activation::threshold(self, threshold, value)
+    }
+
+    /// Shrinks each element towards zero by `lambd`, flattening `[-lambd, lambd]`.
+    #[inline(always)]
+    pub fn softshrink(&self, lambd: f64) -> Result<Self> {
+        crate::ops::activation::softshrink(self, lambd)
+    }
+
+    /// `elu` rescaled so its slope is continuous at zero for every `alpha`.
+    #[inline(always)]
+    pub fn celu(&self, alpha: f64) -> Result<Self> {
+        crate::ops::activation::celu(self, alpha)
+    }
+
+    /// `softmax` of the negated input: favours the smallest element.
+    #[inline(always)]
+    pub fn softmin(&self, dim: Option<usize>) -> Result<Self> {
+        crate::ops::activation::softmin(self, dim)
+    }
+
     /// Softmax activation
     #[inline(always)]
     pub fn softmax(&self, dim: Option<usize>) -> Result<Self> {

@@ -14,12 +14,15 @@ mod power_impl;
 mod softmax_impl;
 #[path = "activation/trigonometry.rs"]
 mod trigonometry_impl;
+#[path = "activation/units.rs"]
+pub mod units;
 
 pub use self::elementwise_impl::*;
 pub use self::hyperbolic_impl::*;
 pub use self::power_impl::*;
 pub(crate) use self::softmax_impl::*;
 pub use self::trigonometry_impl::*;
+pub use self::units::*;
 
 // Shared tests for the modules above. Previously `activation/advanced.rs`,
 // where six hundred lines of tests for the other five modules sat around a

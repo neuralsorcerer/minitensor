@@ -1204,7 +1204,23 @@ assert row_std.shape == (2, 3)
   is zero. That is the limit entropy and cross-entropy need, where the plain
   product gives `0 * -inf = NaN`. A NaN `other` still propagates.
 - `softplus`, `gelu`, `elu`, `selu`, `silu`
-- `hardshrink`
+- `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
+  leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
+  band but subtracts `lambd` from the rest, so it stays continuous
+- `tanhshrink(input)` — `x - tanh(x)`
+- `threshold(input, threshold, value)` — `x` where it exceeds `threshold`,
+  the constant `value` elsewhere
+- `hardtanh(input, min_val=-1.0, max_val=1.0)`, and `relu6(input)` for the
+  `[0, 6]` case that quantized networks use
+- `hardsigmoid(input)`, `hardswish(input)` — `sigmoid` and `silu` with the
+  exponential replaced by three straight lines, for the same reason
+- `mish(input)` — `x * tanh(softplus(x))`
+- `celu(input, alpha=1.0)` — `elu` rescaled so its slope is continuous at zero
+  for every `alpha`, which `elu`'s is only at `alpha = 1`
+- `logsigmoid(input)` — `log(sigmoid(x))`, evaluated as `-softplus(-x)`. The
+  direct form underflows to `-inf` once `sigmoid(x)` rounds to zero, around
+  `x = -104` in float64; this one stays exact and simply returns `x`.
+- `softmin(input, dim=None)` — `softmax` of the negated input
 - `floor_divide` / `//` — Python floor division (rounds toward negative
   infinity; integer operands stay integral, integer zero divisors raise,
   not differentiable)
@@ -1384,9 +1400,11 @@ bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
 logical_not,
 
 # Activations and normalization
-relu, leaky_relu, hardshrink, sigmoid, softplus, gelu, elu, selu, silu,
-softsign, tanh, glu, softmax, log_softmax, masked_softmax, masked_log_softmax,
-layer_norm, rms_norm, scaled_dot_product_attention, rope,
+relu, relu6, leaky_relu, hardtanh, hardshrink, softshrink, tanhshrink,
+threshold, sigmoid, hardsigmoid, logsigmoid, softplus, gelu, elu, celu, selu,
+silu, hardswish, mish, softsign, tanh, glu, softmax, log_softmax, softmin,
+masked_softmax, masked_log_softmax, layer_norm, rms_norm,
+scaled_dot_product_attention, rope,
 
 # Linear algebra
 matmul, solve, solve_triangular, trace, diagonal, diag, diag_embed, triu, tril,

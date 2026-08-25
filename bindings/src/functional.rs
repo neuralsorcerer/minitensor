@@ -506,14 +506,19 @@ unary_forwarders!(
     expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
     floor => "Round towards negative infinity.",
     frac => "The fractional part of each element, `x - trunc(x)`, carrying its sign.",
+    hardsigmoid => "`sigmoid` replaced by three straight lines: 0 below -3, 1 above 3, `x/6 + 1/2` between.",
+    hardswish => "`x * hardsigmoid(x)`: `silu` with the exponential replaced by three straight lines.",
     log => "Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.",
     log10 => "Element-wise base-10 logarithm.",
     log1p => "Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.",
     log2 => "Element-wise base-2 logarithm.",
     logical_not => "Element-wise logical NOT over truth values, giving a boolean tensor.",
+    logsigmoid => "`log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the direct form underflows.",
+    mish => "`x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative tail.",
     ravel => "A contiguous 1-D view of every element, in row-major order.",
     reciprocal => "Element-wise `1 / x`.",
     relu => "Element-wise `max(x, 0)`.",
+    relu6 => "`hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.",
     rsqrt => "Element-wise `1 / sqrt(x)`, computed without the intermediate root.",
     selu => "Scaled Exponential Linear Unit, with the fixed constants that make it self-normalizing.",
     sigmoid => "Element-wise `1 / (1 + exp(-x))`, evaluated so that large-magnitude inputs saturate instead of producing NaN.",
@@ -525,6 +530,7 @@ unary_forwarders!(
     sqrt => "Element-wise square root. Negative inputs give NaN.",
     tan => "Element-wise tangent, taking radians.",
     tanh => "Element-wise hyperbolic tangent.",
+    tanhshrink => "`x - tanh(x)`, what `tanh` leaves behind.",
     trunc => "Round towards zero, discarding the fractional part.",
 );
 
@@ -1202,6 +1208,46 @@ pub fn nan_to_num(
 ) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.nan_to_num(nan, posinf, neginf)
+}
+
+/// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
+#[pyfunction]
+#[pyo3(signature = (input, min_val=-1.0, max_val=1.0))]
+pub fn hardtanh(input: &Bound<PyAny>, min_val: f64, max_val: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.hardtanh(min_val, max_val)
+}
+
+/// `x` where it exceeds `threshold`, `value` everywhere else.
+#[pyfunction]
+#[pyo3(signature = (input, threshold, value))]
+pub fn threshold(input: &Bound<PyAny>, threshold: f64, value: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.threshold(threshold, value)
+}
+
+/// Shrink each element towards zero by `lambd`, flattening `[-lambd, lambd]`.
+#[pyfunction]
+#[pyo3(signature = (input, lambd=0.5))]
+pub fn softshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.softshrink(lambd)
+}
+
+/// `elu` rescaled so its slope is continuous at zero for every `alpha`.
+#[pyfunction]
+#[pyo3(signature = (input, alpha=1.0))]
+pub fn celu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.celu(alpha)
+}
+
+/// Normalize along `dim` so the values are positive, sum to 1, and favour the smallest element.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None))]
+pub fn softmin(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.softmin(dim)
 }
 
 /// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
@@ -1952,6 +1998,17 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nan_to_num, parent)?)?;
     parent.add_function(wrap_pyfunction!(relu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardshrink, parent)?)?;
+    parent.add_function(wrap_pyfunction!(celu, parent)?)?;
+    parent.add_function(wrap_pyfunction!(hardsigmoid, parent)?)?;
+    parent.add_function(wrap_pyfunction!(hardswish, parent)?)?;
+    parent.add_function(wrap_pyfunction!(hardtanh, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logsigmoid, parent)?)?;
+    parent.add_function(wrap_pyfunction!(mish, parent)?)?;
+    parent.add_function(wrap_pyfunction!(relu6, parent)?)?;
+    parent.add_function(wrap_pyfunction!(softmin, parent)?)?;
+    parent.add_function(wrap_pyfunction!(softshrink, parent)?)?;
+    parent.add_function(wrap_pyfunction!(tanhshrink, parent)?)?;
+    parent.add_function(wrap_pyfunction!(threshold, parent)?)?;
     parent.add_function(wrap_pyfunction!(sigmoid, parent)?)?;
     parent.add_function(wrap_pyfunction!(softplus, parent)?)?;
     parent.add_function(wrap_pyfunction!(gelu, parent)?)?;

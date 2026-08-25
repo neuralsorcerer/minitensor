@@ -245,6 +245,86 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `sigmoid` replaced by three straight lines: 0 below -3, 1 above 3, `x/6 + 1/2` between.
+    pub fn hardsigmoid(&self) -> PyResult<Self> {
+        let result = self.inner.hardsigmoid().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `x * hardsigmoid(x)`: `silu` with the exponential replaced by three straight lines.
+    pub fn hardswish(&self) -> PyResult<Self> {
+        let result = self.inner.hardswish().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `x - tanh(x)`, what `tanh` leaves behind.
+    pub fn tanhshrink(&self) -> PyResult<Self> {
+        let result = self.inner.tanhshrink().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative tail.
+    pub fn mish(&self) -> PyResult<Self> {
+        let result = self.inner.mish().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the direct form underflows.
+    pub fn logsigmoid(&self) -> PyResult<Self> {
+        let result = self.inner.logsigmoid().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.
+    pub fn relu6(&self) -> PyResult<Self> {
+        let result = self.inner.relu6().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
+    #[pyo3(signature = (min_val=-1.0, max_val=1.0))]
+    pub fn hardtanh(&self, min_val: f64, max_val: f64) -> PyResult<Self> {
+        let result = self
+            .inner
+            .hardtanh(min_val, max_val)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `x` where it exceeds `threshold`, `value` everywhere else.
+    pub fn threshold(&self, threshold: f64, value: f64) -> PyResult<Self> {
+        let result = self
+            .inner
+            .threshold(threshold, value)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Shrink each element towards zero by `lambd`, flattening `[-lambd, lambd]`.
+    #[pyo3(signature = (lambd=0.5))]
+    pub fn softshrink(&self, lambd: f64) -> PyResult<Self> {
+        let result = self.inner.softshrink(lambd).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `elu` rescaled so its slope is continuous at zero for every `alpha`.
+    #[pyo3(signature = (alpha=1.0))]
+    pub fn celu(&self, alpha: f64) -> PyResult<Self> {
+        let result = self.inner.celu(alpha).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Normalize along `dim` so the values are positive, sum to 1, and favour the smallest element.
+    #[pyo3(signature = (dim=None))]
+    pub fn softmin(&self, dim: Option<isize>) -> PyResult<Self> {
+        let resolved_dim = dim
+            .map(|dim| engine::ops::normalize_dim(dim, self.inner.ndim()))
+            .transpose()
+            .map_err(_convert_error)?;
+        let result = self.inner.softmin(resolved_dim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
     #[pyo3(signature = (lambd=None))]
     pub fn hardshrink(&self, lambd: Option<f64>) -> PyResult<Self> {
