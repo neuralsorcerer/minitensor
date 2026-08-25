@@ -73,28 +73,8 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         let squared_diff = mul(&diff, &diff)?;
 
         // Apply reduction
-        let loss = match reduction {
-            "mean" => {
-                // Compute mean of squared differences
-                let sum = sum_all_elements(&squared_diff)?;
-                let n = squared_diff.numel() as f64;
-                divide_by_scalar(&sum, n)?
-            }
-            "sum" => {
-                // Sum all squared differences
-                sum_all_elements(&squared_diff)?
-            }
-            "none" => {
-                // Return element-wise squared differences
-                squared_diff
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        };
+        let n = squared_diff.numel() as f64;
+        let loss = reduce_detached(squared_diff, reduction, n, None)?;
         (loss, diff_for_grad)
     };
 
@@ -150,28 +130,8 @@ pub fn mae_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> Resu
         let abs_diff = activation_abs(&diff.detach())?;
 
         // Apply reduction
-        let loss = match reduction {
-            "mean" => {
-                // Compute mean of absolute differences
-                let sum = sum_all_elements(&abs_diff)?;
-                let n = abs_diff.numel() as f64;
-                divide_by_scalar(&sum, n)?
-            }
-            "sum" => {
-                // Sum all absolute differences
-                sum_all_elements(&abs_diff)?
-            }
-            "none" => {
-                // Return element-wise absolute differences
-                abs_diff
-            }
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        };
+        let n = abs_diff.numel() as f64;
+        let loss = reduce_detached(abs_diff, reduction, n, None)?;
         (loss, sign_for_grad)
     };
 
@@ -314,21 +274,10 @@ pub fn cross_entropy_loss(
             sum(&nll, Some(vec![1]), false)?
         };
 
-        let loss = match reduction {
-            "mean" => {
-                let sum = sum_all_elements(&per_sample)?;
-                let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
-                divide_by_scalar(&sum, batch)?
-            }
-            "sum" => sum_all_elements(&per_sample)?,
-            "none" => per_sample,
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        };
+        // Averaged over samples, not elements: only the true-class term per
+        // sample is non-zero.
+        let batch = per_sample.shape().dims().first().copied().unwrap_or(1) as f64;
+        let loss = reduce_detached(per_sample, reduction, batch, None)?;
         (loss, softmax_predictions)
     };
 
@@ -528,21 +477,8 @@ pub fn binary_cross_entropy_loss(
         let negative_bce = sub(&zeros, &combined)?;
 
         // Apply reduction
-        match reduction {
-            "mean" => {
-                let sum = sum_all_elements(&negative_bce)?;
-                let n = negative_bce.numel() as f64;
-                divide_by_scalar(&sum, n)?
-            }
-            "sum" => sum_all_elements(&negative_bce)?,
-            "none" => negative_bce,
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        }
+        let n = negative_bce.numel() as f64;
+        reduce_detached(negative_bce, reduction, n, None)?
     };
 
     // Set up gradient function if needed
@@ -634,21 +570,8 @@ pub fn binary_cross_entropy_with_logits_loss(
         pos_weight.as_ref(),
     )?;
 
-    let loss = match reduction {
-        "mean" => {
-            let sum = sum_all_elements(&values)?;
-            let n = values.numel() as f64;
-            divide_by_scalar(&sum, n)?
-        }
-        "sum" => sum_all_elements(&values)?,
-        "none" => values,
-        _ => {
-            return Err(MinitensorError::invalid_operation(format!(
-                "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                reduction
-            )));
-        }
-    };
+    let n = values.numel() as f64;
+    let loss = reduce_detached(values, reduction, n, None)?;
 
     // The forward runs on detached data (the exact gradient comes from
     // BCEWithLogitsLossBackward), so gate on the inputs and turn grad back on
@@ -722,24 +645,12 @@ pub fn kl_div_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) -> R
         // element count, so forward and backward disagreed by a factor of
         // `numel / batch` (4x for a 3x4 input) whenever there was more than one
         // column. `batchmean` is now spelled out, and scales its gradient to match.
-        match reduction {
-            "mean" => {
-                let sum = sum_all_elements(&kld)?;
-                divide_by_scalar(&sum, predictions.numel().max(1) as f64)?
-            }
-            "batchmean" => {
-                let sum = sum_all_elements(&kld)?;
-                divide_by_scalar(&sum, kl_div_batch_size(predictions))?
-            }
-            "sum" => sum_all_elements(&kld)?,
-            "none" => kld,
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'batchmean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        }
+        reduce_detached(
+            kld,
+            reduction,
+            predictions.numel().max(1) as f64,
+            Some(kl_div_batch_size(predictions)),
+        )?
     };
 
     // Set up gradient function if needed
@@ -831,25 +742,12 @@ pub fn focal_loss(
         let focal_values = mul(&weighted_nll, &alpha_tensor)?;
 
         // Apply reduction
-        let loss = match reduction {
-            "mean" => {
-                let sum = sum_all_elements(&focal_values)?;
-                // Average over samples, matching cross_entropy: only the true-class
-                // term per sample is non-zero, so the denominator is the number of
-                // samples (numel / num_classes), not the total element count.
-                let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
-                let n = (focal_values.numel() / num_classes) as f64;
-                divide_by_scalar(&sum, n)?
-            }
-            "sum" => sum_all_elements(&focal_values)?,
-            "none" => focal_values,
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        };
+        // Averaged over samples, matching cross_entropy: only the true-class
+        // term per sample is non-zero, so the denominator is the number of
+        // samples (numel / num_classes), not the total element count.
+        let num_classes = predictions.size(predictions.ndim() - 1)?.max(1);
+        let n = (focal_values.numel() / num_classes) as f64;
+        let loss = reduce_detached(focal_values, reduction, n, None)?;
         (loss, softmax_for_grad)
     };
 
@@ -927,21 +825,8 @@ pub fn huber_loss(
         let huber_values = compute_huber_elementwise(&abs_diff, &diff, &delta_tensor, delta)?;
 
         // Apply reduction
-        let loss = match reduction {
-            "mean" => {
-                let sum = sum_all_elements(&huber_values)?;
-                let n = huber_values.numel() as f64;
-                divide_by_scalar(&sum, n)?
-            }
-            "sum" => sum_all_elements(&huber_values)?,
-            "none" => huber_values,
-            _ => {
-                return Err(MinitensorError::invalid_operation(format!(
-                    "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-                    reduction
-                )));
-            }
-        };
+        let n = huber_values.numel() as f64;
+        let loss = reduce_detached(huber_values, reduction, n, None)?;
         (loss, diff_for_grad)
     };
 
@@ -1021,18 +906,74 @@ pub fn log_cosh_loss(predictions: &Tensor, targets: &Tensor, reduction: &str) ->
     let log2 = create_scalar_tensor(std::f64::consts::LN_2, diff.dtype(), diff.device())?;
     let log_cosh = sub(&add(&diff_abs, &log1p_term)?, &log2)?;
 
-    match reduction {
-        "mean" => mean(&log_cosh, None, false),
-        "sum" => sum(&log_cosh, None, false),
-        "none" => Ok(log_cosh),
-        _ => Err(MinitensorError::invalid_operation(format!(
-            "Invalid reduction mode: {}. Must be 'mean', 'sum', or 'none'",
-            reduction
-        ))),
-    }
+    reduce_loss(log_cosh, reduction)
 }
 
 // Helper functions
+
+/// Applies a loss's `reduction`, on data the caller has already detached.
+///
+/// Every loss in this file did this itself, nine times over, and mostly
+/// identically: sum, divide, or hand the per-element values back. What differs
+/// is only the denominator `mean` divides by -- the element count for most,
+/// the sample count for `cross_entropy` and `focal`, the batch for `kl_div`'s
+/// `batchmean` -- so that is what the caller supplies. The message when the
+/// mode is none of them was the most-copied line of the nine.
+///
+/// The detached form is deliberate: these losses run their forward with
+/// autograd off and attach one hand-written node afterwards (see
+/// [`manual_backward_needed`]). [`reduce_loss`] is the differentiable
+/// counterpart, for the losses that let autograd record the whole computation.
+pub(crate) fn reduce_detached(
+    values: Tensor,
+    reduction: &str,
+    mean_denominator: f64,
+    batchmean_denominator: Option<f64>,
+) -> Result<Tensor> {
+    let divide_sum = |denominator: f64| -> Result<Tensor> {
+        divide_by_scalar(&sum_all_elements(&values)?, denominator)
+    };
+
+    match reduction {
+        "mean" => divide_sum(mean_denominator),
+        "batchmean" if batchmean_denominator.is_some() => {
+            divide_sum(batchmean_denominator.expect("checked by the guard"))
+        }
+        "sum" => sum_all_elements(&values),
+        "none" => Ok(values),
+        _ => Err(invalid_reduction(
+            reduction,
+            batchmean_denominator.is_some(),
+        )),
+    }
+}
+
+/// Applies a loss's `reduction` through the ordinary differentiable ops, for
+/// the losses whose gradients come from autograd rather than from a
+/// hand-written node.
+pub(crate) fn reduce_loss(values: Tensor, reduction: &str) -> Result<Tensor> {
+    match reduction {
+        "mean" => mean(&values, None, false),
+        "sum" => sum(&values, None, false),
+        "none" => Ok(values),
+        _ => Err(invalid_reduction(reduction, false)),
+    }
+}
+
+/// The one message for a reduction mode a loss does not recognise. Shared so
+/// the wording cannot drift between the losses that reduce here and `ctc_loss`,
+/// which validates its mode up front instead (its own reduction is
+/// length-normalised per sample, so it cannot use [`reduce_detached`]).
+pub(crate) fn invalid_reduction(reduction: &str, batchmean: bool) -> MinitensorError {
+    let modes = if batchmean {
+        "'mean', 'batchmean', 'sum', or 'none'"
+    } else {
+        "'mean', 'sum', or 'none'"
+    };
+    MinitensorError::invalid_operation(format!(
+        "Invalid reduction mode: {reduction}. Must be {modes}"
+    ))
+}
 
 /// Validate that loss function inputs are compatible
 fn validate_loss_inputs(predictions: &Tensor, targets: &Tensor) -> Result<()> {

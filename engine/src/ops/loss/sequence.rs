@@ -314,9 +314,10 @@ pub fn ctc_loss(
     zero_infinity: bool,
 ) -> Result<Tensor> {
     if !matches!(reduction, "none" | "sum" | "mean") {
-        return Err(MinitensorError::invalid_operation(format!(
-            "Invalid reduction mode: {reduction}. Must be 'mean', 'sum', or 'none'"
-        )));
+        // Checked here rather than after the fact: the forward-backward pass
+        // below is the expensive part, and there is no point running it for a
+        // mode that cannot be applied to the result.
+        return Err(crate::ops::loss::invalid_reduction(reduction, false));
     }
     if log_probs.ndim() != 3 {
         return Err(MinitensorError::invalid_operation(
