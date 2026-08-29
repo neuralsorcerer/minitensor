@@ -955,7 +955,9 @@ True
   (the `nan*` reductions return NaN for all-NaN slices, matching NumPy)
 - `std(dim=None, unbiased=True, keepdim=False)`
 - `var(dim=None, unbiased=True, keepdim=False)`
-- `nansum`, `nanmean`, `nanmax`, `nanmin`
+- `nansum`, `nanmean`, `nanmax`, `nanmin`, `nanprod`
+- `nanvar(dim=None, unbiased=True, keepdim=False)`, `nanstd(...)`
+- `nanargmax(dim=None, keepdim=False)`, `nanargmin(...)`
 - `logsumexp`
 - `norm(p=2, dim=None, keepdim=False)`
 - `isclose(other, rtol=1e-5, atol=1e-8, equal_nan=False)`
@@ -1029,6 +1031,36 @@ axis measured 0.109ms for `amax` against 0.833ms for the pair, so
 times what it needs to. `nanamax`/`nanamin` are the NaN-skipping forms; `amax`
 and `amin` propagate NaN, as `max` and `min` do. The names are NumPy's and
 PyTorch's.
+
+#### The NaN-skipping statistics
+
+`nansum`, `nanmean`, `nanmax`, `nanmin`, `nanamax` and `nanamin` each carry a
+kernel that walks the buffer once and tests as it goes. The rest of the family
+needs no kernel of its own, because each is an arrangement of operations that
+already exist:
+
+- `nanprod(input, dim=None, keepdim=False)` — the product with NaN read as the
+  multiplicative identity, so an all-NaN slice gives `1`, exactly as a genuinely
+  empty one does.
+- `nanvar(input, dim=None, unbiased=True, keepdim=False)` and `nanstd(...)` —
+  the mean of the squared deviations from `nanmean`, over the entries that are
+  not NaN. `unbiased` divides by the non-NaN count less one, so a slice with a
+  single finite entry gives `NaN` and one with none gives `NaN` as well, which
+  is what NumPy reports for the same input.
+- `nanargmax(input, dim=None, keepdim=False)` and `nanargmin(...)` — the index
+  of the largest or smallest entry that is not NaN. A slice of nothing but NaN
+  raises: every index it could name points at a NaN, so there is no answer to
+  give, and NumPy raises here too.
+
+Writing them this way is one definition rather than two, and it is what makes
+their gradients the gradients of the operations underneath — `nanvar` is
+differentiable because `sub`, `mul` and `sum` are, with the deviation zeroed at
+the NaN positions before it is squared so no `0 * NaN` reaches the chain rule.
+
+`nanvar`, `nanstd`, `nanargmax` and `nanargmin` reduce one dimension at a time,
+since the non-NaN count they divide by comes from a single-axis
+`count_nonzero`; passing more than one dimension raises rather than reducing
+the wrong count.
 
 `mean` over an integer tensor returns a float: `float32` for `int32`,
 `float64` for `int64`. On a `bool` tensor `mean`, `var`, `std`, `norm` and
@@ -1116,10 +1148,10 @@ an identity element:
 | Operation | Reducing a length-zero axis |
 | --- | --- |
 | `sum`, `nansum` | `0` |
-| `prod` | `1` |
-| `mean`, `nanmean`, `std`, `var` | `NaN` (0/0) |
+| `prod`, `nanprod` | `1` |
+| `mean`, `nanmean`, `std`, `var`, `nanvar`, `nanstd` | `NaN` (0/0) |
 | `logsumexp` | `-inf` (`log 0`) |
-| `max`, `min`, `amax`, `amin`, `nanmax`, `nanmin`, `nanamax`, `nanamin`, `argmax`, `argmin` | raises |
+| `max`, `min`, `amax`, `amin`, `nanmax`, `nanmin`, `nanamax`, `nanamin`, `argmax`, `argmin`, `nanargmax`, `nanargmin` | raises |
 | `median`, `quantile`, `nanquantile` | raises |
 | `sort`, `argsort` | returns the empty input unchanged |
 
@@ -1398,7 +1430,8 @@ one_hot,
 # Reductions and statistics
 sum, prod, mean, std, var, all, any, max, min, amax, amin, argmax, argmin,
 median, nanmedian, quantile, nanquantile, nansum, nanmean, nanmax, nanmin,
-nanamax, nanamin, logsumexp, norm, bincount, mode,
+nanamax, nanamin, nanprod, nanvar, nanstd, nanargmax, nanargmin, logsumexp,
+norm, bincount, mode,
 
 # Scans
 cumsum, cumprod, cummax, cummin, logcumsumexp,

@@ -67,6 +67,15 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Like `prod`, treating NaN as one. An all-NaN slice gives 1.
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanprod(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let dims = normalize_optional_axes(dim)?;
+        let result = self.inner.nanprod(dims, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Arithmetic mean over `dim`, or over every element when `dim` is omitted.
     #[pyo3(signature = (dim=None, keepdim=false))]
     pub fn mean(&self, dim: Option<&Bound<PyAny>>, keepdim: Option<bool>) -> PyResult<Self> {
@@ -387,6 +396,22 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Like `argmax`, ignoring NaN. An all-NaN slice has no index and raises.
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanargmax(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.nanargmax(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Like `argmin`, ignoring NaN. An all-NaN slice has no index and raises.
+    #[pyo3(signature = (dim=None, keepdim=false))]
+    pub fn nanargmin(&self, dim: Option<isize>, keepdim: Option<bool>) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let result = self.inner.nanargmin(dim, keepdim).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// The `k` largest elements along `dim`, with their indices. Pass `largest=False` for the smallest.
     #[pyo3(signature = (k, dim=None, largest=true, sorted=true))]
     pub fn topk(
@@ -477,6 +502,42 @@ impl PyTensor {
         let result = self
             .inner
             .var(dims, keepdim, unbiased)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Like `std`, ignoring NaN. Reduces one dimension at a time.
+    #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
+    pub fn nanstd(
+        &self,
+        dim: Option<&Bound<PyAny>>,
+        unbiased: Option<bool>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let unbiased = unbiased.unwrap_or(true);
+        let dims = normalize_optional_axes(dim)?;
+        let result = self
+            .inner
+            .nanstd(dims, keepdim, unbiased)
+            .map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Like `var`, ignoring NaN. Reduces one dimension at a time.
+    #[pyo3(signature = (dim=None, unbiased=true, keepdim=false))]
+    pub fn nanvar(
+        &self,
+        dim: Option<&Bound<PyAny>>,
+        unbiased: Option<bool>,
+        keepdim: Option<bool>,
+    ) -> PyResult<Self> {
+        let keepdim = keepdim.unwrap_or(false);
+        let unbiased = unbiased.unwrap_or(true);
+        let dims = normalize_optional_axes(dim)?;
+        let result = self
+            .inner
+            .nanvar(dims, keepdim, unbiased)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

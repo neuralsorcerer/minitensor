@@ -833,6 +833,13 @@ impl Tensor {
         prod(self, dim, keepdim)
     }
 
+    /// NaN-aware product reduction
+    #[inline(always)]
+    pub fn nanprod(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
+        use crate::ops::reduction::nanprod;
+        nanprod(self, dim, keepdim)
+    }
+
     /// Mean reduction
     #[inline(always)]
     pub fn mean(&self, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Self> {
@@ -936,6 +943,20 @@ impl Tensor {
     pub fn argmin(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
         use crate::ops::reduction::argmin;
         argmin(self, dim, keepdim)
+    }
+
+    /// NaN-aware argument of maximum value
+    #[inline(always)]
+    pub fn nanargmax(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        use crate::ops::reduction::nanargmax;
+        nanargmax(self, dim, keepdim)
+    }
+
+    /// NaN-aware argument of minimum value
+    #[inline(always)]
+    pub fn nanargmin(&self, dim: Option<isize>, keepdim: bool) -> Result<Self> {
+        use crate::ops::reduction::nanargmin;
+        nanargmin(self, dim, keepdim)
     }
 
     /// Maximum values and their indices along a dimension
@@ -1112,6 +1133,20 @@ impl Tensor {
     pub fn var(&self, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Self> {
         use crate::ops::reduction::var;
         var(self, dim, keepdim, unbiased)
+    }
+
+    /// NaN-aware standard deviation
+    #[inline(always)]
+    pub fn nanstd(&self, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Self> {
+        use crate::ops::reduction::nanstd;
+        nanstd(self, dim, keepdim, unbiased)
+    }
+
+    /// NaN-aware variance
+    #[inline(always)]
+    pub fn nanvar(&self, dim: Option<Vec<isize>>, keepdim: bool, unbiased: bool) -> Result<Self> {
+        use crate::ops::reduction::nanvar;
+        nanvar(self, dim, keepdim, unbiased)
     }
 
     /// Exponential function

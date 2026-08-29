@@ -16,6 +16,8 @@ mod logsumexp_impl;
 mod minmax_indices_impl;
 #[path = "reduction/nan_minmax.rs"]
 mod nan_minmax_impl;
+#[path = "reduction/nan_stats.rs"]
+mod nan_stats_impl;
 #[path = "reduction/nanquantile.rs"]
 mod nanquantile_impl;
 #[path = "reduction/norm.rs"]
@@ -35,6 +37,7 @@ pub use self::core_impl::*;
 pub use self::logsumexp_impl::*;
 pub(crate) use self::minmax_indices_impl::*;
 pub(crate) use self::nan_minmax_impl::*;
+pub use self::nan_stats_impl::*;
 pub use self::nanquantile_impl::*;
 pub use self::norm_impl::*;
 pub(crate) use self::quantile_impl::*;

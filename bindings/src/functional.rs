@@ -1125,6 +1125,60 @@ pub fn nanmean(
     tensor.nanmean(dim, Some(keepdim))
 }
 
+/// Like `prod`, treating NaN as one. An all-NaN slice gives 1.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanprod(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanprod(dim, Some(keepdim))
+}
+
+/// Like `var`, ignoring NaN. Reduces one dimension at a time.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
+pub fn nanvar(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    unbiased: bool,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanvar(dim, Some(unbiased), Some(keepdim))
+}
+
+/// Like `std`, ignoring NaN. Reduces one dimension at a time.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, unbiased=true, keepdim=false))]
+pub fn nanstd(
+    input: &Bound<PyAny>,
+    dim: Option<&Bound<PyAny>>,
+    unbiased: bool,
+    keepdim: bool,
+) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanstd(dim, Some(unbiased), Some(keepdim))
+}
+
+/// Like `argmax`, ignoring NaN. An all-NaN slice has no index and raises.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanargmax(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanargmax(dim, Some(keepdim))
+}
+
+/// Like `argmin`, ignoring NaN. An all-NaN slice has no index and raises.
+#[pyfunction]
+#[pyo3(signature = (input, dim=None, keepdim=false))]
+pub fn nanargmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.nanargmin(dim, Some(keepdim))
+}
+
 /// Like `max`, ignoring NaN.
 #[pyfunction]
 #[pyo3(signature = (input, dim=None, keepdim=false))]
@@ -2004,6 +2058,11 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(logsumexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(nansum, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmean, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanprod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanvar, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanstd, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanargmax, parent)?)?;
+    parent.add_function(wrap_pyfunction!(nanargmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmax, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanmin, parent)?)?;
     parent.add_function(wrap_pyfunction!(nanamax, parent)?)?;

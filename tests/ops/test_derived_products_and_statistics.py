@@ -278,9 +278,9 @@ def test_gradients_match_central_differences(name):
         up, down = base.copy(), base.copy()
         up[i] += eps
         down[i] -= eps
-        numeric[i] = (
-            build(_t(up)).sum().item() - build(_t(down)).sum().item()
-        ) / (2 * eps)
+        numeric[i] = (build(_t(up)).sum().item() - build(_t(down)).sum().item()) / (
+            2 * eps
+        )
     np.testing.assert_allclose(analytic, numeric, rtol=1e-5, atol=1e-6)
 
 
