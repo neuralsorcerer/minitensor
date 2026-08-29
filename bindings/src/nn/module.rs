@@ -44,8 +44,12 @@ use engine::ops::grid_sample::{Padding as GridPadding, SampleMode, grid_sample a
 use engine::ops::interpolate::{InterpolateMode, interpolate as interpolate_op};
 use engine::ops::loss::cross_entropy as cross_entropy_op;
 use engine::ops::loss::{
-    ctc_loss as ctc_loss_op, focal_loss as focal_loss_op, huber_loss as huber_loss_op,
-    kl_div_loss as kl_div_loss_op, mae_loss as mae_loss_op, smooth_l1_loss as smooth_l1_loss_op,
+    cosine_embedding_loss as cosine_embedding_loss_op, ctc_loss as ctc_loss_op,
+    focal_loss as focal_loss_op, hinge_embedding_loss as hinge_embedding_loss_op,
+    huber_loss as huber_loss_op, kl_div_loss as kl_div_loss_op, mae_loss as mae_loss_op,
+    margin_ranking_loss as margin_ranking_loss_op, poisson_nll_loss as poisson_nll_loss_op,
+    smooth_l1_loss as smooth_l1_loss_op, soft_margin_loss as soft_margin_loss_op,
+    triplet_margin_loss as triplet_margin_loss_op,
 };
 use engine::ops::pooling::{
     adaptive_avg_pool1d as adaptive_avg_pool1d_op, adaptive_avg_pool2d as adaptive_avg_pool2d_op,
@@ -674,6 +678,150 @@ fn focal_loss_functional(
         alpha,
         gamma,
         reduction,
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// `max(0, -target * (input1 - input2) + margin)`, for a `target` of `+1` where `input1` should rank higher and `-1` where `input2` should.
+#[pyfunction(name = "margin_ranking_loss")]
+#[pyo3(signature = (input1, input2, target, margin=0.0, reduction=None))]
+fn margin_ranking_loss_functional(
+    input1: &Bound<PyAny>,
+    input2: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    margin: f64,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let left = borrow_tensor(input1)?;
+    let right = borrow_tensor(input2)?;
+    let labels = borrow_tensor(target)?;
+    let result = margin_ranking_loss_op(
+        left.tensor(),
+        right.tensor(),
+        labels.tensor(),
+        margin,
+        reduction.unwrap_or("mean"),
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// The distance itself where `target` is `+1`, and `max(0, margin - distance)` where it is `-1`.
+#[pyfunction(name = "hinge_embedding_loss")]
+#[pyo3(signature = (input, target, margin=1.0, reduction=None))]
+fn hinge_embedding_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    margin: f64,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let distances = borrow_tensor(input)?;
+    let labels = borrow_tensor(target)?;
+    let result = hinge_embedding_loss_op(
+        distances.tensor(),
+        labels.tensor(),
+        margin,
+        reduction.unwrap_or("mean"),
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// `1 - cos(x1, x2)` where `target` is `+1`, and `max(0, cos(x1, x2) - margin)` where it is `-1`.
+#[pyfunction(name = "cosine_embedding_loss")]
+#[pyo3(signature = (input1, input2, target, margin=0.0, reduction=None))]
+fn cosine_embedding_loss_functional(
+    input1: &Bound<PyAny>,
+    input2: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    margin: f64,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let left = borrow_tensor(input1)?;
+    let right = borrow_tensor(input2)?;
+    let labels = borrow_tensor(target)?;
+    let result = cosine_embedding_loss_op(
+        left.tensor(),
+        right.tensor(),
+        labels.tensor(),
+        margin,
+        reduction.unwrap_or("mean"),
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// `max(0, d(anchor, positive) - d(anchor, negative) + margin)`. With `swap`, the negative distance is the smaller of `d(anchor, negative)` and `d(positive, negative)`, so a triplet whose positive sits closest to the negative still counts as a violation.
+#[pyfunction(name = "triplet_margin_loss")]
+#[pyo3(signature = (anchor, positive, negative, margin=1.0, p=2.0, eps=1e-6, swap=false, reduction=None))]
+#[allow(clippy::too_many_arguments)]
+fn triplet_margin_loss_functional(
+    anchor: &Bound<PyAny>,
+    positive: &Bound<PyAny>,
+    negative: &Bound<PyAny>,
+    margin: f64,
+    p: f64,
+    eps: f64,
+    swap: bool,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let a = borrow_tensor(anchor)?;
+    let positive = borrow_tensor(positive)?;
+    let negative = borrow_tensor(negative)?;
+    let result = triplet_margin_loss_op(
+        a.tensor(),
+        positive.tensor(),
+        negative.tensor(),
+        margin,
+        p,
+        eps,
+        swap,
+        reduction.unwrap_or("mean"),
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// `log(1 + exp(-target * input))`, the smooth hinge, for a `target` of `+1` or `-1`.
+#[pyfunction(name = "soft_margin_loss")]
+#[pyo3(signature = (input, target, reduction=None))]
+fn soft_margin_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let scores = borrow_tensor(input)?;
+    let labels = borrow_tensor(target)?;
+    let result = soft_margin_loss_op(
+        scores.tensor(),
+        labels.tensor(),
+        reduction.unwrap_or("mean"),
+    )
+    .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
+/// The negative log-likelihood of a Poisson observation. `log_input` says whether `input` is the log of the rate or the rate itself; `full` adds the Stirling term, which changes no gradient because it depends only on `target`.
+#[pyfunction(name = "poisson_nll_loss")]
+#[pyo3(signature = (input, target, log_input=true, full=false, eps=1e-8, reduction=None))]
+fn poisson_nll_loss_functional(
+    input: &Bound<PyAny>,
+    target: &Bound<PyAny>,
+    log_input: bool,
+    full: bool,
+    eps: f64,
+    reduction: Option<&str>,
+) -> PyResult<PyTensor> {
+    let rate = borrow_tensor(input)?;
+    let counts = borrow_tensor(target)?;
+    let result = poisson_nll_loss_op(
+        rate.tensor(),
+        counts.tensor(),
+        log_input,
+        full,
+        eps,
+        reduction.unwrap_or("mean"),
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))

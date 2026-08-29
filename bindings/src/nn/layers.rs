@@ -1933,6 +1933,24 @@ pub fn register_nn_module(py: Python, parent_module: &Bound<Pyo3Module>) -> PyRe
     nn_module.add_function(wrap_pyfunction!(l1_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(kl_div_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(focal_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        margin_ranking_loss_functional,
+        &nn_module
+    )?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        hinge_embedding_loss_functional,
+        &nn_module
+    )?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        cosine_embedding_loss_functional,
+        &nn_module
+    )?)?;
+    nn_module.add_function(wrap_pyfunction!(
+        triplet_margin_loss_functional,
+        &nn_module
+    )?)?;
+    nn_module.add_function(wrap_pyfunction!(soft_margin_loss_functional, &nn_module)?)?;
+    nn_module.add_function(wrap_pyfunction!(poisson_nll_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(ctc_loss_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(grid_sample_functional, &nn_module)?)?;
     nn_module.add_function(wrap_pyfunction!(log_cosh_loss_functional, &nn_module)?)?;

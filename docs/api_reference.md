@@ -1203,6 +1203,10 @@ assert row_std.shape == (2, 3)
 - `xlogy(input, other)` — `input * log(other)`, taken as `0` wherever `input`
   is zero. That is the limit entropy and cross-entropy need, where the plain
   product gives `0 * -inf = NaN`. A NaN `other` still propagates.
+- `cosine_similarity(input, other, dim=1, eps=1e-8)` — the cosine of the angle
+  between them along `dim`. Each norm is floored at `eps` on its own rather
+  than their product being floored once, which is what keeps a zero vector
+  paired with a long one inside `[-1, 1]`.
 - `softplus`, `gelu`, `elu`, `selu`, `silu`
 - `hardshrink(input, lambd=0.5)` — zeroes the band `[-lambd, lambd]` and
   leaves the rest where it is; `softshrink(input, lambd=0.5)` zeroes the same
@@ -1394,7 +1398,8 @@ xlogy,
 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,
 
 # Comparison, bitwise and logic
-eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, isnan, isinf, isfinite,
+eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, cosine_similarity,
+isnan, isinf, isfinite,
 nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not,
 bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
 logical_not,
@@ -1729,6 +1734,12 @@ when you already hold the weights and do not want a module:
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
 | `ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=False)` | Connectionist temporal classification. See below -- it takes more explaining than a table row allows. |
+| `margin_ranking_loss(input1, input2, target, margin=0.0, reduction="mean")` | `max(0, -target * (input1 - input2) + margin)`. `target` is `+1` where `input1` should rank higher and `-1` where `input2` should, so the loss is zero exactly when the ranking is right by at least `margin`. |
+| `hinge_embedding_loss(input, target, margin=1.0, reduction="mean")` | The distance itself where `target` is `+1`, `max(0, margin - distance)` where it is `-1`. |
+| `cosine_embedding_loss(input1, input2, target, margin=0.0, reduction="mean")` | `1 - cos` for a similar pair, `max(0, cos - margin)` for a dissimilar one. |
+| `triplet_margin_loss(anchor, positive, negative, margin=1.0, p=2.0, eps=1e-6, swap=False, reduction="mean")` | `max(0, d(a, p) - d(a, n) + margin)`. With `swap`, the negative distance is the smaller of `d(a, n)` and `d(p, n)`, so a triplet whose positive sits closest to the negative still counts as a violation. `eps` is added inside the norm, which is what keeps the gradient of two identical points from being NaN. |
+| `soft_margin_loss(input, target, reduction="mean")` | `log(1 + exp(-target * input))`, the smooth hinge, for a `target` of `+1` or `-1`. |
+| `poisson_nll_loss(input, target, log_input=True, full=False, eps=1e-8, reduction="mean")` | Negative log-likelihood of a Poisson observation. `log_input` says whether `input` is the log of the rate (the numerically kind form) or the rate itself; `full` adds the Stirling term, which changes no gradient since it depends only on `target`. |
 | `grid_sample(input, grid, mode="bilinear", padding_mode="zeros", align_corners=False)` | Read `input` at the coordinates in `grid`, differentiably in both. See below. |
 
 ```python

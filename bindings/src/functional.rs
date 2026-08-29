@@ -1250,6 +1250,22 @@ pub fn softmin(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     tensor.softmin(dim)
 }
 
+/// Cosine of the angle between `input` and `other` along `dim`. Each norm is floored at `eps` on its own, so a zero vector reports a similarity of zero rather than one far outside `[-1, 1]`.
+#[pyfunction]
+#[pyo3(signature = (input, other, dim=1, eps=1e-8))]
+pub fn cosine_similarity(
+    input: &Bound<PyAny>,
+    other: &Bound<PyAny>,
+    dim: isize,
+    eps: f64,
+) -> PyResult<PyTensor> {
+    let left = borrow_tensor(input)?;
+    let right = borrow_tensor(other)?;
+    let result = engine::ops::loss::cosine_similarity(left.tensor(), right.tensor(), dim, eps)
+        .map_err(_convert_error)?;
+    Ok(PyTensor::from_tensor(result))
+}
+
 /// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
 #[pyfunction]
 #[pyo3(signature = (input, lambd=0.5))]
@@ -2026,6 +2042,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(expm1, parent)?)?;
     parent.add_function(wrap_pyfunction!(sin, parent)?)?;
     parent.add_function(wrap_pyfunction!(cos, parent)?)?;
+    parent.add_function(wrap_pyfunction!(cosine_similarity, parent)?)?;
     parent.add_function(wrap_pyfunction!(tan, parent)?)?;
     parent.add_function(wrap_pyfunction!(asin, parent)?)?;
     parent.add_function(wrap_pyfunction!(acos, parent)?)?;
