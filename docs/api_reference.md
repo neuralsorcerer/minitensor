@@ -82,6 +82,21 @@ of convenience aliases.
 | `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
 | `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. |
 | `corrcoef(input)` | The Pearson correlation matrix of the rows, clamped to `[-1, 1]` -- the division is exact in theory and lands a hair outside it in floating point. |
+| `take(input, index)` | The elements at flat positions `index`, shaped like `index`. Reads the tensor in row-major order whatever its shape; negative positions count from the end. |
+| `take_along_dim(input, indices, dim=None)` | One element per position, its `dim` coordinate coming from `indices`. With `dim` omitted both are flattened first, which is what makes `take_along_dim(x, x.argsort())` reorder a whole tensor. |
+| `index_add(input, dim, index, source, alpha=1.0)` | Add `alpha * source` into the slices `index` names. Repeated indices accumulate. |
+| `index_copy(input, dim, index, source)` | Write `source` over the slices `index` names. A repeated index leaves whichever write landed last. |
+| `index_fill(input, dim, index, value)` | Set the slices `index` names to `value`. |
+| `masked_scatter(input, mask, source)` | Fill the positions `mask` selects with the leading elements of a flattened `source`, in order -- a positional write, where `masked_fill` writes one value everywhere. |
+| `select(input, dim, index)` | One slice along `dim`, with that dimension removed. `narrow` keeps the axis at length one; this is what makes `select(t, 0, i)` the same as `t[i]`. |
+| `flatnonzero(input)` | The flat positions of every non-zero element, as a 1-D int64 tensor. |
+| `argwhere(input)` | The indices of every non-zero element, one row each -- the same answer `nonzero` gives, under the name NumPy users reach for. |
+| `isin(elements, test_elements, assume_unique=False, invert=False)` | Whether each element appears in `test_elements`. Sorts the test set once and binary-searches it, so it costs `(n + m) log m` time and `n + m` memory rather than the `n * m` of comparing everything against everything. |
+| `tril_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's lower triangle. `offset` moves the boundary off the main diagonal. |
+| `triu_indices(row, col, offset=0)` | The `[2, n]` indices of a matrix's upper triangle. |
+| `diagflat(input, offset=0)` | A square matrix with the flattened `input` on its `offset` diagonal. `diag` does this for a vector; this does it for any shape. |
+| `block_diag(*tensors)` | Arrange the inputs down the diagonal of one larger matrix, zero elsewhere. A 1-D input is a row and a scalar a one-by-one block. |
+| `cartesian_prod(*tensors)` | Every combination of one element from each 1-D input, one row each. A single input comes back unchanged. |
 
 ### Shape compatibility helpers
 

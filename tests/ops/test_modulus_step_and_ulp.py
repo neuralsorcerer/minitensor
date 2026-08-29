@@ -30,7 +30,9 @@ def _t(values, dtype="float64", requires_grad=False):
     array = np.asarray(values)
     if dtype.startswith("float"):
         array = array.astype(np.float64 if dtype == "float64" else np.float32)
-    return mt.Tensor(np.ascontiguousarray(array), dtype=dtype, requires_grad=requires_grad)
+    return mt.Tensor(
+        np.ascontiguousarray(array), dtype=dtype, requires_grad=requires_grad
+    )
 
 
 # --- fmod -------------------------------------------------------------------
