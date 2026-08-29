@@ -442,6 +442,14 @@ pub fn clip(
     tensor.clip(min, max)
 }
 
+/// Element-wise `log(x / (1 - x))`, the inverse of `sigmoid`. `eps` clamps the input into `[eps, 1 - eps]` first.
+#[pyfunction]
+#[pyo3(signature = (input, eps=None))]
+pub fn logit(input: &Bound<PyAny>, eps: Option<f64>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.logit(eps)
+}
+
 /// Limit every element to `[min, max]`. Either bound may be omitted.
 #[pyfunction]
 #[pyo3(signature = (input, min=None, max=None))]
@@ -502,12 +510,16 @@ unary_forwarders!(
     cosh => "Element-wise hyperbolic cosine.",
     erf => "Element-wise error function.",
     erfc => "Element-wise complementary error function, `1 - erf(x)`, accurate in the tails where that subtraction would cancel.",
+    erfinv => "Element-wise inverse error function on `[-1, 1]`, infinite at the endpoints and NaN outside them.",
     exp => "Element-wise `e ** x`.",
+    exp2 => "Element-wise `2 ** x`, from the hardware's base-2 exponential rather than `exp(x * ln 2)`.",
     expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
     floor => "Round towards negative infinity.",
     frac => "The fractional part of each element, `x - trunc(x)`, carrying its sign.",
     hardsigmoid => "`sigmoid` replaced by three straight lines: 0 below -3, 1 above 3, `x/6 + 1/2` between.",
     hardswish => "`x * hardsigmoid(x)`: `silu` with the exponential replaced by three straight lines.",
+    digamma => "Element-wise digamma, the derivative of `lgamma`.",
+    lgamma => "Element-wise `log |gamma(x)|`, which stays finite where `gamma` itself overflows.",
     log => "Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.",
     log10 => "Element-wise base-10 logarithm.",
     log1p => "Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.",
@@ -525,6 +537,7 @@ unary_forwarders!(
     sign => "-1, 0 or 1 according to each element's sign. NaN gives NaN.",
     silu => "Sigmoid Linear Unit (Swish), `x * sigmoid(x)`.",
     sin => "Element-wise sine, taking radians.",
+    sinc => "Element-wise `sin(pi * x) / (pi * x)`, taken as 1 at zero.",
     sinh => "Element-wise hyperbolic sine.",
     softsign => "Element-wise `x / (1 + abs(x))`.",
     sqrt => "Element-wise square root. Negative inputs give NaN.",
@@ -2097,6 +2110,12 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(log10, parent)?)?;
     parent.add_function(wrap_pyfunction!(erf, parent)?)?;
     parent.add_function(wrap_pyfunction!(erfc, parent)?)?;
+    parent.add_function(wrap_pyfunction!(erfinv, parent)?)?;
+    parent.add_function(wrap_pyfunction!(exp2, parent)?)?;
+    parent.add_function(wrap_pyfunction!(sinc, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lgamma, parent)?)?;
+    parent.add_function(wrap_pyfunction!(digamma, parent)?)?;
+    parent.add_function(wrap_pyfunction!(logit, parent)?)?;
     parent.add_function(wrap_pyfunction!(log1p, parent)?)?;
     parent.add_function(wrap_pyfunction!(expm1, parent)?)?;
     parent.add_function(wrap_pyfunction!(sin, parent)?)?;

@@ -27,6 +27,7 @@ pub mod search;
 pub mod selection;
 pub mod shape_ops;
 pub mod simd;
+pub mod special;
 pub mod unique;
 pub(crate) mod util;
 
@@ -50,6 +51,7 @@ pub use search::*;
 pub use selection::*;
 pub use shape_ops::*;
 pub use simd::*;
+pub use special::*;
 pub use unique::*;
 
 // Exported so the Python bindings resolve `dim` arguments the same way the

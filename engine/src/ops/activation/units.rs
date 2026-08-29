@@ -77,6 +77,10 @@ macro_rules! unit_grad_kernel {
     };
 }
 
+// The two macros above are the whole per-op cost of this skeleton, so the
+// special functions in `ops::special` reach for them rather than restating it.
+pub(crate) use {unit_grad_kernel, unit_kernel};
+
 /// `1 / (1 + exp(-x))`, evaluated on whichever side of zero keeps the
 /// exponential from overflowing. Several units below need it, and none of them
 /// can call the tensor-level `sigmoid` from inside an element kernel.
@@ -297,7 +301,7 @@ fn unit_forward_data(
 
 /// The shared body: run the value kernel, and record the chain rule if the
 /// input wants a gradient.
-fn activation_unit(
+pub(crate) fn unary_unit(
     tensor: &Tensor,
     name: &'static str,
     kernel: UnitKernel,
@@ -334,7 +338,7 @@ macro_rules! plain_unit {
     ($name:ident, $kernel:ident, $grad:ident, $doc:literal) => {
         #[doc = $doc]
         pub fn $name(tensor: &Tensor) -> Result<Tensor> {
-            activation_unit(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
+            unary_unit(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
         }
     };
 }
@@ -379,19 +383,19 @@ pub fn hardtanh(tensor: &Tensor, min_val: f64, max_val: f64) -> Result<Tensor> {
             "hardtanh requires min_val <= max_val, got {min_val} and {max_val}"
         )));
     }
-    activation_unit(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
+    unary_unit(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
 }
 
 /// `hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.
 pub fn relu6(tensor: &Tensor) -> Result<Tensor> {
     // Named separately because it is what the literature and every other
     // library call it, but there is nothing else to it.
-    activation_unit(tensor, "relu6", HARDTANH, HARDTANH_D, [0.0, 6.0])
+    unary_unit(tensor, "relu6", HARDTANH, HARDTANH_D, [0.0, 6.0])
 }
 
 /// `x` where it exceeds `threshold`, `value` everywhere else.
 pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> {
-    activation_unit(
+    unary_unit(
         tensor,
         "threshold",
         THRESHOLD,
@@ -407,7 +411,7 @@ pub fn softshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
             "softshrink requires lambd to be non-negative, got {lambd}"
         )));
     }
-    activation_unit(tensor, "softshrink", SOFTSHRINK, SOFTSHRINK_D, [lambd, 0.0])
+    unary_unit(tensor, "softshrink", SOFTSHRINK, SOFTSHRINK_D, [lambd, 0.0])
 }
 
 /// `max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`: `elu` rescaled so the
@@ -418,7 +422,7 @@ pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
             "celu requires a non-zero alpha, got {alpha}"
         )));
     }
-    activation_unit(tensor, "celu", CELU, CELU_D, [alpha, 0.0])
+    unary_unit(tensor, "celu", CELU, CELU_D, [alpha, 0.0])
 }
 
 /// `softmax` of the negated input: the distribution that favours the smallest

@@ -294,6 +294,9 @@ _GT1 = np.abs(np.random.default_rng(11).standard_normal(9)) + 1.4
 # `frac` jumps at every non-zero integer, so a central difference straddling one
 # would compare a slope of 1 against a slope of -1e5. These sit at least 0.15
 # away from any integer, and span several of them so `trunc` is not always zero.
+# `logit` is only real on (0, 1), and its gradient `1/(x(1-x))` runs away at
+# both ends, so a central difference needs room on either side.
+_UNIT_OPEN = np.random.default_rng(13).uniform(0.15, 0.85, 9)
 _NON_INTEGRAL = np.array([-3.4, -2.7, -1.25, -0.6, 0.3, 1.45, 2.8, 3.15, 4.5])
 
 _GRADCHECK_OPS = [
@@ -311,6 +314,12 @@ _GRADCHECK_OPS = [
     ("elu", lambda t: t.elu(), _ANY),
     ("erf", lambda t: t.erf(), _ANY),
     ("erfc", lambda t: t.erfc(), _ANY),
+    ("erfinv", lambda t: t.erfinv(), _UNIT),
+    ("exp2", lambda t: t.exp2(), _ANY),
+    ("sinc", lambda t: t.sinc(), _ANY),
+    ("lgamma", lambda t: t.lgamma(), _POS),
+    ("digamma", lambda t: t.digamma(), _POS),
+    ("logit", lambda t: t.logit(), _UNIT_OPEN),
     ("exp", lambda t: t.exp(), _ANY),
     ("expm1", lambda t: t.expm1(), _ANY),
     ("gelu", lambda t: t.gelu(), _ANY),
@@ -566,6 +575,10 @@ def _erf(x):
     return np.vectorize(math.erf)(x)
 
 
+def _lgamma(x):
+    return np.vectorize(math.lgamma)(x)
+
+
 _FORWARD_OPS = [
     ("abs", lambda t: t.abs(), _FWD_ANY, np.abs),
     ("acos", lambda t: t.acos(), _FWD_UNIT, np.arccos),
@@ -579,7 +592,9 @@ _FORWARD_OPS = [
     ("cosh", lambda t: t.cosh(), _FWD_ANY, np.cosh),
     ("erf", lambda t: t.erf(), _FWD_ANY, _erf),
     ("erfc", lambda t: t.erfc(), _FWD_ANY, lambda a: 1.0 - _erf(a)),
+    ("lgamma", lambda t: t.lgamma(), _FWD_POS, _lgamma),
     ("exp", lambda t: t.exp(), _FWD_ANY, np.exp),
+    ("exp2", lambda t: t.exp2(), _FWD_ANY, np.exp2),
     ("expm1", lambda t: t.expm1(), _FWD_ANY, np.expm1),
     ("floor", lambda t: t.floor(), _FWD_ANY, np.floor),
     ("frac", lambda t: t.frac(), _FWD_ANY, lambda a: a - np.trunc(a)),
@@ -589,6 +604,7 @@ _FORWARD_OPS = [
     ("log2", lambda t: t.log2(), _FWD_POS, np.log2),
     ("reciprocal", lambda t: t.reciprocal(), _FWD_POS, lambda a: 1.0 / a),
     ("round", lambda t: t.round(), _FWD_ANY, np.round),
+    ("sinc", lambda t: t.sinc(), _FWD_ANY, np.sinc),
     ("rsqrt", lambda t: t.rsqrt(), _FWD_POS, lambda a: 1.0 / np.sqrt(a)),
     ("sign", lambda t: t.sign(), _FWD_ANY, np.sign),
     ("sin", lambda t: t.sin(), _FWD_ANY, np.sin),

@@ -1191,6 +1191,48 @@ impl Tensor {
         erfc(self)
     }
 
+    /// Inverse error function
+    #[inline(always)]
+    pub fn erfinv(&self) -> Result<Self> {
+        use crate::ops::special::erfinv;
+        erfinv(self)
+    }
+
+    /// Base-2 exponential, `2^x`
+    #[inline(always)]
+    pub fn exp2(&self) -> Result<Self> {
+        use crate::ops::special::exp2;
+        exp2(self)
+    }
+
+    /// Normalized sinc, `sin(pi x) / (pi x)`
+    #[inline(always)]
+    pub fn sinc(&self) -> Result<Self> {
+        use crate::ops::special::sinc;
+        sinc(self)
+    }
+
+    /// Log of the absolute value of the gamma function
+    #[inline(always)]
+    pub fn lgamma(&self) -> Result<Self> {
+        use crate::ops::special::lgamma;
+        lgamma(self)
+    }
+
+    /// Digamma, the logarithmic derivative of the gamma function
+    #[inline(always)]
+    pub fn digamma(&self) -> Result<Self> {
+        use crate::ops::special::digamma;
+        digamma(self)
+    }
+
+    /// Inverse of `sigmoid`, optionally clamping the input away from 0 and 1
+    #[inline(always)]
+    pub fn logit(&self, eps: Option<f64>) -> Result<Self> {
+        use crate::ops::special::logit;
+        logit(self, eps)
+    }
+
     /// log1p (log(1 + x))
     #[inline(always)]
     pub fn log1p(&self) -> Result<Self> {

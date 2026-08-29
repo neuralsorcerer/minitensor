@@ -94,6 +94,43 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise inverse error function on `[-1, 1]`, infinite at the endpoints and NaN outside them.
+    pub fn erfinv(&self) -> PyResult<Self> {
+        let result = self.inner.erfinv().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Element-wise `2 ** x`, from the hardware's base-2 exponential rather than `exp(x * ln 2)`.
+    pub fn exp2(&self) -> PyResult<Self> {
+        let result = self.inner.exp2().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Element-wise `sin(pi * x) / (pi * x)`, taken as 1 at zero.
+    pub fn sinc(&self) -> PyResult<Self> {
+        let result = self.inner.sinc().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Element-wise `log |gamma(x)|`, which stays finite where `gamma` itself overflows.
+    pub fn lgamma(&self) -> PyResult<Self> {
+        let result = self.inner.lgamma().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Element-wise digamma, the derivative of `lgamma`.
+    pub fn digamma(&self) -> PyResult<Self> {
+        let result = self.inner.digamma().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Element-wise `log(x / (1 - x))`, the inverse of `sigmoid`. `eps` clamps the input into `[eps, 1 - eps]` first.
+    #[pyo3(signature = (eps=None))]
+    pub fn logit(&self, eps: Option<f64>) -> PyResult<Self> {
+        let result = self.inner.logit(eps).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;

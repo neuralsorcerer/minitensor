@@ -1238,6 +1238,23 @@ assert row_std.shape == (2, 3)
   dedicated routine rather than computing `1 - erf(x)`: past about `x = 6` in
   float64 `erf(x)` rounds to 1 and that subtraction returns exactly zero, which
   is precisely the tail `erfc` exists to give you (`erfc(20) ≈ 5.4e-176`).
+- `erfinv(input)` — the inverse of `erf` on `[-1, 1]`, infinite at the
+  endpoints. Anything outside that interval gives NaN: `erf` never reaches
+  there, so nothing inverts to it.
+- `exp2(input)` — `2 ** x` from the hardware's own base-2 exponential.
+  `exp(x * log(2))` rounds the exponent before using it, which costs the last
+  few bits of every answer and all of them for a large `x`.
+- `sinc(input)` — `sin(pi x) / (pi x)`, taken as `1` at zero. NumPy's
+  normalized convention, so the zeros sit on the non-zero integers.
+- `lgamma(input)`, `digamma(input)` — `log |gamma(x)|` and its derivative.
+  `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
+  float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,
+  which the library computes itself.
+- `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
+  With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
+  answer for a probability that has rounded to 0 or 1 and flattens the gradient
+  there; without it those give infinities and anything outside `[0, 1]` gives
+  NaN.
 - `sin`, `cos`, `tan`
 - `asin`, `acos`, `atan`
 - `atan2(input, other)` — the angle of `(other, input)` from the positive
@@ -1443,8 +1460,11 @@ histogram, histc,
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
 round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max, maximum,
-minimum, log1p, log2, log10, expm1, logaddexp, erf, erfc, hypot, copysign,
-xlogy,
+minimum, log1p, log2, log10, exp2, expm1, logaddexp, erf, erfc, hypot,
+copysign, xlogy,
+
+# Special functions
+erfinv, sinc, lgamma, digamma, logit,
 
 # Trigonometry and hyperbolics
 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,
