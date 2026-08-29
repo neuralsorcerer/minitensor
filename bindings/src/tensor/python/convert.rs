@@ -280,17 +280,31 @@ pub(crate) fn tensor_from_py_value(reference: &Tensor, value: &Bound<PyAny>) -> 
         return convert_python_data_to_tensor(value, reference.dtype(), reference.device(), false);
     }
 
-    if let Ok(py_tensor) = PyTensor::from_python_value(value) {
+    // The dtype is resolved *before* the tensor is built. Building first and
+    // casting after routed every Python float through the default dtype: with
+    // float32 as the default, `x * 0.1` on a float64 tensor multiplied by
+    // 0.10000000149011612, because widening a float32 back to float64 cannot
+    // recover the digits that dropped on the way in. The same applied to a list
+    // of floats, and to a Python int past 2^24.
+    let target_dtype = dtype::resolve_scalar_dtype(value, reference.dtype())
+        .ok()
+        .or_else(|| {
+            // Not a scalar -- a list or tuple. Its inferred dtype is the one it
+            // would get standing alone, at the configured default; here it is an
+            // operand, so it takes the context's width by the same rule a lone
+            // float does.
+            infer_python_value_dtype(value)
+                .map(|inferred| dtype::dtype_for_context(inferred, reference.dtype()))
+        })
+        .unwrap_or(reference.dtype());
+
+    if let Ok(py_tensor) = PyTensor::from_python_value_with_dtype(value, target_dtype) {
         let mut tensor = py_tensor.inner;
         if tensor.device() != reference.device() {
             tensor = tensor.to(reference.device()).map_err(_convert_error)?;
         }
 
-        let target_dtype = dtype::resolve_scalar_dtype(value, reference.dtype())
-            .ok()
-            .or_else(|| infer_python_value_dtype(value))
-            .unwrap_or(reference.dtype());
-
+        // A wrapped tensor comes back unchanged, so it may still need the cast.
         if tensor.dtype() != target_dtype {
             tensor = tensor.astype(target_dtype).map_err(_convert_error)?;
         }

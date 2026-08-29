@@ -90,6 +90,24 @@ fn integer_like_dtype_for_context(context: DataType) -> DataType {
     }
 }
 
+/// The width an untyped Python value takes on when combined with a tensor of
+/// `context`'s dtype.
+///
+/// [`resolve_scalar_dtype`] applies this to a lone float or int already. A list
+/// of them has no declared dtype either, so it follows the same rule: written
+/// against a float64 tensor, `[0.1]` is the float64 `0.1` rather than the
+/// float32 one widened back, which is a different number.
+///
+/// A NumPy array is not covered, and should not be: it carries a dtype the
+/// caller chose, and that choice outranks the context.
+pub fn dtype_for_context(inferred: DataType, context: DataType) -> DataType {
+    match inferred {
+        DataType::Float32 | DataType::Float64 => float_like_dtype_for_context(context),
+        DataType::Int32 | DataType::Int64 => integer_like_dtype_for_context(context),
+        DataType::Bool => DataType::Bool,
+    }
+}
+
 fn float_like_dtype_for_context(context: DataType) -> DataType {
     match context {
         DataType::Float32 => DataType::Float32,
