@@ -15,6 +15,18 @@ from contextlib import contextmanager as _contextmanager
 from . import _api as _api_helpers
 from . import _core as _C
 from ._api import _CORE_API_MODULES, _OPTIONAL_API_MODULES
+from ._derived import (
+    cdist,
+    corrcoef,
+    cov,
+    diff,
+    dist,
+    kron,
+    outer,
+    trapezoid,
+    trapz,
+    vdot,
+)
 from ._exports import (
     _FUNCTIONAL_FORWARDERS,
     _bind_functional_forwarders,
@@ -303,6 +315,16 @@ _BASE_EXPORTS = (
     "fliplr",
     "flipud",
     "rot90",
+    "outer",
+    "vdot",
+    "kron",
+    "dist",
+    "cdist",
+    "diff",
+    "trapezoid",
+    "trapz",
+    "cov",
+    "corrcoef",
     "search_api",
     "describe_api",
     "help",

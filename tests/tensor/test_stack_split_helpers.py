@@ -27,8 +27,9 @@ def _t(array):
     # `ascontiguousarray` promotes a 0-D input to shape (1,), which is exactly
     # the rank these helpers are being tested about; `asarray` leaves it alone.
     values = np.asarray(array, dtype=np.float64)
-    return mt.Tensor(values if values.ndim == 0 else np.ascontiguousarray(values),
-                     dtype="float64")
+    return mt.Tensor(
+        values if values.ndim == 0 else np.ascontiguousarray(values), dtype="float64"
+    )
 
 
 STACKERS = ["hstack", "vstack", "dstack", "column_stack"]
@@ -69,9 +70,7 @@ def test_stackers_reject_a_bare_tensor_and_an_empty_sequence(name):
         op([])
 
 
-@pytest.mark.parametrize(
-    "reps", [2, (2,), (2, 3), (1, 2, 2), (3, 1)], ids=str
-)
+@pytest.mark.parametrize("reps", [2, (2,), (2, 3), (1, 2, 2), (3, 1)], ids=str)
 def test_tile_matches_numpy_including_short_reps(reps):
     # Short `reps` is what separates `tile` from `repeat`: NumPy pads the
     # missing leading entries with 1, and `repeat` insists on one per axis.
@@ -95,9 +94,7 @@ def test_unbind_drops_the_dimension_it_walks(dim):
     assert len(pieces) == MATRIX.shape[axis]
     for index, piece in enumerate(pieces):
         assert piece.ndim() == MATRIX.ndim - 1
-        np.testing.assert_array_equal(
-            piece.numpy(), np.take(MATRIX, index, axis=axis)
-        )
+        np.testing.assert_array_equal(piece.numpy(), np.take(MATRIX, index, axis=axis))
 
     # It is the inverse of `stack`, which is what makes it not `split`.
     np.testing.assert_array_equal(mt.stack(list(pieces), axis).numpy(), MATRIX)

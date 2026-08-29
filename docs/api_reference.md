@@ -73,6 +73,15 @@ of convenience aliases.
 | `fliplr(input)` | Reverse the columns; needs at least two dimensions. |
 | `flipud(input)` | Reverse the rows. |
 | `rot90(input, k=1, dims=(0, 1))` | Rotate `k` quarter turns in the plane `dims` spans. |
+| `outer(input, other)` | The outer product of two flattened tensors. |
+| `vdot(input, other)` | The inner product of two flattened tensors, of any matching shape. `dot` insists on 1-D operands; this flattens first. |
+| `kron(input, other)` | The Kronecker product: each element of `input` scaling a copy of `other`. Ranks need not match; the shorter is padded with leading 1s. |
+| `dist(input, other, p=2.0)` | The `p`-norm of the difference. |
+| `cdist(input, other, p=2.0)` | Every pairwise `p`-distance between the rows of two batches: `(..., n, d)` and `(..., m, d)` give `(..., n, m)`. Forms the difference in full, so it costs `n * m * d` elements. |
+| `diff(input, n=1, dim=-1)` | The `n`-th discrete difference along `dim`. |
+| `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
+| `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. |
+| `corrcoef(input)` | The Pearson correlation matrix of the rows, clamped to `[-1, 1]` -- the division is exact in theory and lands a hair outside it in floating point. |
 
 ### Shape compatibility helpers
 
