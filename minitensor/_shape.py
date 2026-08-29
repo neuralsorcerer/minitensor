@@ -310,3 +310,202 @@ def atleast_3d(*inputs: object) -> Tensor | tuple[Tensor, ...]:
         else:
             results.append(tensor)
     return _return_atleast_result(results)
+
+
+def _stack_inputs(tensors: object, name: str) -> list[Tensor]:
+    """The sequence a stacking helper was handed, as tensors.
+
+    A single tensor is not a sequence of them: `vstack(t)` is a mistake worth
+    naming rather than an iteration over `t`'s rows.
+    """
+
+    if isinstance(tensors, Tensor):
+        raise TypeError(f"{name} takes a sequence of tensors, not one tensor")
+
+    try:
+        items = list(tensors)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise TypeError(f"{name} takes a sequence of tensors") from exc
+
+    if not items:
+        raise ValueError(f"{name} needs at least one tensor")
+    return [_atleast_tensor(item) for item in items]
+
+
+def hstack(tensors: object) -> Tensor:
+    """Join along the second axis, or the first for 1-D inputs.
+
+    "Horizontally", which for a 1-D tensor means end to end, since it has no
+    second axis to grow.
+    """
+
+    items = _stack_inputs(tensors, "hstack")
+    axis = 0 if all(item.ndim() <= 1 for item in items) else 1
+    return _C.functional.cat([atleast_1d(item) for item in items], axis)
+
+
+def vstack(tensors: object) -> Tensor:
+    """Join along the first axis, after promoting 1-D inputs to rows."""
+
+    items = _stack_inputs(tensors, "vstack")
+    return _C.functional.cat([atleast_2d(item) for item in items], 0)
+
+
+def dstack(tensors: object) -> Tensor:
+    """Join along the third axis, after promoting lower-rank inputs to it."""
+
+    items = _stack_inputs(tensors, "dstack")
+    return _C.functional.cat([atleast_3d(item) for item in items], 2)
+
+
+def column_stack(tensors: object) -> Tensor:
+    """Join as columns: 1-D inputs become columns, the rest stack along axis 1."""
+
+    items = _stack_inputs(tensors, "column_stack")
+    promoted = [
+        item.reshape(item.shape[0], 1) if item.ndim() == 1 else atleast_2d(item)
+        for item in items
+    ]
+    return _C.functional.cat(promoted, 1)
+
+
+def tile(input: object, reps: object) -> Tensor:
+    """Repeat the tensor `reps` times along each axis.
+
+    Unlike `repeat`, `reps` may be shorter than the tensor's rank; the missing
+    leading entries are taken as 1, which is NumPy's rule and the reason both
+    spellings exist.
+    """
+
+    tensor = _atleast_tensor(input)
+    counts = list(_normalize_shape_argument(reps, "tile"))
+    if len(counts) < tensor.ndim():
+        counts = [1] * (tensor.ndim() - len(counts)) + counts
+    return tensor.repeat(counts)
+
+
+def unbind(input: object, dim: int = 0) -> tuple[Tensor, ...]:
+    """Every slice along `dim`, with that dimension removed.
+
+    The inverse of `stack`, as `split` is the inverse of `cat`: what comes back
+    has one dimension fewer, not a length-1 one.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() == 0:
+        raise ValueError("unbind requires a tensor with at least one dimension")
+
+    axis = _normalize_axis(dim, tensor.ndim(), "unbind")
+    return tuple(
+        _C.functional.narrow(tensor, axis, index, 1).squeeze(axis)
+        for index in range(tensor.shape[axis])
+    )
+
+
+def tensor_split(
+    input: object, indices_or_sections: object, dim: int = 0
+) -> tuple[Tensor, ...]:
+    """Split into `n` parts, or at the given indices, without requiring an
+    even division.
+
+    `split` takes a piece *size* and leaves whatever is left over as a short
+    final piece -- ten split by three is `[3, 3, 3, 1]`. This one takes a
+    *count* and balances, spreading the remainder one element at a time over
+    the leading parts: ten into three is `[4, 3, 3]`.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() == 0:
+        raise ValueError("tensor_split requires a tensor with at least one dimension")
+
+    axis = _normalize_axis(dim, tensor.ndim(), "tensor_split")
+    length = tensor.shape[axis]
+
+    if isinstance(indices_or_sections, Tensor):
+        raise TypeError("tensor_split takes an int or a sequence of ints")
+
+    try:
+        sections = _operator.index(indices_or_sections)
+    except TypeError:
+        bounds = [_operator.index(index) for index in indices_or_sections]  # type: ignore[union-attr]
+        edges = [0, *(min(max(index, 0), length) for index in bounds), length]
+    else:
+        if sections <= 0:
+            raise ValueError(
+                f"tensor_split requires a positive number of sections, got {sections}"
+            )
+        base, extra = divmod(length, sections)
+        edges = [0]
+        for part in range(sections):
+            edges.append(edges[-1] + base + (1 if part < extra else 0))
+
+    return tuple(
+        _C.functional.narrow(tensor, axis, start, max(stop - start, 0))
+        for start, stop in zip(edges, edges[1:])
+    )
+
+
+def _normalize_axis(dim: object, ndim: int, name: str) -> int:
+    try:
+        axis = _operator.index(dim)
+    except TypeError as exc:
+        raise TypeError(f"{name} requires an integer dim") from exc
+
+    if axis < 0:
+        axis += ndim
+    if not 0 <= axis < ndim:
+        raise ValueError(
+            f"{name} dim {dim} is out of range for a {ndim}-dimensional tensor"
+        )
+    return axis
+
+
+def fliplr(input: object) -> Tensor:
+    """Reverse the columns: `flip` on axis 1, which needs a second axis."""
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError("fliplr requires a tensor with at least two dimensions")
+    return _C.functional.flip(tensor, [1])
+
+
+def flipud(input: object) -> Tensor:
+    """Reverse the rows: `flip` on axis 0."""
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 1:
+        raise ValueError("flipud requires a tensor with at least one dimension")
+    return _C.functional.flip(tensor, [0])
+
+
+def rot90(input: object, k: int = 1, dims: object = (0, 1)) -> Tensor:
+    """Rotate by 90 degrees `k` times in the plane `dims` spans.
+
+    A rotation is a transpose and a flip; which of the two axes is flipped is
+    what makes it a rotation rather than a reflection, so the direction of `k`
+    decides that rather than the order of `dims`.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError("rot90 requires a tensor with at least two dimensions")
+
+    try:
+        first, second = (_operator.index(axis) for axis in dims)  # type: ignore[misc]
+    except (TypeError, ValueError) as exc:
+        raise TypeError("rot90 dims must be a pair of integers") from exc
+
+    first = _normalize_axis(first, tensor.ndim(), "rot90")
+    second = _normalize_axis(second, tensor.ndim(), "rot90")
+    if first == second:
+        raise ValueError("rot90 dims must name two different axes")
+
+    quarters = _operator.index(k) % 4
+    if quarters == 0:
+        return tensor
+    if quarters == 2:
+        return _C.functional.flip(tensor, [first, second])
+
+    transposed = _C.functional.transpose(tensor, first, second)
+    flipped = first if quarters == 1 else second
+    return _C.functional.flip(transposed, [flipped])

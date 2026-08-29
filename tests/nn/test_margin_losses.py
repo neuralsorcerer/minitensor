@@ -21,8 +21,11 @@ F = mt.functional
 
 
 def _tensor(values, requires_grad=False):
-    return mt.Tensor(np.asarray(values, dtype=np.float64), dtype="float64",
-                     requires_grad=requires_grad)
+    return mt.Tensor(
+        np.asarray(values, dtype=np.float64),
+        dtype="float64",
+        requires_grad=requires_grad,
+    )
 
 
 def _cosine(a, b, eps=1e-8, axis=1):
@@ -94,9 +97,7 @@ def test_hinge_embedding_loss_matches_the_definition():
 def test_cosine_embedding_loss_matches_the_definition():
     for margin in (0.0, 0.5):
         cosine = _cosine(LEFT, RIGHT)
-        expected = np.where(
-            SIGNS == 1, 1.0 - cosine, np.maximum(0.0, cosine - margin)
-        )
+        expected = np.where(SIGNS == 1, 1.0 - cosine, np.maximum(0.0, cosine - margin))
         got = F.cosine_embedding_loss(
             _tensor(LEFT), _tensor(RIGHT), _tensor(SIGNS), margin, "none"
         ).numpy()
@@ -115,8 +116,12 @@ def test_triplet_margin_loss_matches_the_definition_and_swaps():
         0.0, distance(anchor, positive) - distance(anchor, negative) + 1.0
     )
     got = F.triplet_margin_loss(
-        _tensor(anchor), _tensor(positive), _tensor(negative),
-        margin=1.0, eps=0.0, reduction="none",
+        _tensor(anchor),
+        _tensor(positive),
+        _tensor(negative),
+        margin=1.0,
+        eps=0.0,
+        reduction="none",
     ).numpy()
     np.testing.assert_allclose(got, expected, rtol=1e-13)
 
@@ -127,8 +132,13 @@ def test_triplet_margin_loss_matches_the_definition_and_swaps():
         + 1.0,
     )
     got = F.triplet_margin_loss(
-        _tensor(anchor), _tensor(positive), _tensor(negative),
-        margin=1.0, eps=0.0, swap=True, reduction="none",
+        _tensor(anchor),
+        _tensor(positive),
+        _tensor(negative),
+        margin=1.0,
+        eps=0.0,
+        swap=True,
+        reduction="none",
     ).numpy()
     np.testing.assert_allclose(got, swapped, rtol=1e-13)
     assert np.any(swapped > expected), "the swap has to change something here"
@@ -148,8 +158,13 @@ def test_triplet_margin_loss_takes_other_norms():
             0.0, row_norm(anchor, positive)[0] - row_norm(anchor, negative)[0] + 1.0
         )
         got = F.triplet_margin_loss(
-            _tensor(anchor), _tensor(positive), _tensor(negative),
-            margin=1.0, p=p, eps=0.0, reduction="none",
+            _tensor(anchor),
+            _tensor(positive),
+            _tensor(negative),
+            margin=1.0,
+            p=p,
+            eps=0.0,
+            reduction="none",
         ).item()
         assert got == pytest.approx(expected, rel=1e-12)
 
@@ -161,9 +176,7 @@ def test_soft_margin_loss_matches_the_definition_and_survives_confident_errors()
 
     # A sample the model got confidently wrong: `exp(800)` overflows, and the
     # loss has to converge on the linear tail instead of returning inf.
-    wrong = F.soft_margin_loss(
-        _tensor([-800.0]), _tensor([1.0]), "none"
-    ).item()
+    wrong = F.soft_margin_loss(_tensor([-800.0]), _tensor([1.0]), "none").item()
     assert wrong == 800.0
     with np.errstate(over="ignore"):
         assert np.isinf(np.log1p(np.exp(800.0)))
@@ -278,7 +291,12 @@ def test_reductions_agree_with_each_other(name):
     # `build` bakes in "sum"; call the underlying op with each reduction.
     op = getattr(F, name)
     args = {
-        "margin_ranking_loss": (tensor, _tensor(RIGHT[:, :1].ravel()), _tensor(SIGNS), 0.5),
+        "margin_ranking_loss": (
+            tensor,
+            _tensor(RIGHT[:, :1].ravel()),
+            _tensor(SIGNS),
+            0.5,
+        ),
         "hinge_embedding_loss": (tensor, _tensor(SIGNS), 1.0),
         "soft_margin_loss": (tensor, _tensor(SIGNS)),
         "poisson_nll_loss": (tensor, _tensor([0.0, 1.0, 3.0])),
@@ -294,14 +312,26 @@ def test_reductions_agree_with_each_other(name):
 @pytest.mark.parametrize(
     "call, message",
     [
-        (lambda: mt.cosine_similarity(_tensor(LEFT), _tensor(RIGHT), eps=0.0),
-         "positive eps"),
-        (lambda: F.cosine_embedding_loss(
-            _tensor(LEFT), _tensor(RIGHT), _tensor(SIGNS), 2.0), "margin in"),
-        (lambda: F.triplet_margin_loss(
-            _tensor(LEFT), _tensor(RIGHT), _tensor(LEFT), p=0.0), "norm order"),
-        (lambda: F.poisson_nll_loss(
-            _tensor(LEFT), _tensor(RIGHT), eps=-1.0), "non-negative eps"),
+        (
+            lambda: mt.cosine_similarity(_tensor(LEFT), _tensor(RIGHT), eps=0.0),
+            "positive eps",
+        ),
+        (
+            lambda: F.cosine_embedding_loss(
+                _tensor(LEFT), _tensor(RIGHT), _tensor(SIGNS), 2.0
+            ),
+            "margin in",
+        ),
+        (
+            lambda: F.triplet_margin_loss(
+                _tensor(LEFT), _tensor(RIGHT), _tensor(LEFT), p=0.0
+            ),
+            "norm order",
+        ),
+        (
+            lambda: F.poisson_nll_loss(_tensor(LEFT), _tensor(RIGHT), eps=-1.0),
+            "non-negative eps",
+        ),
     ],
 )
 def test_invalid_arguments_are_rejected(call, message):

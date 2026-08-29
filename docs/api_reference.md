@@ -63,6 +63,16 @@ of convenience aliases.
 | `atleast_2d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least two dimensions. |
 | `atleast_3d(*inputs)` | Convert one or more tensor-like inputs to tensors with at least three dimensions. |
 | `meshgrid(*inputs, indexing="xy", sparse=False, copy=False)` | Build coordinate grids from scalar or 1-D tensor-like coordinates. |
+| `hstack(tensors)` | Join along the second axis, or the first for 1-D inputs. |
+| `vstack(tensors)` | Join along the first axis, after promoting 1-D inputs to rows. |
+| `dstack(tensors)` | Join along the third axis, after promoting lower-rank inputs to it. |
+| `column_stack(tensors)` | Join as columns: 1-D inputs become columns, the rest stack along axis 1. |
+| `tile(input, reps)` | Repeat along each axis. Unlike `repeat`, `reps` may be shorter than the rank; the missing leading entries are taken as 1, which is why both spellings exist. |
+| `unbind(input, dim=0)` | Every slice along `dim`, with that dimension removed -- the inverse of `stack`, as `split` is the inverse of `cat`. |
+| `tensor_split(input, indices_or_sections, dim=0)` | Split into a *count* of balanced parts, or at explicit indices. `split` takes a piece *size* and leaves a short tail: ten by three is `[3, 3, 3, 1]` for `split` and `[4, 3, 3]` here. |
+| `fliplr(input)` | Reverse the columns; needs at least two dimensions. |
+| `flipud(input)` | Reverse the rows. |
+| `rot90(input, k=1, dims=(0, 1))` | Rotate `k` quarter turns in the plane `dims` spans. |
 
 ### Shape compatibility helpers
 
