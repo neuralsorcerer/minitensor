@@ -22,7 +22,12 @@ from __future__ import annotations
 import operator as _operator
 
 from . import _core as _C
-from ._shape import _atleast_tensor, _normalize_axis, broadcast_to, meshgrid as _meshgrid
+from ._shape import (
+    _atleast_tensor,
+    _normalize_axis,
+    broadcast_to,
+)
+from ._shape import meshgrid as _meshgrid
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -268,7 +273,11 @@ def _triangle_indices(row: int, col: int, offset: int, lower: bool) -> Tensor:
     down = Tensor.arange(0, rows, 1, dtype="int64").reshape(rows, 1)
     across = Tensor.arange(0, cols, 1, dtype="int64").reshape(1, cols)
     diagonal = across - down
-    selected = diagonal <= _operator.index(offset) if lower else diagonal >= _operator.index(offset)
+    selected = (
+        diagonal <= _operator.index(offset)
+        if lower
+        else diagonal >= _operator.index(offset)
+    )
     # `nonzero` gives one row per position; the convention for an index pair is
     # one row per *axis*, so it is transposed.
     return _F.transpose(_F.nonzero(selected), 0, 1)

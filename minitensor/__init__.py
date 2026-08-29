@@ -14,6 +14,7 @@ from contextlib import contextmanager as _contextmanager
 
 from . import _api as _api_helpers
 from . import _core as _C
+from . import _nn_extras
 from ._api import _CORE_API_MODULES, _OPTIONAL_API_MODULES
 from ._derived import (
     cdist,
@@ -178,6 +179,12 @@ _sys.modules[__name__ + ".functional"] = functional
 
 nn = _C.nn
 _sys.modules[__name__ + ".nn"] = nn
+
+# The Python-level pieces of `nn`. They are attached before the mirror below
+# copies `nn` into `functional`, so both namespaces carry them and neither has
+# to name them twice.
+for _extra_name in _nn_extras._NN_EXTRAS:
+    setattr(nn, _extra_name, getattr(_nn_extras, _extra_name))
 
 optim = _C.optim
 _sys.modules[__name__ + ".optim"] = optim

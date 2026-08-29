@@ -277,7 +277,15 @@ _FUNCTIONAL_ONLY = (
     "triplet_margin_loss",
     "soft_margin_loss",
     "poisson_nll_loss",
+    "nll_loss",
     "grid_sample",
+    # Layer-shaped in the same way: `prelu` takes a learned weight,
+    # `gumbel_softmax` a temperature, and the pixel shuffles a factor that
+    # only means anything for an `(n, c, h, w)` feature map.
+    "prelu",
+    "gumbel_softmax",
+    "pixel_shuffle",
+    "pixel_unshuffle",
     # Gradient utilities. `nn` is the conventional place to look for these,
     # so they stay under `mt.nn` rather than becoming `mt.clip_grad_norm_`.
     "clip_grad_norm_",

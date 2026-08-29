@@ -32,7 +32,9 @@ def _t(values, dtype="float64", requires_grad=False):
 
 
 def _i(values):
-    return mt.Tensor(np.ascontiguousarray(np.asarray(values, dtype=np.int64)), dtype="int64")
+    return mt.Tensor(
+        np.ascontiguousarray(np.asarray(values, dtype=np.int64)), dtype="int64"
+    )
 
 
 # --- take and take_along_dim ------------------------------------------------
@@ -240,9 +242,7 @@ def test_flatnonzero_matches_numpy():
 
 def test_argwhere_matches_numpy():
     values = np.array([[0.0, 3.0], [0.0, 0.0], [-1.0, 0.0]])
-    np.testing.assert_array_equal(
-        mt.argwhere(_t(values)).numpy(), np.argwhere(values)
-    )
+    np.testing.assert_array_equal(mt.argwhere(_t(values)).numpy(), np.argwhere(values))
 
 
 def test_nothing_non_zero_gives_an_empty_answer_of_the_right_rank():
