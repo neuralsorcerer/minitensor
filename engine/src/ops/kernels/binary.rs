@@ -395,6 +395,43 @@ binary_kernel!(
     }
 );
 
+// Remainder with the sign of the *dividend* (C's `fmod`, and what `%` already
+// means in Rust for both floats and integers). It is the same computation as
+// above without the correction step, which is the whole difference between the
+// two conventions: `fmod(-7, 3)` is -1 where `remainder(-7, 3)` is 2.
+binary_kernel!(
+    fmod_f32_direct,
+    as_f32_slice,
+    f32,
+    Float32,
+    "f32",
+    |a: f32, b: f32| a % b
+);
+binary_kernel!(
+    fmod_f64_direct,
+    as_f64_slice,
+    f64,
+    Float64,
+    "f64",
+    |a: f64, b: f64| a % b
+);
+binary_kernel!(
+    fmod_i32_direct,
+    as_i32_slice,
+    i32,
+    Int32,
+    "i32",
+    |a: i32, b: i32| a.wrapping_rem(b)
+);
+binary_kernel!(
+    fmod_i64_direct,
+    as_i64_slice,
+    i64,
+    Int64,
+    "i64",
+    |a: i64, b: i64| a.wrapping_rem(b)
+);
+
 /// Generic broadcasting binary map: applies `op` element-wise over broadcast
 /// operands, producing a fresh, fully-initialized output buffer (no zeroing
 /// pass — every element is written exactly once).

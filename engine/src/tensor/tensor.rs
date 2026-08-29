@@ -2591,6 +2591,24 @@ impl Tensor {
         crate::ops::binary_math::xlogy(self, other)
     }
 
+    /// The unit step of `self`, taking the value `other` at exactly zero.
+    #[inline(always)]
+    pub fn heaviside(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::heaviside(self, other)
+    }
+
+    /// The next representable value after `self` towards `other`.
+    #[inline(always)]
+    pub fn nextafter(&self, other: &Self) -> Result<Self> {
+        crate::ops::binary_math::nextafter(self, other)
+    }
+
+    /// Remainder carrying the dividend's sign, as C's `fmod` does.
+    #[inline(always)]
+    pub fn fmod(&self, other: &Self) -> Result<Self> {
+        crate::ops::arithmetic::fmod(self, other)
+    }
+
     /// Round tensor values towards zero element-wise.
     #[inline(always)]
     pub fn trunc(&self) -> Result<Self> {

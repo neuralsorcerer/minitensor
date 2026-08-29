@@ -117,4 +117,13 @@ impl PyTensor {
     pub fn remainder(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         self.__mod__(other)
     }
+
+    /// Element-wise modulo taking the sign of the dividend, matching C's `fmod`.
+    pub fn fmod(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        use engine::ops::arithmetic::fmod;
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Rem)?;
+        let result = fmod(&lhs, &rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
 }

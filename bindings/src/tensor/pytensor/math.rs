@@ -225,6 +225,22 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The unit step of `input`: 0 below zero, 1 above it, and `other` at exactly zero.
+    pub fn heaviside(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.heaviside(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// The next representable value after each element, in the direction of `other`.
+    pub fn nextafter(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        let (lhs, rhs) =
+            prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Div)?;
+        let result = lhs.nextafter(&rhs).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// The magnitude of `input` with the sign of `other`, signed zeros included.
     pub fn copysign(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =

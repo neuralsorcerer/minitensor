@@ -1217,7 +1217,7 @@ assert row_std.shape == (2, 3)
 - `abs`, `sqrt`, `exp`, `log`, `pow`, `matmul`
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors
-- `floor_divide`, `remainder`
+- `floor_divide`, `remainder`, `fmod`
 - `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`,
   `bitwise_left_shift`, `bitwise_right_shift`
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
@@ -1271,6 +1271,16 @@ assert row_std.shape == (2, 3)
 - `xlogy(input, other)` — `input * log(other)`, taken as `0` wherever `input`
   is zero. That is the limit entropy and cross-entropy need, where the plain
   product gives `0 * -inf = NaN`. A NaN `other` still propagates.
+- `heaviside(input, other)` — the unit step: `0` below zero, `1` above it, and
+  `other` at exactly zero, which is the value no two conventions agree on and
+  the reason it takes a second operand. NaN stays NaN, being on neither side.
+  The step is flat wherever it is defined, so the gradient reaches `other`
+  alone, and only where the input is exactly zero.
+- `nextafter(input, other)` — the next representable value after each element
+  in the direction of `other`. Steps by one bit pattern, so it crosses zero
+  into the smallest subnormal and stops at the largest finite value on its way
+  in from infinity. As a real-valued function it differs from the identity by
+  one ulp, and that is the gradient it reports.
 - `cosine_similarity(input, other, dim=1, eps=1e-8)` — the cosine of the angle
   between them along `dim`. Each norm is floored at `eps` on its own rather
   than their product being floored once, which is what keeps a zero vector
@@ -1299,6 +1309,13 @@ assert row_std.shape == (2, 3)
 - `remainder` / `%` — Python-style remainder (takes the divisor's sign;
   `a == (a // b) * b + a % b` holds for every dtype; differentiable for
   float dtypes)
+- `fmod` — the same remainder taking the *dividend's* sign, which is what C's
+  `fmod` and Rust's `%` mean: `fmod(-7, 3)` is `-1` where `remainder(-7, 3)` is
+  `2`. They agree whenever the operands share a sign, and are one computation
+  with one correction step between them — the quotient rounds towards zero
+  instead of towards negative infinity, in the value and in `d/dy` alike.
+  Integer operands stay integral for both, and both are differentiable for
+  float dtypes.
 - `bitwise_and` / `&`, `bitwise_or` / `|`, `bitwise_xor` / `^`,
   `bitwise_not` / `~` — bit operations on integers, the matching truth table on
   bools; rejected for floats. A bool paired with an integer promotes to that
@@ -1459,9 +1476,9 @@ histogram, histc,
 
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
-round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max, maximum,
-minimum, log1p, log2, log10, exp2, expm1, logaddexp, erf, erfc, hypot,
-copysign, xlogy,
+fmod, round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max,
+maximum, minimum, log1p, log2, log10, exp2, expm1, logaddexp, erf, erfc, hypot,
+copysign, xlogy, heaviside, nextafter,
 
 # Special functions
 erfinv, sinc, lgamma, digamma, logit,

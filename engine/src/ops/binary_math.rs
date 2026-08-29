@@ -136,6 +136,93 @@ float_pair!(
     XLOGY_D_Y, |x, y| x / y
 );
 
+// --- heaviside -------------------------------------------------------------
+
+float_pair!(
+    /// The step: `0` below zero, `1` above it, and `other` exactly at it --
+    /// which is the whole reason it takes a second operand, since that value
+    /// is the one convention never agrees on.
+    ///
+    /// A NaN input stays NaN; it is on neither side of the step.
+    HEAVISIDE, |x, at_zero| {
+        if x < 0.0 {
+            0.0
+        } else if x > 0.0 {
+            1.0
+        } else if x == 0.0 {
+            at_zero
+        } else {
+            x
+        }
+    }
+);
+float_pair!(
+    /// The step is flat wherever it is defined, so the gradient with respect
+    /// to the input is zero everywhere the derivative exists -- and the
+    /// jump at zero has no finite derivative to report.
+    HEAVISIDE_D_X, |_x, _at_zero| 0.0
+);
+float_pair!(
+    /// The second operand is the value taken at exactly zero, so it reaches
+    /// the output there and nowhere else.
+    HEAVISIDE_D_AT_ZERO, |x, _at_zero| if x == 0.0 { 1.0 } else { 0.0 }
+);
+
+// --- nextafter -------------------------------------------------------------
+
+/// Defines `nextafter` at one width. The bit manipulation names the type on
+/// every line, so this cannot go through [`float_pair!`], which requires a
+/// body that typechecks at both.
+macro_rules! next_after_fn {
+    ($name:ident, $ty:ty) => {
+        #[inline(always)]
+        fn $name(from: $ty, towards: $ty) -> $ty {
+            if from.is_nan() || towards.is_nan() {
+                return <$ty>::NAN;
+            }
+            if from == towards {
+                // Includes `0.0` against `-0.0`, where the answer is the
+                // destination rather than a step in either direction.
+                return towards;
+            }
+            if from == 0.0 {
+                // Neither zero has a neighbour one bit away in the direction
+                // asked for; the smallest subnormal does.
+                let smallest = <$ty>::from_bits(1);
+                return if towards > 0.0 { smallest } else { -smallest };
+            }
+            // Consecutive representable values are consecutive bit patterns
+            // within a sign, and the pattern grows away from zero. So a step
+            // towards a larger value adds one bit above zero and subtracts one
+            // below it.
+            let bits = from.to_bits();
+            let stepped = if (from < towards) == (from > 0.0) {
+                bits + 1
+            } else {
+                bits - 1
+            };
+            <$ty>::from_bits(stepped)
+        }
+    };
+}
+
+next_after_fn!(next_after_f32, f32);
+next_after_fn!(next_after_f64, f64);
+
+/// One representable value from `from` in the direction of `towards`.
+const NEXTAFTER: FloatBinaryKernel = (next_after_f32, next_after_f64);
+float_pair!(
+    /// `nextafter(x, y)` differs from `x` by a single ulp, so as a
+    /// real-valued function it is the identity and this is its slope. The
+    /// step itself is below anything a derivative can see.
+    NEXTAFTER_D_FROM, |_x, _y| 1.0
+);
+float_pair!(
+    /// Only the *direction* of the second operand reaches the answer, and no
+    /// derivative can see a direction.
+    NEXTAFTER_D_TOWARDS, |_x, _y| 0.0
+);
+
 /// The shared body: promote, broadcast, run `forward`, and record `partials`
 /// if either operand wants a gradient.
 fn float_binary(
@@ -259,6 +346,20 @@ float_binary_op!(
     XLOGY_D_Y,
     "`input * log(other)`, taken as `0` wherever `input` is zero rather than \
      as the `0 * -inf` the plain product would give."
+);
+float_binary_op!(
+    heaviside,
+    HEAVISIDE,
+    HEAVISIDE_D_X,
+    HEAVISIDE_D_AT_ZERO,
+    "The unit step of `input`, taking the value `other` at exactly zero."
+);
+float_binary_op!(
+    nextafter,
+    NEXTAFTER,
+    NEXTAFTER_D_FROM,
+    NEXTAFTER_D_TOWARDS,
+    "The next representable value after `input` in the direction of `other`."
 );
 
 #[cfg(test)]
@@ -463,5 +564,111 @@ mod tests {
         let a = f64_tensor(vec![1.0, 2.0, 3.0]);
         let b = f64_tensor(vec![1.0, 2.0]);
         assert!(atan2(&a, &b).is_err());
+    }
+
+    #[test]
+    fn heaviside_steps_at_zero_and_takes_its_second_operand_there() {
+        let x = f64_tensor(vec![-2.0, -0.0, 0.0, 3.5, f64::NAN]);
+        let at_zero = f64_tensor(vec![0.5, 0.5, 0.5, 0.5, 0.5]);
+        let got = wide(&heaviside(&x, &at_zero).unwrap());
+        assert_eq!(got[0], 0.0);
+        // Negative zero is still zero, so it takes the given value too.
+        assert_eq!(got[1], 0.5);
+        assert_eq!(got[2], 0.5);
+        assert_eq!(got[3], 1.0);
+        assert!(got[4].is_nan(), "a NaN is on neither side of the step");
+    }
+
+    #[test]
+    fn the_heaviside_gradient_reaches_only_the_value_at_zero() {
+        let x = f64_tensor(vec![-1.0, 0.0, 1.0]).requires_grad_(true);
+        let at_zero = f64_tensor(vec![0.25, 0.25, 0.25]).requires_grad_(true);
+        let out = heaviside(&x, &at_zero).unwrap();
+        let seed = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = backward_collect(&out, Some(seed)).unwrap();
+        // Flat wherever it is defined.
+        assert_eq!(wide(grads.get(&x.id()).unwrap()), vec![0.0; 3]);
+        // And the second operand is the output at exactly zero, nowhere else.
+        assert_eq!(wide(grads.get(&at_zero.id()).unwrap()), vec![0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn nextafter_moves_exactly_one_representable_value() {
+        let from = f64_tensor(vec![1.0, 1.0, -1.0, -1.0]);
+        let towards = f64_tensor(vec![2.0, 0.0, 0.0, -2.0]);
+        let got = wide(&nextafter(&from, &towards).unwrap());
+
+        // One ulp up and down from 1, and the same either side of -1.
+        assert_eq!(got[0], f64::from_bits(1.0f64.to_bits() + 1));
+        assert_eq!(got[1], f64::from_bits(1.0f64.to_bits() - 1));
+        assert_eq!(got[2], -f64::from_bits(1.0f64.to_bits() - 1));
+        assert_eq!(got[3], -f64::from_bits(1.0f64.to_bits() + 1));
+
+        // Every step is strictly in the direction asked for, and nothing sits
+        // between the answer and where it started.
+        assert!(got[0] > 1.0 && got[1] < 1.0);
+        assert!(got[2] > -1.0 && got[3] < -1.0);
+    }
+
+    #[test]
+    fn nextafter_handles_the_values_with_no_neighbour_of_their_own() {
+        let from = f64_tensor(vec![0.0, -0.0, 0.0, f64::MAX, f64::INFINITY, 3.0, f64::NAN]);
+        let towards = f64_tensor(vec![1.0, 1.0, -1.0, f64::INFINITY, 0.0, 3.0, 1.0]);
+        let got = wide(&nextafter(&from, &towards).unwrap());
+
+        // Neither zero has a neighbour a bit away; the smallest subnormal does.
+        assert_eq!(got[0], f64::from_bits(1));
+        assert_eq!(got[1], f64::from_bits(1));
+        assert_eq!(got[2], -f64::from_bits(1));
+        // Past the largest finite value there is only infinity, and back from
+        // infinity there is only the largest finite value.
+        assert_eq!(got[3], f64::INFINITY);
+        assert_eq!(got[4], f64::MAX);
+        // Already there, so it stays.
+        assert_eq!(got[5], 3.0);
+        assert!(got[6].is_nan());
+    }
+
+    #[test]
+    fn nextafter_agrees_with_itself_at_float32() {
+        let from = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![1.0, -1.0, 0.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let towards = Tensor::new(
+            Arc::new(TensorData::from_vec_f32(
+                vec![2.0, -2.0, 1.0],
+                Device::cpu(),
+            )),
+            Shape::new(vec![3]),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        );
+        let got = nextafter(&from, &towards).unwrap();
+        assert_eq!(got.dtype(), DataType::Float32);
+        let values = got.data().as_f32_slice().unwrap();
+        assert_eq!(values[0], f32::from_bits(1.0f32.to_bits() + 1));
+        assert_eq!(values[1], -f32::from_bits(1.0f32.to_bits() + 1));
+        assert_eq!(values[2], f32::from_bits(1));
+    }
+
+    #[test]
+    fn the_nextafter_gradient_is_the_identity_in_its_first_operand() {
+        let from = f64_tensor(vec![1.0, 2.0]).requires_grad_(true);
+        let towards = f64_tensor(vec![5.0, 5.0]).requires_grad_(true);
+        let out = nextafter(&from, &towards).unwrap();
+        let seed = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+        let grads = backward_collect(&out, Some(seed)).unwrap();
+        // One ulp away from `from`, so as a real function this is the identity.
+        assert_eq!(wide(grads.get(&from.id()).unwrap()), vec![1.0, 1.0]);
+        // Only the direction of the second operand reaches the answer.
+        assert_eq!(wide(grads.get(&towards.id()).unwrap()), vec![0.0, 0.0]);
     }
 }

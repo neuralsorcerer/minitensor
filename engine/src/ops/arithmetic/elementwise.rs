@@ -12,7 +12,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::binary::{BinaryOpKind, coerce_binary_operands},
     ops::kernels::*,
-    tensor::{DataType, Tensor, TensorData},
+    tensor::{DataType, Shape, Tensor, TensorData},
 };
 use std::sync::Arc;
 
@@ -536,12 +536,72 @@ pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Element-wise remainder with broadcasting (Python `%` semantics: the result
-/// has the divisor's sign, consistent with [`floor_div`] via
-/// `a == floor_div(a, b) * b + remainder(a, b)`).
+/// Which way a modulus rounds its quotient, which is the only thing that
+/// separates the two conventions.
+#[derive(Clone, Copy)]
+enum ModulusConvention {
+    /// The quotient rounds towards negative infinity, so the result carries
+    /// the *divisor's* sign. Python's `%`, and consistent with [`floor_div`]
+    /// via `a == floor_div(a, b) * b + remainder(a, b)`.
+    Floored,
+    /// The quotient rounds towards zero, so the result carries the
+    /// *dividend's* sign. C's `fmod`, and Rust's `%`.
+    Truncated,
+}
+
+impl ModulusConvention {
+    /// The four dtype kernels this convention dispatches to.
+    fn kernels(self) -> [BinaryKernel; 4] {
+        match self {
+            Self::Floored => [
+                rem_f32_direct,
+                rem_f64_direct,
+                rem_i32_direct,
+                rem_i64_direct,
+            ],
+            Self::Truncated => [
+                fmod_f32_direct,
+                fmod_f64_direct,
+                fmod_i32_direct,
+                fmod_i64_direct,
+            ],
+        }
+    }
+
+    /// How the backward pass reaches the same quotient. `d/dy` is its
+    /// negation, so this is where the two conventions differ in the gradient
+    /// as well as in the value.
+    fn quotient(self) -> fn(&Tensor, &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Floored => floor_div,
+            Self::Truncated => trunc_div,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Floored => "remainder",
+            Self::Truncated => "fmod",
+        }
+    }
+}
+
+/// One dtype's elementwise kernel, as the four in a [`ModulusConvention`] are
+/// stored.
+type BinaryKernel = fn(&Tensor, &Tensor, &Shape) -> Result<TensorData>;
+
+/// The quotient rounded towards zero, which is what `fmod` subtracts a
+/// multiple of. Only ever reached for float operands, since an integer
+/// modulus is exact and carries no gradient.
+fn trunc_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    crate::ops::activation::trunc(&div(lhs, rhs)?)
+}
+
+/// Element-wise modulus with broadcasting, in either convention.
 ///
-/// Differentiable for float dtypes: `d/dx = 1`, `d/dy = -floor(x/y)`.
-pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+/// Differentiable for float dtypes: `d/dx = 1`, and `d/dy = -q` where `q` is
+/// the quotient the convention rounds to, which is locally constant.
+fn modulus(lhs: &Tensor, rhs: &Tensor, convention: ModulusConvention) -> Result<Tensor> {
     if lhs.device() != rhs.device() {
         return Err(MinitensorError::device_mismatch(
             format!("{:?}", lhs.device()),
@@ -553,42 +613,47 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
-    // Gradients only make sense for floating dtypes; an all-integer remainder
-    // is exact and non-differentiable.
+    // Gradients only make sense for floating dtypes; an all-integer modulus is
+    // exact and non-differentiable.
     let requires_grad = (lhs.requires_grad() || rhs.requires_grad())
         && matches!(result_dtype, DataType::Float32 | DataType::Float64);
+    let grad_fn = || {
+        Arc::new(RemainderBackward {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            input_ids: [lhs.id(), rhs.id()],
+            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
+            quotient: convention.quotient(),
+        })
+    };
 
     let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
     if output_shape.numel() == 0 {
-        let mut output = Tensor::empty(
-            output_shape.clone(),
-            result_dtype,
-            lhs.device(),
-            requires_grad,
-        );
-        if requires_grad {
-            let grad_fn = Arc::new(RemainderBackward {
-                lhs: lhs.clone(),
-                rhs: rhs.clone(),
-                input_ids: [lhs.id(), rhs.id()],
-                input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
-            });
-            output = with_grad_fn(output, grad_fn)?;
-        }
-        return Ok(output);
+        let output = Tensor::empty(output_shape, result_dtype, lhs.device(), requires_grad);
+        return if requires_grad {
+            with_grad_fn(output, grad_fn())
+        } else {
+            Ok(output)
+        };
     }
 
     ensure_no_integer_zero_divisor(rhs_ref)?;
 
+    let kernels = convention.kernels();
     let output_data = match result_dtype {
-        DataType::Float32 => rem_f32_direct(lhs_ref, rhs_ref, &output_shape)?,
-        DataType::Float64 => rem_f64_direct(lhs_ref, rhs_ref, &output_shape)?,
-        DataType::Int32 => rem_i32_direct(lhs_ref, rhs_ref, &output_shape)?,
-        DataType::Int64 => rem_i64_direct(lhs_ref, rhs_ref, &output_shape)?,
-        DataType::Bool => unreachable!("bool rejected during operand coercion"),
+        DataType::Float32 => kernels[0](lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Float64 => kernels[1](lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int32 => kernels[2](lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Int64 => kernels[3](lhs_ref, rhs_ref, &output_shape)?,
+        DataType::Bool => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "{} is not defined for boolean tensors",
+                convention.name()
+            )));
+        }
     };
 
-    let mut output = Tensor::new(
+    let output = Tensor::new(
         Arc::new(output_data),
         output_shape,
         result_dtype,
@@ -597,16 +662,172 @@ pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     );
 
     if requires_grad {
-        let grad_fn = Arc::new(RemainderBackward {
-            lhs: lhs.clone(),
-            rhs: rhs.clone(),
-            input_ids: [lhs.id(), rhs.id()],
-            input_requires_grad: [lhs.requires_grad(), rhs.requires_grad()],
-        });
-        output = with_grad_fn(output, grad_fn)?;
+        return with_grad_fn(output, grad_fn());
     }
-
     Ok(output)
 }
 
+/// Element-wise remainder with broadcasting, carrying the divisor's sign
+/// (Python's `%`): `remainder(-7, 3)` is 2.
+pub fn remainder(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    modulus(lhs, rhs, ModulusConvention::Floored)
+}
+
+/// Element-wise remainder with broadcasting, carrying the dividend's sign
+/// (C's `fmod`): `fmod(-7, 3)` is -1.
+pub fn fmod(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    modulus(lhs, rhs, ModulusConvention::Truncated)
+}
+
 // Helper functions for type-specific operations
+
+#[cfg(test)]
+mod modulus_tests {
+    use super::*;
+    use crate::{autograd::backward_collect, device::Device, tensor::Shape};
+
+    fn f64_tensor(data: Vec<f64>) -> Tensor {
+        let len = data.len();
+        Tensor::new(
+            Arc::new(TensorData::from_vec_f64(data, Device::cpu())),
+            Shape::new(vec![len]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn i64_tensor(data: Vec<i64>) -> Tensor {
+        let len = data.len();
+        Tensor::new(
+            Arc::new(TensorData::from_vec_i64(data, Device::cpu())),
+            Shape::new(vec![len]),
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn wide(tensor: &Tensor) -> Vec<f64> {
+        tensor.data().as_f64_slice().unwrap().to_vec()
+    }
+
+    /// Every sign pairing, which is the only place the two conventions differ.
+    const DIVIDENDS: [f64; 4] = [7.0, -7.0, 7.0, -7.0];
+    const DIVISORS: [f64; 4] = [3.0, 3.0, -3.0, -3.0];
+
+    #[test]
+    fn the_two_conventions_differ_only_when_the_signs_disagree() {
+        let a = f64_tensor(DIVIDENDS.to_vec());
+        let b = f64_tensor(DIVISORS.to_vec());
+
+        // `remainder` takes the divisor's sign, `fmod` the dividend's.
+        assert_eq!(
+            wide(&remainder(&a, &b).unwrap()),
+            vec![1.0, 2.0, -2.0, -1.0]
+        );
+        assert_eq!(wide(&fmod(&a, &b).unwrap()), vec![1.0, -1.0, 1.0, -1.0]);
+    }
+
+    #[test]
+    fn each_convention_reconstructs_its_own_quotient() {
+        // The identity that defines them: `a == q * b + r`, with `q` floored
+        // for one and truncated for the other.
+        let a = f64_tensor(DIVIDENDS.to_vec());
+        let b = f64_tensor(DIVISORS.to_vec());
+
+        for (name, values, quotients) in [
+            (
+                "remainder",
+                wide(&remainder(&a, &b).unwrap()),
+                DIVIDENDS
+                    .iter()
+                    .zip(DIVISORS)
+                    .map(|(x, y)| (x / y).floor())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "fmod",
+                wide(&fmod(&a, &b).unwrap()),
+                DIVIDENDS
+                    .iter()
+                    .zip(DIVISORS)
+                    .map(|(x, y)| (x / y).trunc())
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            for (index, ((&r, &q), (&x, y))) in values
+                .iter()
+                .zip(&quotients)
+                .zip(DIVIDENDS.iter().zip(DIVISORS))
+                .enumerate()
+            {
+                assert_eq!(q * y + r, x, "{name}[{index}]");
+            }
+        }
+    }
+
+    #[test]
+    fn integer_operands_stay_integral_in_both() {
+        let a = i64_tensor(vec![7, -7, 7, -7]);
+        let b = i64_tensor(vec![3, 3, -3, -3]);
+        for (name, result) in [("remainder", remainder(&a, &b)), ("fmod", fmod(&a, &b))] {
+            let out = result.unwrap();
+            assert_eq!(out.dtype(), DataType::Int64, "{name}");
+        }
+        assert_eq!(
+            remainder(&a, &b).unwrap().data().as_i64_slice().unwrap(),
+            &[1, 2, -2, -1]
+        );
+        assert_eq!(
+            fmod(&a, &b).unwrap().data().as_i64_slice().unwrap(),
+            &[1, -1, 1, -1]
+        );
+    }
+
+    #[test]
+    fn an_integer_zero_divisor_is_refused_by_both() {
+        let a = i64_tensor(vec![1]);
+        let zero = i64_tensor(vec![0]);
+        assert!(remainder(&a, &zero).is_err());
+        assert!(fmod(&a, &zero).is_err());
+    }
+
+    #[test]
+    fn the_gradient_follows_each_convention_s_own_quotient() {
+        // `d/dx` is 1 for both; `d/dy` is the negated quotient, which is where
+        // they part company for mixed signs.
+        for (name, op, expected) in [
+            (
+                "remainder",
+                remainder as fn(&Tensor, &Tensor) -> Result<Tensor>,
+                // floor(-7/3) = -3
+                3.0,
+            ),
+            (
+                "fmod", fmod, // trunc(-7/3) = -2
+                2.0,
+            ),
+        ] {
+            let a = f64_tensor(vec![-7.0]).requires_grad_(true);
+            let b = f64_tensor(vec![3.0]).requires_grad_(true);
+            let out = op(&a, &b).unwrap();
+            let seed = Tensor::ones(out.shape().clone(), out.dtype(), out.device(), false);
+            let grads = backward_collect(&out, Some(seed)).unwrap();
+            assert_eq!(wide(grads.get(&a.id()).unwrap()), vec![1.0], "{name} d/dx");
+            assert_eq!(
+                wide(grads.get(&b.id()).unwrap()),
+                vec![expected],
+                "{name} d/dy"
+            );
+        }
+    }
+
+    #[test]
+    fn an_integer_modulus_carries_no_gradient() {
+        let a = i64_tensor(vec![7]);
+        let b = i64_tensor(vec![3]);
+        assert!(!fmod(&a, &b).unwrap().requires_grad());
+        assert!(!remainder(&a, &b).unwrap().requires_grad());
+    }
+}

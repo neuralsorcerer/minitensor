@@ -706,6 +706,9 @@ pub struct RemainderBackward {
     pub input_ids: [TensorId; 2],
     /// Which inputs actually need a gradient (see [`AddBackward`]).
     pub input_requires_grad: [bool; 2],
+    /// How the forward rounded its quotient: floored for `remainder`,
+    /// truncated for `fmod`. The two ops agree on `d/dx` and differ only here.
+    pub quotient: fn(&Tensor, &Tensor) -> Result<Tensor>,
 }
 
 impl GradientFunction for RemainderBackward {
@@ -713,14 +716,14 @@ impl GradientFunction for RemainderBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(2);
 
-        // rem(x, y) = x - floor(x/y) * y with floor(x/y) locally constant, so
-        // d/dx = 1 and d/dy = -floor(x/y).
+        // rem(x, y) = x - q(x/y) * y with the quotient locally constant, so
+        // d/dx = 1 and d/dy = -q.
         if self.input_requires_grad[0] {
             let lhs_grad = reduce_gradient_for_broadcasting(grad_output, self.lhs.shape())?;
             accumulate_grad(&mut gradients, self.input_ids[0], lhs_grad)?;
         }
         if self.input_requires_grad[1] {
-            let quotient = arithmetic::floor_div(&self.lhs.detach(), &self.rhs.detach())?;
+            let quotient = (self.quotient)(&self.lhs.detach(), &self.rhs.detach())?;
             let rhs_term = arithmetic::mul(grad_output, &quotient)?;
             let rhs_term = arithmetic::neg(&rhs_term)?;
             let rhs_grad = reduce_gradient_for_broadcasting(&rhs_term, self.rhs.shape())?;
