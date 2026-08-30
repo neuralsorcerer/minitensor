@@ -15,9 +15,14 @@ accuracy and the gradients of the ones underneath rather than restating them.
 
 from __future__ import annotations
 
+import builtins
+import math as _math
 import operator as _operator
 
+import numpy as _np
+
 from . import _core as _C
+from ._indexing import ravel_multi_index as _ravel_multi_index
 from ._indexing import triu_indices as _triu_indices
 from ._shape import _atleast_tensor, _normalize_axis
 
@@ -183,6 +188,159 @@ def pdist(input: object, p: float = 2.0) -> Tensor:
     left = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 0, 1), 0))
     right = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 1, 1), 0))
     return _F.norm(left - right, p, [-1])
+
+
+def _histogram_specification(value: object, dims: int, name: str) -> list:
+    """One entry per dimension, from one value or a sequence of them."""
+
+    if value is None or isinstance(value, (int, float)) or _is_tensor(value):
+        return [value] * dims
+    entries = list(value)  # type: ignore[arg-type]
+    if len(entries) != dims:
+        raise ValueError(
+            f"histogramdd expects one {name} per dimension ({dims}), got {len(entries)}"
+        )
+    return entries
+
+
+def _is_tensor(value: object) -> bool:
+    return isinstance(value, Tensor) or hasattr(value, "__array__")
+
+
+def _histogram_bounds(bounds: object, dims: int) -> list:
+    """`range` as one `(low, high)` pair per dimension, or `None` for each.
+
+    Both spellings are taken: a flat sequence of `2 * dims` numbers, which is
+    what `torch.histogramdd` uses, and a sequence of pairs, which is what this
+    library's own one-dimensional `histogram` generalises to. They cannot be
+    confused, because one has sequences in it and the other does not.
+    """
+
+    if bounds is None:
+        return [None] * dims
+    entries = list(bounds)  # type: ignore[arg-type]
+    if entries and not isinstance(entries[0], (list, tuple)):
+        if len(entries) != 2 * dims:
+            raise ValueError(
+                f"histogramdd expects a flat range of {2 * dims} values or "
+                f"{dims} pairs, got {len(entries)} values"
+            )
+        entries = [(entries[2 * d], entries[2 * d + 1]) for d in range(dims)]
+    if len(entries) != dims:
+        raise ValueError(
+            f"histogramdd expects one range per dimension ({dims}), got {len(entries)}"
+        )
+    return [(float(low), float(high)) for low, high in entries]
+
+
+def _histogram_edges(column: Tensor, specification: object, bounds: object) -> Tensor:
+    """The bin edges for one dimension, from a count or given outright."""
+
+    if _is_tensor(specification):
+        edges = _atleast_tensor(specification)
+        if edges.ndim() != 1 or int(edges.shape[0]) < 2:
+            raise ValueError(
+                "histogramdd needs at least two edges per dimension, got "
+                f"{list(edges.shape)}"
+            )
+        return edges
+
+    count = _operator.index(specification)
+    if count < 1:
+        raise ValueError(f"histogramdd requires at least one bin, got {count}")
+    if bounds is None:
+        low, high = float(column.min().item()), float(column.max().item())
+    else:
+        low, high = bounds
+    if low == high:
+        # A column that never varies would otherwise have no width to divide;
+        # widening by half on each side is what `numpy` does for it too.
+        low, high = low - 0.5, high + 0.5
+    if not low < high:
+        raise ValueError(f"histogramdd needs an increasing range, got ({low}, {high})")
+    return _C.Tensor.linspace(low, high, count + 1, dtype=str(column.dtype))
+
+
+def histogramdd(
+    input: object,
+    bins: object = 10,
+    range: object = None,
+    weight: object | None = None,
+    density: bool = False,
+) -> tuple[Tensor, list[Tensor]]:
+    """The joint histogram of `(points, dimensions)` samples, and its edges.
+
+    `histogram` counts along a line; this counts in a box. `bins` is a count for
+    every dimension, one count each, or the edges themselves; `range` bounds
+    each dimension when the edges are to be computed.
+
+    Which cell a point falls in is the same question in every dimension, asked
+    once per axis and then combined -- so the axes are bucketed separately and
+    `ravel_multi_index` folds the coordinates into the one flat position that
+    `bincount` counts. No cell is ever visited, and nothing is nested: the cost
+    is the samples, not the grid, which matters because the grid is the thing
+    that grows exponentially.
+
+    A point outside the edges of any dimension is dropped, and the last bin of
+    each holds its own right edge, both as they are in `histogram`. `density`
+    divides each cell by the total and by its own volume, so the result
+    integrates to one over cells that need not be equal.
+    """
+
+    sample = _require_float(_atleast_tensor(input), "histogramdd")
+    if sample.ndim() == 1:
+        sample = sample.reshape(int(sample.shape[0]), 1)
+    if sample.ndim() != 2:
+        raise ValueError(
+            f"histogramdd takes a (points, dimensions) sample, got "
+            f"{sample.ndim()} dimensions"
+        )
+    points, dims = (int(size) for size in sample.shape)
+
+    specifications = _histogram_specification(bins, dims, "bin count")
+    bounds = _histogram_bounds(range, dims)
+
+    edges: list[Tensor] = []
+    located: list[Tensor] = []
+    inside: Tensor | None = None
+    for axis in builtins.range(dims):
+        column = _F.squeeze(_F.narrow(sample, 1, axis, 1), 1)
+        boundary = _histogram_edges(column, specifications[axis], bounds[axis])
+        edges.append(boundary)
+        last = int(boundary.shape[0]) - 2
+
+        # `searchsorted` counts the edges at or below the value, so one less is
+        # the bin -- except at the top edge, which the closing of the last bin
+        # puts inside it rather than past it.
+        cell = _F.searchsorted(boundary, column, True) - 1
+        at_top = column == _F.narrow(boundary, 0, last + 1, 1)
+        cell = _F.where(at_top, _C.Tensor.full([1], last, dtype=str(cell.dtype)), cell)
+
+        within = (cell >= 0) & (cell <= last)
+        inside = within if inside is None else inside & within
+        located.append(_F.clamp(cell, 0, last))
+
+    sizes = tuple(int(boundary.shape[0]) - 1 for boundary in edges)
+    # A dropped point is counted with a weight of zero rather than removed,
+    # which keeps this one pass over the samples with no compaction in it.
+    kept = inside.astype(str(sample.dtype))
+    if weight is not None:
+        kept = kept * _atleast_tensor(weight).reshape(points)
+    counts = _F.bincount(
+        _ravel_multi_index(located, sizes), kept, _math.prod(sizes)
+    ).reshape(list(sizes))
+
+    if not density:
+        return counts, edges
+
+    total = counts.sum()
+    volume = None
+    for axis, boundary in enumerate(edges):
+        shape = [1] * dims
+        shape[axis] = sizes[axis]
+        widths = diff(boundary).reshape(shape)
+        volume = widths if volume is None else volume * widths
+    return counts / (total * volume), edges
 
 
 def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:

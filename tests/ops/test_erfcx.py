@@ -94,9 +94,7 @@ def test_it_is_finite_and_right_where_the_product_is_not(x, expected):
 
 @pytest.mark.parametrize("x", [1e2, 1e4, 1e100, 1e300])
 def test_it_approaches_one_over_x_root_pi(x):
-    assert float(_at([x])[0]) == pytest.approx(
-        1.0 / (x * math.sqrt(math.pi)), rel=1e-3
-    )
+    assert float(_at([x])[0]) == pytest.approx(1.0 / (x * math.sqrt(math.pi)), rel=1e-3)
 
 
 def test_a_mills_ratio_is_computable_at_a_depth_erfc_cannot_reach():

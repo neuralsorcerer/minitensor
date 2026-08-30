@@ -768,6 +768,23 @@ pub(crate) fn create_arange_tensor(
     ))
 }
 
+/// The `i`-th of `steps` values evenly spaced from `start` to `end`.
+///
+/// The endpoint is written rather than computed. `start + (steps - 1) * step`
+/// lands a few ulps from `end` for most spacings, and a `linspace` whose last
+/// element is not its stop value quietly breaks anything that compares against
+/// it -- a histogram's closing bin edge, an interpolation's right boundary, a
+/// grid's far corner. `numpy` writes the endpoint for the same reason.
+fn evenly_spaced(start: f64, end: f64, step: f64, steps: usize, i: usize) -> f64 {
+    if steps == 1 {
+        start
+    } else if i + 1 == steps {
+        end
+    } else {
+        start + i as f64 * step
+    }
+}
+
 pub(crate) fn create_linspace_tensor(
     start: f64,
     end: f64,
@@ -795,11 +812,7 @@ pub(crate) fn create_linspace_tensor(
         DataType::Float32 => {
             if let Some(slice) = tensor_data.as_f32_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let value = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let value = evenly_spaced(start, end, step, steps, i);
                     *val = value as f32;
                 }
             }
@@ -807,11 +820,7 @@ pub(crate) fn create_linspace_tensor(
         DataType::Float64 => {
             if let Some(slice) = tensor_data.as_f64_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let value = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let value = evenly_spaced(start, end, step, steps, i);
                     *val = value;
                 }
             }
@@ -819,11 +828,7 @@ pub(crate) fn create_linspace_tensor(
         DataType::Int32 => {
             if let Some(slice) = tensor_data.as_i32_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let value = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let value = evenly_spaced(start, end, step, steps, i);
                     *val = value.round() as i32;
                 }
             }
@@ -831,11 +836,7 @@ pub(crate) fn create_linspace_tensor(
         DataType::Int64 => {
             if let Some(slice) = tensor_data.as_i64_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let value = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let value = evenly_spaced(start, end, step, steps, i);
                     *val = value.round() as i64;
                 }
             }
@@ -843,11 +844,7 @@ pub(crate) fn create_linspace_tensor(
         DataType::Bool => {
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let value = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let value = evenly_spaced(start, end, step, steps, i);
                     *val = value != 0.0;
                 }
             }
@@ -897,11 +894,7 @@ pub(crate) fn create_logspace_tensor(
         DataType::Float32 => {
             if let Some(slice) = tensor_data.as_f32_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let exponent = evenly_spaced(start, end, step, steps, i);
                     *val = base.powf(exponent) as f32;
                 }
             }
@@ -909,11 +902,7 @@ pub(crate) fn create_logspace_tensor(
         DataType::Float64 => {
             if let Some(slice) = tensor_data.as_f64_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let exponent = evenly_spaced(start, end, step, steps, i);
                     *val = base.powf(exponent);
                 }
             }
@@ -921,11 +910,7 @@ pub(crate) fn create_logspace_tensor(
         DataType::Int32 => {
             if let Some(slice) = tensor_data.as_i32_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let exponent = evenly_spaced(start, end, step, steps, i);
                     *val = base.powf(exponent).round() as i32;
                 }
             }
@@ -933,11 +918,7 @@ pub(crate) fn create_logspace_tensor(
         DataType::Int64 => {
             if let Some(slice) = tensor_data.as_i64_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let exponent = evenly_spaced(start, end, step, steps, i);
                     *val = base.powf(exponent).round() as i64;
                 }
             }
@@ -945,11 +926,7 @@ pub(crate) fn create_logspace_tensor(
         DataType::Bool => {
             if let Some(slice) = tensor_data.as_bool_slice_mut() {
                 for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = if steps == 1 {
-                        start
-                    } else {
-                        start + i as f64 * step
-                    };
+                    let exponent = evenly_spaced(start, end, step, steps, i);
                     *val = base.powf(exponent) != 0.0;
                 }
             }
