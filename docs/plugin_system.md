@@ -1,11 +1,14 @@
 # Plugin System Documentation
 
 MiniTensor's plugin module provides version metadata, Python-side plugin
-registries, lightweight custom-layer wrappers, and optional native shared-library
-loading. It is separate from the Rust custom-operation registry described in
-[the custom operations guide](custom_operations.md): the current Python plugin
-API can store callbacks and metadata, but it does not expose a Python API that
-turns arbitrary Python functions into engine-level tensor kernels.
+registries, lightweight custom-layer wrappers, and optional native
+shared-library loading. It is separate from the operation registry described in
+[the custom operations guide](custom_operations.md), and answers a different
+question: a plugin is a *bundle* -- a name, a version, a compatibility range,
+and setup and teardown callbacks -- where an operation is a single function with
+a gradient. Reach for `register_custom_op` to add one operation; reach for a
+plugin to ship a set of them together with the metadata that says which
+MiniTensor versions they work with.
 
 ## Core concepts
 

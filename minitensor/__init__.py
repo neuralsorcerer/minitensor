@@ -238,6 +238,7 @@ if serialization is not None:
     _sys.modules[__name__ + ".serialization"] = serialization
 
 _OPTIONAL_TOP_LEVEL_EXPORTS = (
+    "register_custom_op",
     "execute_custom_op_py",
     "is_custom_op_registered_py",
     "list_custom_ops_py",

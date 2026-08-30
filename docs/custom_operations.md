@@ -1,26 +1,104 @@
 # Custom Operations System
 
-MiniTensor's custom-operations system is currently a Rust-engine extension
-point with a small Python execution API. The compiled examples demonstrate how
-to register Rust `CustomOp` implementations in the global registry and invoke
-them from Python. Python can register and manage plugin metadata, but the
-current public Python package does **not** expose a Python `CustomOpBuilder` for
-creating new tensor kernels entirely in Python.
+An operation MiniTensor does not have can be added from Python, with no Rust
+toolchain and no rebuild, and it then participates in autograd on the same terms
+as a built-in one. The same registry also holds operations written in Rust
+against the `CustomOp` trait, which is what the bundled examples are.
 
-## Current public Python API
+## Registering one from Python
 
-The top-level `minitensor` package exposes these helpers when the Rust extension
-is available:
+`register_custom_op(name, forward, backward=None, num_inputs=1)` is the
+extension point.
+
+`forward` is called with the input tensors as positional arguments and returns a
+tensor. `backward`, when given, is called with `(grad_output, inputs, output)`
+-- the incoming gradient, a tuple of the saved inputs, and the saved output --
+and returns one gradient per input: a bare tensor when there is one input,
+otherwise a sequence, in which `None` means no gradient flows to that input.
+
+Whether you write a `backward` decides which of two things you get, and they are
+the only two a caller can sensibly mean.
+
+**Without one**, the forward is recorded like any other Python function, and the
+operation differentiates by composition:
+
+```python
+import minitensor as mt
+
+mt.register_custom_op("scaled_square", lambda x: (x * x) * 0.5)
+
+x = mt.Tensor([1.0, 2.0], dtype="float64", requires_grad=True)
+mt.execute_custom_op_py("scaled_square", [x]).sum().backward()
+print(x.grad.tolist())  # [1.0, 2.0]
+
+mt.clear_autograd_graph()
+mt.unregister_custom_op_py("scaled_square")
+```
+
+**With one**, the forward runs with gradient recording *off* and the gradient is
+whatever `backward` says. That is what makes a straight-through estimator
+possible -- the true derivative of a step function is zero everywhere, and zero
+is not the gradient anyone wants:
+
+```python
+import minitensor as mt
+
+
+def step(x):
+    return (x > 0.0).astype("float64")
+
+
+mt.register_custom_op("hard_step", step, lambda grad, inputs, output: grad)
+
+x = mt.Tensor([-1.0, 0.5, 2.0], dtype="float64", requires_grad=True)
+mt.execute_custom_op_py("hard_step", [x]).sum().backward()
+print(x.grad.tolist())  # [1.0, 1.0, 1.0]
+
+mt.clear_autograd_graph()
+mt.unregister_custom_op_py("hard_step")
+```
+
+Recording is off in that second case for a reason: were it on, the graph would
+hold two paths to the same gradient -- the forward's own and the backward's --
+and they would add.
+
+An operation of several inputs declares `num_inputs` and returns a gradient for
+each:
+
+```python
+import minitensor as mt
+
+mt.register_custom_op(
+    "weighted",
+    lambda a, b: a * b,
+    lambda grad, inputs, output: (grad * inputs[1], grad * inputs[0]),
+    num_inputs=2,
+)
+
+a = mt.Tensor([1.0, 2.0], dtype="float64", requires_grad=True)
+b = mt.Tensor([3.0, 4.0], dtype="float64", requires_grad=True)
+mt.execute_custom_op_py("weighted", [a, b]).sum().backward()
+print(a.grad.tolist(), b.grad.tolist())  # [3.0, 4.0] [1.0, 2.0]
+
+mt.clear_autograd_graph()
+mt.unregister_custom_op_py("weighted")
+```
+
+A gradient whose shape or dtype does not match its input is refused rather than
+accumulated into a buffer it does not fit, and an exception raised inside either
+callable is reported with its own message -- so what you see is a traceback from
+your own code.
+
+## The rest of the registry API
 
 | Function | Behavior |
 | --- | --- |
+| `register_custom_op(name, forward, backward=None, num_inputs=1)` | Registers an operation whose forward and backward are Python callables. A name already taken is refused. |
 | `register_example_custom_ops()` | Registers the bundled Rust example operations: `swish`, `gelu`, `mish`, `power`, and `layer_norm`. |
 | `list_custom_ops_py()` | Returns registered operation names. |
 | `is_custom_op_registered_py(name)` | Checks whether a name is present in the global registry. |
 | `execute_custom_op_py(name, inputs)` | Executes a registered operation with a Python list of tensors or tensor wrappers and returns a `Tensor`. |
 | `unregister_custom_op_py(name)` | Removes an operation from the global registry. |
-
-Example:
 
 ```python
 import minitensor as mt
@@ -32,6 +110,8 @@ x = mt.Tensor([[1.0, 2.0, -1.0]], requires_grad=True)
 y = mt.execute_custom_op_py("swish", [x])
 print(y.shape)
 ```
+
+The registry is process-wide, so a name is taken until it is unregistered.
 
 `execute_custom_op_py` accepts either core `Tensor` objects or wrapper objects
 with a `_tensor` attribute. The binding returns a tensor object directly; older

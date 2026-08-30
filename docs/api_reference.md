@@ -273,11 +273,59 @@ but keep this module in mind when maintaining older code that imports from
 
 The custom-ops system is exposed at the top level:
 
+- `register_custom_op(name, forward, backward=None, num_inputs=1)`
 - `execute_custom_op_py(name, inputs)`
 - `is_custom_op_registered_py(name)`
 - `list_custom_ops_py()`
 - `register_example_custom_ops()`
 - `unregister_custom_op_py(name)`
+
+`register_custom_op` is the extension point: an operation the library does not
+have becomes one it does, participating in autograd on the same terms as a
+built-in one, with no Rust toolchain and no rebuild.
+
+`forward` is called with the input tensors as positional arguments and returns
+a tensor. `backward`, when given, is called with `(grad_output, inputs, output)`
+-- the incoming gradient, a tuple of the saved inputs, and the saved output --
+and returns one gradient per input: a bare tensor when there is one input,
+otherwise a sequence, in which `None` means no gradient flows to that input.
+
+Whether you write a `backward` decides which of two things you get, and they
+are the only two a caller can sensibly mean:
+
+- **Without one**, the forward is recorded like any other Python function and
+  the operation differentiates by composition. Use this when the forward is
+  ordinary tensor code and its own derivative is the one you want.
+- **With one**, the forward runs with gradient recording *off* and the gradient
+  is whatever `backward` says. Use this when the true derivative is not the
+  useful one -- a straight-through estimator through a step function, say,
+  whose real gradient is zero everywhere -- or when you can write the
+  derivative more cheaply or more stably than the chain rule would derive it.
+
+```python
+import minitensor as mt
+
+
+# A straight-through estimator: the true derivative of a step is zero
+# everywhere, so the backward hands back the identity instead.
+def step(x):
+    return (x > 0.0).astype("float64")
+
+
+mt.register_custom_op("step_through", step, lambda grad, inputs, output: grad)
+
+x = mt.Tensor([-1.0, 0.5, 2.0], dtype="float64", requires_grad=True)
+mt.execute_custom_op_py("step_through", [x]).sum().backward()
+print(x.grad.tolist())  # [1.0, 1.0, 1.0]
+
+mt.clear_autograd_graph()
+mt.unregister_custom_op_py("step_through")
+```
+
+A gradient whose shape or dtype does not match its input is refused rather than
+accumulated into a buffer it does not fit, and an exception raised inside
+either callable is reported with its own message, so a traceback from your own
+code is what you see.
 
 ## 2) Tensor creation API
 

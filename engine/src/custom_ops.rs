@@ -7,7 +7,7 @@
 pub mod examples;
 
 use crate::{
-    autograd::{GradientFunction, TensorId, add_to_graph},
+    autograd::{GradientFunction, TensorId, with_grad_fn},
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},
@@ -231,7 +231,19 @@ impl CustomOpRegistry {
         // Set up gradient tracking if any input requires gradients
         let requires_grad = inputs.iter().any(|t| t.requires_grad());
         if requires_grad && let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
-            add_to_graph(&output, Some(grad_fn))?;
+            // `with_grad_fn`, not `add_to_graph`: the node has to go *on the
+            // output* as well as into the graph, and doing only the second
+            // leaves a tensor the walk treats as a leaf -- `backward()` reached
+            // it, found no gradient function, and stopped, so the custom
+            // gradient never ran and the inputs came back with none.
+            //
+            // The flag is set first for the same reason. A forward that
+            // supplies its own gradient computes the value with recording
+            // *off*, since the operations inside it are an implementation
+            // detail rather than the graph, so the tensor it hands back carries
+            // no flag of its own. It is differentiable because this node says
+            // so, and the flag has to say so too.
+            return with_grad_fn(output.requires_grad_(true), grad_fn);
         }
 
         Ok(output)

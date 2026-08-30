@@ -19,6 +19,9 @@ numpy = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 parking_lot = { workspace = true }
+# The engine's gradient maps are keyed with this hasher, and a backward
+# written in Python has to hand one back.
+rustc-hash = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { version = "0.29", features = ["resolve-config"] }
