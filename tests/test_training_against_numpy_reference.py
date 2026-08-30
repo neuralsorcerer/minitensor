@@ -115,7 +115,18 @@ def test_the_reference_problem_actually_trains(problem):
 
 
 @pytest.mark.parametrize(
-    "optimizer_name", ["Adam", "AdamW", "RMSprop", "Lion", "NAdam"]
+    "optimizer_name",
+    [
+        "Adam",
+        "AdamW",
+        "RMSprop",
+        "Lion",
+        "NAdam",
+        "Adadelta",
+        "Adamax",
+        "RAdam",
+        "Rprop",
+    ],
 )
 def test_the_same_model_trains_under_every_optimizer(problem, optimizer_name):
     # Wider coverage of the optimizer surface against the same graph, checking

@@ -294,5 +294,16 @@ impl Optimizer for NAdam {
         Ok(())
     }
 
+    fn describe(&self) -> String {
+        format!(
+            "NAdam(lr={:?}, betas=({}, {}), eps={:?}, momentum_decay={:?})",
+            self.learning_rate(),
+            self.beta1(),
+            self.beta2(),
+            self.epsilon(),
+            self.momentum_decay()
+        )
+    }
+
     crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }

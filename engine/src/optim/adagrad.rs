@@ -273,5 +273,14 @@ impl Optimizer for Adagrad {
         Ok(())
     }
 
+    fn describe(&self) -> String {
+        format!(
+            "Adagrad(lr={:?}, lr_decay={:?}, eps={:?})",
+            self.learning_rate(),
+            self.lr_decay(),
+            self.epsilon()
+        )
+    }
+
     crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }

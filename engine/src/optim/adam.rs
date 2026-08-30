@@ -442,6 +442,20 @@ impl Optimizer for AdamW {
         self.inner.step_count()
     }
 
+    /// Named for itself rather than delegated: the inner optimizer is an
+    /// `Adam` configured for decoupled decay, and reporting it as one would
+    /// be a `repr` that does not name the object it came from.
+    fn describe(&self) -> String {
+        format!(
+            "AdamW(lr={:?}, betas=({}, {}), eps={:?}, weight_decay={:?})",
+            self.learning_rate(),
+            self.beta1(),
+            self.beta2(),
+            self.epsilon(),
+            self.weight_decay()
+        )
+    }
+
     fn state_dict(&self, parameters: &[&Tensor]) -> Result<OptimizerState> {
         self.inner.state_dict(parameters)
     }
@@ -456,6 +470,12 @@ impl Optimizer for AdamW {
         clipping: &GradientClipping,
     ) -> Result<()> {
         self.inner.clip_gradients(parameters, clipping)
+    }
+
+    /// `self`, not the inner `Adam`: a caller asking for the concrete type
+    /// behind an `AdamW` means `AdamW`.
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -507,6 +527,19 @@ impl Optimizer for Adam {
         }
 
         Ok(())
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "Adam(lr={:?}, betas=({:?}, {:?}), eps={:?}, weight_decay={:?}, amsgrad={}, decoupled_weight_decay={})",
+            self.learning_rate(),
+            self.beta1(),
+            self.beta2(),
+            self.epsilon(),
+            self.weight_decay(),
+            super::optimizer::py_bool(self.is_amsgrad()),
+            super::optimizer::py_bool(self.is_decoupled_weight_decay())
+        )
     }
 
     crate::delegate_optimizer_bookkeeping!(groups, step_count);

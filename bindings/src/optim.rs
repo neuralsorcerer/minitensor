@@ -6,7 +6,9 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
-use engine::optim::{Adagrad, Adam, AdamW, Lion, NAdam, Optimizer, RMSprop, SGD};
+use engine::optim::{
+    Adadelta, Adagrad, Adam, AdamW, Adamax, Lion, NAdam, Optimizer, RAdam, RMSprop, Rprop, SGD,
+};
 use engine::serialization::{OptimizerState, SerializationFormat};
 use engine::{autograd, tensor::Tensor};
 use pyo3::Py;
@@ -16,30 +18,36 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyModule as Pyo3Module};
 
-/// Python spells its booleans `True`/`False`; Rust's `Display` gives
-/// `true`/`false`, which is not valid Python in a `__repr__`.
-fn py_bool(value: bool) -> &'static str {
-    if value { "True" } else { "False" }
-}
-
 /// Base class for optimizers.
 ///
 /// Every optimizer subclasses this, so `isinstance(opt, optim.Optimizer)`
 /// identifies any of them. See `step`, `zero_grad`, `state_dict` and `lr`.
 #[pyclass(name = "Optimizer", subclass)]
 pub struct PyOptimizer {
-    inner: OptimizerType,
+    /// Held as a trait object rather than an enum of the seven concrete
+    /// types. Everything this class does -- step, zero_grad, lr, state_dict,
+    /// repr -- is a method the `Optimizer` trait already has, so an enum
+    /// bought nothing but one match arm per optimizer per method, and a new
+    /// optimizer meant editing six matches before it would even compile. The
+    /// per-algorithm hyperparameters the subclasses expose come back through
+    /// [`concrete`].
+    inner: Box<dyn Optimizer>,
     parameters: Vec<Py<PyAny>>,
 }
 
-enum OptimizerType {
-    Sgd(SGD),
-    Adam(Adam),
-    AdamW(AdamW),
-    RMSprop(RMSprop),
-    Adagrad(Adagrad),
-    NAdam(NAdam),
-    Lion(Lion),
+/// The concrete optimizer behind a subclass's `self`, for a hyperparameter
+/// that belongs to one algorithm only.
+///
+/// Every caller is a getter on the subclass that owns that hyperparameter, so
+/// the downcast succeeds by construction; the error is what a subclass
+/// attached to the wrong optimizer would produce, which is the same thing the
+/// enum's `_ =>` arm used to say.
+fn concrete<T: 'static>(optimizer: &PyOptimizer) -> PyResult<&T> {
+    optimizer
+        .inner
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| PyRuntimeError::new_err("Invalid optimizer type"))
 }
 
 #[pymethods]
@@ -114,16 +122,9 @@ impl PyOptimizer {
                 .map(|tensor| tensor.tensor_mut())
                 .collect();
 
-            match &mut self.inner {
-                OptimizerType::Sgd(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::Adam(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::AdamW(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::RMSprop(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::Adagrad(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::NAdam(opt) => opt.step(tensor_refs.as_mut_slice()),
-                OptimizerType::Lion(opt) => opt.step(tensor_refs.as_mut_slice()),
-            }
-            .map_err(_convert_error)?;
+            self.inner
+                .step(tensor_refs.as_mut_slice())
+                .map_err(_convert_error)?;
 
             // Consume only this optimizer's gradients, not the whole graph.
             //
@@ -169,16 +170,9 @@ impl PyOptimizer {
                 .map(|tensor| tensor.tensor_mut())
                 .collect();
 
-            match &mut self.inner {
-                OptimizerType::Sgd(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::Adam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::AdamW(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::RMSprop(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::Adagrad(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::NAdam(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-                OptimizerType::Lion(opt) => opt.zero_grad(tensor_refs.as_mut_slice(), set),
-            }
-            .map_err(_convert_error)?;
+            self.inner
+                .zero_grad(tensor_refs.as_mut_slice(), set)
+                .map_err(_convert_error)?;
         }
 
         Ok(())
@@ -187,117 +181,32 @@ impl PyOptimizer {
     /// Get learning rate
     #[getter]
     pub(crate) fn lr(&self) -> f64 {
-        match &self.inner {
-            OptimizerType::Sgd(optimizer) => optimizer.learning_rate(),
-            OptimizerType::Adam(optimizer) => optimizer.learning_rate(),
-            OptimizerType::AdamW(optimizer) => optimizer.learning_rate(),
-            OptimizerType::RMSprop(optimizer) => optimizer.learning_rate(),
-            OptimizerType::Adagrad(optimizer) => optimizer.learning_rate(),
-            OptimizerType::NAdam(optimizer) => optimizer.learning_rate(),
-            OptimizerType::Lion(optimizer) => optimizer.learning_rate(),
-        }
+        self.inner.learning_rate()
     }
 
     /// Set learning rate
     #[setter]
     pub(crate) fn set_lr(&mut self, lr: f64) {
-        match &mut self.inner {
-            OptimizerType::Sgd(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::Adam(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::AdamW(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::RMSprop(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::Adagrad(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::NAdam(optimizer) => optimizer.set_learning_rate(lr),
-            OptimizerType::Lion(optimizer) => optimizer.set_learning_rate(lr),
-        }
+        self.inner.set_learning_rate(lr)
     }
 
     /// String representation
+    ///
+    /// Each optimizer writes its own line, in its own file, beside the
+    /// hyperparameters it reports -- which is what keeps a retuned or renamed
+    /// one from leaving a stale `repr` behind here.
     fn __repr__(&self) -> String {
-        match &self.inner {
-            OptimizerType::Sgd(optimizer) => format!(
-                "SGD(lr={:?}, momentum={:?}, dampening={:?}, weight_decay={:?}, nesterov={})",
-                optimizer.learning_rate(),
-                optimizer.momentum(),
-                optimizer.dampening(),
-                optimizer.weight_decay(),
-                py_bool(optimizer.is_nesterov())
-            ),
-            OptimizerType::Adam(optimizer) => format!(
-                "Adam(lr={:?}, betas=({:?}, {:?}), eps={:?}, weight_decay={:?}, amsgrad={}, decoupled_weight_decay={})",
-                optimizer.learning_rate(),
-                optimizer.beta1(),
-                optimizer.beta2(),
-                optimizer.epsilon(),
-                optimizer.weight_decay(),
-                py_bool(optimizer.is_amsgrad()),
-                py_bool(optimizer.is_decoupled_weight_decay())
-            ),
-            OptimizerType::AdamW(optimizer) => format!(
-                "AdamW(lr={:?}, betas=({}, {}), eps={:?}, weight_decay={:?})",
-                optimizer.learning_rate(),
-                optimizer.beta1(),
-                optimizer.beta2(),
-                optimizer.epsilon(),
-                optimizer.weight_decay()
-            ),
-            OptimizerType::NAdam(optimizer) => format!(
-                "NAdam(lr={:?}, betas=({}, {}), eps={:?}, momentum_decay={:?})",
-                optimizer.learning_rate(),
-                optimizer.beta1(),
-                optimizer.beta2(),
-                optimizer.epsilon(),
-                optimizer.momentum_decay()
-            ),
-            OptimizerType::Adagrad(optimizer) => format!(
-                "Adagrad(lr={:?}, lr_decay={:?}, eps={:?})",
-                optimizer.learning_rate(),
-                optimizer.lr_decay(),
-                optimizer.epsilon()
-            ),
-            OptimizerType::RMSprop(optimizer) => format!(
-                "RMSprop(lr={:?}, alpha={:?}, eps={:?}, weight_decay={:?}, momentum={:?}, centered={})",
-                optimizer.learning_rate(),
-                optimizer.alpha(),
-                optimizer.epsilon(),
-                optimizer.weight_decay(),
-                optimizer.momentum(),
-                py_bool(optimizer.is_centered())
-            ),
-            OptimizerType::Lion(optimizer) => format!(
-                "Lion(lr={:?}, betas=({}, {}), weight_decay={:?})",
-                optimizer.learning_rate(),
-                optimizer.beta1(),
-                optimizer.beta2(),
-                optimizer.weight_decay()
-            ),
-        }
+        self.inner.describe()
     }
 }
 
 impl PyOptimizer {
     fn as_optimizer(&self) -> &dyn Optimizer {
-        match &self.inner {
-            OptimizerType::Sgd(o) => o,
-            OptimizerType::Adam(o) => o,
-            OptimizerType::AdamW(o) => o,
-            OptimizerType::RMSprop(o) => o,
-            OptimizerType::Adagrad(o) => o,
-            OptimizerType::NAdam(o) => o,
-            OptimizerType::Lion(o) => o,
-        }
+        self.inner.as_ref()
     }
 
     fn as_optimizer_mut(&mut self) -> &mut dyn Optimizer {
-        match &mut self.inner {
-            OptimizerType::Sgd(o) => o,
-            OptimizerType::Adam(o) => o,
-            OptimizerType::AdamW(o) => o,
-            OptimizerType::RMSprop(o) => o,
-            OptimizerType::Adagrad(o) => o,
-            OptimizerType::NAdam(o) => o,
-            OptimizerType::Lion(o) => o,
-        }
+        self.inner.as_mut()
     }
 
     /// Borrow every tracked parameter, in the order they were registered.
@@ -388,51 +297,14 @@ impl PyOptimizerState {
 }
 
 impl PyOptimizer {
-    fn from_sgd(sgd: SGD, parameters: Vec<Py<PyAny>>) -> Self {
+    /// Wrap any optimizer with the parameters it will step.
+    ///
+    /// One constructor rather than seven identical ones: the trait object is
+    /// what this class holds, so the concrete type is only ever passed
+    /// through.
+    fn new(optimizer: impl Optimizer + 'static, parameters: Vec<Py<PyAny>>) -> Self {
         Self {
-            inner: OptimizerType::Sgd(sgd),
-            parameters,
-        }
-    }
-
-    fn from_adam(adam: Adam, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::Adam(adam),
-            parameters,
-        }
-    }
-
-    fn from_adamw(adamw: AdamW, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::AdamW(adamw),
-            parameters,
-        }
-    }
-
-    fn from_rmsprop(rmsprop: RMSprop, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::RMSprop(rmsprop),
-            parameters,
-        }
-    }
-
-    fn from_nadam(nadam: NAdam, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::NAdam(nadam),
-            parameters,
-        }
-    }
-
-    fn from_adagrad(adagrad: Adagrad, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::Adagrad(adagrad),
-            parameters,
-        }
-    }
-
-    fn from_lion(lion: Lion, parameters: Vec<Py<PyAny>>) -> Self {
-        Self {
-            inner: OptimizerType::Lion(lion),
+            inner: Box::new(optimizer),
             parameters,
         }
     }
@@ -593,51 +465,31 @@ impl PySGD {
             .with_dampening(dampening)
             .with_nesterov(nesterov);
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_sgd(sgd, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(sgd, params)).add_subclass(Self))
     }
 
     /// Get momentum parameter
     #[getter]
     fn momentum(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
-            Ok(sgd.momentum())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<SGD>(slf.as_ref())?.momentum())
     }
 
     /// Get momentum dampening parameter
     #[getter]
     fn dampening(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
-            Ok(sgd.dampening())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<SGD>(slf.as_ref())?.dampening())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
-            Ok(sgd.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<SGD>(slf.as_ref())?.weight_decay())
     }
 
     /// Get nesterov flag
     #[getter]
     fn nesterov(slf: PyRef<Self>) -> PyResult<bool> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Sgd(sgd) = &optimizer.inner {
-            Ok(sgd.is_nesterov())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<SGD>(slf.as_ref())?.is_nesterov())
     }
 }
 
@@ -700,62 +552,37 @@ impl PyAdam {
         )
         .with_amsgrad(amsgrad);
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_adam(adam, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(adam, params)).add_subclass(Self))
     }
 
     /// Get beta1 parameter
     #[getter]
     fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adam(adam) = &optimizer.inner {
-            Ok(adam.beta1())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adam>(slf.as_ref())?.beta1())
     }
 
     /// Get beta2 parameter
     #[getter]
     fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adam(adam) = &optimizer.inner {
-            Ok(adam.beta2())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adam>(slf.as_ref())?.beta2())
     }
 
     /// Get epsilon parameter
     #[getter]
     fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adam(adam) = &optimizer.inner {
-            Ok(adam.epsilon())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adam>(slf.as_ref())?.epsilon())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adam(adam) = &optimizer.inner {
-            Ok(adam.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adam>(slf.as_ref())?.weight_decay())
     }
 
     /// Whether the AMSGrad variant is in use
     #[getter]
     fn amsgrad(slf: PyRef<Self>) -> PyResult<bool> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adam(adam) = &optimizer.inner {
-            Ok(adam.is_amsgrad())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adam>(slf.as_ref())?.is_amsgrad())
     }
 }
 
@@ -812,51 +639,31 @@ impl PyAdamW {
             Some(weight_decay),
         );
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_adamw(adamw, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(adamw, params)).add_subclass(Self))
     }
 
     /// Get beta1 parameter
     #[getter]
     fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
-            Ok(adamw.beta1())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<AdamW>(slf.as_ref())?.beta1())
     }
 
     /// Get beta2 parameter
     #[getter]
     fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
-            Ok(adamw.beta2())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<AdamW>(slf.as_ref())?.beta2())
     }
 
     /// Get epsilon parameter
     #[getter]
     fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
-            Ok(adamw.epsilon())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<AdamW>(slf.as_ref())?.epsilon())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::AdamW(adamw) = &optimizer.inner {
-            Ok(adamw.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<AdamW>(slf.as_ref())?.weight_decay())
     }
 }
 
@@ -921,51 +728,31 @@ impl PyRMSprop {
         )
         .with_centered(centered);
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_rmsprop(rmsprop, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(rmsprop, params)).add_subclass(Self))
     }
 
     /// Get alpha parameter
     #[getter]
     fn alpha(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::RMSprop(rmsprop) = &optimizer.inner {
-            Ok(rmsprop.alpha())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<RMSprop>(slf.as_ref())?.alpha())
     }
 
     /// Get epsilon parameter
     #[getter]
     fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::RMSprop(rmsprop) = &optimizer.inner {
-            Ok(rmsprop.epsilon())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<RMSprop>(slf.as_ref())?.epsilon())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::RMSprop(rmsprop) = &optimizer.inner {
-            Ok(rmsprop.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<RMSprop>(slf.as_ref())?.weight_decay())
     }
 
     /// Get momentum parameter
     #[getter]
     fn momentum(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::RMSprop(rmsprop) = &optimizer.inner {
-            Ok(rmsprop.momentum())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<RMSprop>(slf.as_ref())?.momentum())
     }
 }
 
@@ -1019,52 +806,37 @@ impl PyNAdam {
             Some(momentum_decay),
         );
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_nadam(nadam, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(nadam, params)).add_subclass(Self))
     }
 
     /// Get the first-moment decay rate
     #[getter]
     fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
-        match &slf.as_ref().inner {
-            OptimizerType::NAdam(o) => Ok(o.beta1()),
-            _ => Err(PyRuntimeError::new_err("Invalid optimizer type")),
-        }
+        Ok(concrete::<NAdam>(slf.as_ref())?.beta1())
     }
 
     /// Get the second-moment decay rate
     #[getter]
     fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
-        match &slf.as_ref().inner {
-            OptimizerType::NAdam(o) => Ok(o.beta2()),
-            _ => Err(PyRuntimeError::new_err("Invalid optimizer type")),
-        }
+        Ok(concrete::<NAdam>(slf.as_ref())?.beta2())
     }
 
     /// Get epsilon
     #[getter]
     fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
-        match &slf.as_ref().inner {
-            OptimizerType::NAdam(o) => Ok(o.epsilon()),
-            _ => Err(PyRuntimeError::new_err("Invalid optimizer type")),
-        }
+        Ok(concrete::<NAdam>(slf.as_ref())?.epsilon())
     }
 
     /// Get weight decay
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        match &slf.as_ref().inner {
-            OptimizerType::NAdam(o) => Ok(o.weight_decay()),
-            _ => Err(PyRuntimeError::new_err("Invalid optimizer type")),
-        }
+        Ok(concrete::<NAdam>(slf.as_ref())?.weight_decay())
     }
 
     /// Get the momentum-schedule decay
     #[getter]
     fn momentum_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        match &slf.as_ref().inner {
-            OptimizerType::NAdam(o) => Ok(o.momentum_decay()),
-            _ => Err(PyRuntimeError::new_err("Invalid optimizer type")),
-        }
+        Ok(concrete::<NAdam>(slf.as_ref())?.momentum_decay())
     }
 }
 
@@ -1122,51 +894,31 @@ impl PyAdagrad {
             Some(epsilon),
         );
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_adagrad(adagrad, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(adagrad, params)).add_subclass(Self))
     }
 
     /// Get the learning-rate decay coefficient
     #[getter]
     fn lr_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adagrad(adagrad) = &optimizer.inner {
-            Ok(adagrad.lr_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adagrad>(slf.as_ref())?.lr_decay())
     }
 
     /// Get epsilon parameter
     #[getter]
     fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adagrad(adagrad) = &optimizer.inner {
-            Ok(adagrad.epsilon())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adagrad>(slf.as_ref())?.epsilon())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adagrad(adagrad) = &optimizer.inner {
-            Ok(adagrad.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adagrad>(slf.as_ref())?.weight_decay())
     }
 
     /// Get the value new accumulators start at
     #[getter]
     fn initial_accumulator_value(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Adagrad(adagrad) = &optimizer.inner {
-            Ok(adagrad.initial_accumulator_value())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Adagrad>(slf.as_ref())?.initial_accumulator_value())
     }
 }
 
@@ -1214,40 +966,318 @@ impl PyLion {
 
         let lion = Lion::new(lr, Some(beta1), Some(beta2), Some(weight_decay));
 
-        Ok(PyClassInitializer::from(PyOptimizer::from_lion(lion, params)).add_subclass(Self))
+        Ok(PyClassInitializer::from(PyOptimizer::new(lion, params)).add_subclass(Self))
     }
 
     /// Get beta1 parameter
     #[getter]
     fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Lion(lion) = &optimizer.inner {
-            Ok(lion.beta1())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Lion>(slf.as_ref())?.beta1())
     }
 
     /// Get beta2 parameter
     #[getter]
     fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Lion(lion) = &optimizer.inner {
-            Ok(lion.beta2())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
-        }
+        Ok(concrete::<Lion>(slf.as_ref())?.beta2())
     }
 
     /// Get weight decay parameter
     #[getter]
     fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
-        let optimizer = slf.as_ref();
-        if let OptimizerType::Lion(lion) = &optimizer.inner {
-            Ok(lion.weight_decay())
-        } else {
-            Err(PyRuntimeError::new_err("Invalid optimizer type"))
+        Ok(concrete::<Lion>(slf.as_ref())?.weight_decay())
+    }
+}
+
+/// Adadelta optimizer (Zeiler, 2012) — an adaptive method whose step is
+/// measured in the parameter's own units, so the learning rate defaults to 1
+/// and is a multiplier rather than the scale that decides convergence.
+#[pyclass(name = "Adadelta", extends = PyOptimizer)]
+pub struct PyAdadelta;
+
+#[pymethods]
+impl PyAdadelta {
+    /// Create a new Adadelta optimizer
+    #[new]
+    #[pyo3(signature = (parameters, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0.0))]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        rho: f64,
+        eps: f64,
+        weight_decay: f64,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
         }
+        if !(0.0..1.0).contains(&rho) {
+            return Err(PyValueError::new_err("rho must be in [0, 1)."));
+        }
+        if eps <= 0.0 {
+            return Err(PyValueError::new_err("Epsilon must be positive."));
+        }
+        if weight_decay < 0.0 {
+            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        }
+
+        let params = collect_parameters(parameters)?;
+        let adadelta = Adadelta::new(Some(lr), Some(rho), Some(eps), Some(weight_decay));
+        Ok(PyClassInitializer::from(PyOptimizer::new(adadelta, params)).add_subclass(Self))
+    }
+
+    /// Get the decay for both running averages
+    #[getter]
+    fn rho(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adadelta>(slf.as_ref())?.rho())
+    }
+
+    /// Get epsilon parameter
+    #[getter]
+    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adadelta>(slf.as_ref())?.epsilon())
+    }
+
+    /// Get weight decay parameter
+    #[getter]
+    fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adadelta>(slf.as_ref())?.weight_decay())
+    }
+}
+
+/// Adamax optimizer (Kingma & Ba, 2015) — Adam with the second moment measured
+/// by a decaying infinity norm rather than a mean of squares, so one enormous
+/// gradient decays out of the denominator geometrically instead of being
+/// squared into an average that takes far longer to forget.
+#[pyclass(name = "Adamax", extends = PyOptimizer)]
+pub struct PyAdamax;
+
+#[pymethods]
+impl PyAdamax {
+    /// Create a new Adamax optimizer
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(
+        signature = (
+            parameters,
+            lr=0.002,
+            betas=None,
+            beta1=None,
+            beta2=None,
+            eps=1e-8,
+            weight_decay=0.0
+        )
+    )]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        betas: Option<(f64, f64)>,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
+        eps: f64,
+        weight_decay: f64,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
+        }
+        if eps <= 0.0 {
+            return Err(PyValueError::new_err("Epsilon must be positive."));
+        }
+        if weight_decay < 0.0 {
+            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        }
+
+        let params = collect_parameters(parameters)?;
+        let (beta1, beta2) = resolve_betas_with_defaults(betas, beta1, beta2, (0.9, 0.999))?;
+        let adamax = Adamax::new(
+            Some(lr),
+            Some(beta1),
+            Some(beta2),
+            Some(eps),
+            Some(weight_decay),
+        );
+        Ok(PyClassInitializer::from(PyOptimizer::new(adamax, params)).add_subclass(Self))
+    }
+
+    /// Get beta1 parameter
+    #[getter]
+    fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adamax>(slf.as_ref())?.beta1())
+    }
+
+    /// Get beta2 parameter
+    #[getter]
+    fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adamax>(slf.as_ref())?.beta2())
+    }
+
+    /// Get epsilon parameter
+    #[getter]
+    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adamax>(slf.as_ref())?.epsilon())
+    }
+
+    /// Get weight decay parameter
+    #[getter]
+    fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Adamax>(slf.as_ref())?.weight_decay())
+    }
+}
+
+/// RAdam optimizer (Liu et al., 2020) — Adam with its early steps scaled by
+/// the variance its second-moment estimate actually has, so the warmup a plain
+/// Adam needs scheduled falls out of the method instead.
+#[pyclass(name = "RAdam", extends = PyOptimizer)]
+pub struct PyRAdam;
+
+#[pymethods]
+impl PyRAdam {
+    /// Create a new RAdam optimizer
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(
+        signature = (
+            parameters,
+            lr=0.001,
+            betas=None,
+            beta1=None,
+            beta2=None,
+            eps=1e-8,
+            weight_decay=0.0
+        )
+    )]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        betas: Option<(f64, f64)>,
+        beta1: Option<f64>,
+        beta2: Option<f64>,
+        eps: f64,
+        weight_decay: f64,
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
+        }
+        if eps <= 0.0 {
+            return Err(PyValueError::new_err("Epsilon must be positive."));
+        }
+        if weight_decay < 0.0 {
+            return Err(PyValueError::new_err("Weight decay must be non-negative."));
+        }
+
+        let params = collect_parameters(parameters)?;
+        let (beta1, beta2) = resolve_betas_with_defaults(betas, beta1, beta2, (0.9, 0.999))?;
+        if beta2 >= 1.0 {
+            // The effective sample count is `2 / (1 - beta2) - 1`, which is
+            // what the rectification is a function of; at 1 there is no such
+            // number to rectify against.
+            return Err(PyValueError::new_err("beta2 must be below 1."));
+        }
+        let radam = RAdam::new(
+            Some(lr),
+            Some(beta1),
+            Some(beta2),
+            Some(eps),
+            Some(weight_decay),
+        );
+        Ok(PyClassInitializer::from(PyOptimizer::new(radam, params)).add_subclass(Self))
+    }
+
+    /// Get beta1 parameter
+    #[getter]
+    fn beta1(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<RAdam>(slf.as_ref())?.beta1())
+    }
+
+    /// Get beta2 parameter
+    #[getter]
+    fn beta2(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<RAdam>(slf.as_ref())?.beta2())
+    }
+
+    /// Get epsilon parameter
+    #[getter]
+    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<RAdam>(slf.as_ref())?.epsilon())
+    }
+
+    /// Get weight decay parameter
+    #[getter]
+    fn weight_decay(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<RAdam>(slf.as_ref())?.weight_decay())
+    }
+}
+
+/// Rprop optimizer (Riedmiller & Braun, 1993) — moves by a per-parameter step
+/// size in the gradient's direction, reading only its sign. Immune to badly
+/// scaled gradients and unsuited to mini-batches, where a noisy sign flips for
+/// reasons that have nothing to do with the surface: it is a full-batch method.
+#[pyclass(name = "Rprop", extends = PyOptimizer)]
+pub struct PyRprop;
+
+#[pymethods]
+impl PyRprop {
+    /// Create a new Rprop optimizer
+    #[new]
+    #[pyo3(signature = (parameters, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0)))]
+    fn new(
+        _py: Python,
+        parameters: &Bound<PyAny>,
+        lr: f64,
+        etas: (f64, f64),
+        step_sizes: (f64, f64),
+    ) -> PyResult<PyClassInitializer<Self>> {
+        if lr <= 0.0 {
+            return Err(PyValueError::new_err("Learning rate must be positive."));
+        }
+        let (eta_minus, eta_plus) = etas;
+        if !(eta_minus > 0.0 && eta_minus < 1.0) {
+            return Err(PyValueError::new_err("etas[0] must be in (0, 1)."));
+        }
+        if eta_plus <= 1.0 {
+            return Err(PyValueError::new_err("etas[1] must be above 1."));
+        }
+        let (step_min, step_max) = step_sizes;
+        if !(step_min > 0.0 && step_min < step_max) {
+            return Err(PyValueError::new_err(
+                "step_sizes must satisfy 0 < step_sizes[0] < step_sizes[1].",
+            ));
+        }
+
+        let params = collect_parameters(parameters)?;
+        let rprop = Rprop::new(
+            Some(lr),
+            Some(eta_minus),
+            Some(eta_plus),
+            Some(step_min),
+            Some(step_max),
+        );
+        Ok(PyClassInitializer::from(PyOptimizer::new(rprop, params)).add_subclass(Self))
+    }
+
+    /// Get the shrink factor for a step whose gradient reversed
+    #[getter]
+    fn eta_minus(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Rprop>(slf.as_ref())?.eta_minus())
+    }
+
+    /// Get the growth factor for a step whose gradient agreed
+    #[getter]
+    fn eta_plus(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Rprop>(slf.as_ref())?.eta_plus())
+    }
+
+    /// Get the smallest allowed step size
+    #[getter]
+    fn step_min(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Rprop>(slf.as_ref())?.step_min())
+    }
+
+    /// Get the largest allowed step size
+    #[getter]
+    fn step_max(slf: PyRef<Self>) -> PyResult<f64> {
+        Ok(concrete::<Rprop>(slf.as_ref())?.step_max())
     }
 }
 
@@ -1266,6 +1296,10 @@ pub fn register_optim_module(py: Python, parent_module: &Bound<Pyo3Module>) -> P
     optim_module.add_class::<PyAdagrad>()?;
     optim_module.add_class::<PyNAdam>()?;
     optim_module.add_class::<PyLion>()?;
+    optim_module.add_class::<PyAdadelta>()?;
+    optim_module.add_class::<PyAdamax>()?;
+    optim_module.add_class::<PyRAdam>()?;
+    optim_module.add_class::<PyRprop>()?;
 
     crate::lr_scheduler::register(&optim_module)?;
 

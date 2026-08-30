@@ -9,8 +9,8 @@
 mod tests {
     use crate::optim::optimizer::LearningRateScheduler;
     use crate::optim::{
-        Adagrad, Adam, AdamW, CosineAnnealingLR, GradientClipping, GradientUtils, NAdam, Optimizer,
-        ParameterGroup, RMSprop, SGD,
+        Adadelta, Adagrad, Adam, AdamW, Adamax, CosineAnnealingLR, GradientClipping, GradientUtils,
+        NAdam, Optimizer, ParameterGroup, RAdam, RMSprop, Rprop, SGD,
     };
     use crate::{
         device::Device,
@@ -1532,6 +1532,477 @@ mod tests {
                 &sequential[..],
                 "{name} disagrees across the parallel threshold"
             );
+        }
+    }
+
+    // --- the fixed-state optimizers -------------------------------------
+
+    /// One scalar parameter, driven through `grads` by `step`, reporting the
+    /// value after each step.
+    ///
+    /// Every trajectory test below is the same shape -- transcribe the update
+    /// rule from its paper, run it beside the implementation, compare every
+    /// step -- so the driving is written once.
+    fn scalar_trajectory<O: Optimizer>(start: f64, grads: &[f64], optimizer: &mut O) -> Vec<f64> {
+        let mut p = Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+        p.data_mut().as_f64_slice_mut().unwrap()[0] = start;
+
+        let mut out = Vec::with_capacity(grads.len());
+        for &g in grads {
+            let mut grad =
+                Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+            grad.data_mut().as_f64_slice_mut().unwrap()[0] = g;
+            p.set_grad(Some(grad));
+            {
+                let mut params = vec![&mut p];
+                optimizer.step(&mut params).unwrap();
+            }
+            out.push(p.data().as_f64_slice().unwrap()[0]);
+        }
+        out
+    }
+
+    const TRAJECTORY_GRADS: [f64; 6] = [0.5, -2.0, 1.0, 0.25, -0.75, 1.5];
+
+    #[test]
+    fn test_adadelta_matches_the_update_rule() {
+        for &(lr, rho, eps, wd) in &[
+            (1.0f64, 0.9f64, 1e-6f64, 0.0f64),
+            (0.5, 0.95, 1e-8, 0.0),
+            (1.0, 0.9, 1e-6, 0.05),
+        ] {
+            let mut opt = Adadelta::new(Some(lr), Some(rho), Some(eps), Some(wd));
+            let got = scalar_trajectory(1.0, &TRAJECTORY_GRADS, &mut opt);
+
+            // Zeiler 2012, algorithm 1, transcribed.
+            let (mut p, mut square, mut delta) = (1.0f64, 0.0f64, 0.0f64);
+            for (i, &raw) in TRAJECTORY_GRADS.iter().enumerate() {
+                let g = raw + wd * p;
+                square = rho * square + (1.0 - rho) * g * g;
+                let step = ((delta + eps).sqrt() / (square + eps).sqrt()) * g;
+                delta = rho * delta + (1.0 - rho) * step * step;
+                p -= lr * step;
+                assert!(
+                    (got[i] - p).abs() < 1e-12,
+                    "lr={lr} rho={rho} wd={wd} step {i}: {} != {p}",
+                    got[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_adadelta_needs_no_learning_rate_to_move_sensibly() {
+        // The claim the method is named for: with the default `lr` of 1 the
+        // first step is about `sqrt(eps) / sqrt((1 - rho) g^2 + eps)` times the
+        // gradient -- a step in the parameter's own units, not the gradient's,
+        // so a gradient scaled by a thousand does not scale the step by a
+        // thousand.
+        let small = scalar_trajectory(1.0, &[0.001], &mut Adadelta::new(None, None, None, None))[0];
+        let large =
+            scalar_trajectory(1.0, &[1000.0], &mut Adadelta::new(None, None, None, None))[0];
+
+        let small_step = (1.0 - small).abs();
+        let large_step = (1.0 - large).abs();
+        // Six orders of magnitude of gradient in; a factor of four out. A
+        // method that scaled its step by the gradient would have moved a
+        // million times further for the larger one.
+        let ratio = large_step / small_step;
+        assert!(
+            (1.0..10.0).contains(&ratio),
+            "{large_step} against {small_step} is a ratio of {ratio}"
+        );
+        assert!(
+            ratio < 1e-3 * (1000.0 / 0.001),
+            "and nowhere near the million a gradient-proportional step would give"
+        );
+    }
+
+    #[test]
+    fn test_adadelta_creation_and_defaults() {
+        let opt = Adadelta::new(None, None, None, None);
+        assert_eq!(opt.learning_rate(), 1.0);
+        assert_eq!(opt.rho(), 0.9);
+        assert_eq!(opt.epsilon(), 1e-6);
+        assert_eq!(opt.weight_decay(), 0.0);
+        assert!(opt.describe().starts_with("Adadelta(lr=1.0"));
+    }
+
+    #[test]
+    fn test_adamax_matches_the_update_rule() {
+        for &(lr, beta1, beta2, eps, wd) in &[
+            (0.002f64, 0.9f64, 0.999f64, 1e-8f64, 0.0f64),
+            (0.01, 0.8, 0.99, 1e-8, 0.0),
+            (0.002, 0.9, 0.999, 1e-8, 0.1),
+        ] {
+            let mut opt = Adamax::new(Some(lr), Some(beta1), Some(beta2), Some(eps), Some(wd));
+            let got = scalar_trajectory(1.0, &TRAJECTORY_GRADS, &mut opt);
+
+            // Kingma & Ba 2015, algorithm 2.
+            let (mut p, mut m, mut u) = (1.0f64, 0.0f64, 0.0f64);
+            for (i, &raw) in TRAJECTORY_GRADS.iter().enumerate() {
+                let g = raw + wd * p;
+                m = beta1 * m + (1.0 - beta1) * g;
+                u = (beta2 * u).max(g.abs());
+                let correction = 1.0 - beta1.powi(i as i32 + 1);
+                p -= (lr / correction) * m / (u + eps);
+                assert!(
+                    (got[i] - p).abs() < 1e-12,
+                    "lr={lr} betas=({beta1},{beta2}) wd={wd} step {i}: {} != {p}",
+                    got[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_adamax_forgets_a_spike_geometrically_where_adam_squares_it() {
+        // The denominator is a decaying maximum, so one enormous gradient sets
+        // it and then leaves at exactly `beta2` per step -- knowable in
+        // advance, which a mean of squares is not.
+        let beta2 = 0.9;
+        let mut opt = Adamax::new(Some(1.0), Some(0.0), Some(beta2), Some(0.0), None);
+        // A spike, then unit gradients that cannot beat the decaying maximum.
+        let grads = [100.0, 1.0, 1.0, 1.0];
+        let got = scalar_trajectory(0.0, &grads, &mut opt);
+
+        // With beta1 = 0 the numerator is just the gradient, so each step is
+        // `g / u` and `u` is `100 * beta2^k` while that stays above 1.
+        // The first step sets the maximum; the decay is what the rest measure.
+        let mut previous = got[0];
+        for (k, step) in got.iter().enumerate().skip(1) {
+            let expected_denominator = 100.0 * beta2.powi(k as i32);
+            let taken = previous - step;
+            assert!(
+                (taken - 1.0 / expected_denominator).abs() < 1e-12,
+                "step {k}: moved {taken}"
+            );
+            previous = *step;
+        }
+    }
+
+    #[test]
+    fn test_adamax_creation_and_defaults() {
+        let opt = Adamax::new(None, None, None, None, None);
+        assert_eq!(opt.learning_rate(), 0.002);
+        assert_eq!(opt.beta1(), 0.9);
+        assert_eq!(opt.beta2(), 0.999);
+        assert_eq!(opt.epsilon(), 1e-8);
+        assert!(opt.describe().starts_with("Adamax(lr=0.002"));
+    }
+
+    #[test]
+    fn test_radam_matches_the_update_rule() {
+        for &(lr, beta1, beta2, eps, wd) in &[
+            (0.001f64, 0.9f64, 0.999f64, 1e-8f64, 0.0f64),
+            (0.01, 0.9, 0.99, 1e-8, 0.0),
+            (0.001, 0.95, 0.999, 1e-8, 0.02),
+        ] {
+            // Long enough to cross the five-sample threshold, which is where
+            // the interesting half of the method starts.
+            let grads: Vec<f64> = (0..40).map(|i| 0.7 * ((i as f64) * 0.9).sin()).collect();
+            let mut opt = RAdam::new(Some(lr), Some(beta1), Some(beta2), Some(eps), Some(wd));
+            let got = scalar_trajectory(1.0, &grads, &mut opt);
+
+            // Liu et al. 2020, algorithm 2.
+            let (mut p, mut m, mut v) = (1.0f64, 0.0f64, 0.0f64);
+            let rho_infinity = 2.0 / (1.0 - beta2) - 1.0;
+            let mut rectified_steps = 0;
+            for (i, &raw) in grads.iter().enumerate() {
+                let t = i as f64 + 1.0;
+                let g = raw + wd * p;
+                m = beta1 * m + (1.0 - beta1) * g;
+                v = beta2 * v + (1.0 - beta2) * g * g;
+
+                let bias1 = 1.0 - beta1.powf(t);
+                let bias2 = 1.0 - beta2.powf(t);
+                let rho = rho_infinity - 2.0 * t * beta2.powf(t) / bias2;
+                let m_hat = m / bias1;
+
+                if rho > 5.0 {
+                    rectified_steps += 1;
+                    let rectifier = (((rho - 4.0) * (rho - 2.0) * rho_infinity)
+                        / ((rho_infinity - 4.0) * (rho_infinity - 2.0) * rho))
+                        .sqrt();
+                    p -= lr * rectifier * m_hat / (v.sqrt() / bias2.sqrt() + eps);
+                } else {
+                    p -= lr * m_hat;
+                }
+                assert!(
+                    (got[i] - p).abs() < 1e-12,
+                    "lr={lr} betas=({beta1},{beta2}) wd={wd} step {i}: {} != {p}",
+                    got[i]
+                );
+            }
+            assert!(
+                rectified_steps > 0,
+                "the trajectory has to reach the adaptive branch to test it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_radam_takes_a_plain_step_before_the_variance_is_measurable() {
+        // The warmup that falls out of the method: while the second moment has
+        // fewer than five effective samples the step is `lr * m_hat`, which is
+        // the gradient's own scale, not an adaptive one.
+        let lr = 0.1;
+        let mut opt = RAdam::new(Some(lr), Some(0.0), Some(0.999), Some(0.0), None);
+        // With beta1 = 0 the first moment is the gradient, so a non-adaptive
+        // step is exactly `lr * g`.
+        let got = scalar_trajectory(0.0, &[2.0, 2.0, 2.0], &mut opt);
+        for (i, value) in got.iter().enumerate() {
+            let expected = -(lr * 2.0) * (i as f64 + 1.0);
+            assert!(
+                (value - expected).abs() < 1e-12,
+                "step {i}: {value} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_radam_creation_and_defaults() {
+        let opt = RAdam::new(None, None, None, None, None);
+        assert_eq!(opt.learning_rate(), 0.001);
+        assert_eq!(opt.beta1(), 0.9);
+        assert_eq!(opt.beta2(), 0.999);
+        assert!(opt.describe().starts_with("RAdam(lr=0.001"));
+    }
+
+    #[test]
+    fn test_rprop_matches_the_update_rule() {
+        for &(lr, eta_minus, eta_plus, step_min, step_max) in &[
+            (0.01f64, 0.5f64, 1.2f64, 1e-6f64, 50.0f64),
+            (0.1, 0.6, 1.5, 1e-8, 2.0),
+        ] {
+            let mut opt = Rprop::new(
+                Some(lr),
+                Some(eta_minus),
+                Some(eta_plus),
+                Some(step_min),
+                Some(step_max),
+            );
+            let got = scalar_trajectory(1.0, &TRAJECTORY_GRADS, &mut opt);
+
+            // Riedmiller & Braun 1993.
+            let (mut p, mut previous, mut size) = (1.0f64, 0.0f64, lr);
+            for (i, &raw) in TRAJECTORY_GRADS.iter().enumerate() {
+                let agreement = raw * previous;
+                let g = if agreement > 0.0 {
+                    size = (size * eta_plus).min(step_max);
+                    raw
+                } else if agreement < 0.0 {
+                    size = (size * eta_minus).max(step_min);
+                    0.0
+                } else {
+                    raw
+                };
+                if g > 0.0 {
+                    p -= size;
+                } else if g < 0.0 {
+                    p += size;
+                }
+                previous = g;
+                assert!(
+                    (got[i] - p).abs() < 1e-12,
+                    "lr={lr} etas=({eta_minus},{eta_plus}) step {i}: {} != {p}",
+                    got[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rprop_ignores_the_gradient_magnitude_entirely() {
+        // The character of the method: only the sign is read, so two runs
+        // whose gradients differ by twelve orders of magnitude but agree in
+        // sign take exactly the same path.
+        let signs = [1.0f64, 1.0, -1.0, -1.0, 1.0];
+        let tiny: Vec<f64> = signs.iter().map(|s| s * 1e-9).collect();
+        let huge: Vec<f64> = signs.iter().map(|s| s * 1e3).collect();
+
+        let a = scalar_trajectory(1.0, &tiny, &mut Rprop::new(None, None, None, None, None));
+        let b = scalar_trajectory(1.0, &huge, &mut Rprop::new(None, None, None, None, None));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_rprop_grows_a_step_that_agrees_and_skips_one_that_reverses() {
+        let lr = 0.1;
+        let mut opt = Rprop::new(Some(lr), Some(0.5), Some(1.2), None, None);
+        // Agree, agree, reverse, agree.
+        let got = scalar_trajectory(0.0, &[1.0, 1.0, -1.0, -1.0], &mut opt);
+
+        // The first step takes `lr` (nothing to agree with yet, so the size
+        // stands), the second `lr * 1.2`.
+        assert!((got[0] + lr).abs() < 1e-15);
+        assert!((got[1] - (got[0] - lr * 1.2)).abs() < 1e-15);
+        // The reversal shrinks the step and takes none of it.
+        assert!(
+            (got[2] - got[1]).abs() < 1e-15,
+            "a reversed step must not move"
+        );
+        // And the step after it starts from the shrunk size, in the new
+        // direction. The reversal cleared the remembered gradient, so this
+        // step has nothing to agree with and the size stands at `lr * 1.2 * 0.5`.
+        assert!((got[3] - (got[2] + lr * 1.2 * 0.5)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_rprop_creation_and_defaults() {
+        let opt = Rprop::new(None, None, None, None, None);
+        assert_eq!(opt.learning_rate(), 0.01);
+        assert_eq!(opt.eta_minus(), 0.5);
+        assert_eq!(opt.eta_plus(), 1.2);
+        assert_eq!(opt.step_min(), 1e-6);
+        assert_eq!(opt.step_max(), 50.0);
+        assert!(opt.describe().starts_with("Rprop(lr=0.01"));
+    }
+
+    #[test]
+    fn test_the_new_optimizers_reject_non_float_parameters() {
+        let make = || {
+            let mut p = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), true);
+            let grad = Tensor::zeros(Shape::new(vec![2]), DataType::Int64, Device::cpu(), false);
+            p.set_grad(Some(grad));
+            p
+        };
+        let mut optimizers: Vec<Box<dyn Optimizer>> = vec![
+            Box::new(Adadelta::new(None, None, None, None)),
+            Box::new(Adamax::new(None, None, None, None, None)),
+            Box::new(RAdam::new(None, None, None, None, None)),
+            Box::new(Rprop::new(None, None, None, None, None)),
+        ];
+        for optimizer in optimizers.iter_mut() {
+            let mut p = make();
+            let mut params = vec![&mut p];
+            let error = optimizer.step(&mut params).unwrap_err().to_string();
+            assert!(
+                error.contains("floating point"),
+                "expected a dtype complaint, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_new_optimizers_round_trip_their_state() {
+        for name in ["Adadelta", "Adamax", "RAdam", "Rprop"] {
+            let build = || -> Box<dyn Optimizer> {
+                match name {
+                    "Adadelta" => Box::new(Adadelta::new(None, None, None, None)),
+                    "Adamax" => Box::new(Adamax::new(None, None, None, None, None)),
+                    "RAdam" => Box::new(RAdam::new(None, None, None, None, None)),
+                    _ => Box::new(Rprop::new(None, None, None, None, None)),
+                }
+            };
+
+            let mut p = Tensor::zeros(Shape::new(vec![3]), DataType::Float64, Device::cpu(), true);
+            p.data_mut()
+                .as_f64_slice_mut()
+                .unwrap()
+                .copy_from_slice(&[1.0, -2.0, 0.5]);
+            let mut optimizer = build();
+            let grads = [[0.3f64, -0.7, 0.2], [0.1, 0.4, -0.6]];
+            for row in &grads {
+                let mut grad =
+                    Tensor::zeros(Shape::new(vec![3]), DataType::Float64, Device::cpu(), false);
+                grad.data_mut()
+                    .as_f64_slice_mut()
+                    .unwrap()
+                    .copy_from_slice(row);
+                p.set_grad(Some(grad));
+                let mut params = vec![&mut p];
+                optimizer.step(&mut params).unwrap();
+            }
+
+            let state = optimizer.state_dict(&[&p]).unwrap();
+            assert_eq!(state.step_count, 2);
+
+            // A fresh optimizer loaded from that snapshot has to take the same
+            // next step as the one that produced it -- which is the whole
+            // reason a snapshot exists.
+            let mut restored = build();
+            restored.load_state_dict(&[&p], &state).unwrap();
+
+            let next = [0.5f64, 0.5, -0.5];
+            let mut continued = p.clone();
+            let mut reloaded = p.clone();
+            for (optimizer, param) in [
+                (&mut optimizer, &mut continued),
+                (&mut restored, &mut reloaded),
+            ] {
+                let mut grad =
+                    Tensor::zeros(Shape::new(vec![3]), DataType::Float64, Device::cpu(), false);
+                grad.data_mut()
+                    .as_f64_slice_mut()
+                    .unwrap()
+                    .copy_from_slice(&next);
+                param.set_grad(Some(grad));
+                let mut params = vec![param];
+                optimizer.step(&mut params).unwrap();
+            }
+            assert_eq!(
+                continued.data().as_f64_slice().unwrap(),
+                reloaded.data().as_f64_slice().unwrap(),
+                "{name} did not resume where it left off"
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_new_optimizers_step_a_large_parameter_the_same_way_as_a_small_one() {
+        // The update runs sequentially below the element threshold and across
+        // rayon's workers above it, and the two have to agree. A buffer well
+        // past the threshold, all of whose elements see the same gradient,
+        // must end up holding the same value as a one-element run.
+        let long = 70_000;
+        for name in ["Adadelta", "Adamax", "RAdam", "Rprop"] {
+            let build = || -> Box<dyn Optimizer> {
+                match name {
+                    "Adadelta" => Box::new(Adadelta::new(None, None, None, None)),
+                    "Adamax" => Box::new(Adamax::new(None, None, None, None, None)),
+                    "RAdam" => Box::new(RAdam::new(None, None, None, None, None)),
+                    _ => Box::new(Rprop::new(None, None, None, None, None)),
+                }
+            };
+
+            let mut wide = Tensor::zeros(
+                Shape::new(vec![long]),
+                DataType::Float64,
+                Device::cpu(),
+                true,
+            );
+            wide.data_mut().as_f64_slice_mut().unwrap().fill(1.0);
+            let mut narrow =
+                Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), true);
+            narrow.data_mut().as_f64_slice_mut().unwrap()[0] = 1.0;
+
+            let (mut wide_opt, mut narrow_opt) = (build(), build());
+            for &g in &[0.5f64, -0.25, 0.75] {
+                let mut wide_grad = Tensor::zeros(
+                    Shape::new(vec![long]),
+                    DataType::Float64,
+                    Device::cpu(),
+                    false,
+                );
+                wide_grad.data_mut().as_f64_slice_mut().unwrap().fill(g);
+                wide.set_grad(Some(wide_grad));
+                wide_opt.step(&mut [&mut wide]).unwrap();
+
+                let mut narrow_grad =
+                    Tensor::zeros(Shape::new(vec![1]), DataType::Float64, Device::cpu(), false);
+                narrow_grad.data_mut().as_f64_slice_mut().unwrap()[0] = g;
+                narrow.set_grad(Some(narrow_grad));
+                narrow_opt.step(&mut [&mut narrow]).unwrap();
+            }
+
+            let expected = narrow.data().as_f64_slice().unwrap()[0];
+            for (index, &value) in wide.data().as_f64_slice().unwrap().iter().enumerate() {
+                assert!(
+                    (value - expected).abs() < 1e-12,
+                    "{name}[{index}]: {value} != {expected}"
+                );
+            }
         }
     }
 }

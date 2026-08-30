@@ -316,6 +316,10 @@ def test_layers_decline_wrongly_shaped_input(layer_name, build):
         ("Adagrad", optim.Adagrad),
         ("Lion", optim.Lion),
         ("NAdam", optim.NAdam),
+        ("Adadelta", optim.Adadelta),
+        ("Adamax", optim.Adamax),
+        ("RAdam", optim.RAdam),
+        ("Rprop", optim.Rprop),
     ],
 )
 def test_optimizers_decline_degenerate_configuration(optimizer_name, build):

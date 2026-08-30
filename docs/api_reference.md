@@ -2284,6 +2284,10 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 - `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004)`
 - `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, epsilon=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
+- `Adadelta(params, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0.0)`
+- `Adamax(params, lr=0.002, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0)`
+- `RAdam(params, lr=0.001, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0)`
+- `Rprop(params, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0))`
 
 `SGD`'s `dampening` scales the incoming gradient by `1 - dampening` before it
 enters the momentum buffer, so the buffer leans further on its history. The
@@ -2320,6 +2324,42 @@ magnitude, and it stores one momentum buffer per parameter instead of Adam's
 two. Because the step size is uniform, a Lion learning rate is typically 3-10x
 smaller than the AdamW one, with a correspondingly larger `weight_decay`. Its
 beta defaults are `(0.9, 0.99)` -- not Adam's `(0.9, 0.999)`.
+
+`Adadelta` (Zeiler, 2012) is the answer to a dimensional complaint about the
+methods above it: a gradient divided by a running magnitude of gradients is a
+pure number, so their step is measured in nothing at all and the learning rate
+has to carry the parameter's units. Adadelta multiplies by a running magnitude
+of its own past *steps* as well, so the answer comes out in the parameter's
+units and `lr` defaults to 1 — a multiplier rather than the scale that decides
+whether the run converges. Gradients six orders of magnitude apart give steps
+within a factor of four of each other. `rho` decays both running averages and
+`eps` sits under both square roots, so it is also what seeds the very first
+step.
+
+`Adamax` (Kingma & Ba, 2015) is Adam with the second moment measured by a
+decaying infinity norm — `u = max(beta2 * u, |g|)` — rather than a mean of
+squares. One enormous gradient sets the denominator and then leaves it at
+exactly `beta2` per step, where squaring it into an average takes far longer to
+forget. There is also no second bias correction: a maximum of a decaying
+sequence is not shrunk towards zero by starting at zero the way a mean is.
+
+`RAdam` (Liu et al., 2020) scales Adam's early steps by the variance its
+second-moment estimate actually has. In the first few steps that estimate is
+built from almost no samples, so its variance is enormous and the steps are
+wild — which is what a linear warmup schedule exists to paper over. RAdam
+computes the estimate's effective sample count and applies the correction that
+variance implies, so the warmup falls out of the method rather than being tuned
+into it. Below five effective samples there is no usable estimate at all and it
+takes a plain, non-adaptive step.
+
+`Rprop` (Riedmiller & Braun, 1993) reads only the *sign* of the gradient. It
+keeps a step size per parameter and moves by exactly that: a step whose
+direction agrees with the last grows by `etas[1]`, one that reverses shrinks by
+`etas[0]` and is not taken at all, because reversing means the last step went
+past a minimum. Gradients twelve orders of magnitude apart but agreeing in sign
+take an identical path. That makes it immune to badly scaled gradients and
+useless on mini-batches, where a noisy sign flips for reasons that have nothing
+to do with the surface — it is a full-batch method.
 
 `Adam`'s `amsgrad=True` keeps the running *maximum* of the second moment
 instead of its current value, so the denominator never shrinks and the step

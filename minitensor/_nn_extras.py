@@ -193,7 +193,9 @@ def pixel_shuffle(input: object, upscale_factor: int) -> Tensor:
     tensor = _atleast_tensor(input)
     factor = int(upscale_factor)
     if factor < 1:
-        raise ValueError(f"pixel_shuffle requires a positive factor, got {upscale_factor}")
+        raise ValueError(
+            f"pixel_shuffle requires a positive factor, got {upscale_factor}"
+        )
     if tensor.ndim() < 3:
         raise ValueError(
             f"pixel_shuffle expects at least three dimensions, got {tensor.ndim()}"
@@ -248,9 +250,7 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
     out_height = height // factor
     out_width = width // factor
 
-    unpacked = tensor.reshape(
-        [*batch, channels, out_height, factor, out_width, factor]
-    )
+    unpacked = tensor.reshape([*batch, channels, out_height, factor, out_width, factor])
     lead = len(batch)
     order = list(range(lead)) + [
         lead,

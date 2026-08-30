@@ -7,6 +7,7 @@
 use super::utils::GradientUtils;
 use crate::{autograd::TensorId, error::Result, serialization::OptimizerState, tensor::Tensor};
 use rustc_hash::FxHashMap;
+use std::any::Any;
 
 /// Parameter group for managing different learning rates and settings
 #[derive(Debug, Clone)]
@@ -198,6 +199,12 @@ pub fn check_param_grad_match(param: &Tensor, grad: &Tensor) -> Result<()> {
     Ok(())
 }
 
+/// `true`/`false` as Python spells it, for the `describe` implementations --
+/// a `repr` a Python caller can paste back into their own source.
+pub(crate) fn py_bool(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
+}
+
 /// Implements the seven [`Optimizer`] methods that are pure bookkeeping —
 /// identical in every optimizer here, and differing only in which fields hold
 /// the groups and the step count.
@@ -243,6 +250,10 @@ macro_rules! delegate_optimizer_bookkeeping {
 
         fn step_count(&self) -> usize {
             self.$step_count
+        }
+
+        fn as_any(&self) -> &dyn ::std::any::Any {
+            self
         }
     };
 }
@@ -355,6 +366,17 @@ pub trait Optimizer: Send + Sync {
     /// Perform one optimization step
     fn step(&mut self, parameters: &mut [&mut Tensor]) -> Result<()>;
 
+    /// This optimizer as [`Any`], so a caller holding one as a trait object
+    /// can reach a hyperparameter that belongs to a single algorithm.
+    ///
+    /// The trait covers what every optimizer does -- `lr`, `step_count`,
+    /// `state_dict` -- and those go through it. `nesterov`, `amsgrad` and
+    /// `momentum_decay` belong to one algorithm each, and there is nothing
+    /// sensible for the others to answer, so they are reached by asking for
+    /// the concrete type instead. [`delegate_optimizer_bookkeeping!`] writes
+    /// the one line this needs.
+    fn as_any(&self) -> &dyn Any;
+
     /// Zero out gradients of parameters
     fn zero_grad(&self, parameters: &mut [&mut Tensor], set_to_none: bool) -> Result<()>;
 
@@ -385,6 +407,18 @@ pub trait Optimizer: Send + Sync {
     /// Get the current step count
     fn step_count(&self) -> usize {
         0
+    }
+
+    /// One line naming this optimizer and the hyperparameters that decide how
+    /// it behaves, for a `repr`.
+    ///
+    /// It lives here rather than in the Python bindings because the values it
+    /// reports are this optimizer's own: writing it beside them is what keeps
+    /// a renamed or retuned hyperparameter from leaving a stale `repr` behind
+    /// in a file nobody editing the optimizer would think to open. The default
+    /// reports the one thing every optimizer has.
+    fn describe(&self) -> String {
+        format!("Optimizer(lr={:?})", self.learning_rate())
     }
 
     /// Snapshot everything needed to resume training exactly where it stopped.

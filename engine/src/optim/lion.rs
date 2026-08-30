@@ -246,6 +246,16 @@ impl Optimizer for Lion {
         Ok(())
     }
 
+    fn describe(&self) -> String {
+        format!(
+            "Lion(lr={:?}, betas=({}, {}), weight_decay={:?})",
+            self.learning_rate(),
+            self.beta1(),
+            self.beta2(),
+            self.weight_decay()
+        )
+    }
+
     crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }
 

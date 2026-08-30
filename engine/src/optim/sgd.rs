@@ -326,5 +326,16 @@ impl Optimizer for SGD {
         Ok(())
     }
 
+    fn describe(&self) -> String {
+        format!(
+            "SGD(lr={:?}, momentum={:?}, dampening={:?}, weight_decay={:?}, nesterov={})",
+            self.learning_rate(),
+            self.momentum(),
+            self.dampening(),
+            self.weight_decay(),
+            super::optimizer::py_bool(self.is_nesterov())
+        )
+    }
+
     crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }

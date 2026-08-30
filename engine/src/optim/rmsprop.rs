@@ -350,5 +350,17 @@ impl Optimizer for RMSprop {
         Ok(())
     }
 
+    fn describe(&self) -> String {
+        format!(
+            "RMSprop(lr={:?}, alpha={:?}, eps={:?}, weight_decay={:?}, momentum={:?}, centered={})",
+            self.learning_rate(),
+            self.alpha(),
+            self.epsilon(),
+            self.weight_decay(),
+            self.momentum(),
+            super::optimizer::py_bool(self.is_centered())
+        )
+    }
+
     crate::delegate_optimizer_bookkeeping!(groups, step_count);
 }

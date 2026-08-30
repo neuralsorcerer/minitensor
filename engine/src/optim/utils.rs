@@ -390,6 +390,111 @@ pub(crate) fn load_param_buffers(
     Ok(())
 }
 
+/// One float width's arm of [`fixed_state_update!`]. Not called directly.
+///
+/// Split out only because a macro cannot easily expand a nested `macro_rules!`
+/// with its own metavariables; this is the body [`fixed_state_update!`]
+/// instantiates once per width.
+macro_rules! fixed_state_arm {
+    (
+        $ty:ty, $read:ident, $write:ident, $name:literal,
+        $param:expr, $grad:expr, [$($state:expr),+ $(,)?],
+        [$($scalar:ident = $value:expr),* $(,)?],
+        |$p:ident, $g:ident, $i:ident, [$($slot:ident),+ $(,)?]| $body:block
+    ) => {{
+        // Once per call rather than once per element.
+        $(let $scalar: $ty = $value as $ty;)*
+
+        let slice_error = |what: &str| {
+            $crate::error::MinitensorError::internal_error(format!(
+                concat!($name, ": failed to read the {} as ", stringify!($ty)),
+                what
+            ))
+        };
+        let param_buffer = $param
+            .data_mut()
+            .$write()
+            .ok_or_else(|| slice_error("parameter"))?;
+        let grad_buffer = $grad.data().$read().ok_or_else(|| slice_error("gradient"))?;
+        $(
+            let $slot = $state
+                .data_mut()
+                .$write()
+                .ok_or_else(|| slice_error(stringify!($slot)))?;
+        )+
+
+        let step = |$p: &mut [$ty], $g: &[$ty], state: &mut [&mut [$ty]]| {
+            let [$($slot),+] = state else {
+                unreachable!(concat!($name, " passes its own state buffers"))
+            };
+            for $i in 0..$p.len() {
+                $body
+            }
+        };
+
+        // Below the threshold rayon's split overhead dwarfs the arithmetic, so
+        // stay on the calling thread. See `ops::map::PAR_THRESHOLD`.
+        let mut state = [$($slot),+];
+        if param_buffer.len() < $crate::ops::map::PAR_THRESHOLD {
+            step(param_buffer, grad_buffer, &mut state);
+        } else {
+            $crate::ops::map::par_param_update(
+                param_buffer,
+                grad_buffer,
+                &mut state,
+                $crate::ops::map::PAR_CHUNK,
+                &step,
+            );
+        }
+        Ok(())
+    }};
+}
+
+/// Run one optimizer's per-element update at whichever float width the
+/// parameter carries, sequentially below the element threshold and across
+/// rayon's workers above it.
+///
+/// The update body is written once and instantiated at both widths, which is
+/// what makes this a macro: the body has to be generic over the width, and a
+/// closure cannot be. So it must not name `f32` or `f64` -- write `0.5`, not
+/// `0.5f64` -- and its scalars arrive through the `[name = value]` list,
+/// converted to the working width once per call rather than once per element.
+///
+/// This covers the optimizers whose state is the same buffers on every step.
+/// The ones that came before it take a set that varies at runtime -- RMSprop's
+/// momentum and centering buffers, Adam's `amsgrad` maximum, SGD's momentum --
+/// and the code that hands rayon only the buffers actually in use is the
+/// interesting part of those files, not boilerplate to be shared away.
+macro_rules! fixed_state_update {
+    (
+        $name:literal,
+        $param:expr, $grad:expr, [$($state:expr),+ $(,)?],
+        [$($scalar:ident = $value:expr),* $(,)?],
+        |$p:ident, $g:ident, $i:ident, [$($slot:ident),+ $(,)?]| $body:block
+    ) => {{
+        let param: &mut $crate::tensor::Tensor = $param;
+        let grad: &$crate::tensor::Tensor = $grad;
+        match param.dtype() {
+            $crate::tensor::DataType::Float32 => $crate::optim::utils::fixed_state_arm!(
+                f32, as_f32_slice, as_f32_slice_mut, $name,
+                param, grad, [$($state),+], [$($scalar = $value),*],
+                |$p, $g, $i, [$($slot),+]| $body
+            ),
+            $crate::tensor::DataType::Float64 => $crate::optim::utils::fixed_state_arm!(
+                f64, as_f64_slice, as_f64_slice_mut, $name,
+                param, grad, [$($state),+], [$($scalar = $value),*],
+                |$p, $g, $i, [$($slot),+]| $body
+            ),
+            other => Err($crate::error::MinitensorError::invalid_operation(format!(
+                concat!($name, " requires floating point parameters, got {}"),
+                other
+            ))),
+        }
+    }};
+}
+
+pub(crate) use {fixed_state_arm, fixed_state_update};
+
 #[cfg(test)]
 mod tests {
     use super::*;

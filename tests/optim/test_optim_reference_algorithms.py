@@ -146,6 +146,80 @@ def _ref_lion(lr, b1=0.9, b2=0.99, weight_decay=0.0):
     return out
 
 
+def _ref_adadelta(lr, rho=0.9, eps=1e-6, weight_decay=0.0):
+    """Zeiler 2012, algorithm 1."""
+    p, square, delta, out = INIT.copy(), np.zeros_like(INIT), np.zeros_like(INIT), []
+    for grad in GRADS:
+        g = grad + weight_decay * p
+        square = rho * square + (1 - rho) * g * g
+        step = (np.sqrt(delta + eps) / np.sqrt(square + eps)) * g
+        delta = rho * delta + (1 - rho) * step * step
+        p = p - lr * step
+        out.append(p.copy())
+    return out
+
+
+def _ref_adamax(lr, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
+    """Kingma & Ba 2015, algorithm 2. One bias correction, not two: a decaying
+    maximum is not shrunk towards zero by starting at zero the way a mean is."""
+    p, m, u, out = INIT.copy(), np.zeros_like(INIT), np.zeros_like(INIT), []
+    for t, grad in enumerate(GRADS, start=1):
+        g = grad + weight_decay * p
+        m = beta1 * m + (1 - beta1) * g
+        u = np.maximum(beta2 * u, np.abs(g))
+        p = p - (lr / (1 - beta1**t)) * m / (u + eps)
+        out.append(p.copy())
+    return out
+
+
+def _ref_radam(lr, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
+    """Liu et al. 2020, algorithm 2."""
+    p, m, v, out = INIT.copy(), np.zeros_like(INIT), np.zeros_like(INIT), []
+    rho_inf = 2 / (1 - beta2) - 1
+    for t, grad in enumerate(GRADS, start=1):
+        g = grad + weight_decay * p
+        m = beta1 * m + (1 - beta1) * g
+        v = beta2 * v + (1 - beta2) * g * g
+        bias1 = 1 - beta1**t
+        bias2 = 1 - beta2**t
+        rho = rho_inf - 2 * t * beta2**t / bias2
+        m_hat = m / bias1
+        if rho > 5:
+            rectifier = np.sqrt(
+                ((rho - 4) * (rho - 2) * rho_inf)
+                / ((rho_inf - 4) * (rho_inf - 2) * rho)
+            )
+            p = p - lr * rectifier * m_hat / (np.sqrt(v) / np.sqrt(bias2) + eps)
+        else:
+            p = p - lr * m_hat
+        out.append(p.copy())
+    return out
+
+
+def _ref_rprop(lr, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0)):
+    """Riedmiller & Braun 1993. Only the sign of the gradient is read."""
+    eta_minus, eta_plus = etas
+    step_min, step_max = step_sizes
+    p = INIT.copy()
+    previous = np.zeros_like(INIT)
+    size = np.full_like(INIT, lr)
+    out = []
+    for grad in GRADS:
+        g = grad.copy()
+        agreement = g * previous
+        grew = agreement > 0
+        shrank = agreement < 0
+        size = np.where(grew, np.minimum(size * eta_plus, step_max), size)
+        size = np.where(shrank, np.maximum(size * eta_minus, step_min), size)
+        # A reversal is not stepped on, and is forgotten so the step after it
+        # cannot count the same reversal twice.
+        g = np.where(shrank, 0.0, g)
+        p = p - np.sign(g) * size
+        previous = g
+        out.append(p.copy())
+    return out
+
+
 CASES = [
     ("SGD", lambda ps: mt.optim.SGD(ps, lr=0.1), lambda: _ref_sgd(0.1)),
     (
@@ -242,6 +316,44 @@ CASES = [
         ),
         lambda: _ref_sgd(0.1, momentum=0.9, dampening=0.3, weight_decay=0.05),
     ),
+    (
+        "Adadelta",
+        lambda ps: mt.optim.Adadelta(ps, lr=1.0),
+        lambda: _ref_adadelta(1.0),
+    ),
+    (
+        "Adadelta+rho+weight_decay",
+        lambda ps: mt.optim.Adadelta(ps, lr=0.5, rho=0.95, weight_decay=0.02),
+        lambda: _ref_adadelta(0.5, rho=0.95, weight_decay=0.02),
+    ),
+    (
+        "Adamax",
+        lambda ps: mt.optim.Adamax(ps, lr=0.05),
+        lambda: _ref_adamax(0.05),
+    ),
+    (
+        "Adamax+weight_decay",
+        lambda ps: mt.optim.Adamax(ps, lr=0.05, weight_decay=0.02),
+        lambda: _ref_adamax(0.05, weight_decay=0.02),
+    ),
+    (
+        "RAdam",
+        lambda ps: mt.optim.RAdam(ps, lr=0.05),
+        lambda: _ref_radam(0.05),
+    ),
+    (
+        "RAdam+weight_decay",
+        lambda ps: mt.optim.RAdam(ps, lr=0.05, weight_decay=0.02),
+        lambda: _ref_radam(0.05, weight_decay=0.02),
+    ),
+    ("Rprop", lambda ps: mt.optim.Rprop(ps, lr=0.05), lambda: _ref_rprop(0.05)),
+    (
+        "Rprop+etas+step_sizes",
+        lambda ps: mt.optim.Rprop(
+            ps, lr=0.05, etas=(0.4, 1.5), step_sizes=(1e-3, 0.08)
+        ),
+        lambda: _ref_rprop(0.05, etas=(0.4, 1.5), step_sizes=(1e-3, 0.08)),
+    ),
 ]
 
 
@@ -289,6 +401,8 @@ _UNVARIED = {
     "beta2",
     "alpha",
     "momentum_decay",
+    # The floor spelled `eps` rather than `epsilon` in the newer constructors.
+    "eps",
 }
 
 
@@ -309,7 +423,19 @@ def test_every_optimizer_hyperparameter_is_exercised_against_the_reference():
     configured = " ".join(inspect.getsource(make) for _, make, _ in CASES)
 
     missing = []
-    for name in ("SGD", "Adam", "AdamW", "Adagrad", "RMSprop", "NAdam", "Lion"):
+    for name in (
+        "SGD",
+        "Adam",
+        "AdamW",
+        "Adagrad",
+        "RMSprop",
+        "NAdam",
+        "Lion",
+        "Adadelta",
+        "Adamax",
+        "RAdam",
+        "Rprop",
+    ):
         optimizer = getattr(mt.optim, name)
         for param in inspect.signature(optimizer).parameters:
             if param in ("self", "parameters") or param in _UNVARIED:
