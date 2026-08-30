@@ -136,7 +136,9 @@ def lerp(input: object, end: object, weight: object) -> Tensor:
     return start + _atleast_tensor(weight) * (_atleast_tensor(end) - start)
 
 
-def addcmul(input: object, tensor1: object, tensor2: object, value: float = 1) -> Tensor:
+def addcmul(
+    input: object, tensor1: object, tensor2: object, value: float = 1
+) -> Tensor:
     """`input + value * tensor1 * tensor2`, element-wise."""
 
     return _atleast_tensor(input) + _scaled(
@@ -144,7 +146,9 @@ def addcmul(input: object, tensor1: object, tensor2: object, value: float = 1) -
     )
 
 
-def addcdiv(input: object, tensor1: object, tensor2: object, value: float = 1) -> Tensor:
+def addcdiv(
+    input: object, tensor1: object, tensor2: object, value: float = 1
+) -> Tensor:
     """`input + value * tensor1 / tensor2`, element-wise."""
 
     return _atleast_tensor(input) + _scaled(
@@ -173,7 +177,10 @@ def logaddexp2(input: object, other: object) -> Tensor:
     """
 
     scale = _math.log(2.0)
-    return _F.logaddexp(_atleast_tensor(input) * scale, _atleast_tensor(other) * scale) / scale
+    return (
+        _F.logaddexp(_atleast_tensor(input) * scale, _atleast_tensor(other) * scale)
+        / scale
+    )
 
 
 def ldexp(input: object, other: object) -> Tensor:

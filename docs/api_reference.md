@@ -97,6 +97,21 @@ of convenience aliases.
 | `diagflat(input, offset=0)` | A square matrix with the flattened `input` on its `offset` diagonal. `diag` does this for a vector; this does it for any shape. |
 | `block_diag(*tensors)` | Arrange the inputs down the diagonal of one larger matrix, zero elsewhere. A 1-D input is a row and a scalar a one-by-one block. |
 | `cartesian_prod(*tensors)` | Every combination of one element from each 1-D input, one row each. A single input comes back unchanged. |
+| `t(input)` | The transpose of a matrix, and anything of lower rank unchanged. Declines a rank above two rather than guessing which axes were meant -- name them with `transpose`. |
+| `numel(input)` | How many elements the tensor holds, as a Python int. |
+| `mm(input, mat2)` | The product of two matrices. `matmul` also broadcasts batches and promotes vectors; this rejects anything that is not two matrices, which is the point of asking by this name. |
+| `mv(input, vec)` | A matrix times a vector. |
+| `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
+| `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
+| `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
+| `inverse(input)` | The inverse of each square matrix, solved against an identity. For `inverse(A) @ b`, ask `solve(A, b)` instead -- same answer, without forming the inverse, faster and better conditioned. |
+| `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse, over the singular values above `rcond * s_max`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
+| `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
+| `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
+| `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
+| `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because code written against NumPy asks for them defensively. |
+| `imag(input)` | Zero everywhere, as a detached constant -- written as `input * 0` it would answer NaN for an infinite input. |
+| `angle(input)` | `0` for a positive element and `pi` for a negative one. Reads the sign *bit*, so `angle(-0.0)` is `pi`; a NaN has no argument and stays NaN. Piecewise constant, so it carries no gradient. |
 
 ### Shape compatibility helpers
 
@@ -1510,6 +1525,10 @@ checks it against the exports, so a name here is one the library really has.
 reshape, view, flatten, ravel, transpose, permute, movedim, moveaxis, swapaxes,
 swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 pad,
+
+# Matrix products, inverses and rescalings
+t, numel, mm, mv, inner, tensordot, addmm, baddbmm, inverse, pinverse, logdet,
+renorm, vander, real, conj, imag, angle,
 
 # Joining, splitting and indexing
 cat, stack, split, chunk, index_select, gather, narrow, scatter, scatter_add,

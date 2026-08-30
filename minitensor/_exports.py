@@ -268,6 +268,24 @@ _FUNCTIONAL_FORWARDERS = (
     "less",
     "less_equal",
     "not_equal",
+    # The named matmuls, inverses and rescalings, from `_matrix`.
+    "t",
+    "numel",
+    "mm",
+    "mv",
+    "inner",
+    "tensordot",
+    "addmm",
+    "baddbmm",
+    "inverse",
+    "pinverse",
+    "logdet",
+    "renorm",
+    "vander",
+    "real",
+    "conj",
+    "imag",
+    "angle",
 )
 
 # Public members of `functional` that deliberately stay namespaced. These are

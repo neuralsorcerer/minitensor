@@ -14,7 +14,7 @@ from contextlib import contextmanager as _contextmanager
 
 from . import _api as _api_helpers
 from . import _core as _C
-from . import _elementwise, _nn_extras
+from . import _elementwise, _matrix, _nn_extras
 from ._api import _CORE_API_MODULES, _OPTIONAL_API_MODULES
 from ._derived import (
     cdist,
@@ -186,10 +186,18 @@ _sys.modules[__name__ + ".nn"] = nn
 # every one of them to the top level, exactly as it does for the ops that come
 # out of the extension. They go onto `Tensor` as well, since each takes its
 # tensor first, so `mt.add(a, b)` and `a.add(b)` are one definition.
-for _elementwise_name in _elementwise._ELEMENTWISE:
-    _member = getattr(_elementwise, _elementwise_name)
-    setattr(functional, _elementwise_name, _member)
-    setattr(Tensor, _elementwise_name, _member)
+for _module, _names in (
+    (_elementwise, _elementwise._ELEMENTWISE),
+    (_matrix, _matrix._MATRIX),
+):
+    for _elementwise_name in _names:
+        _member = getattr(_module, _elementwise_name)
+        setattr(functional, _elementwise_name, _member)
+        # A name the extension already implements as a method keeps it: the
+        # free function above delegates to that method, so overwriting it here
+        # would make it call itself.
+        if not hasattr(Tensor, _elementwise_name):
+            setattr(Tensor, _elementwise_name, _member)
 
 for _alias, _target in _elementwise._ALIASES.items():
     setattr(functional, _alias, getattr(functional, _target))

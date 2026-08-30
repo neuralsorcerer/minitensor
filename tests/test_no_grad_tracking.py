@@ -137,6 +137,13 @@ _RETURNS_INPUT_UNCHANGED = {
     "copy_",
     "requires_grad_",
     "detach_",
+    # Real-valued answers to complex questions, and the transpose of something
+    # with nothing to transpose: each hands back the receiver itself, so the
+    # live edge the probe finds is the receiver's own and there was never a
+    # second tensor whose tracking could be wrong.
+    "conj",
+    "real",
+    "t",
 }
 
 

@@ -302,6 +302,10 @@ _NON_INTEGRAL = np.array([-3.4, -2.7, -1.25, -0.6, 0.3, 1.45, 2.8, 3.15, 4.5])
 _GRADCHECK_OPS = [
     ("abs", lambda t: t.abs(), _ANY),
     ("absolute", lambda t: t.absolute(), _ANY),
+    ("conj", lambda t: t.conj(), _ANY),
+    ("real", lambda t: t.real(), _ANY),
+    ("t", lambda t: t.t(), _ANY),
+    ("vander", lambda t: t.vander(), _POS),
     ("acos", lambda t: t.acos(), _UNIT),
     ("acosh", lambda t: t.acosh(), _GT1),
     ("asin", lambda t: t.asin(), _UNIT),

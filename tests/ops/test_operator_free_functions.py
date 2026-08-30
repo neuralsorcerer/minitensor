@@ -201,7 +201,8 @@ def test_ldexp_scales_by_an_exact_power_of_two():
     values = np.array([1.5, -0.25, 3.0])
     exponents = np.array([3.0, 10.0, -4.0])
     np.testing.assert_array_equal(
-        mt.ldexp(_t(values), _t(exponents)).numpy(), np.ldexp(values, exponents.astype(int))
+        mt.ldexp(_t(values), _t(exponents)).numpy(),
+        np.ldexp(values, exponents.astype(int)),
     )
 
 
@@ -209,8 +210,12 @@ def test_fmax_and_fmin_ignore_a_nan_that_maximum_would_propagate():
     left = np.array([np.nan, 1.0, np.nan, 3.0])
     right = np.array([2.0, np.nan, np.nan, -1.0])
 
-    np.testing.assert_array_equal(mt.fmax(_t(left), _t(right)).numpy(), np.fmax(left, right))
-    np.testing.assert_array_equal(mt.fmin(_t(left), _t(right)).numpy(), np.fmin(left, right))
+    np.testing.assert_array_equal(
+        mt.fmax(_t(left), _t(right)).numpy(), np.fmax(left, right)
+    )
+    np.testing.assert_array_equal(
+        mt.fmin(_t(left), _t(right)).numpy(), np.fmin(left, right)
+    )
 
     # And the contrast that makes the pair worth having.
     propagated = mt.maximum(_t(left), _t(right)).numpy()
