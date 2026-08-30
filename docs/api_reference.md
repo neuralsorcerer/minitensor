@@ -112,6 +112,15 @@ of convenience aliases.
 | `real(input)`, `conj(input)` | The input itself: every dtype here is real. The names exist because code written against NumPy asks for them defensively. |
 | `imag(input)` | Zero everywhere, as a detached constant -- written as `input * 0` it would answer NaN for an infinite input. |
 | `angle(input)` | `0` for a positive element and `pi` for a negative one. Reads the sign *bit*, so `angle(-0.0)` is `pi`; a NaN has no argument and stays NaN. Piecewise constant, so it carries no gradient. |
+| `unflatten(input, dim, sizes)` | Split one axis into several -- the inverse of `flatten`. One entry of `sizes` may be `-1`. `reshape` can do the same thing only by restating every other dimension, which is the mistake this exists to stop. |
+| `msort(input)` | Sort along the first dimension, values only. |
+| `hsplit(input, indices_or_sections)`, `vsplit(...)`, `dsplit(...)` | `tensor_split` along the second, first and third axes. `hsplit` takes the first axis of a 1-D input, which is the only one it has to split horizontally. |
+| `kthvalue(input, k, dim=-1, keepdim=False)` | The `k`-th smallest value along `dim` and where it came from. `k` counts from one, so `kthvalue(x, 1)` is the minimum. |
+| `combinations(input, r=2, with_replacement=False)` | Every combination of `r` elements of a 1-D input, one row each, in the order `itertools.combinations` gives them. |
+| `gradient(input, spacing=1.0, dim=None, edge_order=1)` | The numerical derivative of *data* -- second-order accurate in the interior, `edge_order`-accurate at the ends. `spacing` is a step or a coordinate vector, per axis, and the coordinates need not be evenly spaced. Not the autograd gradient: for that, call `backward`. |
+| `bernoulli(input)` | A 0/1 draw per element, `input` giving each element's probability. |
+| `normal(mean=0.0, std=1.0, size=None)` | A normal draw shifted by `mean` and scaled by `std`. With `size` omitted the shape comes from whichever of the two is a tensor. |
+| `multinomial(input, num_samples, replacement=False)` | Draw indices with probability proportional to `input`, a row of weights or a batch of them; they need not sum to one. With replacement it is one `searchsorted` in the cumulative distribution; without, it is the top `k` of `log(w) + Gumbel noise`, which is exactly a weighted sample without replacement in one sort rather than a removal loop. |
 
 ### Shape compatibility helpers
 

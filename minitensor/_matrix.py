@@ -95,7 +95,9 @@ def inner(input: object, other: object) -> Tensor:
     return tensordot(input, other, ([-1], [-1]))
 
 
-def _contraction_axes(dims: object, left_rank: int, right_rank: int) -> tuple[list[int], list[int]]:
+def _contraction_axes(
+    dims: object, left_rank: int, right_rank: int
+) -> tuple[list[int], list[int]]:
     """The two axis lists `tensordot` contracts over.
 
     An integer means "the last `n` of the left against the first `n` of the
@@ -124,8 +126,12 @@ def _contraction_axes(dims: object, left_rank: int, right_rank: int) -> tuple[li
             "tensordot dims must be an integer or a pair of axis sequences"
         ) from exc
 
-    left_list = [_normalize_axis(a, left_rank, "tensordot") for a in _as_sequence(left_axes)]
-    right_list = [_normalize_axis(a, right_rank, "tensordot") for a in _as_sequence(right_axes)]
+    left_list = [
+        _normalize_axis(a, left_rank, "tensordot") for a in _as_sequence(left_axes)
+    ]
+    right_list = [
+        _normalize_axis(a, right_rank, "tensordot") for a in _as_sequence(right_axes)
+    ]
     if len(left_list) != len(right_list):
         raise ValueError(
             f"tensordot needs the same number of axes on each side, got "
@@ -174,7 +180,9 @@ def tensordot(input: object, other: object, dims: object = 2) -> Tensor:
     cols = _F.permute(right, right_axes + right_kept).reshape([shared, kept_cols])
     product = _F.matmul(rows, cols)
 
-    result_shape = [left_shape[i] for i in left_kept] + [right_shape[i] for i in right_kept]
+    result_shape = [left_shape[i] for i in left_kept] + [
+        right_shape[i] for i in right_kept
+    ]
     return product.reshape(result_shape)
 
 
@@ -262,7 +270,9 @@ def logdet(input: object) -> Tensor:
     return _F.where(
         sign > 0,
         log_absolute,
-        _C.Tensor.full(list(log_absolute.shape), negative_infinity, dtype=str(log_absolute.dtype)),
+        _C.Tensor.full(
+            list(log_absolute.shape), negative_infinity, dtype=str(log_absolute.dtype)
+        ),
     )
 
 

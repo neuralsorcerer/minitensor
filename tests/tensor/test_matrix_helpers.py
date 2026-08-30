@@ -106,7 +106,9 @@ def test_mm_and_mv_refuse_what_matmul_would_have_guessed_at():
 def test_inner_matches_numpy(left, right):
     a = RNG.standard_normal(left)
     b = RNG.standard_normal(right)
-    np.testing.assert_allclose(mt.inner(_t(a), _t(b)).numpy(), np.inner(a, b), rtol=1e-13)
+    np.testing.assert_allclose(
+        mt.inner(_t(a), _t(b)).numpy(), np.inner(a, b), rtol=1e-13
+    )
 
 
 @pytest.mark.parametrize(
@@ -161,7 +163,8 @@ def test_tensordot_reports_axes_that_do_not_line_up():
 
 def test_addmm_and_baddbmm_are_the_expression_they_name():
     np.testing.assert_allclose(
-        mt.addmm(_t(A), _t(A), _t(B), beta=2.0, alpha=3.0).numpy(), 2.0 * A + 3.0 * (A @ B)
+        mt.addmm(_t(A), _t(A), _t(B), beta=2.0, alpha=3.0).numpy(),
+        2.0 * A + 3.0 * (A @ B),
     )
     batch1 = RNG.standard_normal((3, 2, 4))
     batch2 = RNG.standard_normal((3, 4, 5))

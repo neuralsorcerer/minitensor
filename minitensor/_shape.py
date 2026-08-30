@@ -509,3 +509,156 @@ def rot90(input: object, k: int = 1, dims: object = (0, 1)) -> Tensor:
     transposed = _C.functional.transpose(tensor, first, second)
     flipped = first if quarters == 1 else second
     return _C.functional.flip(transposed, [flipped])
+
+
+def unflatten(input: object, dim: int, sizes: object) -> Tensor:
+    """Split one axis into several, the inverse of `flatten`.
+
+    One entry of `sizes` may be `-1`, and is worked out from the length of the
+    axis being split. `reshape` can do the same thing, but only by restating
+    every other dimension of the tensor -- which is the mistake this exists to
+    stop.
+    """
+
+    tensor = _atleast_tensor(input)
+    axis = _normalize_axis(dim, tensor.ndim(), "unflatten")
+    parts = [_operator.index(size) for size in sizes]
+
+    inferred = [i for i, size in enumerate(parts) if size == -1]
+    if len(inferred) > 1:
+        raise ValueError("unflatten can infer at most one dimension")
+    if any(size < 0 and size != -1 for size in parts):
+        raise ValueError(f"unflatten sizes must be non-negative or -1, got {parts}")
+
+    length = tensor.shape[axis]
+    if inferred:
+        known = 1
+        for size in parts:
+            if size != -1:
+                known *= size
+        if known == 0 or length % known:
+            raise ValueError(f"unflatten cannot split an axis of {length} into {parts}")
+        parts[inferred[0]] = length // known
+    else:
+        total = 1
+        for size in parts:
+            total *= size
+        if total != length:
+            raise ValueError(
+                f"unflatten sizes {parts} multiply to {total}, not the axis's {length}"
+            )
+
+    dims = list(tensor.shape)
+    return tensor.reshape(dims[:axis] + parts + dims[axis + 1 :])
+
+
+def msort(input: object) -> Tensor:
+    """Sort along the first dimension, values only.
+
+    `sort` returns the indices as well and defaults to the last dimension;
+    this is the shorthand NumPy and PyTorch both spell this way.
+    """
+
+    return _C.functional.sort(_atleast_tensor(input), 0)[0]
+
+
+def _split_along(
+    input: object, indices_or_sections: object, axis: int, name: str, minimum: int
+):
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < minimum:
+        raise ValueError(
+            f"{name} requires at least {minimum} dimensions, got {tensor.ndim()}"
+        )
+    return tensor_split(tensor, indices_or_sections, axis)
+
+
+def hsplit(input: object, indices_or_sections: object) -> tuple[Tensor, ...]:
+    """Split along the second axis, or the first for a 1-D input.
+
+    A vector has only one axis to split horizontally, so that is the one taken.
+    """
+
+    tensor = _atleast_tensor(input)
+    axis = 0 if tensor.ndim() == 1 else 1
+    return _split_along(tensor, indices_or_sections, axis, "hsplit", 1)
+
+
+def vsplit(input: object, indices_or_sections: object) -> tuple[Tensor, ...]:
+    """Split along the first axis. Needs at least two dimensions: a vector has
+    no rows to split."""
+
+    return _split_along(input, indices_or_sections, 0, "vsplit", 2)
+
+
+def dsplit(input: object, indices_or_sections: object) -> tuple[Tensor, ...]:
+    """Split along the third axis."""
+
+    return _split_along(input, indices_or_sections, 2, "dsplit", 3)
+
+
+def kthvalue(
+    input: object, k: int, dim: int = -1, keepdim: bool = False
+) -> tuple[Tensor, Tensor]:
+    """The `k`-th smallest value along `dim`, and where it came from.
+
+    `k` counts from one, as it does in every other library that offers this,
+    so `kthvalue(x, 1)` is the minimum and `kthvalue(x, n)` the maximum.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() == 0:
+        raise ValueError("kthvalue requires a tensor with at least one dimension")
+    axis = _normalize_axis(dim, tensor.ndim(), "kthvalue")
+    position = _operator.index(k)
+    length = tensor.shape[axis]
+    if not 1 <= position <= length:
+        raise ValueError(
+            f"kthvalue requires 1 <= k <= {length} for an axis of that length, got {k}"
+        )
+
+    values, indices = _C.functional.sort(tensor, axis)
+    picked = _C.functional.narrow(values, axis, position - 1, 1)
+    where = _C.functional.narrow(indices, axis, position - 1, 1)
+    if keepdim:
+        return picked, where
+    return (
+        _C.functional.squeeze(picked, axis),
+        _C.functional.squeeze(where, axis),
+    )
+
+
+def combinations(input: object, r: int = 2, with_replacement: bool = False) -> Tensor:
+    """Every combination of `r` elements of a 1-D `input`, one row each.
+
+    In lexicographic order over positions, as `itertools.combinations` gives
+    them, so a caller can line the rows up against that without sorting. The
+    row count is the binomial coefficient, which grows fast enough that this
+    builds the index list in Python rather than as a tensor operation: at the
+    sizes where the tensor version would pay, the answer does not fit in
+    memory anyway.
+    """
+
+    import itertools as _itertools
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() != 1:
+        raise ValueError(f"combinations requires a 1-D tensor, got {tensor.ndim()}")
+    count = _operator.index(r)
+    if count < 0:
+        raise ValueError(f"combinations requires a non-negative r, got {r}")
+
+    choose = (
+        _itertools.combinations_with_replacement
+        if with_replacement
+        else _itertools.combinations
+    )
+    rows = list(choose(range(tensor.shape[0]), count))
+    if not rows or count == 0:
+        # No rows, or rows with nothing in them: either way there is nothing to
+        # select, and the shape is the whole answer.
+        return _C.Tensor.zeros([len(rows), count], dtype=str(tensor.dtype))
+
+    flat = _np.asarray(rows, dtype=_np.int64).reshape(-1)
+    picked = _C.functional.index_select(tensor, 0, as_tensor(flat))
+    return picked.reshape(len(rows), count)

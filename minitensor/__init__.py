@@ -16,6 +16,7 @@ from . import _api as _api_helpers
 from . import _core as _C
 from . import _elementwise, _matrix, _nn_extras
 from ._api import _CORE_API_MODULES, _OPTIONAL_API_MODULES
+from ._calculus import gradient
 from ._derived import (
     cdist,
     corrcoef,
@@ -50,6 +51,7 @@ from ._indexing import (
     tril_indices,
     triu_indices,
 )
+from ._sampling import bernoulli, multinomial, normal
 from ._shape import (
     atleast_1d,
     atleast_2d,
@@ -59,15 +61,22 @@ from ._shape import (
     broadcast_to,
     can_broadcast,
     column_stack,
+    combinations,
+    dsplit,
     dstack,
     fliplr,
     flipud,
+    hsplit,
     hstack,
+    kthvalue,
     meshgrid,
+    msort,
     rot90,
     tensor_split,
     tile,
     unbind,
+    unflatten,
+    vsplit,
     vstack,
 )
 
@@ -388,6 +397,17 @@ _BASE_EXPORTS = (
     "diagflat",
     "block_diag",
     "cartesian_prod",
+    "unflatten",
+    "msort",
+    "hsplit",
+    "vsplit",
+    "dsplit",
+    "kthvalue",
+    "combinations",
+    "gradient",
+    "bernoulli",
+    "normal",
+    "multinomial",
     "search_api",
     "describe_api",
     "help",
