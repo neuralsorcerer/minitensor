@@ -109,6 +109,9 @@ of convenience aliases.
 | `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
 | `inverse(input)` | The inverse of each square matrix, solved against an identity. For `inverse(A) @ b`, ask `solve(A, b)` instead -- same answer, without forming the inverse, faster and better conditioned. |
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse, over the singular values above `rcond * s_max`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
+| `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
+| `tensorsolve(a, b, axes=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `axes` names axes of `a` to move to the end first. |
+| `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
 | `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
 | `vander(x, N=None, increasing=False)` | The Vandermonde matrix: each row a geometric series in one entry, descending by default so `vander(x) @ c` evaluates a polynomial with `c` in the order people write coefficients. |
@@ -1593,8 +1596,8 @@ swapdims, squeeze, unsqueeze, expand, repeat, repeat_interleave, flip, roll,
 pad,
 
 # Matrix products, inverses and rescalings
-t, numel, mm, mv, inner, tensordot, addmm, baddbmm, inverse, pinverse, logdet,
-renorm, vander, real, conj, imag, angle,
+t, numel, mm, mv, inner, tensordot, tensorsolve, tensorinv, addmm, baddbmm,
+inverse, pinverse, matrix_exp, logdet, renorm, vander, real, conj, imag, angle,
 
 # Joining, splitting and indexing
 cat, stack, split, chunk, index_select, gather, narrow, scatter, scatter_add,

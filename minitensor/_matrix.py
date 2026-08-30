@@ -13,6 +13,13 @@ flattened, `inverse` is `solve` against an identity, and `pinverse` is `svd`
 with the small singular values dropped. None of them earns a kernel, so none
 gets one, and each inherits the accuracy and the gradient of the one
 underneath.
+
+`matrix_exp` is the one that looks like it should need a kernel and does not.
+Scaling and squaring with a Pade approximant is a real algorithm, but every
+step of it is a `matmul`, a `solve` or a scalar multiply -- so it is written
+here, and its gradient is the derivative of the approximant that was actually
+evaluated rather than a second formula that has to be kept in agreement with
+the first.
 """
 
 from __future__ import annotations
@@ -26,6 +33,28 @@ from ._shape import _atleast_tensor, _normalize_axis
 
 Tensor = _C.Tensor
 _F = _C.functional
+
+
+def _square_matrix(input: object, name: str) -> tuple[Tensor, int]:
+    """`input` as a stack of square matrices, with the side length."""
+
+    matrix = _atleast_tensor(input)
+    if matrix.ndim() < 2:
+        raise ValueError(
+            f"{name} requires at least two dimensions, got {matrix.ndim()}"
+        )
+    size = int(matrix.shape[-1])
+    if int(matrix.shape[-2]) != size:
+        raise ValueError(
+            f"{name} requires square matrices, got {matrix.shape[-2]} by {size}"
+        )
+    return matrix, size
+
+
+def _identity_like(matrix: Tensor, size: int) -> Tensor:
+    """The `size` identity, in the dtype and on the device of `matrix`."""
+
+    return _C.Tensor.eye(size, dtype=str(matrix.dtype), device=_C.Device(matrix.device))
 
 
 def _require_rank(tensor: Tensor, rank: int, name: str, what: str) -> Tensor:
@@ -218,18 +247,8 @@ def inverse(input: object) -> Tensor:
     and it is both faster and better conditioned.
     """
 
-    matrix = _atleast_tensor(input)
-    if matrix.ndim() < 2:
-        raise ValueError(
-            f"inverse requires at least two dimensions, got {matrix.ndim()}"
-        )
-    size = matrix.shape[-1]
-    if matrix.shape[-2] != size:
-        raise ValueError(
-            f"inverse requires square matrices, got {matrix.shape[-2]} by {size}"
-        )
-    identity = _C.Tensor.eye(size, dtype=str(matrix.dtype))
-    return _F.solve(matrix, identity)
+    matrix, size = _square_matrix(input, "inverse")
+    return _F.solve(matrix, _identity_like(matrix, size))
 
 
 def pinverse(input: object, rcond: float = 1e-15) -> Tensor:
@@ -383,6 +402,251 @@ def angle(input: object) -> Tensor:
     )
 
 
+# --- the matrix exponential -------------------------------------------------
+
+#: The largest 1-norm each Pade degree handles at the precision named, from
+#: Higham, "The scaling and squaring method for the matrix exponential
+#: revisited" (2005), tables 2.3 and 2.4. Below a threshold the approximant is
+#: accurate to the unit roundoff of that precision on its own; above the last
+#: one the matrix is halved until it is not.
+_PADE_THRESHOLDS = {
+    "float64": (
+        (3, 1.495585217958292e-2),
+        (5, 2.539398330063230e-1),
+        (7, 9.504178996162932e-1),
+        (9, 2.097847961257068e0),
+        (13, 5.371920351148152e0),
+    ),
+    # Single precision stops at degree 7 -- not to save work, but because the
+    # degree-13 coefficients run to 6e16, and adding a term that size to one of
+    # order 1 in float32 discards the smaller one entirely.
+    "float32": (
+        (3, 4.258730016922831e-1),
+        (5, 1.880152677804762e0),
+        (7, 3.925724783138660e0),
+    ),
+}
+
+#: The Pade numerator coefficients b_0 .. b_m of each degree.
+_PADE_COEFFICIENTS = {
+    3: (120.0, 60.0, 12.0, 1.0),
+    5: (30240.0, 15120.0, 3360.0, 420.0, 30.0, 1.0),
+    7: (17297280.0, 8648640.0, 1995840.0, 277200.0, 25200.0, 1512.0, 56.0, 1.0),
+    9: (
+        17643225600.0,
+        8821612800.0,
+        2075673600.0,
+        302702400.0,
+        30270240.0,
+        2162160.0,
+        110880.0,
+        3960.0,
+        90.0,
+        1.0,
+    ),
+    13: (
+        64764752532480000.0,
+        32382376266240000.0,
+        7771770303897600.0,
+        1187353796428800.0,
+        129060195264000.0,
+        10559470521600.0,
+        670442572800.0,
+        33522128640.0,
+        1323241920.0,
+        40840800.0,
+        960960.0,
+        16380.0,
+        182.0,
+        1.0,
+    ),
+}
+
+
+def _pade_halves(
+    matrix: Tensor, degree: int, identity: Tensor
+) -> tuple[Tensor, Tensor]:
+    """The odd and even halves `U` and `V` of the degree-`m` Pade approximant.
+
+    `exp(A) ~ (V - U)^-1 (V + U)`, where `U` collects the odd powers of `A` and
+    `V` the even ones. Both are built from `A^2` rather than from `A`, so a
+    degree-`m` approximant costs about `m / 2` products instead of `m`.
+    """
+
+    coefficients = _PADE_COEFFICIENTS[degree]
+    squared = _F.matmul(matrix, matrix)
+
+    if degree == 13:
+        # Higham's grouping for the top degree: three powers and two products
+        # rather than six powers, which is where most of its cost would be.
+        fourth = _F.matmul(squared, squared)
+        sixth = _F.matmul(fourth, squared)
+        odd = _F.matmul(
+            sixth,
+            sixth * coefficients[13]
+            + fourth * coefficients[11]
+            + squared * coefficients[9],
+        )
+        odd = odd + (
+            sixth * coefficients[7]
+            + fourth * coefficients[5]
+            + squared * coefficients[3]
+            + identity * coefficients[1]
+        )
+        even = _F.matmul(
+            sixth,
+            sixth * coefficients[12]
+            + fourth * coefficients[10]
+            + squared * coefficients[8],
+        )
+        even = even + (
+            sixth * coefficients[6]
+            + fourth * coefficients[4]
+            + squared * coefficients[2]
+            + identity * coefficients[0]
+        )
+        return _F.matmul(matrix, odd), even
+
+    odd = identity * coefficients[1]
+    even = identity * coefficients[0]
+    power = identity
+    for exponent in range(2, degree + 1, 2):
+        power = _F.matmul(power, squared)
+        odd = odd + power * coefficients[exponent + 1]
+        even = even + power * coefficients[exponent]
+    return _F.matmul(matrix, odd), even
+
+
+def matrix_exp(input: object) -> Tensor:
+    """The matrix exponential, `sum_k A^k / k!`, of each square matrix.
+
+    Not `exp` applied elementwise -- that is `exp`. This is the solution
+    operator of `dx/dt = A x`, so `matrix_exp(A t) @ x0` is where a linear
+    system started at `x0` has got to by time `t`.
+
+    Computed by scaling and squaring: halve `A` until its 1-norm is small
+    enough for a Pade approximant to be accurate to the unit roundoff, evaluate
+    the approximant, and square the result back. The degree and the number of
+    halvings come from Higham's 2005 analysis, and the thresholds depend on the
+    precision, so a float32 matrix takes a different route than a float64 one
+    rather than the same route at a worse answer.
+
+    Every step is a `matmul`, a `solve` or a scalar multiply, so the operation
+    is differentiable by composition and the gradient is the exact derivative
+    of the approximant that was evaluated. The number of halvings is chosen
+    from the norm and then held fixed: it is a discrete choice, constant under
+    small changes to `A`, and its derivative is zero wherever it is defined.
+
+    A batch shares one scaling, chosen from the largest norm in it. Scaling a
+    matrix more than it needs costs a squaring, not accuracy, which is the
+    trade that keeps a batch one sequence of operations rather than many.
+    """
+
+    matrix, size = _square_matrix(input, "matrix_exp")
+    precision = str(matrix.dtype)
+    if precision not in _PADE_THRESHOLDS:
+        raise ValueError(f"matrix_exp needs a floating-point matrix, got {precision}")
+
+    # The 1-norm is the largest absolute column sum, and the largest over a
+    # batch decides for all of it.
+    norm = float(_F.abs(matrix).sum(-2).max().item())
+    thresholds = _PADE_THRESHOLDS[precision]
+    squarings = 0
+    for degree, threshold in thresholds:
+        if norm <= threshold:
+            break
+    else:
+        degree, threshold = thresholds[-1]
+        # `log2(norm / threshold)` halvings bring the norm under it; the
+        # ceiling is what makes "under" hold rather than "close to".
+        squarings = max(0, int(_math.ceil(_math.log2(norm / threshold))))
+        matrix = matrix * (0.5**squarings)
+
+    identity = _identity_like(matrix, size)
+    odd, even = _pade_halves(matrix, degree, identity)
+    result = _F.solve(even - odd, even + odd)
+    for _ in range(squarings):
+        result = _F.matmul(result, result)
+    return result
+
+
+# --- linear systems over more than two axes ---------------------------------
+
+
+def _flat_size(sizes: object) -> int:
+    return _math.prod(int(size) for size in sizes)
+
+
+def tensorsolve(a: object, b: object, axes: object = None) -> Tensor:
+    """Solve `a x = b` where the contraction runs over several axes at once.
+
+    `a` has the shape of `b` followed by the shape of the answer, and the
+    system is the square one you get by flattening each half. `axes` names axes
+    of `a` to move to the end first, for when they are not already there.
+
+    This is `solve` with a reshape on each side; the reshape is the whole
+    operation, and the gradient is `solve`'s.
+    """
+
+    tensor = _atleast_tensor(a)
+    rhs = _atleast_tensor(b)
+    if axes is not None:
+        moved = [
+            _normalize_axis(axis, tensor.ndim(), "tensorsolve")
+            for axis in _as_sequence(axes)
+        ]
+        if len(set(moved)) != len(moved):
+            raise ValueError(f"tensorsolve was given a repeated axis in {axes}")
+        order = [axis for axis in range(tensor.ndim()) if axis not in moved] + moved
+        tensor = _F.permute(tensor, order)
+
+    if tensor.ndim() < rhs.ndim():
+        raise ValueError(
+            f"tensorsolve needs a coefficient tensor of at least the rank of the "
+            f"right-hand side, got {tensor.ndim()} against {rhs.ndim()}"
+        )
+    answer_shape = list(tensor.shape)[rhs.ndim() :]
+    unknowns = _flat_size(answer_shape)
+    if _flat_size(tensor.shape) != unknowns * unknowns:
+        raise ValueError(
+            f"tensorsolve needs a square system: {list(tensor.shape)} does not "
+            f"flatten to {unknowns} by {unknowns}"
+        )
+    if _flat_size(rhs.shape) != unknowns:
+        raise ValueError(
+            f"tensorsolve needs {unknowns} right-hand side values for "
+            f"{unknowns} unknowns, got {_flat_size(rhs.shape)}"
+        )
+
+    solved = _F.solve(tensor.reshape(unknowns, unknowns), rhs.reshape(unknowns, 1))
+    return solved.reshape(answer_shape)
+
+
+def tensorinv(a: object, ind: int = 2) -> Tensor:
+    """The inverse of `a` seen as a matrix split at axis `ind`.
+
+    The axes before `ind` are the rows and those after are the columns, so the
+    result has them the other way round -- which is what makes
+    `tensordot(tensorinv(a), a, ind)` the identity of that shape.
+    """
+
+    tensor = _atleast_tensor(a)
+    split = _operator.index(ind)
+    if not 0 < split < tensor.ndim():
+        raise ValueError(
+            f"tensorinv splits at an axis strictly inside the tensor, and {ind} "
+            f"is not one for a rank of {tensor.ndim()}"
+        )
+    shape = list(tensor.shape)
+    rows, columns = _flat_size(shape[:split]), _flat_size(shape[split:])
+    if rows != columns:
+        raise ValueError(
+            f"tensorinv needs the two halves of {shape} to have the same number "
+            f"of elements, got {rows} and {columns}"
+        )
+    return inverse(tensor.reshape(rows, columns)).reshape(shape[split:] + shape[:split])
+
+
 #: Attached to the top level, to `functional` and -- where the first argument
 #: is the tensor -- to `Tensor`. See `_elementwise._ELEMENTWISE`.
 _MATRIX = (
@@ -394,6 +658,7 @@ _MATRIX = (
     "inner",
     "inverse",
     "logdet",
+    "matrix_exp",
     "mm",
     "mv",
     "numel",
@@ -402,5 +667,7 @@ _MATRIX = (
     "renorm",
     "t",
     "tensordot",
+    "tensorinv",
+    "tensorsolve",
     "vander",
 )

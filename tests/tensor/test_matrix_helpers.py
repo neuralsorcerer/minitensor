@@ -369,3 +369,97 @@ def test_renorm_leaves_the_untouched_rows_with_a_gradient_of_one():
     mt.renorm(rows, 2.0, 0, 1.0).sum().backward()
     np.testing.assert_allclose(rows.grad.numpy()[0], [1.0, 1.0])
     mt.clear_autograd_graph()
+
+
+# --- linear systems over more than two axes ---------------------------------
+#
+# `tensorsolve` and `tensorinv` are `solve` and `inverse` with a reshape on each
+# side, and NumPy has both under the same names -- so the reshape is what the
+# tests check, against `np.linalg`.
+
+
+@pytest.mark.parametrize(
+    "coefficients,rhs",
+    [((2, 3, 6), (2, 3)), ((4, 4), (4,)), ((2, 2, 2, 8), (2, 2, 2))],
+)
+def test_tensorsolve_matches_numpy(coefficients, rhs):
+    a = RNG.standard_normal(coefficients)
+    b = RNG.standard_normal(rhs)
+    np.testing.assert_allclose(
+        mt.tensorsolve(_t(a), _t(b)).numpy(), np.linalg.tensorsolve(a, b), rtol=1e-9
+    )
+
+
+def test_tensorsolve_moves_the_axes_it_is_given_to_the_end():
+    a = RNG.standard_normal((3, 2, 6))
+    b = RNG.standard_normal((2, 3))
+    np.testing.assert_allclose(
+        mt.tensorsolve(_t(a), _t(b), axes=(2,)).numpy(),
+        np.linalg.tensorsolve(a, b, axes=(2,)),
+        rtol=1e-9,
+    )
+
+
+def test_the_solution_of_tensorsolve_solves_the_system_it_names():
+    """Checked against the contraction rather than against another solver."""
+
+    a = RNG.standard_normal((2, 3, 6))
+    b = RNG.standard_normal((2, 3))
+    x = mt.tensorsolve(_t(a), _t(b))
+    np.testing.assert_allclose(
+        mt.tensordot(_t(a), x, 1).numpy(), b, rtol=1e-8, atol=1e-10
+    )
+
+
+def test_tensorsolve_carries_a_gradient_to_both_operands():
+    a = _t(RNG.standard_normal((2, 3, 6)), requires_grad=True)
+    b = _t(RNG.standard_normal((2, 3)), requires_grad=True)
+    mt.tensorsolve(a, b).sum().backward()
+    assert np.isfinite(a.grad.numpy()).all()
+    assert np.isfinite(b.grad.numpy()).all()
+    mt.clear_autograd_graph()
+
+
+@pytest.mark.parametrize("shape,split", [((4, 6, 8, 3), 2), ((9, 3, 3), 1)])
+def test_tensorinv_matches_numpy(shape, split):
+    a = RNG.standard_normal(shape)
+    np.testing.assert_allclose(
+        mt.tensorinv(_t(a), split).numpy(), np.linalg.tensorinv(a, split), rtol=1e-8
+    )
+
+
+def test_tensorinv_contracts_back_to_the_identity():
+    a = RNG.standard_normal((4, 6, 8, 3))
+    contracted = mt.tensordot(mt.tensorinv(_t(a), 2), _t(a), 2).numpy()
+    np.testing.assert_allclose(
+        contracted.reshape(24, 24), np.eye(24), rtol=0, atol=1e-8
+    )
+
+
+def test_tensorsolve_reports_a_system_that_is_not_square():
+    with pytest.raises(ValueError, match="square system"):
+        mt.tensorsolve(
+            _t(RNG.standard_normal((2, 3, 5))), _t(RNG.standard_normal((2, 3)))
+        )
+
+
+def test_tensorsolve_reports_a_repeated_axis():
+    with pytest.raises(ValueError, match="repeated axis"):
+        mt.tensorsolve(
+            _t(RNG.standard_normal((2, 3, 6))),
+            _t(RNG.standard_normal((2, 3))),
+            axes=(1, 1),
+        )
+
+
+def test_tensorinv_reports_halves_that_do_not_match():
+    with pytest.raises(ValueError, match="same number"):
+        mt.tensorinv(_t(RNG.standard_normal((4, 6, 5))), 2)
+
+
+@pytest.mark.parametrize("split", [0, 4, -1])
+def test_tensorinv_refuses_a_split_outside_the_tensor(split):
+    """Zero would leave nothing on the left, and the rank nothing on the right."""
+
+    with pytest.raises(ValueError, match="strictly inside"):
+        mt.tensorinv(_t(RNG.standard_normal((4, 6, 8, 3))), split)
