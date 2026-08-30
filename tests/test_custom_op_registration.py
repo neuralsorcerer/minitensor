@@ -81,7 +81,9 @@ def test_a_composed_op_is_differentiable_all_the_way_down(name):
     x = _t([0.5, -1.5], requires_grad=True)
     _run(name, x).sum().backward()
     values = np.array([0.5, -1.5])
-    np.testing.assert_allclose(x.grad.numpy(), 2 * values * np.exp(values**2), rtol=1e-12)
+    np.testing.assert_allclose(
+        x.grad.numpy(), 2 * values * np.exp(values**2), rtol=1e-12
+    )
     mt.clear_autograd_graph()
 
 

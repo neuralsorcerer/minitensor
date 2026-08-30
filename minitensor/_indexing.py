@@ -6,20 +6,26 @@
 
 """Indexing, scattering and index-producing helpers, in terms of the kernels.
 
-Every function here rearranges what `index_select`, `gather`, `scatter`,
-`nonzero`, `searchsorted` and `pad` already do. None of them needs a kernel of
+Almost every function here rearranges what `index_select`, `gather`, `scatter`,
+`nonzero`, `searchsorted` and `pad` already do. None of those needs a kernel of
 its own: `take` is `index_select` over a flattened view, `index_add` is
-`scatter_add` with the index broadcast, `isin` is a sorted lookup, and the
-`*_indices` builders are a comparison run through `nonzero`. Writing them here
-rather than in the extension keeps the shipped binary the size of the
+`scatter_add` with the index broadcast, and `isin` is a sorted lookup. Writing
+them here rather than in the extension keeps the shipped binary the size of the
 operations that genuinely need one, and each inherits the bounds checking, the
 dtype rules and the gradients of the kernel underneath instead of restating
 them.
+
+The `*_indices` builders are the exception, and they are the exception for the
+reason set out under "Where an operation belongs" in `docs/development.md`:
+their arguments are Python integers rather than tensors, so there is no device
+to stay on and no gradient to carry, and NumPy already computes the answer.
 """
 
 from __future__ import annotations
 
 import operator as _operator
+
+import numpy as _np
 
 from . import _core as _C
 from ._shape import (
@@ -265,22 +271,22 @@ def isin(
 
 
 def _triangle_indices(row: int, col: int, offset: int, lower: bool) -> Tensor:
+    name = "tril_indices" if lower else "triu_indices"
     rows = _operator.index(row)
     cols = _operator.index(col)
     if rows < 0 or cols < 0:
-        raise ValueError(f"tril_indices requires non-negative sizes, got {row}, {col}")
+        raise ValueError(f"{name} requires non-negative sizes, got {row}, {col}")
 
-    down = Tensor.arange(0, rows, 1, dtype="int64").reshape(rows, 1)
-    across = Tensor.arange(0, cols, 1, dtype="int64").reshape(1, cols)
-    diagonal = across - down
-    selected = (
-        diagonal <= _operator.index(offset)
-        if lower
-        else diagonal >= _operator.index(offset)
-    )
-    # `nonzero` gives one row per position; the convention for an index pair is
-    # one row per *axis*, so it is transposed.
-    return _F.transpose(_F.nonzero(selected), 0, 1)
+    # Three Python integers in, an index pair out: nothing here has a device to
+    # stay on, a dtype to agree with or a gradient to carry, which is exactly
+    # the case where NumPy is the better engine. Doing it with kernels means
+    # two ranges, a broadcast subtraction, a comparison, a `nonzero` and a
+    # transpose -- six allocations to reach integers NumPy produces in one
+    # call. NumPy takes the offset where the column count goes, so the
+    # arguments are reordered rather than passed through.
+    build = _np.tril_indices if lower else _np.triu_indices
+    pair = _np.array(build(rows, _operator.index(offset), cols), dtype=_np.int64)
+    return Tensor.from_numpy(pair)
 
 
 def tril_indices(row: int, col: int, offset: int = 0) -> Tensor:

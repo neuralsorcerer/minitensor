@@ -324,6 +324,30 @@ def test_the_index_builders_refuse_a_negative_size():
         mt.tril_indices(-1, 3)
 
 
+def test_the_index_builders_refuse_a_negative_size_under_either_name():
+    with pytest.raises(ValueError, match="triu_indices requires non-negative"):
+        mt.triu_indices(2, -1)
+
+
+def test_the_index_pair_is_a_minitensor_index_not_a_numpy_one():
+    """The pair is computed by NumPy but has to come back as a usable index.
+
+    It is built from Python integers, so NumPy produces it -- but a caller
+    indexes a MiniTensor tensor with it, which means it has to be an int64
+    tensor on the default device, not a NumPy array that happens to print the
+    same way.
+    """
+
+    matrix = mt.Tensor.from_numpy(np.arange(9.0).reshape(3, 3))
+    pair = mt.tril_indices(3, 3)
+    assert isinstance(pair, mt.Tensor)
+    assert "int64" in str(pair.dtype)
+    np.testing.assert_array_equal(
+        mt.take(matrix, pair[0] * 3 + pair[1]).numpy(),
+        np.arange(9.0).reshape(3, 3)[np.tril_indices(3)],
+    )
+
+
 # --- diagflat, block_diag, cartesian_prod -----------------------------------
 
 

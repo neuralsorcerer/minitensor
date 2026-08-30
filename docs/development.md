@@ -15,6 +15,44 @@ bindings, Rust engine, examples, tests, or documentation.
 | `examples/` | Runnable Python and Rust examples. |
 | `docs/` | Markdown documentation and static assets. |
 
+## Where an operation belongs
+
+A new operation goes in one of three places, and which one is decided by what
+its arguments carry rather than by how much code it takes.
+
+**A kernel in `engine/`** when the operation has an algorithm of its own: a
+loop, a decomposition, a recurrence, or an analytical backward that is better
+than the one composition would give. `matmul`, `svd`, `sort`, `conv2d` and
+`cross_entropy` are here because each is a real algorithm, not an arrangement
+of other ones.
+
+**A Python arrangement in `minitensor/_*.py`** when the operation is existing
+kernels pointed at rearranged operands. `tensordot` is `matmul` with the
+contracted axes moved and flattened; `nll_loss` is a gather and a weighted
+mean; `signbit` is a `copysign` compared against zero. Writing these in Python
+keeps the shipped extension the size of the operations that genuinely need a
+kernel, and each one inherits the accuracy, the dtype rules and the gradient of
+what it is arranged from instead of restating them.
+
+**NumPy** when the computation is over Python integers -- shapes, axes, index
+sets, split points -- with no tensor operand at all. `broadcast_shapes` is
+`np.broadcast_shapes`; `tril_indices` and `triu_indices` are `np.tril_indices`
+and `np.triu_indices`. NumPy is a hard runtime dependency, so this costs
+nothing to ship, it is faster than the kernel form at any size where the time
+matters, and -- the part that outlasts a benchmark -- it is one fewer
+implementation that can disagree with the library everyone compares against.
+
+The line between the second and third cases is the one worth stating, because
+it is easy to get backwards: **NumPy computes indices and shapes; the engine
+computes values.** A tensor operand carries a device, a dtype and possibly a
+gradient. Handing it to NumPy would copy it off the device, drop the gradient
+silently -- the operation still returns a right-looking answer, so nothing that
+checks values would catch it -- and, for the sampling functions, draw from
+NumPy's random stream instead of the one `manual_seed` controls. A Python
+integer carries none of those, so nothing is lost by letting NumPy do the
+arithmetic. `isin` and `multinomial` stay in terms of kernels for exactly this
+reason even though NumPy has both: their arguments are tensors.
+
 ## Environment setup
 
 MiniTensor source builds require Python 3.10 or newer, Rust/Cargo, and maturin.
