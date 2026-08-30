@@ -121,6 +121,8 @@ _FUNCTIONAL_FORWARDERS = (
     "floor_divide",
     "remainder",
     "fmod",
+    "gcd",
+    "lcm",
     "bitwise_and",
     "bitwise_left_shift",
     "bitwise_not",

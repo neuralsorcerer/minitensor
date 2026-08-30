@@ -1399,6 +1399,12 @@ assert row_std.shape == (2, 3)
   `bitwise_not` / `~` — bit operations on integers, the matching truth table on
   bools; rejected for floats. A bool paired with an integer promotes to that
   integer dtype, as it does for `+`.
+- `gcd`, `lcm` — integers only, and always non-negative: a common divisor of
+  `-12` and `8` is a common divisor of `12` and `8`, and the positive one is
+  what every library reports. `gcd(x, 0)` is the magnitude of `x`, since every
+  integer divides zero; `lcm(x, 0)` is `0`, since zero is the least of the
+  multiples of zero. `lcm` divides before it multiplies, because the product of
+  two operands can leave the dtype even when their multiple does not.
 - `bitwise_left_shift` / `<<`, `bitwise_right_shift` / `>>` — integers only
   (two bools have no bits to move). The right shift is arithmetic, so it
   preserves sign and floors. Counts at or past the dtype's width are undefined
@@ -1579,7 +1585,7 @@ eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, cosine_similarity,
 isnan, isinf, isfinite, isposinf, isneginf, isreal,
 nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not,
 bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
-logical_not,
+logical_not, gcd, lcm,
 
 # Activations and normalization
 relu, relu6, leaky_relu, hardtanh, hardshrink, softshrink, tanhshrink,

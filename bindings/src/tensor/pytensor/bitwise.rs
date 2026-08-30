@@ -177,6 +177,16 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Element-wise greatest common divisor, always non-negative. `gcd(x, 0)` is the magnitude of `x`.
+    pub fn gcd(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        bitwise_binary(&self.inner, other, false, BinaryOpKind::Shift, bitwise::gcd)
+    }
+
+    /// Element-wise least common multiple, always non-negative. `lcm(x, 0)` is 0.
+    pub fn lcm(&self, other: &Bound<PyAny>) -> PyResult<Self> {
+        bitwise_binary(&self.inner, other, false, BinaryOpKind::Shift, bitwise::lcm)
+    }
+
     /// Element-wise bitwise complement, and logical NOT for booleans.
     pub fn bitwise_not(&self) -> PyResult<Self> {
         self.__invert__()

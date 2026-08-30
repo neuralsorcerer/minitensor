@@ -568,6 +568,7 @@ binary_forwarders!(
     logical_xor => "Element-wise logical XOR over truth values, giving a boolean tensor.",
     heaviside => "The unit step of `input`: 0 below zero, 1 above it, and `other` at exactly zero.",
     hypot => "`sqrt(input^2 + other^2)`, computed without forming either square, so it answers where the squares would overflow.",
+    lcm => "Element-wise least common multiple, always non-negative. `lcm(x, 0)` is 0.",
     nextafter => "The next representable value after each element, in the direction of `other`.",
     lt => "Element-wise `<`, giving a boolean tensor.",
     matmul => "Matrix product, broadcasting over leading batch dimensions.",
@@ -576,6 +577,7 @@ binary_forwarders!(
     ne => "Element-wise inequality, giving a boolean tensor.",
     pow => "Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.",
     fmod => "Element-wise modulo taking the sign of the dividend, matching C's `fmod`.",
+    gcd => "Element-wise greatest common divisor, always non-negative. `gcd(x, 0)` is the magnitude of `x`.",
     remainder => "Element-wise modulo taking the sign of the divisor, matching Python's `%`.",
     xlogy => "`input * log(other)`, taken as `0` wherever `input` is zero rather than as the `0 * -inf` the plain product would give.",
 );
@@ -2165,6 +2167,8 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(nextafter, parent)?)?;
     parent.add_function(wrap_pyfunction!(heaviside, parent)?)?;
     parent.add_function(wrap_pyfunction!(fmod, parent)?)?;
+    parent.add_function(wrap_pyfunction!(gcd, parent)?)?;
+    parent.add_function(wrap_pyfunction!(lcm, parent)?)?;
     parent.add_function(wrap_pyfunction!(logaddexp, parent)?)?;
     parent.add_function(wrap_pyfunction!(maximum, parent)?)?;
     parent.add_function(wrap_pyfunction!(minimum, parent)?)?;

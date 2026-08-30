@@ -208,16 +208,25 @@ fn check_shift_amounts(amounts: &Tensor, op: &str) -> Result<()> {
     Ok(())
 }
 
-/// `<<` and `>>`, over the promoted integer dtype.
-macro_rules! shift_op {
+/// One element-wise op over the promoted *integer* dtype -- no boolean arm,
+/// because neither shifting a truth value nor taking its divisor means
+/// anything.
+///
+/// The four-argument form runs `$check` over the right-hand operand first, for
+/// the ops that have a count they can refuse up front.
+macro_rules! integer_op {
     ($name:ident, $i32_fn:ident, $i64_fn:ident, $doc:literal) => {
+        integer_op!($name, $i32_fn, $i64_fn, $doc, |_rhs, _name| Ok(()));
+    };
+    ($name:ident, $i32_fn:ident, $i64_fn:ident, $doc:literal, $check:expr) => {
         #[doc = $doc]
         pub fn $name(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             let (lhs_cast, rhs_cast, dtype, output_shape) =
                 coerce_and_broadcast(lhs, rhs, BinaryOpKind::Shift)?;
             let lhs_ref = lhs_cast.as_ref();
             let rhs_ref = rhs_cast.as_ref();
-            check_shift_amounts(rhs_ref, stringify!($name))?;
+            let check: fn(&Tensor, &str) -> Result<()> = $check;
+            check(rhs_ref, stringify!($name))?;
 
             let output_data = match dtype {
                 DataType::Int32 => broadcast_binary_arm!(
@@ -250,18 +259,84 @@ macro_rules! shift_op {
     };
 }
 
-shift_op!(
+integer_op!(
     bitwise_left_shift,
     shl_i32,
     shl_i64,
-    "Element-wise left shift. Counts at or past the dtype's width give 0."
+    "Element-wise left shift. Counts at or past the dtype's width give 0.",
+    check_shift_amounts
 );
-shift_op!(
+integer_op!(
     bitwise_right_shift,
     shr_i32,
     shr_i64,
     "Element-wise arithmetic right shift, preserving sign. Counts at or past \
-     the dtype's width give 0 for non-negative values and -1 for negative ones."
+     the dtype's width give 0 for non-negative values and -1 for negative ones.",
+    check_shift_amounts
+);
+
+/// The greatest common divisor and the least common multiple, at both integer
+/// widths.
+///
+/// Euclid's algorithm on the magnitudes, which is what makes the answer
+/// non-negative for negative operands: a common divisor of `-12` and `8` is a
+/// common divisor of `12` and `8`, and the convention every library follows is
+/// to report the positive one.
+macro_rules! divisor_fns {
+    ($gcd:ident, $lcm:ident, $ty:ty) => {
+        #[inline(always)]
+        fn $gcd(a: $ty, b: $ty) -> $ty {
+            // `unsigned_abs` rather than `abs`, so the most negative value --
+            // whose magnitude has no representation as a signed integer --
+            // does not overflow on the way in.
+            let mut x = a.unsigned_abs();
+            let mut y = b.unsigned_abs();
+            while y != 0 {
+                let remainder = x % y;
+                x = y;
+                y = remainder;
+            }
+            // The one magnitude that cannot come back is the most negative
+            // value's, and it can only survive here as `gcd(MIN, 0)`; the
+            // saturating cast reports the largest representable divisor rather
+            // than wrapping to a negative one.
+            if x > <$ty>::MAX as _ {
+                <$ty>::MAX
+            } else {
+                x as $ty
+            }
+        }
+
+        #[inline(always)]
+        fn $lcm(a: $ty, b: $ty) -> $ty {
+            let divisor = $gcd(a, b);
+            if divisor == 0 {
+                // Every multiple of zero is zero, so zero is the least of them.
+                return 0;
+            }
+            // Divide before multiplying: the product of two operands can leave
+            // the dtype even when their multiple does not.
+            (a / divisor).wrapping_mul(b).wrapping_abs()
+        }
+    };
+}
+
+divisor_fns!(gcd_i32, lcm_i32, i32);
+divisor_fns!(gcd_i64, lcm_i64, i64);
+
+integer_op!(
+    gcd,
+    gcd_i32,
+    gcd_i64,
+    "Element-wise greatest common divisor, always non-negative. `gcd(x, 0)` \
+     is the magnitude of `x`, since every integer divides zero."
+);
+integer_op!(
+    lcm,
+    lcm_i32,
+    lcm_i64,
+    "Element-wise least common multiple, always non-negative. `lcm(x, 0)` is \
+     0, since zero is the least of the multiples of zero."
 );
 
 /// Reduces a tensor of any dtype to the truth values the logical ops operate
@@ -582,5 +657,109 @@ mod tests {
         let b = i32_tensor(vec![1, 2]);
         assert!(bitwise_or(&a, &b).is_err());
         assert!(logical_or(&a, &b).is_err());
+    }
+
+    #[test]
+    fn gcd_and_lcm_match_euclid_at_both_widths() {
+        // Every sign pairing, plus the zeros, at i64 and i32.
+        let pairs: [(i64, i64); 10] = [
+            (12, 8),
+            (-12, 8),
+            (12, -8),
+            (-12, -8),
+            (0, 5),
+            (5, 0),
+            (0, 0),
+            (17, 5),
+            (270, 192),
+            (1, 1),
+        ];
+        let expected_gcd = [4i64, 4, 4, 4, 5, 5, 0, 1, 6, 1];
+        let expected_lcm = [24i64, 24, 24, 24, 0, 0, 0, 85, 8640, 1];
+
+        let lhs: Vec<i64> = pairs.iter().map(|p| p.0).collect();
+        let rhs: Vec<i64> = pairs.iter().map(|p| p.1).collect();
+        let a = i64_tensor(lhs.clone());
+        let b = i64_tensor(rhs.clone());
+        assert_eq!(
+            gcd(&a, &b).unwrap().data().as_i64_slice().unwrap(),
+            &expected_gcd
+        );
+        assert_eq!(
+            lcm(&a, &b).unwrap().data().as_i64_slice().unwrap(),
+            &expected_lcm
+        );
+
+        let narrow_lhs: Vec<i32> = lhs.iter().map(|&v| v as i32).collect();
+        let narrow_rhs: Vec<i32> = rhs.iter().map(|&v| v as i32).collect();
+        let a = i32_tensor(narrow_lhs);
+        let b = i32_tensor(narrow_rhs);
+        let expected: Vec<i32> = expected_gcd.iter().map(|&v| v as i32).collect();
+        assert_eq!(
+            gcd(&a, &b).unwrap().data().as_i32_slice().unwrap(),
+            &expected[..]
+        );
+    }
+
+    #[test]
+    fn gcd_survives_the_value_with_no_positive_magnitude() {
+        // `i64::MIN.abs()` overflows, so the magnitudes are taken unsigned.
+        let a = i64_tensor(vec![i64::MIN, i64::MIN, i64::MIN]);
+        let b = i64_tensor(vec![0, 2, i64::MIN]);
+        let got = gcd(&a, &b).unwrap();
+        let values = got.data().as_i64_slice().unwrap();
+        // gcd(MIN, 0) is |MIN|, which no i64 can hold; the largest one is
+        // reported instead of a wrapped negative.
+        assert_eq!(values[0], i64::MAX);
+        assert_eq!(values[1], 2);
+        assert_eq!(values[2], i64::MAX);
+        assert!(
+            values.iter().all(|&v| v >= 0),
+            "a divisor is never negative"
+        );
+    }
+
+    #[test]
+    fn gcd_and_lcm_broadcast_and_promote_like_the_shifts() {
+        let a = i32_tensor(vec![12, 18]);
+        let b = i64_tensor(vec![8]);
+        let got = gcd(&a, &b).unwrap();
+        assert_eq!(got.dtype(), DataType::Int64);
+        assert_eq!(got.data().as_i64_slice().unwrap(), &[4, 2]);
+    }
+
+    #[test]
+    fn gcd_and_lcm_refuse_floats_and_booleans() {
+        let floats = Tensor::new(
+            Arc::new(TensorData::from_vec_f64(vec![1.0, 2.0], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let booleans = Tensor::new(
+            Arc::new(TensorData::from_vec_bool(vec![true, false], Device::cpu())),
+            Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        assert!(gcd(&floats, &floats).is_err());
+        assert!(lcm(&floats, &floats).is_err());
+        // Two truth values have no divisors, the same reason they have no bits
+        // to shift.
+        assert!(gcd(&booleans, &booleans).is_err());
+    }
+
+    #[test]
+    fn lcm_divides_before_multiplying() {
+        // The product of these two leaves i64; their least common multiple
+        // does not, and only the ordering of the arithmetic keeps it.
+        let a = i64_tensor(vec![4_000_000_000]);
+        let b = i64_tensor(vec![6_000_000_000]);
+        assert_eq!(
+            lcm(&a, &b).unwrap().data().as_i64_slice().unwrap(),
+            &[12_000_000_000]
+        );
     }
 }

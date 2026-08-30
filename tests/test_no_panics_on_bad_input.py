@@ -191,6 +191,8 @@ def test_binary_ops_decline_every_mismatched_pair():
         "logaddexp",
         "remainder",
         "fmod",
+        "gcd",
+        "lcm",
         "heaviside",
         "nextafter",
         "floor_divide",

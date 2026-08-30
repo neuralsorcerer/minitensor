@@ -90,9 +90,9 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
     interior = parts[0] + parts[1] + parts[2]
 
     if edge_order == 1:
-        first = (_slice(values, axis, 1, 1) - _slice(values, axis, 0, 1)) / _broadcastable(
-            _slice(behind, 0, 0, 1), axis, rank
-        )
+        first = (
+            _slice(values, axis, 1, 1) - _slice(values, axis, 0, 1)
+        ) / _broadcastable(_slice(behind, 0, 0, 1), axis, rank)
         last = (
             _slice(values, axis, length - 1, 1) - _slice(values, axis, length - 2, 1)
         ) / _broadcastable(_slice(behind, 0, length - 2, 1), axis, rank)
@@ -102,7 +102,9 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
         second_gap = _slice(behind, 0, 1, 1)
         total = first_gap + second_gap
         first = (
-            _broadcastable(-(2.0 * first_gap + second_gap) / (first_gap * total), axis, rank)
+            _broadcastable(
+                -(2.0 * first_gap + second_gap) / (first_gap * total), axis, rank
+            )
             * _slice(values, axis, 0, 1)
             + _broadcastable(total / (first_gap * second_gap), axis, rank)
             * _slice(values, axis, 1, 1)
@@ -118,7 +120,9 @@ def _one_axis(values: Tensor, positions: Tensor, axis: int, edge_order: int) -> 
             * _slice(values, axis, length - 3, 1)
             + _broadcastable(-total / (penultimate_gap * last_gap), axis, rank)
             * _slice(values, axis, length - 2, 1)
-            + _broadcastable((2.0 * last_gap + penultimate_gap) / (last_gap * total), axis, rank)
+            + _broadcastable(
+                (2.0 * last_gap + penultimate_gap) / (last_gap * total), axis, rank
+            )
             * _slice(values, axis, length - 1, 1)
         )
 
@@ -165,7 +169,11 @@ def gradient(
     # sequence of them is one per axis, in the order `dim` names them.
     if isinstance(spacing, (int, float)) and not isinstance(spacing, bool):
         spacings = [spacing] * len(axes)
-    elif isinstance(spacing, (list, tuple)) and len(spacing) == len(axes) and len(axes) != 1:
+    elif (
+        isinstance(spacing, (list, tuple))
+        and len(spacing) == len(axes)
+        and len(axes) != 1
+    ):
         spacings = list(spacing)
     else:
         spacings = [spacing] * len(axes)

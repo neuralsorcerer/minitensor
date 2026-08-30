@@ -2609,6 +2609,18 @@ impl Tensor {
         crate::ops::arithmetic::fmod(self, other)
     }
 
+    /// Element-wise greatest common divisor, always non-negative.
+    #[inline(always)]
+    pub fn gcd(&self, other: &Self) -> Result<Self> {
+        crate::ops::bitwise::gcd(self, other)
+    }
+
+    /// Element-wise least common multiple, always non-negative.
+    #[inline(always)]
+    pub fn lcm(&self, other: &Self) -> Result<Self> {
+        crate::ops::bitwise::lcm(self, other)
+    }
+
     /// Round tensor values towards zero element-wise.
     #[inline(always)]
     pub fn trunc(&self) -> Result<Self> {

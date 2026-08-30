@@ -56,7 +56,9 @@ def normal(mean: object = 0.0, std: object = 1.0, size: object = None) -> Tensor
     std_is_tensor = isinstance(std, Tensor)
 
     if size is not None:
-        shape = [_operator.index(dim) for dim in (size if _is_sequence(size) else (size,))]
+        shape = [
+            _operator.index(dim) for dim in (size if _is_sequence(size) else (size,))
+        ]
     elif mean_is_tensor or std_is_tensor:
         template = mean if mean_is_tensor else std
         shape = list(template.shape)
@@ -113,7 +115,9 @@ def multinomial(input: object, num_samples: int, replacement: bool = False) -> T
     categories = rows.shape[1]
     count = _operator.index(num_samples)
     if count < 0:
-        raise ValueError(f"multinomial requires a non-negative num_samples, got {count}")
+        raise ValueError(
+            f"multinomial requires a non-negative num_samples, got {count}"
+        )
     if not replacement and count > categories:
         raise ValueError(
             f"multinomial cannot draw {count} of {categories} categories without "
