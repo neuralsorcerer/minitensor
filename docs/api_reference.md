@@ -1977,6 +1977,8 @@ when you already hold the weights and do not want a module:
 | `gumbel_softmax(logits, tau=1.0, hard=False, dim=-1, eps=1e-20)` | A differentiable sample from a categorical distribution: Gumbel noise added to the logits, then a softmax at temperature `tau`. As `tau` falls the result approaches a one-hot draw and stays differentiable at every `tau`, which sampling itself is not. With `hard=True` the value is one-hot and the gradient is still the soft one -- the straight-through estimator. |
 | `pixel_shuffle(input, upscale_factor)` | Trade `r**2` channels for that much height and width: `(n, c * r * r, h, w)` becomes `(n, c, h * r, w * r)`. The last layer of a super-resolution network -- upsampling by rearrangement costs nothing and invents nothing, where a transposed convolution does both. |
 | `pixel_unshuffle(input, downscale_factor)` | The inverse: `(n, c, h * r, w * r)` back to `(n, c * r * r, h, w)`. |
+| `unfold(input, kernel_size, dilation=1, padding=0, stride=1)` | Every sliding block of `input`, one per column: `(n, c, *spatial)` becomes `(n, c * taps, blocks)`. im2col -- what turns a convolution into a single matrix product, so a convolution variant the library does not ship is two lines rather than a kernel. Any number of spatial axes, not only the two `torch.nn.functional.unfold` takes, so a 3-D convolution is the same product with a rank-three kernel. |
+| `fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1)` | Sum the sliding blocks back into one `output_size` plane -- the adjoint of `unfold`, and bit-identical to its gradient, because the backward of a gather is a scatter-add over the positions it read. Overlapping positions are summed, not averaged; fold a tensor of ones and divide to average. |
 
 ```python
 import minitensor as mt
@@ -2018,6 +2020,37 @@ True
 0.417
 30.0
 [[-1.0]]
+```
+
+`unfold` and `fold` are the pair that lets a caller write a convolution the
+library does not ship. Every sliding window becomes a column, so the
+convolution is one matrix product, and `fold` is the same map run backwards:
+
+```python
+import minitensor as mt
+from minitensor import functional as F
+
+image = mt.Tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]])
+weight = mt.Tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+
+# One column per window, laid out channel-major then kernel-major.
+columns = F.unfold(image, 2)
+print(columns.tolist())
+
+built = F.matmul(weight.reshape(1, -1), columns).reshape(1, 1, 2, 2)
+print(built.tolist())
+print(F.conv2d(image, weight).tolist())
+
+# Overlapping blocks add rather than overwrite, so folding ones counts how many
+# blocks read each position -- the divisor that turns a fold into an average.
+print(F.fold(mt.Tensor.ones_like(columns), (3, 3), 2).tolist())
+```
+
+```text
+[[[1.0, 2.0, 4.0, 5.0], [2.0, 3.0, 5.0, 6.0], [4.0, 5.0, 7.0, 8.0], [5.0, 6.0, 8.0, 9.0]]]
+[[[[37.0, 47.0], [67.0, 77.0]]]]
+[[[[37.0, 47.0], [67.0, 77.0]]]]
+[[[[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]]]
 ```
 
 ### Sampling at coordinates

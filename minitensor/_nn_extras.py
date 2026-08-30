@@ -12,6 +12,14 @@ a reshape and a permute. None of them earns a kernel, so none of them gets
 one: each is written here, once, in terms of operations whose accuracy and
 gradients are already established.
 
+`unfold` and `fold` are the same idea aimed at the largest target in the file.
+A convolution is a matrix product once the sliding blocks are laid out as
+columns, so an `unfold` plus a `matmul` is a convolution -- and the caller who
+writes it that way can vary it however they like without a Rust toolchain. The
+layout is a gather at positions computed from the kernel geometry, and because
+the backward of a gather is a scatter-add, `fold` comes out as the exact
+adjoint of `unfold` without the two sharing a line of code.
+
 `cross_entropy` is the one that does have a kernel, because it has an
 analytical backward worth having -- and `nll_loss` is the half of it that takes
 log-probabilities it did not compute itself, which is what makes the two
@@ -20,8 +28,12 @@ different functions rather than one written twice.
 
 from __future__ import annotations
 
+import operator as _operator
+
+import numpy as _np
+
 from . import _core as _C
-from ._shape import _atleast_tensor, _normalize_axis
+from ._shape import _atleast_tensor, _normalize_axis, broadcast_to
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -267,10 +279,245 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
 #: What `minitensor/__init__.py` attaches to the `nn` namespace. Listed here,
 #: beside the definitions, so a new function is exported by being written
 #: rather than by being remembered somewhere else.
+def _sliding_argument(
+    value: object, name: str, rank: int, minimum: int, op: str
+) -> tuple[int, ...]:
+    """`value` as one integer per spatial axis, checked against `minimum`."""
+
+    try:
+        entries = (_operator.index(value),) * rank
+    except TypeError:
+        try:
+            entries = tuple(_operator.index(entry) for entry in value)  # type: ignore[union-attr]
+        except TypeError:
+            raise TypeError(
+                f"{op} expects {name} to be an integer or a sequence of them, "
+                f"got {type(value).__name__}"
+            ) from None
+        if len(entries) != rank:
+            raise ValueError(
+                f"{op} expects one {name} per spatial axis ({rank}), "
+                f"got {len(entries)}"
+            )
+    if any(entry < minimum for entry in entries):
+        raise ValueError(f"{op} requires {name} of at least {minimum}, got {entries}")
+    return entries
+
+
+def _sliding_rank(*candidates: object) -> int:
+    """How many spatial axes the arguments describe.
+
+    `fold` has no input shape to read the rank off -- its input arrives already
+    flattened -- so it comes from whichever argument was given as a sequence,
+    and from the two-dimensional case when every one of them is a bare integer.
+    Two is the only case `torch.nn.functional.fold` supports at all, so it is
+    also the one an unannotated call means.
+    """
+
+    for candidate in candidates:
+        if isinstance(candidate, (tuple, list)):
+            return len(candidate)
+    return 2
+
+
+def _sliding_geometry(
+    op: str,
+    spatial: tuple[int, ...],
+    kernel_size: object,
+    dilation: object,
+    padding: object,
+    stride: object,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], "_np.ndarray"]:
+    """The kernel, the padding, the padded plane and the map of every tap.
+
+    The map has shape `(taps, blocks)`: row `t`, column `b` is the flat position
+    in the padded plane that tap `t` of block `b` reads. Every value in it comes
+    from the geometry integers alone -- no tensor is involved and no gradient
+    can be -- so NumPy computes it, per "Where an operation belongs" in
+    `docs/development.md`. `ravel_multi_index` is what makes the rank a
+    parameter rather than a special case, which is why any number of spatial
+    axes works here and not just the two a 2-D convolution needs.
+    """
+
+    rank = len(spatial)
+    kernel = _sliding_argument(kernel_size, "kernel_size", rank, 1, op)
+    spaced = _sliding_argument(dilation, "dilation", rank, 1, op)
+    margin = _sliding_argument(padding, "padding", rank, 0, op)
+    step = _sliding_argument(stride, "stride", rank, 1, op)
+
+    padded = tuple(size + 2 * pad for size, pad in zip(spatial, margin))
+    # A dilated kernel reaches `d * (k - 1) + 1` positions, not `k` of them.
+    reach = tuple(space * (k - 1) + 1 for k, space in zip(kernel, spaced))
+    if any(extent > size for extent, size in zip(reach, padded)):
+        raise ValueError(
+            f"{op} has a kernel that does not fit: a dilated extent of {reach} "
+            f"over a padded input of {padded}"
+        )
+    blocks = tuple(
+        (size - extent) // s + 1 for size, extent, s in zip(padded, reach, step)
+    )
+
+    taps = _np.meshgrid(
+        *[_np.arange(k) * space for k, space in zip(kernel, spaced)], indexing="ij"
+    )
+    starts = _np.meshgrid(
+        *[_np.arange(count) * s for count, s in zip(blocks, step)], indexing="ij"
+    )
+    coordinates = [
+        tap.reshape(-1, 1) + start.reshape(1, -1) for tap, start in zip(taps, starts)
+    ]
+    return kernel, margin, padded, _np.ravel_multi_index(coordinates, padded)
+
+
+def _positions(index: "_np.ndarray", like: Tensor) -> Tensor:
+    """The index map as an int64 tensor beside the data it will address."""
+
+    return Tensor.from_numpy(index.astype(_np.int64)).to(_C.Device(like.device))
+
+
+def unfold(
+    input: object,
+    kernel_size: object,
+    dilation: object = 1,
+    padding: object = 0,
+    stride: object = 1,
+) -> Tensor:
+    """Every sliding block of `input`, laid out one per column.
+
+    `(n, c, *spatial)` becomes `(n, c * taps, blocks)`, where `taps` is the
+    product of `kernel_size` and each column holds one window flattened over
+    the channels and the kernel -- im2col. What that buys is a convolution
+    written as a single matrix product:
+
+        cols = unfold(x, 3, padding=1)
+        out = (weight.reshape(out_channels, -1) @ cols).reshape(n, -1, h, w)
+
+    which is the same numbers `conv2d` produces, and is a form the caller can
+    vary -- a different weight sharing, a learned aggregation over the window,
+    a sparsity pattern -- without needing a kernel written for it.
+
+    The gradient comes from the gather underneath, so a position read by
+    several overlapping blocks accumulates all of their gradients.
+
+    `kernel_size`, `dilation`, `padding` and `stride` are each one integer for
+    every spatial axis, or a single integer meaning the same for all of them.
+    Any number of spatial axes is allowed rather than only the two
+    `torch.nn.functional.unfold` accepts, so a 3-D convolution is this same
+    matrix product with a rank-three kernel.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 3:
+        raise ValueError(
+            "unfold expects a batch, a channel and at least one spatial axis, "
+            f"got {tensor.ndim()} dimensions"
+        )
+    batch, channels, *spatial = [int(size) for size in tensor.shape]
+    _kernel, margin, padded, index = _sliding_geometry(
+        "unfold", tuple(spatial), kernel_size, dilation, padding, stride
+    )
+    if any(margin):
+        # `pad` takes its axes innermost-first, two entries each.
+        flat_padding: list[int] = []
+        for pad in reversed(margin):
+            flat_padding += [pad, pad]
+        tensor = _F.pad(tensor, flat_padding)
+
+    taps, columns = index.shape
+    # The flattened spatial size is spelled out rather than inferred with -1:
+    # an empty batch or an empty channel axis leaves nothing for the inference
+    # to divide by, and the failure would read as a reshape error rather than
+    # as the empty answer it should be.
+    plane = int(_np.prod(padded, dtype=_np.int64))
+    gathered = _F.index_select(
+        tensor.reshape(batch, channels, plane), 2, _positions(index.reshape(-1), tensor)
+    )
+    # `(n, c, taps * blocks)` and `(n, c * taps, blocks)` are the same buffer:
+    # the tap axis is already between the channel and the block.
+    return gathered.reshape(batch, channels * taps, columns)
+
+
+def fold(
+    input: object,
+    output_size: object,
+    kernel_size: object,
+    dilation: object = 1,
+    padding: object = 0,
+    stride: object = 1,
+) -> Tensor:
+    """Sum the sliding blocks of `input` back into one `output_size` plane.
+
+    The inverse of `unfold` in the only sense a lossy map has one: it is its
+    adjoint, so `(unfold(x) * y).sum()` and `(x * fold(y)).sum()` are the same
+    number -- to within the order the two sums are taken in, which is a ULP or
+    so, not to the bit. Positions covered by more than one block are *summed*,
+    which is what makes this the backward of a convolution written as a matrix
+    product rather than a way of putting an image back together. To average
+    instead, fold a matching tensor of ones and divide by it.
+
+    Against the gradient the agreement is exact, and not maintained by hand:
+    the two functions share no code, and `unfold`'s backward is bit-identical
+    to `fold` because the backward of a gather is a scatter-add over the very
+    positions the gather read.
+
+    `output_size` is the spatial shape to fold into, before padding is removed.
+    The remaining arguments mean what they mean in `unfold`, and must be the
+    ones that produced the input.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() != 3:
+        raise ValueError(
+            "fold expects a three-dimensional input of (batch, channels * taps, "
+            f"blocks), got {tensor.ndim()} dimensions"
+        )
+    batch, packed, columns = [int(size) for size in tensor.shape]
+    rank = _sliding_rank(output_size, kernel_size, stride, padding, dilation)
+    spatial = _sliding_argument(output_size, "output_size", rank, 0, "fold")
+    _kernel, margin, padded, index = _sliding_geometry(
+        "fold", spatial, kernel_size, dilation, padding, stride
+    )
+
+    taps, expected = index.shape
+    if packed % taps:
+        raise ValueError(
+            f"fold needs the packed channel count ({packed}) to divide by the "
+            f"number of kernel taps ({taps})"
+        )
+    if columns != expected:
+        raise ValueError(
+            f"fold expects {expected} block(s) for an output of {spatial} under "
+            f"this geometry, got {columns}"
+        )
+    channels = packed // taps
+
+    # The map is the same for every image and every channel, so it is expanded
+    # rather than tiled: materialising one copy per (batch, channel) would cost
+    # more memory than the data being folded.
+    positions = broadcast_to(
+        _positions(index.reshape(1, 1, -1), tensor), (batch, channels, taps * columns)
+    )
+    target = Tensor.zeros(
+        [batch, channels, int(_np.prod(padded, dtype=_np.int64))],
+        dtype=tensor.dtype,
+        device=_C.Device(tensor.device),
+    )
+    summed = _F.scatter_add(
+        target, 2, positions, tensor.reshape(batch, channels, taps * columns)
+    )
+    folded = summed.reshape([batch, channels, *padded])
+    for axis, (pad, size) in enumerate(zip(margin, spatial)):
+        if pad:
+            folded = _F.narrow(folded, 2 + axis, pad, size)
+    return folded
+
+
 _NN_EXTRAS = (
+    "fold",
     "gumbel_softmax",
     "nll_loss",
     "pixel_shuffle",
     "pixel_unshuffle",
     "prelu",
+    "unfold",
 )

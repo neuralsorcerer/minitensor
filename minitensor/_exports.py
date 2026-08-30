@@ -343,6 +343,11 @@ _FUNCTIONAL_ONLY = (
     "gumbel_softmax",
     "pixel_shuffle",
     "pixel_unshuffle",
+    # Also layer-shaped: both take a convolution's geometry, and `unfold` in
+    # particular is not the sliding-window view a bare `mt.unfold` would be
+    # read as, so keeping it namespaced is what stops the two being confused.
+    "unfold",
+    "fold",
     # Gradient utilities. `nn` is the conventional place to look for these,
     # so they stay under `mt.nn` rather than becoming `mt.clip_grad_norm_`.
     "clip_grad_norm_",
