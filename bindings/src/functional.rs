@@ -519,6 +519,7 @@ unary_forwarders!(
     erf => "Element-wise error function.",
     erfc => "Element-wise complementary error function, `1 - erf(x)`, accurate in the tails where that subtraction would cancel.",
     erfinv => "Element-wise inverse error function on `[-1, 1]`, infinite at the endpoints and NaN outside them.",
+    erfcx => "`exp(x**2) * erfc(x)`, which stays finite where `erfc` has underflowed.",
     exp => "Element-wise `e ** x`.",
     exp2 => "Element-wise `2 ** x`, from the hardware's base-2 exponential rather than `exp(x * ln 2)`.",
     expm1 => "Element-wise `exp(x) - 1`, accurate for small `x` where the subtraction would cancel.",
@@ -2106,6 +2107,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(celu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardsigmoid, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardswish, parent)?)?;
+    parent.add_function(wrap_pyfunction!(erfcx, parent)?)?;
     parent.add_function(wrap_pyfunction!(i0, parent)?)?;
     parent.add_function(wrap_pyfunction!(i1, parent)?)?;
     parent.add_function(wrap_pyfunction!(i0e, parent)?)?;

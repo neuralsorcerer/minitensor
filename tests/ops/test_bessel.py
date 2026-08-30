@@ -90,7 +90,9 @@ def test_the_values_at_the_origin():
 def test_the_zeroth_is_even_and_the_first_is_odd():
     positive = [0.3, 2.0, 17.0, 45.0]
     negative = [-value for value in positive]
-    np.testing.assert_array_equal(F.i0(_t(positive)).numpy(), F.i0(_t(negative)).numpy())
+    np.testing.assert_array_equal(
+        F.i0(_t(positive)).numpy(), F.i0(_t(negative)).numpy()
+    )
     np.testing.assert_array_equal(
         F.i1(_t(positive)).numpy(), -F.i1(_t(negative)).numpy()
     )

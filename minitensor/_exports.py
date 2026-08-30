@@ -226,6 +226,7 @@ _FUNCTIONAL_FORWARDERS = (
     "i1",
     "i0e",
     "i1e",
+    "erfcx",
     "logit",
     "logaddexp",
     "cosine_similarity",

@@ -26,6 +26,7 @@ use crate::{
     },
     tensor::Tensor,
 };
+use libm::erfc;
 use statrs::function::{
     erf::erf_inv,
     gamma::{digamma as digamma_scalar, ln_gamma},
@@ -577,6 +578,69 @@ pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
     unary_unit(tensor, "i1e", I1E, I1E_D, [0.0; 2])
 }
 
+// --- erfcx ------------------------------------------------------------------
+
+/// Where `exp(x^2) erfc(x)` gives way to the asymptotic series.
+///
+/// Below it the product is exact, because `erfc` is a dedicated routine rather
+/// than `1 - erf` and keeps the tail. Above about 26.6 the product cannot be
+/// formed at all -- `exp(x^2)` overflows while `erfc(x)` underflows, and their
+/// ratio is a perfectly ordinary number that `inf * 0` does not reach. Eight is
+/// where the asymptotic series is already exact, so the switch happens long
+/// before the product is in any trouble.
+const ERFCX_CROSSOVER: f64 = 8.0;
+
+/// How many terms of that series to take, chosen for the crossover.
+///
+/// Fixed rather than stopped where the terms turn, for the reason
+/// [`BESSEL_ASYMPTOTIC_TERMS`] is fixed. Sixteen already reaches 2e-16 at the
+/// crossover and no count above that improves on it; twenty is the same cost
+/// with margin.
+const ERFCX_ASYMPTOTIC_TERMS: i32 = 20;
+
+/// `exp(x^2) erfc(x)`, the scaled complementary error function.
+fn erfcx_scalar(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        // `erfcx(-x) = 2 exp(x^2) - erfcx(x)`, which recurses exactly once and
+        // overflows below about -27 -- where the true value does too.
+        return 2.0 * (x * x).exp() - erfcx_scalar(-x);
+    }
+    if x < ERFCX_CROSSOVER {
+        return (x * x).exp() * erfc(x);
+    }
+
+    // `1/(x sqrt(pi)) sum_k (-1)^k (2k-1)!! / (2 x^2)^k`.
+    let mut total = 1.0;
+    let mut term = 1.0;
+    let denominator = 2.0 * x * x;
+    for k in 1..=ERFCX_ASYMPTOTIC_TERMS {
+        term *= -(2.0 * k as f64 - 1.0) / denominator;
+        total += term;
+    }
+    total / (x * PI.sqrt())
+}
+
+wide_kernel!(
+    /// `exp(x^2) erfc(x)`, which stays finite where `erfc` has underflowed.
+    ERFCX, |x, _p| erfcx_scalar(x)
+);
+wide_grad_kernel!(
+    /// `d/dx erfcx(x) = 2 x erfcx(x) - 2/sqrt(pi)`.
+    ///
+    /// From differentiating the product: the `exp(x^2)` contributes the first
+    /// term and `erfc` the second, and the second is a constant because
+    /// `erfc'(x) = -2/sqrt(pi) exp(-x^2)` cancels the scaling exactly.
+    ERFCX_D, |x, g, _p| g * (2.0 * x * erfcx_scalar(x) - 2.0 / PI.sqrt())
+);
+
+/// `erfcx(input)`, `exp(x**2) erfc(x)`.
+pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
+    unary_unit(tensor, "erfcx", ERFCX, ERFCX_D, [0.0; 2])
+}
+
 // --- erfinv ----------------------------------------------------------------
 
 wide_kernel!(
@@ -899,6 +963,72 @@ mod tests {
                 "i1e at {x}"
             );
         }
+    }
+
+    #[test]
+    fn erfcx_matches_the_product_it_is_named_for_where_the_product_exists() {
+        for &x in &[
+            0.0_f64, 1e-8, 0.1, 0.5, 1.0, 3.0, 7.0, 7.999, -0.5, -2.0, -5.0, -20.0,
+        ] {
+            let product = (x * x).exp() * erfc(x);
+            assert!(
+                (erfcx_scalar(x) - product).abs() <= 1e-14 * product.abs(),
+                "at {x}: {} against {product}",
+                erfcx_scalar(x)
+            );
+        }
+    }
+
+    #[test]
+    fn erfcx_is_finite_where_the_product_cannot_be_formed() {
+        // `erfc(30)` has underflowed to zero and `exp(900)` is infinite, so the
+        // product is `inf * 0`; the answer is 0.0188.
+        assert_eq!(erfc(30.0), 0.0);
+        assert!((30.0_f64 * 30.0).exp().is_infinite());
+        let value = erfcx_scalar(30.0);
+        assert!((value - 0.018_795_888_861_416_76).abs() < 1e-15);
+        // And it keeps going: `1/(x sqrt(pi))` is what it approaches.
+        for &x in &[100.0_f64, 1e4, 1e100] {
+            let limit = 1.0 / (x * PI.sqrt());
+            assert!((erfcx_scalar(x) - limit).abs() <= 1e-3 * limit, "at {x}");
+        }
+    }
+
+    #[test]
+    fn erfcx_agrees_across_its_own_crossover() {
+        let product = (ERFCX_CROSSOVER * ERFCX_CROSSOVER).exp() * erfc(ERFCX_CROSSOVER);
+        // The asymptotic branch, reached by asking for the crossover exactly.
+        let asymptotic = erfcx_scalar(ERFCX_CROSSOVER);
+        assert!(
+            (asymptotic - product).abs() <= 1e-14 * product,
+            "{asymptotic} against {product}"
+        );
+    }
+
+    #[test]
+    fn erfcx_overflows_only_where_its_value_does() {
+        // `erfcx(-x)` grows like `2 exp(x^2)`, which passes the top of a double
+        // a little past -26.6.
+        assert!(erfcx_scalar(-26.0).is_finite());
+        assert!(erfcx_scalar(-30.0).is_infinite());
+        assert!(erfcx_scalar(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn erfcx_differentiates_to_its_own_closed_form() {
+        let values = [0.0, 0.5, 3.0, 8.5, 20.0, -2.0];
+        let analytic = gradient(erfcx, &values);
+        let expected: Vec<f64> = values
+            .iter()
+            .map(|&v| 2.0 * v * erfcx_scalar(v) - 2.0 / PI.sqrt())
+            .collect();
+        assert_close(&analytic, &expected, 1e-14, "erfcx gradient");
+        assert_close(
+            &analytic,
+            &numeric_gradient(erfcx, &values, 1e-6),
+            1e-6,
+            "against central differences",
+        );
     }
 
     #[test]

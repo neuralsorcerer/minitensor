@@ -1261,6 +1261,13 @@ impl Tensor {
         i1e(self)
     }
 
+    /// `exp(x**2)` times `erfc`
+    #[inline(always)]
+    pub fn erfcx(&self) -> Result<Self> {
+        use crate::ops::special::erfcx;
+        erfcx(self)
+    }
+
     /// Inverse of `sigmoid`, optionally clamping the input away from 0 and 1
     #[inline(always)]
     pub fn logit(&self, eps: Option<f64>) -> Result<Self> {

@@ -1425,6 +1425,13 @@ assert row_std.shape == (2, 3)
   Fixed rather than stopped where the terms turn, which is the usual rule and
   makes the truncation depend on the last bit of the argument — two inputs a
   billionth apart would then differ in the tenth digit.
+- `erfcx(input)` — `exp(x**2) erfc(x)`. `erfc` underflows to zero a little past
+  26 and `exp(x**2)` overflows a little past 26.6, so above there the product is
+  `inf * 0` — while the value it reaches for is ordinary: `erfcx(30)` is
+  `0.0188` and `erfcx(1e100)` is `5.6e-101`. Every Gaussian tail computation
+  that divides one by another needs it, a Mills ratio being the plainest.
+  Its derivative is `2 x erfcx(x) - 2/sqrt(pi)`, where the constant is constant
+  because `erfc`'s own derivative cancels the scaling exactly.
 - `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
   With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
   answer for a probability that has rounded to 0 or 1 and flattens the gradient
@@ -1672,7 +1679,7 @@ add, sub, mul, div, neg, absolute, subtract, multiply, divide, true_divide,
 negative, concat, greater, greater_equal, less, less_equal, not_equal,
 
 # Special functions
-erfinv, sinc, lgamma, digamma, polygamma, logit, i0, i1, i0e, i1e,
+erfinv, erfcx, sinc, lgamma, digamma, polygamma, logit, i0, i1, i0e, i1e,
 
 # Trigonometry and hyperbolics
 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,

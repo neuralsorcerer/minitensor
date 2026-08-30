@@ -161,6 +161,12 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// `exp(x**2) * erfc(x)`, which stays finite where `erfc` has underflowed.
+    pub fn erfcx(&self) -> PyResult<Self> {
+        let result = self.inner.erfcx().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;

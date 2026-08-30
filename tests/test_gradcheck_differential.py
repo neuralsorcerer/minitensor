@@ -320,6 +320,7 @@ _GRADCHECK_OPS = [
     ("erf", lambda t: t.erf(), _ANY),
     ("erfc", lambda t: t.erfc(), _ANY),
     ("erfinv", lambda t: t.erfinv(), _UNIT),
+    ("erfcx", lambda t: t.erfcx(), _ANY),
     ("exp2", lambda t: t.exp2(), _ANY),
     ("sinc", lambda t: t.sinc(), _ANY),
     ("lgamma", lambda t: t.lgamma(), _POS),
