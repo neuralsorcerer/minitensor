@@ -164,9 +164,7 @@ def test_a_high_order_at_one_is_a_factorial_times_a_zeta(order):
 
 
 @pytest.mark.parametrize("order,argument", [(40, 1e4), (100, 1e4), (169, 1e3)])
-def test_a_high_order_at_a_large_argument_survives_the_scales_involved(
-    order, argument
-):
+def test_a_high_order_at_a_large_argument_survives_the_scales_involved(order, argument):
     """Where `n!` overflows one way and `x ** -(n + 1)` underflows the other.
 
     At order 100 and `x = 1e4` the answer is `9e-245` -- an ordinary double --
@@ -229,9 +227,7 @@ def test_the_derivative_is_the_next_order(order):
         np.ascontiguousarray(values), dtype="float64", requires_grad=True
     )
     F.polygamma(order, tracked).sum().backward()
-    np.testing.assert_allclose(
-        tracked.grad.numpy(), _at(order + 1, values), rtol=1e-13
-    )
+    np.testing.assert_allclose(tracked.grad.numpy(), _at(order + 1, values), rtol=1e-13)
     mt.clear_autograd_graph()
 
 

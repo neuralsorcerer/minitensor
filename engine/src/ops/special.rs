@@ -412,6 +412,171 @@ pub fn polygamma(order: i64, tensor: &Tensor) -> Result<Tensor> {
     )
 }
 
+// --- the modified Bessel functions of the first kind ------------------------
+
+/// Where the power series gives way to the asymptotic one.
+///
+/// The power series converges everywhere and its terms are all positive, so
+/// nothing cancels; what grows is the number of them, roughly with the
+/// argument -- forty-five at thirty, which is nothing. The asymptotic series
+/// diverges and is only worth having once it gets close before it turns. Thirty
+/// is where a fixed sixteen terms of it reach 4e-16 for both orders and stay
+/// there for every larger argument, which is what makes the count fixed.
+const BESSEL_CROSSOVER: f64 = 30.0;
+
+/// How many terms of the asymptotic series to take, chosen for the crossover.
+///
+/// A fixed count rather than "stop at the smallest term", which is the usual
+/// rule and is the wrong one here: where two consecutive terms are nearly equal
+/// the stopping point turns on the last bit of the argument, and two arguments
+/// a billionth apart come back with answers that differ in the tenth digit. The
+/// series is a fixed cost either way, and this way the answer is a continuous
+/// function of its input.
+const BESSEL_ASYMPTOTIC_TERMS: i32 = 16;
+
+/// `exp(-t) I_order(t)` by the power series, for a non-negative `t`.
+///
+/// `I_v(t) = sum_k (t/2)^(2k+v) / (k! (k+v)!)`, scaled at the end. The scaling
+/// is what the `e`-suffixed functions want and what keeps the others from
+/// overflowing before their own result does.
+fn scaled_bessel_series(order: u32, t: f64) -> f64 {
+    let half = t / 2.0;
+    let mut term = half.powi(order as i32) / (1..=order).map(|k| k as f64).product::<f64>();
+    let mut total = term;
+    let mut k = 1.0;
+    while term > 1e-18 * total {
+        term *= half * half / (k * (k + order as f64));
+        total += term;
+        k += 1.0;
+    }
+    total * (-t).exp()
+}
+
+/// `exp(-t) I_order(t)` by the asymptotic series, for a `t` above the
+/// crossover.
+///
+/// `1/sqrt(2 pi t) sum_k (-1)^k a_k / t^k`, with
+/// `a_k = a_(k-1) (4 v^2 - (2k-1)^2) / (8k)`.
+fn scaled_bessel_asymptotic(order: u32, t: f64) -> f64 {
+    let mu = 4.0 * (order as f64) * (order as f64);
+    let mut total = 1.0;
+    let mut coefficient = 1.0;
+    let mut sign = -1.0;
+    let mut power = 1.0;
+    for k in 1..=BESSEL_ASYMPTOTIC_TERMS {
+        let step = 2.0 * k as f64 - 1.0;
+        coefficient *= (mu - step * step) / (8.0 * k as f64);
+        power *= t;
+        total += sign * coefficient / power;
+        sign = -sign;
+    }
+    total / (2.0 * PI * t).sqrt()
+}
+
+/// `exp(-|x|) I_0(x)`. Even, and bounded by one.
+fn i0e_scalar(x: f64) -> f64 {
+    let t = x.abs();
+    if t < BESSEL_CROSSOVER {
+        scaled_bessel_series(0, t)
+    } else {
+        scaled_bessel_asymptotic(0, t)
+    }
+}
+
+/// `exp(-|x|) I_1(x)`. Odd, which the sign of `x` carries.
+fn i1e_scalar(x: f64) -> f64 {
+    let t = x.abs();
+    let magnitude = if t < BESSEL_CROSSOVER {
+        scaled_bessel_series(1, t)
+    } else {
+        scaled_bessel_asymptotic(1, t)
+    };
+    if x < 0.0 { -magnitude } else { magnitude }
+}
+
+/// `exp(-|x|) I_1(x) / x`, which is `1/2` at the origin where the quotient is
+/// not.
+///
+/// Both gradients below need it there, and dividing would give `0/0`. Taking
+/// the `t` out of the series instead leaves a series in `t^2` that starts at
+/// `1/2` and is as accurate at zero as anywhere else.
+fn scaled_i1_over_x(x: f64) -> f64 {
+    let t = x.abs();
+    if t >= BESSEL_CROSSOVER {
+        return scaled_bessel_asymptotic(1, t) / t;
+    }
+    let quarter = t * t / 4.0;
+    let mut term = 0.5;
+    let mut total = term;
+    let mut k = 1.0;
+    while term > 1e-18 * total {
+        term *= quarter / (k * (k + 1.0));
+        total += term;
+        k += 1.0;
+    }
+    total * (-t).exp()
+}
+
+/// The sign of `x`, and zero at zero -- which `f64::signum` is not.
+fn direction(x: f64) -> f64 {
+    if x == 0.0 { 0.0 } else { x.signum() }
+}
+
+wide_kernel!(
+    /// `I_0(x)`, the modified Bessel function of the first kind, order zero.
+    I0, |x, _p| (x.abs()).exp() * i0e_scalar(x)
+);
+wide_grad_kernel!(
+    /// `d/dx I_0(x) = I_1(x)`.
+    I0_D, |x, g, _p| g * (x.abs()).exp() * i1e_scalar(x)
+);
+wide_kernel!(
+    /// `I_1(x)`, the modified Bessel function of the first kind, order one.
+    I1, |x, _p| (x.abs()).exp() * i1e_scalar(x)
+);
+wide_grad_kernel!(
+    /// `d/dx I_1(x) = I_0(x) - I_1(x) / x`, and `1/2` at the origin.
+    I1_D, |x, g, _p| g * (x.abs()).exp() * (i0e_scalar(x) - scaled_i1_over_x(x))
+);
+wide_kernel!(
+    /// `exp(-|x|) I_0(x)`, which stays under one where `I_0` overflows.
+    I0E, |x, _p| i0e_scalar(x)
+);
+wide_grad_kernel!(
+    /// `d/dx [exp(-|x|) I_0(x)] = i1e(x) - sign(x) i0e(x)`.
+    I0E_D, |x, g, _p| g * (i1e_scalar(x) - direction(x) * i0e_scalar(x))
+);
+wide_kernel!(
+    /// `exp(-|x|) I_1(x)`.
+    I1E, |x, _p| i1e_scalar(x)
+);
+wide_grad_kernel!(
+    /// `d/dx [exp(-|x|) I_1(x)] = i0e(x) - i1e(x)/x - sign(x) i1e(x)`.
+    I1E_D, |x, g, _p| {
+        g * (i0e_scalar(x) - scaled_i1_over_x(x) - direction(x) * i1e_scalar(x))
+    }
+);
+
+/// `i0(input)`, the modified Bessel function of the first kind, order zero.
+pub fn i0(tensor: &Tensor) -> Result<Tensor> {
+    unary_unit(tensor, "i0", I0, I0_D, [0.0; 2])
+}
+
+/// `i1(input)`, the modified Bessel function of the first kind, order one.
+pub fn i1(tensor: &Tensor) -> Result<Tensor> {
+    unary_unit(tensor, "i1", I1, I1_D, [0.0; 2])
+}
+
+/// `i0e(input)`, `exp(-|x|) i0(x)`.
+pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
+    unary_unit(tensor, "i0e", I0E, I0E_D, [0.0; 2])
+}
+
+/// `i1e(input)`, `exp(-|x|) i1(x)`.
+pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
+    unary_unit(tensor, "i1e", I1E, I1E_D, [0.0; 2])
+}
+
 // --- erfinv ----------------------------------------------------------------
 
 wide_kernel!(
@@ -687,6 +852,120 @@ mod tests {
         assert_eq!(trigamma(0.0), f64::INFINITY);
         assert_eq!(trigamma(-3.0), f64::INFINITY);
         assert!(trigamma(f64::NAN).is_nan());
+    }
+
+    /// `I_v(t)` by its defining series in extended range, for a reference the
+    /// implementation shares no code with.
+    fn bessel_reference(order: u32, t: f64) -> f64 {
+        let half = t / 2.0;
+        let mut term = half.powi(order as i32) / (1..=order).map(|k| k as f64).product::<f64>();
+        let mut total = term;
+        for k in 1..4000 {
+            term *= half * half / (k as f64 * (k as f64 + order as f64));
+            total += term;
+            if term <= 1e-19 * total {
+                break;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn the_bessel_functions_match_their_series_on_both_sides_of_the_crossover() {
+        for &x in &[
+            0.0,
+            1e-8,
+            0.1,
+            1.0,
+            5.0,
+            29.9,
+            BESSEL_CROSSOVER,
+            30.1,
+            50.0,
+            100.0,
+            -3.0,
+            -40.0,
+        ] {
+            let t = x.abs();
+            let scale = (-t).exp();
+            let (zero, one) = (bessel_reference(0, t), bessel_reference(1, t));
+            let sign = if x < 0.0 { -1.0 } else { 1.0 };
+            assert!(
+                (i0e_scalar(x) - zero * scale).abs() <= 1e-14 * (zero * scale),
+                "i0e at {x}"
+            );
+            assert!(
+                (i1e_scalar(x) - sign * one * scale).abs() <= 1e-14 * (one * scale).max(1e-300),
+                "i1e at {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_series_agree_where_they_meet() {
+        // Evaluated at the crossover itself rather than either side of it: the
+        // two are different mathematics and have to give the same answer there,
+        // and comparing points a whisker apart would measure the function's own
+        // slope instead -- which at thirty is enough to swamp the agreement.
+        for order in [0_u32, 1] {
+            let series = scaled_bessel_series(order, BESSEL_CROSSOVER);
+            let asymptotic = scaled_bessel_asymptotic(order, BESSEL_CROSSOVER);
+            assert!(
+                (series - asymptotic).abs() <= 1e-14 * series.abs(),
+                "order {order}: series {series:?} against asymptotic {asymptotic:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_asymptotic_series_takes_a_fixed_number_of_terms() {
+        // Which is the point of choosing one: the answer must not depend on
+        // where a data-dependent stopping rule happened to stop. Two arguments
+        // a billionth apart differ by the function's slope and nothing else.
+        let slope = i1e_scalar(BESSEL_CROSSOVER) - i0e_scalar(BESSEL_CROSSOVER);
+        let below = i0e_scalar(BESSEL_CROSSOVER + 1e-9);
+        let above = i0e_scalar(BESSEL_CROSSOVER + 3e-9);
+        assert!(
+            ((above - below) - 2e-9 * slope).abs() <= 1e-16,
+            "{below:?} to {above:?} against a slope of {slope:?}"
+        );
+    }
+
+    #[test]
+    fn the_scaled_bessels_stay_finite_where_the_plain_ones_overflow() {
+        // `i0(750)` is past the top of a double and `i0e(750)` is 0.0146.
+        assert!(i0(&f64_tensor(vec![750.0])).is_ok());
+        assert!(wide(&i0(&f64_tensor(vec![750.0])).unwrap())[0].is_infinite());
+        let scaled = wide(&i0e(&f64_tensor(vec![750.0])).unwrap())[0];
+        assert!(scaled.is_finite() && scaled > 0.0);
+        // `1/sqrt(2 pi t)` is what it approaches, from above.
+        let limit = 1.0 / (2.0 * PI * 750.0).sqrt();
+        assert!(scaled > limit && scaled < limit * 1.001);
+    }
+
+    #[test]
+    fn the_bessel_gradients_match_central_differences() {
+        let values = [0.0, 0.3, 1.0, 5.0, 20.0, -2.0, -25.0];
+        for (name, op) in [
+            ("i0", i0 as fn(&Tensor) -> Result<Tensor>),
+            ("i1", i1 as fn(&Tensor) -> Result<Tensor>),
+            ("i0e", i0e as fn(&Tensor) -> Result<Tensor>),
+            ("i1e", i1e as fn(&Tensor) -> Result<Tensor>),
+        ] {
+            assert_close(
+                &gradient(op, &values),
+                &numeric_gradient(op, &values, 1e-6),
+                1e-6,
+                name,
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_bessel_is_the_derivative_of_the_zeroth() {
+        let values = [0.2, 1.5, 6.0, 25.0];
+        let expected = wide(&i1(&f64_tensor(values.to_vec())).unwrap());
+        assert_close(&gradient(i0, &values), &expected, 1e-14, "i0' == i1");
     }
 
     #[test]

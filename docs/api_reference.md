@@ -1411,6 +1411,20 @@ assert row_std.shape == (2, 3)
   these orders do. `scipy` stops in the same place. Orders 0 and 1 keep the
   whole line. The order itself must be at most 169, which is where the
   factorial in the derivative stops fitting a double.
+- `i0(input)`, `i1(input)`, `i0e(input)`, `i1e(input)` — the modified Bessel
+  functions of the first kind, orders zero and one, and each scaled by
+  `exp(-|x|)`. `i0` and `i1` grow like `exp(x)` and overflow a double a little
+  past 713; the things they are wanted for do not. A Kaiser window is a ratio of
+  two `i0`s and a von Mises density divides by one, and in both the
+  exponentials cancel — the scaled forms are that cancellation done before it
+  can overflow rather than after. `i0` differentiates to `i1`, and `i1` to
+  `i0 - i1/x`, which is `1/2` at the origin where the quotient is not.
+
+  A power series below thirty, where the terms are all positive so nothing
+  cancels, and an asymptotic series above it taken to a fixed sixteen terms.
+  Fixed rather than stopped where the terms turn, which is the usual rule and
+  makes the truncation depend on the last bit of the argument — two inputs a
+  billionth apart would then differ in the tenth digit.
 - `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
   With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
   answer for a probability that has rounded to 0 or 1 and flattens the gradient
@@ -1658,7 +1672,7 @@ add, sub, mul, div, neg, absolute, subtract, multiply, divide, true_divide,
 negative, concat, greater, greater_equal, less, less_equal, not_equal,
 
 # Special functions
-erfinv, sinc, lgamma, digamma, polygamma, logit,
+erfinv, sinc, lgamma, digamma, polygamma, logit, i0, i1, i0e, i1e,
 
 # Trigonometry and hyperbolics
 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,

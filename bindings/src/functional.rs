@@ -526,6 +526,10 @@ unary_forwarders!(
     frac => "The fractional part of each element, `x - trunc(x)`, carrying its sign.",
     hardsigmoid => "`sigmoid` replaced by three straight lines: 0 below -3, 1 above 3, `x/6 + 1/2` between.",
     hardswish => "`x * hardsigmoid(x)`: `silu` with the exponential replaced by three straight lines.",
+    i0 => "Modified Bessel function of the first kind, order zero.",
+    i1 => "Modified Bessel function of the first kind, order one.",
+    i0e => "`exp(-|x|) * i0(x)`, which stays under one where `i0` overflows.",
+    i1e => "`exp(-|x|) * i1(x)`.",
     digamma => "Element-wise digamma, the derivative of `lgamma`.",
     lgamma => "Element-wise `log |gamma(x)|`, which stays finite where `gamma` itself overflows.",
     log => "Element-wise natural logarithm. Zero gives `-inf`, negatives give NaN.",
@@ -2102,6 +2106,10 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(celu, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardsigmoid, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardswish, parent)?)?;
+    parent.add_function(wrap_pyfunction!(i0, parent)?)?;
+    parent.add_function(wrap_pyfunction!(i1, parent)?)?;
+    parent.add_function(wrap_pyfunction!(i0e, parent)?)?;
+    parent.add_function(wrap_pyfunction!(i1e, parent)?)?;
     parent.add_function(wrap_pyfunction!(hardtanh, parent)?)?;
     parent.add_function(wrap_pyfunction!(logsigmoid, parent)?)?;
     parent.add_function(wrap_pyfunction!(mish, parent)?)?;

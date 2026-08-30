@@ -1233,6 +1233,34 @@ impl Tensor {
         polygamma(order, self)
     }
 
+    /// Modified Bessel function of the first kind, order zero
+    #[inline(always)]
+    pub fn i0(&self) -> Result<Self> {
+        use crate::ops::special::i0;
+        i0(self)
+    }
+
+    /// Modified Bessel function of the first kind, order one
+    #[inline(always)]
+    pub fn i1(&self) -> Result<Self> {
+        use crate::ops::special::i1;
+        i1(self)
+    }
+
+    /// `exp(-|x|)` times `i0`
+    #[inline(always)]
+    pub fn i0e(&self) -> Result<Self> {
+        use crate::ops::special::i0e;
+        i0e(self)
+    }
+
+    /// `exp(-|x|)` times `i1`
+    #[inline(always)]
+    pub fn i1e(&self) -> Result<Self> {
+        use crate::ops::special::i1e;
+        i1e(self)
+    }
+
     /// Inverse of `sigmoid`, optionally clamping the input away from 0 and 1
     #[inline(always)]
     pub fn logit(&self, eps: Option<f64>) -> Result<Self> {

@@ -137,6 +137,30 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// Modified Bessel function of the first kind, order zero.
+    pub fn i0(&self) -> PyResult<Self> {
+        let result = self.inner.i0().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// Modified Bessel function of the first kind, order one.
+    pub fn i1(&self) -> PyResult<Self> {
+        let result = self.inner.i1().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `exp(-|x|) * i0(x)`, which stays under one where `i0` overflows.
+    pub fn i0e(&self) -> PyResult<Self> {
+        let result = self.inner.i0e().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// `exp(-|x|) * i1(x)`.
+    pub fn i1e(&self) -> PyResult<Self> {
+        let result = self.inner.i1e().map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;
