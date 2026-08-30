@@ -1233,6 +1233,46 @@ assert row_std.shape == (2, 3)
 - `eq`, `ne`, `lt`, `le`, `gt`, `ge` — free-function forms of the comparison
   methods, returning bool tensors
 - `floor_divide`, `remainder`, `fmod`
+- `add(input, other, alpha=1)`, `sub(...)`, `mul`, `div(input, other, rounding_mode=None)`,
+  `neg` — the operators as free functions, and as methods. `a + b` always
+  worked; `mt.add(a, b)` and `a.add(b)` are what most code that moves between
+  array libraries actually writes. `alpha` scales the second operand,
+  `rounding_mode` picks `"floor"` or `"trunc"` instead of the exact quotient.
+- `square(input)` — a product, not `pow(input, 2)`: the general power goes
+  through `exp(2 log x)` for a non-integral exponent and is both slower and less
+  exact than a multiplication, which is exact for every input.
+- `lerp(input, end, weight)` — `input + weight * (end - input)`, written as a
+  step from `input` so `weight = 0` and `weight = 1` return the endpoints
+  exactly rather than approximately.
+- `addcmul(input, t1, t2, value=1)`, `addcdiv(...)` — `input + value * t1 * t2`
+  and the same with a division.
+- `deg2rad`, `rad2deg` — a multiplication by `pi/180` and its inverse.
+- `float_power(input, exponent)` — the power computed in float64 whatever the
+  inputs are, since an integer power overflows silently once the answer leaves
+  the dtype's range.
+- `logaddexp2(input, other)` — the base-2 `logaddexp`, computed by rescaling it
+  rather than by a second stable implementation of the same shift-and-add.
+- `ldexp(input, other)` — `input * 2**other`. Computed as the product, so an
+  `other` large enough to overflow `2**other` gives infinity even where the
+  product would have been finite; the exponent itself is exact.
+- `fmax(input, other)`, `fmin(...)` — the extrema *ignoring* NaN, where
+  `maximum`/`minimum` propagate it. NaN survives only where both operands are
+  NaN and there is genuinely nothing to compare.
+- `isposinf`, `isneginf` — the two halves of `isinf`.
+- `isreal` — true everywhere, NaN included: every dtype here is real. The name
+  exists because code written against NumPy asks, and a missing attribute is a
+  worse answer than the correct one.
+- `signbit(input)` — whether the sign *bit* is set, which is not `input < 0`:
+  negative zero is not less than zero but carries the bit, and telling the two
+  zeros apart is the only reason to ask. Reads the bit through `copysign`.
+- `sgn` — the same function as `sign` for real numbers, under the name used
+  where a complex version would differ.
+- Second spellings, one object under two names: `absolute` (`abs`), `subtract`,
+  `multiply`, `divide` and `true_divide` (`div`), `negative` (`neg`), `concat`
+  (`cat`), `greater` (`gt`), `greater_equal` (`ge`), `less` (`lt`),
+  `less_equal` (`le`), `not_equal` (`ne`). NumPy and PyTorch each settled on a
+  different one for several of these, and code moving between them writes
+  whichever it learned.
 - `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`,
   `bitwise_left_shift`, `bitwise_right_shift`
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
@@ -1492,8 +1532,13 @@ histogram, histc,
 # Elementwise arithmetic and rounding
 abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
 fmod, round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max,
-maximum, minimum, log1p, log2, log10, exp2, expm1, logaddexp, erf, erfc, hypot,
-copysign, xlogy, heaviside, nextafter,
+maximum, minimum, log1p, log2, log10, exp2, expm1, logaddexp, logaddexp2, erf,
+erfc, hypot, copysign, xlogy, heaviside, nextafter, fmax, fmin, square,
+float_power, ldexp, lerp, addcmul, addcdiv, deg2rad, rad2deg, signbit, sgn,
+
+# The operators as free functions, and second spellings of existing names
+add, sub, mul, div, neg, absolute, subtract, multiply, divide, true_divide,
+negative, concat, greater, greater_equal, less, less_equal, not_equal,
 
 # Special functions
 erfinv, sinc, lgamma, digamma, logit,
@@ -1503,7 +1548,7 @@ sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,
 
 # Comparison, bitwise and logic
 eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, cosine_similarity,
-isnan, isinf, isfinite,
+isnan, isinf, isfinite, isposinf, isneginf, isreal,
 nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not,
 bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
 logical_not,

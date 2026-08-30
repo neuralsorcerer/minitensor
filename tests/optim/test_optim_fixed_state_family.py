@@ -46,7 +46,9 @@ def _drive(optimizer, param, grads):
     trajectory = []
     for grad in grads:
         optimizer.zero_grad()
-        (param * mt.Tensor(np.asarray(grad, dtype=np.float64), dtype="float64")).sum().backward()
+        (
+            param * mt.Tensor(np.asarray(grad, dtype=np.float64), dtype="float64")
+        ).sum().backward()
         optimizer.step()
         trajectory.append(param.numpy().copy())
     mt.clear_autograd_graph()
@@ -138,7 +140,9 @@ def test_adamax_accepts_betas_as_a_tuple_or_as_two_arguments():
 
 def test_adamax_reports_itself():
     opt = optim.Adamax([_param([1.0])], lr=0.01)
-    assert repr(opt) == "Adamax(lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)"
+    assert (
+        repr(opt) == "Adamax(lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)"
+    )
 
 
 # --- RAdam ------------------------------------------------------------------
@@ -187,7 +191,9 @@ def test_radam_refuses_a_beta2_of_one():
 
 def test_radam_reports_itself():
     opt = optim.RAdam([_param([1.0])], lr=0.002)
-    assert repr(opt) == "RAdam(lr=0.002, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)"
+    assert (
+        repr(opt) == "RAdam(lr=0.002, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)"
+    )
 
 
 # --- Rprop ------------------------------------------------------------------
@@ -295,9 +301,7 @@ def test_a_reloaded_optimizer_resumes_where_it_left_off(name, build, kwargs):
     fresh.load_state_dict(state)
     _drive(fresh, continued, next_grad)
 
-    np.testing.assert_allclose(
-        continued.numpy(), param.numpy(), rtol=1e-14, atol=1e-15
-    )
+    np.testing.assert_allclose(continued.numpy(), param.numpy(), rtol=1e-14, atol=1e-15)
 
 
 @pytest.mark.parametrize("name,build,kwargs", FAMILY, ids=[f[0] for f in FAMILY])
@@ -311,10 +315,14 @@ def test_the_learning_rate_is_readable_and_writable(name, build, kwargs):
 
 @pytest.mark.parametrize("name,build,kwargs", FAMILY, ids=[f[0] for f in FAMILY])
 def test_an_integer_parameter_is_refused_by_name(name, build, kwargs):
-    param = mt.Tensor(np.array([1, 2], dtype=np.int64), dtype="int64").requires_grad_(True)
+    param = mt.Tensor(np.array([1, 2], dtype=np.int64), dtype="int64").requires_grad_(
+        True
+    )
     opt = build([param], lr=0.1, **kwargs)
     with pytest.raises(Exception, match="floating point"):
-        (param * mt.Tensor(np.array([1, 1], dtype=np.int64), dtype="int64")).sum().backward()
+        (
+            param * mt.Tensor(np.array([1, 1], dtype=np.int64), dtype="int64")
+        ).sum().backward()
         opt.step()
     mt.clear_autograd_graph()
 
