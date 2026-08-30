@@ -26,7 +26,10 @@ use crate::{
     },
     tensor::Tensor,
 };
-use statrs::function::{erf::erf_inv, gamma::digamma as digamma_scalar};
+use statrs::function::{
+    erf::erf_inv,
+    gamma::{digamma as digamma_scalar, ln_gamma},
+};
 use std::f64::consts::{LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
@@ -206,13 +209,95 @@ wide_grad_kernel!(
     DIGAMMA_D, |x, g, _p| g * trigamma(x)
 );
 
-/// `trigamma(x)`, the derivative of [`digamma`] and the only piece of this
-/// family the crate's dependencies do not already have.
+/// The Bernoulli numbers `B_2j` for `j = 1..=7`, which are the coefficients of
+/// the Euler-Maclaurin expansion below and the only constants it needs.
+const BERNOULLI: [f64; 7] = [
+    1.0 / 6.0,
+    -1.0 / 30.0,
+    1.0 / 42.0,
+    -1.0 / 30.0,
+    5.0 / 66.0,
+    -691.0 / 2730.0,
+    7.0 / 6.0,
+];
+
+/// Where the recurrence stops and the expansion below takes over, for a zeta
+/// of order `s`.
 ///
-/// Two identities and one series, which is how every implementation of it
-/// works: reflect the negative half onto the positive one, walk up by the
-/// recurrence until the asymptotic expansion has converged, and evaluate it
-/// there.
+/// Twelve is where the first dropped term falls under 1e-14 of the answer for
+/// the small orders; the higher ones need the argument to lead the order,
+/// because the expansion's terms carry a rising factorial in `s`. Stopping at
+/// six, as some implementations do, leaves a thousand times more error.
+fn expansion_threshold(s: f64) -> f64 {
+    (s + 7.0).max(12.0)
+}
+
+/// `zeta(s, a)` divided by `a^-s`, for an `a` already large enough, by
+/// Euler-Maclaurin.
+///
+/// The expansion is
+/// `a^(1-s)/(s-1) + 1/(2 a^s) + sum_j B_2j/(2j)! (s)_(2j-1) a^-(s+2j-1)`,
+/// where `(s)_m` is the rising factorial. Dividing it by the scale of its
+/// leading term leaves every term of order one, which is the point: at a high
+/// order, `a^-s` underflows long before the answer does, and the factorial in
+/// front of it would have restored the scale had there been anything left to
+/// restore. Kept apart, the two are combined in the exponent instead.
+fn hurwitz_bracket(s: f64, a: f64) -> f64 {
+    let mut total = a / (s - 1.0) + 0.5;
+    let mut rising = s;
+    let mut factorial = 1.0;
+    for (index, bernoulli) in BERNOULLI.iter().enumerate() {
+        let two_j = 2.0 * (index as f64 + 1.0);
+        factorial *= two_j * (two_j - 1.0);
+        total += bernoulli / factorial * rising * a.powf(-(two_j - 1.0));
+        rising *= (s + two_j - 1.0) * (s + two_j);
+    }
+    total
+}
+
+/// `zeta(s, x)` divided by `|x|^-s`, and nothing else.
+///
+/// Everything is measured against the first term, which is the largest one for
+/// a positive argument, so the sum stays near one and the scale lives in the
+/// exponent outside. That is what lets a high order work at all: `n!` sits near
+/// the top of the range and `x^-s` near the bottom, and multiplying them loses
+/// the answer to overflow or underflow on the way to a value that fits.
+fn scaled_zeta(order: u32, x: f64) -> f64 {
+    let exponent = order as i32 + 1;
+    let threshold = expansion_threshold(exponent as f64);
+    let steps = if x < threshold {
+        (threshold - x).ceil() as i64
+    } else {
+        0
+    };
+    let argument = x + steps as f64;
+    let reference = x.abs();
+
+    // `(x + k)^-s / |x|^-s`, which `powi` keeps the sign of when the argument
+    // starts out negative and the recurrence has yet to walk it up.
+    let mut total = 0.0;
+    for step in 0..steps {
+        total += (reference / (x + step as f64)).powi(exponent);
+    }
+    total + (reference / argument).powi(exponent) * hurwitz_bracket(exponent as f64, argument)
+}
+
+/// `polygamma(order, x)` for an order of one or more and an argument that is
+/// neither a pole nor beyond [`RECURRENCE_FLOOR`].
+fn polygamma_series(order: u32, x: f64) -> f64 {
+    let s = order as f64 + 1.0;
+    let sign = if order.is_multiple_of(2) { -1.0 } else { 1.0 };
+    // `n! * |x|^-s` in the exponent rather than as a product, for the reason
+    // `scaled_zeta` divides by `|x|^-s` in the first place.
+    sign * (ln_gamma(s) - s * x.abs().ln()).exp() * scaled_zeta(order, x)
+}
+
+/// `trigamma(x)`, the derivative of [`digamma`].
+///
+/// The negative half is reflected rather than walked, which is what keeps a
+/// large negative argument a single step instead of a million of them:
+/// `trigamma(x) + trigamma(1 - x) = pi^2 / sin^2(pi x)`, and `1 - x` is above
+/// one for every negative `x`, so this recurses exactly once.
 fn trigamma(x: f64) -> f64 {
     if x.is_nan() {
         return f64::NAN;
@@ -223,38 +308,60 @@ fn trigamma(x: f64) -> f64 {
         return f64::INFINITY;
     }
     if x < 0.0 {
-        // `trigamma(x) + trigamma(1 - x) = pi^2 / sin^2(pi x)`, and `1 - x` is
-        // above 1 for every negative `x`, so this recurses exactly once.
         let sine = (PI * x).sin();
         return PI * PI / (sine * sine) - trigamma(1.0 - x);
     }
+    polygamma_series(1, x)
+}
 
-    // `trigamma(x) = trigamma(x + 1) + 1/x^2` walks the argument up to where
-    // the expansion below is worth using. Twelve is where its first dropped
-    // term falls under 1e-14 of the answer; stopping at 6, as some
-    // implementations do, leaves a thousand times more error than that.
-    let mut argument = x;
-    let mut total = 0.0;
-    while argument < 12.0 {
-        total += 1.0 / (argument * argument);
-        argument += 1.0;
+/// The largest order this can carry.
+///
+/// `polygamma` is `(-1)^(n+1) n! zeta(n + 1, x)`, so the factorial has to be
+/// finite -- and the gradient is the next order up, which needs one more.
+/// `170!` is the last that fits a double, so `169` is the last order whose
+/// derivative is still computable.
+pub const POLYGAMMA_MAX_ORDER: u32 = 169;
+
+/// `polygamma(order, x)`, the `order`-th derivative of [`digamma`].
+///
+/// `(-1)^(n+1) n! zeta(n + 1, x)`, with the Hurwitz zeta split the way every
+/// implementation splits it: walk the argument up by the recurrence until the
+/// asymptotic expansion has converged, then evaluate it there.
+///
+/// Orders zero and one come from `digamma` and `trigamma`, which are the same
+/// function with a better route for negative arguments.
+fn polygamma_scalar(order: u32, x: f64) -> f64 {
+    match order {
+        0 => return digamma_scalar(x),
+        1 => return trigamma(x),
+        _ => {}
     }
-
-    // `1/x + 1/(2x^2) + sum B_2n / x^(2n+1)`, factored as `(1/x)(...)` and
-    // evaluated by Horner in `1/x^2`.
-    let inverse_square = 1.0 / (argument * argument);
-    total
-        + (1.0 / argument)
-            * (1.0
-                + 0.5 / argument
-                + inverse_square
-                    * (1.0 / 6.0
-                        + inverse_square
-                            * (-1.0 / 30.0
-                                + inverse_square
-                                    * (1.0 / 42.0
-                                        + inverse_square
-                                            * (-1.0 / 30.0 + inverse_square * (5.0 / 66.0))))))
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    // The sign is the one the limit takes from the right, which is what
+    // `digamma` and `trigamma` already answer at their own poles.
+    let sign = if order.is_multiple_of(2) { -1.0 } else { 1.0 };
+    if x == 0.0 {
+        return sign * f64::INFINITY;
+    }
+    if x < 0.0 {
+        // Above order one the negative half is not computed, and NaN says so
+        // rather than returning digits that are not there. Walking the
+        // recurrence up from a negative argument sums terms that are enormous
+        // beside the answer and alternate in sign: at order six and `x = -10.5`
+        // that already costs eight digits, and by `x = -100.5` there is nothing
+        // left. What avoids it is the reflection formula, and for a general
+        // order that needs the `n`-th derivative of the cotangent -- a
+        // polynomial in `cot(pi x)` whose coefficients overflow well before the
+        // orders here do. `scipy` stops at the same place, for the same reason:
+        // its `zeta(s, q)` is defined for positive `q` only.
+        //
+        // Orders zero and one keep the whole line, because `digamma` and
+        // `trigamma` reach it by routes this one does not have.
+        return f64::NAN;
+    }
+    polygamma_series(order, x)
 }
 
 /// `log |gamma(input)|`, element-wise.
@@ -265,6 +372,44 @@ pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
 /// `digamma(input)`, the derivative of `lgamma`.
 pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
     unary_unit(tensor, "digamma", DIGAMMA, DIGAMMA_D, [0.0; 2])
+}
+
+wide_kernel!(
+    /// `polygamma(order, x)`, with the order carried as a parameter.
+    POLYGAMMA, |x, p| polygamma_scalar(p[0] as u32, x)
+);
+wide_grad_kernel!(
+    /// `d/dx polygamma(n, x) = polygamma(n + 1, x)`.
+    ///
+    /// The derivative of a polygamma is the next one, so the chain rule needs
+    /// no second formula and no finite difference -- which is also why the
+    /// order is capped one below where the factorial stops fitting.
+    POLYGAMMA_D, |x, g, p| g * polygamma_scalar(p[0] as u32 + 1, x)
+);
+
+/// `polygamma(order, input)`, the `order`-th derivative of `digamma`.
+///
+/// Order zero is `digamma` itself and order one is `trigamma`.
+pub fn polygamma(order: i64, tensor: &Tensor) -> Result<Tensor> {
+    if order < 0 {
+        return Err(MinitensorError::invalid_argument(format!(
+            "polygamma takes a non-negative order, got {order}"
+        )));
+    }
+    if order > POLYGAMMA_MAX_ORDER as i64 {
+        return Err(MinitensorError::invalid_argument(format!(
+            "polygamma is defined here up to order {POLYGAMMA_MAX_ORDER}, where the \
+             factorial in its definition and in its derivative both still fit a \
+             double, got {order}"
+        )));
+    }
+    unary_unit(
+        tensor,
+        "polygamma",
+        POLYGAMMA,
+        POLYGAMMA_D,
+        [order as f64, 0.0],
+    )
 }
 
 // --- erfinv ----------------------------------------------------------------
@@ -542,6 +687,101 @@ mod tests {
         assert_eq!(trigamma(0.0), f64::INFINITY);
         assert_eq!(trigamma(-3.0), f64::INFINITY);
         assert!(trigamma(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn polygamma_agrees_with_the_two_orders_that_have_their_own_route() {
+        // Orders 0 and 1 are `digamma` and `trigamma`; the general path has to
+        // be the same function, or the family has a seam in it.
+        for &x in &[0.25_f64, 0.5, 1.0, 2.5, 7.0, 40.0] {
+            assert!((polygamma_scalar(0, x) - digamma_scalar(x)).abs() < 1e-15);
+            assert!((polygamma_scalar(1, x) - trigamma(x)).abs() <= 1e-14 * trigamma(x).abs());
+        }
+    }
+
+    #[test]
+    fn polygamma_matches_its_closed_forms() {
+        // `polygamma(n, 1) = (-1)^(n+1) n! zeta(n + 1)`, and the zeta values at
+        // small integers are known exactly.
+        let zeta_3 = 1.202_056_903_159_594_3;
+        let zeta_4 = std::f64::consts::PI.powi(4) / 90.0;
+        let zeta_5 = 1.036_927_755_143_37;
+        assert!((polygamma_scalar(2, 1.0) - (-2.0 * zeta_3)).abs() < 1e-14);
+        assert!((polygamma_scalar(3, 1.0) - (6.0 * zeta_4)).abs() < 1e-13);
+        assert!((polygamma_scalar(4, 1.0) - (-24.0 * zeta_5)).abs() < 1e-12);
+
+        // The recurrence, which the walk uses and so cannot itself be right by
+        // accident: `polygamma(n, x + 1) = polygamma(n, x) + (-1)^n n! / x^(n+1)`.
+        for order in 2..=6_u32 {
+            let factorial: f64 = (1..=order).map(|k| k as f64).product();
+            let sign = if order.is_multiple_of(2) { 1.0 } else { -1.0 };
+            for &x in &[0.3_f64, 1.7, 5.5, 30.0] {
+                let term = factorial / x.powi(order as i32 + 1);
+                let stepped = polygamma_scalar(order, x + 1.0);
+                let expected = polygamma_scalar(order, x) + sign * term;
+                // The two sides of the recurrence cancel almost entirely for a
+                // small `x`, so the error that matters is measured against what
+                // cancelled rather than against the little that survived.
+                assert!(
+                    (stepped - expected).abs() <= 1e-14 * term.abs().max(stepped.abs()),
+                    "order {order} at {x}: {stepped} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polygamma_takes_the_sign_of_the_limit_from_the_right_at_a_pole() {
+        // Which is what `digamma` and `trigamma` already answer at theirs, and
+        // is the only sign the two sides agree on for an odd order.
+        assert_eq!(polygamma_scalar(2, 0.0), f64::NEG_INFINITY);
+        assert_eq!(polygamma_scalar(3, 0.0), f64::INFINITY);
+        assert_eq!(polygamma_scalar(0, 0.0), f64::NEG_INFINITY);
+        assert_eq!(polygamma_scalar(1, -1.0), f64::INFINITY);
+        assert!(polygamma_scalar(4, f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn above_order_one_the_negative_half_says_nan_rather_than_guessing() {
+        for &x in &[-0.5_f64, -1.0, -10.5, -1.0e6] {
+            assert!(polygamma_scalar(2, x).is_nan(), "at {x}");
+            assert!(polygamma_scalar(7, x).is_nan(), "at {x}");
+        }
+        // Orders zero and one reach the negative half by routes the general one
+        // does not have, and keep it.
+        assert!(trigamma(-1.0e9 + 0.5).is_finite());
+        assert!(polygamma_scalar(1, -0.5).is_finite());
+        assert!(polygamma_scalar(0, -0.5).is_finite());
+        // Zero itself is the pole, not the negative half.
+        assert_eq!(polygamma_scalar(2, 0.0), f64::NEG_INFINITY);
+        assert_eq!(polygamma_scalar(3, 0.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn polygamma_refuses_an_order_it_cannot_carry() {
+        let tensor = f64_tensor(vec![1.0]);
+        assert!(polygamma(-1, &tensor).is_err());
+        assert!(polygamma(POLYGAMMA_MAX_ORDER as i64 + 1, &tensor).is_err());
+        // At the cap both the value and its derivative are still finite.
+        assert!(polygamma_scalar(POLYGAMMA_MAX_ORDER, 1.0).is_finite());
+        assert!(polygamma_scalar(POLYGAMMA_MAX_ORDER + 1, 1.0).is_finite());
+    }
+
+    #[test]
+    fn polygamma_differentiates_to_the_next_order() {
+        fn second(tensor: &Tensor) -> Result<Tensor> {
+            polygamma(2, tensor)
+        }
+        let values = [0.4, 1.0, 2.5, 9.0];
+        let analytic = gradient(second, &values);
+        let expected: Vec<f64> = values.iter().map(|&v| polygamma_scalar(3, v)).collect();
+        assert_close(&analytic, &expected, 1e-14, "polygamma gradient");
+        assert_close(
+            &analytic,
+            &numeric_gradient(second, &values, 1e-6),
+            1e-5,
+            "against central differences",
+        );
     }
 
     #[test]

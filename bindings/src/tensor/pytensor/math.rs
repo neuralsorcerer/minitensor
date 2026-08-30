@@ -131,6 +131,12 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The `order`-th derivative of `digamma`. Order 0 is `digamma` itself and order 1 is the trigamma function.
+    pub fn polygamma(&self, order: i64) -> PyResult<Self> {
+        let result = self.inner.polygamma(order).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise `log(1 + x)`, accurate for small `x` where `log(1 + x)` would cancel.
     pub fn log1p(&self) -> PyResult<Self> {
         let result = self.inner.log1p().map_err(_convert_error)?;

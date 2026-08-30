@@ -1391,6 +1391,26 @@ assert row_std.shape == (2, 3)
   `lgamma` is finite where `gamma` overflows: `gamma(200)` is past the top of
   float64 and `lgamma(200)` is 858. `digamma` differentiates to `trigamma`,
   which the library computes itself.
+- `polygamma(order, input)` — the `order`-th derivative of `digamma`, so order
+  0 is `digamma` and order 1 is `trigamma`; both are computed by their own
+  routes and the general one agrees with them. Its own derivative is the next
+  order, exactly, with no second formula and no finite difference.
+
+  `polygamma(n, x)` is `(-1)^(n+1) n! zeta(n+1, x)`, and the two factors sit at
+  opposite ends of the range: at order 169 the factorial is `4e304` while the
+  zeta at a large argument is far below the smallest double. They are combined
+  as logarithms rather than as a product, which is what makes the high orders
+  work — `polygamma(169, 1)` is `169!`, and `polygamma(169, 1e4)` is a perfectly
+  ordinary small number that forming the product would have lost.
+
+  Orders above 1 take non-negative arguments only, and give NaN below zero.
+  Reaching a positive argument by the recurrence sums terms that are enormous
+  beside the answer and alternate in sign — by order 6 at `x = -100` there is
+  nothing left of it — and the reflection formula that avoids that needs the
+  `n`-th derivative of the cotangent, whose coefficients overflow well before
+  these orders do. `scipy` stops in the same place. Orders 0 and 1 keep the
+  whole line. The order itself must be at most 169, which is where the
+  factorial in the derivative stops fitting a double.
 - `logit(input, eps=None)` — `log(x / (1 - x))`, the inverse of `sigmoid`.
   With `eps` the input is first pulled into `[eps, 1 - eps]`, which bounds the
   answer for a probability that has rounded to 0 or 1 and flattens the gradient
@@ -1638,7 +1658,7 @@ add, sub, mul, div, neg, absolute, subtract, multiply, divide, true_divide,
 negative, concat, greater, greater_equal, less, less_equal, not_equal,
 
 # Special functions
-erfinv, sinc, lgamma, digamma, logit,
+erfinv, sinc, lgamma, digamma, polygamma, logit,
 
 # Trigonometry and hyperbolics
 sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,

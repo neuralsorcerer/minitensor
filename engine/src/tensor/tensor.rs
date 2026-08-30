@@ -1226,6 +1226,13 @@ impl Tensor {
         digamma(self)
     }
 
+    /// The `order`-th derivative of `digamma`
+    #[inline(always)]
+    pub fn polygamma(&self, order: i64) -> Result<Self> {
+        use crate::ops::special::polygamma;
+        polygamma(order, self)
+    }
+
     /// Inverse of `sigmoid`, optionally clamping the input away from 0 and 1
     #[inline(always)]
     pub fn logit(&self, eps: Option<f64>) -> Result<Self> {

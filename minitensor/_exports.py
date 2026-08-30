@@ -221,6 +221,7 @@ _FUNCTIONAL_FORWARDERS = (
     "sinc",
     "lgamma",
     "digamma",
+    "polygamma",
     "logit",
     "logaddexp",
     "cosine_similarity",

@@ -450,6 +450,14 @@ pub fn logit(input: &Bound<PyAny>, eps: Option<f64>) -> PyResult<PyTensor> {
     tensor.logit(eps)
 }
 
+/// The `order`-th derivative of `digamma`. Order 0 is `digamma` itself and order 1 is the trigamma function.
+#[pyfunction]
+#[pyo3(signature = (order, input))]
+pub fn polygamma(order: i64, input: &Bound<PyAny>) -> PyResult<PyTensor> {
+    let tensor = borrow_tensor(input)?;
+    tensor.polygamma(order)
+}
+
 /// Limit every element to `[min, max]`. Either bound may be omitted.
 #[pyfunction]
 #[pyo3(signature = (input, min=None, max=None))]
@@ -2120,6 +2128,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(sinc, parent)?)?;
     parent.add_function(wrap_pyfunction!(lgamma, parent)?)?;
     parent.add_function(wrap_pyfunction!(digamma, parent)?)?;
+    parent.add_function(wrap_pyfunction!(polygamma, parent)?)?;
     parent.add_function(wrap_pyfunction!(logit, parent)?)?;
     parent.add_function(wrap_pyfunction!(log1p, parent)?)?;
     parent.add_function(wrap_pyfunction!(expm1, parent)?)?;
