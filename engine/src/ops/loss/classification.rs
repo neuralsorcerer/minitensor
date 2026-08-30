@@ -492,29 +492,12 @@ pub(crate) fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::Device;
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
+    use crate::test_support::tensor_of;
 
     #[test]
     fn test_mse_loss_mean() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.5], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5, 2.5], vec![3], false);
 
         let loss = mse_loss(&predictions, &targets, "mean").unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -527,8 +510,8 @@ mod tests {
 
     #[test]
     fn test_mse_loss_sum() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![2.0, 3.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![2.0, 3.0], vec![2], false);
 
         let loss = mse_loss(&predictions, &targets, "sum").unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -539,8 +522,8 @@ mod tests {
 
     #[test]
     fn test_mse_loss_none() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![2.0, 3.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![2.0, 3.0], vec![2], false);
 
         let loss = mse_loss(&predictions, &targets, "none").unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -553,8 +536,8 @@ mod tests {
 
     #[test]
     fn test_mae_loss_mean() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.0], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5, 2.0], vec![3], false);
 
         let loss = mae_loss(&predictions, &targets, "mean").unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -565,8 +548,8 @@ mod tests {
 
     #[test]
     fn test_huber_loss_quadratic_region() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![1.2, 2.3], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![1.2, 2.3], vec![2], false);
 
         // Delta = 1.0, differences are 0.2 and 0.3, both <= 1.0, so quadratic
         let loss = huber_loss(&predictions, &targets, 1.0, "none").unwrap();
@@ -579,8 +562,8 @@ mod tests {
 
     #[test]
     fn test_huber_loss_linear_region() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![3.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![3.0, 0.0], vec![2], false);
 
         // Delta = 1.0, differences are 2.0 and 2.0, both > 1.0, so linear
         let loss = huber_loss(&predictions, &targets, 1.0, "none").unwrap();
@@ -593,8 +576,8 @@ mod tests {
 
     #[test]
     fn test_bce_loss_mean_and_backward() {
-        let predictions = create_test_tensor_f32(vec![0.8, 0.2], vec![2], true);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.8, 0.2], vec![2], true);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0], vec![2], false);
 
         let loss = binary_cross_entropy_loss(&predictions, &targets, "mean").unwrap();
         let loss_val = loss.data().as_f32_slice().unwrap()[0];
@@ -621,8 +604,8 @@ mod tests {
             -100.0f32, -50.0, -30.0, -8.0, -1.0, 0.0, 1.0, 8.0, 30.0, 100.0,
         ] {
             for &t in &[0.0f32, 0.3, 1.0] {
-                let logits = create_test_tensor_f32(vec![x], vec![1], true);
-                let targets = create_test_tensor_f32(vec![t], vec![1], false);
+                let logits = tensor_of::<f32>(vec![x], vec![1], true);
+                let targets = tensor_of::<f32>(vec![t], vec![1], false);
                 let loss =
                     binary_cross_entropy_with_logits_loss(&logits, &targets, None, "sum").unwrap();
 
@@ -660,9 +643,9 @@ mod tests {
         // ~9.4e-14 in f32, and the BCE backward's clamped denominator then
         // returns roughly -0.09 instead -- the example all but stops training.
         for &x in &[-30.0f32, -50.0, -100.0] {
-            let targets = create_test_tensor_f32(vec![1.0], vec![1], false);
+            let targets = tensor_of::<f32>(vec![1.0], vec![1], false);
 
-            let logits = create_test_tensor_f32(vec![x], vec![1], true);
+            let logits = tensor_of::<f32>(vec![x], vec![1], true);
             let fused =
                 binary_cross_entropy_with_logits_loss(&logits, &targets, None, "sum").unwrap();
             let fused_grad = crate::autograd::backward_collect(&fused, None).unwrap()[&logits.id()]
@@ -674,7 +657,7 @@ mod tests {
                 "x={x}: fused grad {fused_grad} should be -1"
             );
 
-            let probs_input = create_test_tensor_f32(vec![x], vec![1], true);
+            let probs_input = tensor_of::<f32>(vec![x], vec![1], true);
             let probs = crate::ops::activation::sigmoid(&probs_input).unwrap();
             let split = binary_cross_entropy_loss(&probs, &targets, "sum").unwrap();
             let split_grad = crate::autograd::backward_collect(&split, None).unwrap()
@@ -706,9 +689,9 @@ mod tests {
             })
             .collect();
 
-        let logits = create_test_tensor_f32(logits_v, vec![2, 3], false);
-        let targets = create_test_tensor_f32(targets_v, vec![2, 3], false);
-        let weights = create_test_tensor_f32(weights_v, vec![3], false);
+        let logits = tensor_of::<f32>(logits_v, vec![2, 3], false);
+        let targets = tensor_of::<f32>(targets_v, vec![2, 3], false);
+        let weights = tensor_of::<f32>(weights_v, vec![3], false);
 
         let none = binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "none")
             .unwrap();
@@ -735,9 +718,9 @@ mod tests {
 
     #[test]
     fn test_bce_with_logits_rejects_non_broadcastable_pos_weight() {
-        let logits = create_test_tensor_f32(vec![0.4, -0.7], vec![2, 1], false);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2, 1], false);
-        let weights = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        let logits = tensor_of::<f32>(vec![0.4, -0.7], vec![2, 1], false);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0], vec![2, 1], false);
+        let weights = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
         assert!(
             binary_cross_entropy_with_logits_loss(&logits, &targets, Some(&weights), "mean")
                 .is_err()
@@ -749,8 +732,8 @@ mod tests {
         // BCE clamps its log outputs to >= -100 (forward) and its backward
         // denominator to >= 1e-12, so a saturated prediction (exactly 0 or 1)
         // yields a finite loss and gradient instead of inf/nan.
-        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], true);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.0, 1.0], vec![2], true);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0], vec![2], false);
 
         let loss = binary_cross_entropy_loss(&predictions, &targets, "mean").unwrap();
         let loss_val = loss.data().as_f32_slice().unwrap()[0];
@@ -773,8 +756,8 @@ mod tests {
         // divided by 2, which is exactly the forward/backward disagreement
         // `mean` had: the forward divided by the batch dimension (1, for a 1-D
         // tensor) while the backward divided by the element count.
-        let predictions = create_test_tensor_f32(vec![0.4, 0.6], vec![2], true);
-        let targets = create_test_tensor_f32(vec![0.5, 0.5], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.4, 0.6], vec![2], true);
+        let targets = tensor_of::<f32>(vec![0.5, 0.5], vec![2], false);
 
         let elementwise = 0.5 * (0.5f32.ln() - 0.4f32.ln()) + 0.5 * (0.5f32.ln() - 0.6f32.ln());
 
@@ -796,8 +779,8 @@ mod tests {
         // target is zero, and one NaN term takes the whole reduction with it.
         // A one-hot target is nothing but zeros and a one, so this made the
         // most common target a classifier has return NaN.
-        let predictions = create_test_tensor_f32(vec![0.1, 0.2, 0.3, 0.4], vec![4], true);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0, 1.0, 0.0], vec![4], false);
+        let predictions = tensor_of::<f32>(vec![0.1, 0.2, 0.3, 0.4], vec![4], true);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0, 1.0, 0.0], vec![4], false);
 
         let loss = kl_div_loss(&predictions, &targets, "sum").unwrap();
         let value = loss.data().as_f32_slice().unwrap()[0];
@@ -805,20 +788,20 @@ mod tests {
 
         // A zero target opposite a zero prediction is `-inf - -inf`, which is
         // NaN before the mask rather than an infinity.
-        let both_zero = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let both_zero = tensor_of::<f32>(vec![0.0, 1.0], vec![2], false);
         let loss = kl_div_loss(&both_zero, &both_zero, "sum").unwrap();
         assert_eq!(loss.data().as_f32_slice().unwrap()[0], 0.0);
 
         // But a live target against a zero prediction still diverges.
-        let live = create_test_tensor_f32(vec![0.5, 0.5], vec![2], false);
+        let live = tensor_of::<f32>(vec![0.5, 0.5], vec![2], false);
         let loss = kl_div_loss(&both_zero, &live, "sum").unwrap();
         assert!(loss.data().as_f32_slice().unwrap()[0].is_infinite());
     }
 
     #[test]
     fn kl_div_batchmean_divides_by_the_leading_dimension() {
-        let predictions = create_test_tensor_f32(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
-        let targets = create_test_tensor_f32(vec![0.5, 0.5, 0.5, 0.5], vec![2, 2], false);
+        let predictions = tensor_of::<f32>(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
+        let targets = tensor_of::<f32>(vec![0.5, 0.5, 0.5, 0.5], vec![2, 2], false);
 
         let sum = kl_div_loss(&predictions, &targets, "sum").unwrap();
         let sum_val = sum.data().as_f32_slice().unwrap()[0];
@@ -833,7 +816,7 @@ mod tests {
         // reduction gets its own input: gradients accumulate per tensor id, so
         // reusing one would sum the three backward passes.
         for (reduction, divisor) in [("mean", 4.0f32), ("batchmean", 2.0), ("sum", 1.0)] {
-            let inputs = create_test_tensor_f32(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
+            let inputs = tensor_of::<f32>(vec![0.4, 0.6, 0.3, 0.7], vec![2, 2], true);
             let loss = kl_div_loss(&inputs, &targets, reduction).unwrap();
             let grads = crate::autograd::backward_collect(&loss, None).unwrap();
             let grad = grads.get(&inputs.id()).unwrap();
@@ -847,8 +830,8 @@ mod tests {
 
     #[test]
     fn test_loss_gradient_tracking() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], true);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], true);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5], vec![2], false);
 
         let loss = mse_loss(&predictions, &targets, "mean").unwrap();
 
@@ -858,8 +841,8 @@ mod tests {
 
     #[test]
     fn test_loss_input_validation() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5, 3.5], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5, 3.5], vec![3], false);
 
         // Shape mismatch should fail
         let result = mse_loss(&predictions, &targets, "mean");
@@ -868,8 +851,8 @@ mod tests {
 
     #[test]
     fn test_invalid_reduction_mode() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5], vec![2], false);
 
         let result = mse_loss(&predictions, &targets, "invalid");
         assert!(result.is_err());
@@ -877,8 +860,8 @@ mod tests {
 
     #[test]
     fn test_huber_loss_invalid_delta() {
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5], vec![2], false);
 
         let result = huber_loss(&predictions, &targets, -1.0, "mean");
         assert!(result.is_err());
@@ -886,8 +869,8 @@ mod tests {
 
     #[test]
     fn test_smooth_l1_loss_matches_huber() {
-        let predictions = create_test_tensor_f32(vec![0.5, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.5, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0], vec![2], false);
 
         let smooth = smooth_l1_loss(&predictions, &targets, 1.0, "none").unwrap();
         let huber = huber_loss(&predictions, &targets, 1.0, "none").unwrap();
@@ -903,8 +886,8 @@ mod tests {
         // The two agree only at 1.0, so implementing smooth-l1 as a bare
         // `huber_loss(.., beta, ..)` is right for the default and wrong
         // everywhere else: huber(x, d) == d * smooth_l1(x, beta = d).
-        let predictions = create_test_tensor_f32(vec![0.25, 1.0, 4.0], vec![3], false);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0, 0.0], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![0.25, 1.0, 4.0], vec![3], false);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0, 0.0], vec![3], false);
 
         for beta in [0.5f32, 1.0, 2.0, 5.0] {
             let smooth = smooth_l1_loss(&predictions, &targets, beta as f64, "none").unwrap();
@@ -937,8 +920,8 @@ mod tests {
 
     #[test]
     fn test_log_cosh_loss_mean() {
-        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.0, 1.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0], vec![2], false);
 
         let loss = log_cosh_loss(&predictions, &targets, "mean").unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -949,8 +932,8 @@ mod tests {
 
     #[test]
     fn test_log_cosh_loss_invalid_reduction() {
-        let predictions = create_test_tensor_f32(vec![0.0], vec![1], false);
-        let targets = create_test_tensor_f32(vec![0.0], vec![1], false);
+        let predictions = tensor_of::<f32>(vec![0.0], vec![1], false);
+        let targets = tensor_of::<f32>(vec![0.0], vec![1], false);
 
         let result = log_cosh_loss(&predictions, &targets, "invalid");
         assert!(result.is_err());

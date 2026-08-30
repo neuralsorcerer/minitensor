@@ -8,6 +8,7 @@ use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
 use crate::ops::map::{par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2};
+use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
@@ -141,12 +142,7 @@ fn bool_fold_along_dim(
     keepdim: bool,
     fold: BoolFold,
 ) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let input_shape = tensor.shape().dims();
     let mut output_shape = input_shape.to_vec();
@@ -1013,132 +1009,70 @@ pub fn topk(
     };
     let outer_stride = dim_size * inner;
 
+    // One arm per dtype, and the nine arguments written once: only the
+    // accessors and the comparator pair differ.
+    macro_rules! topk_arm {
+        ($read:ident, $write:ident, $name:literal, $desc:expr, $asc:expr) => {{
+            let input = tensor.data().$read().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
+            })?;
+            let values = values_data.$write().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get mutable ", $name, " slice"))
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            topk_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                k,
+                sorted,
+                if largest { $desc } else { $asc },
+            );
+        }};
+    }
+
     match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            let compare = if largest { cmp_f32_desc } else { cmp_f32_asc };
-            topk_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                k,
-                sorted,
-                compare,
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            let compare = if largest { cmp_f64_desc } else { cmp_f64_asc };
-            topk_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                k,
-                sorted,
-                compare,
-            );
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            let compare = if largest { cmp_i32_desc } else { cmp_i32_asc };
-            topk_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                k,
-                sorted,
-                compare,
-            );
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            let compare = if largest { cmp_i64_desc } else { cmp_i64_asc };
-            topk_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                k,
-                sorted,
-                compare,
-            );
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            let compare = if largest { cmp_bool_desc } else { cmp_bool_asc };
-            topk_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                k,
-                sorted,
-                compare,
-            );
-        }
+        DataType::Float32 => topk_arm!(
+            as_f32_slice,
+            as_f32_slice_mut,
+            "f32",
+            cmp_f32_desc,
+            cmp_f32_asc
+        ),
+        DataType::Float64 => topk_arm!(
+            as_f64_slice,
+            as_f64_slice_mut,
+            "f64",
+            cmp_f64_desc,
+            cmp_f64_asc
+        ),
+        DataType::Int32 => topk_arm!(
+            as_i32_slice,
+            as_i32_slice_mut,
+            "i32",
+            cmp_i32_desc,
+            cmp_i32_asc
+        ),
+        DataType::Int64 => topk_arm!(
+            as_i64_slice,
+            as_i64_slice_mut,
+            "i64",
+            cmp_i64_desc,
+            cmp_i64_asc
+        ),
+        DataType::Bool => topk_arm!(
+            as_bool_slice,
+            as_bool_slice_mut,
+            "bool",
+            cmp_bool_desc,
+            cmp_bool_asc
+        ),
     }
 
     let values = Tensor::new(

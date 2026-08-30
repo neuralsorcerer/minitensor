@@ -6,6 +6,7 @@
 
 use crate::ops::map::par_out_chunks;
 use crate::ops::util::Accumulate;
+use crate::ops::util::check_dim;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{Tensor, TensorData},
@@ -96,12 +97,7 @@ macro_rules! cumprod_forward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if dim >= tensor.ndim() {
-                return Err(MinitensorError::dim_out_of_range(
-                    dim as isize,
-                    tensor.ndim(),
-                ));
-            }
+            check_dim(dim, tensor.ndim())?;
 
             let dim_size = shape[dim];
             let inner = shape[dim + 1..].iter().product::<usize>();
@@ -395,12 +391,7 @@ macro_rules! cumsum_forward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if dim >= tensor.ndim() {
-                return Err(MinitensorError::dim_out_of_range(
-                    dim as isize,
-                    tensor.ndim(),
-                ));
-            }
+            check_dim(dim, tensor.ndim())?;
 
             let dim_size = shape[dim];
             let inner = shape[dim + 1..].iter().product::<usize>();
@@ -434,12 +425,7 @@ macro_rules! cumsum_backward {
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             let shape = tensor.shape().dims();
 
-            if dim >= tensor.ndim() {
-                return Err(MinitensorError::dim_out_of_range(
-                    dim as isize,
-                    tensor.ndim(),
-                ));
-            }
+            check_dim(dim, tensor.ndim())?;
 
             let dim_size = shape[dim];
             let inner = shape[dim + 1..].iter().product::<usize>();

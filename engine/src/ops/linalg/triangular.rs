@@ -79,25 +79,9 @@ mod tests {
     use super::*;
     use crate::tensor::DataType;
     use crate::tensor::Tensor;
+    use crate::test_support::{tensor_of, tensor_on};
     use crate::{autograd::GradientFunction, device::Device, tensor::TensorData};
     use std::sync::Arc;
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
 
     fn create_test_tensor_f64(data: Vec<f64>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
         let shape_obj = Shape::new(shape);
@@ -150,33 +134,11 @@ mod tests {
         )
     }
 
-    fn create_test_tensor_f32_on_device(
-        data: Vec<f32>,
-        shape: Vec<usize>,
-        device: Device,
-    ) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data =
-            TensorData::zeros_on_device(shape_obj.numel(), DataType::Float32, device);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            device,
-            false,
-        )
-    }
-
     #[test]
     fn test_matmul_basic() {
         // 2x3 * 3x2 = 2x2
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
-        let b = create_test_tensor_f32(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let b = tensor_of::<f32>(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2], false);
 
         let result = matmul(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -301,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_transpose_2d() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
 
         let result = transpose(&a, 0, 1).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -314,8 +276,8 @@ mod tests {
 
     #[test]
     fn test_matmul_dimension_mismatch() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![1, 2], false);
-        let b = create_test_tensor_f32(vec![3.0, 4.0, 5.0], vec![3, 1], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![1, 2], false);
+        let b = tensor_of::<f32>(vec![3.0, 4.0, 5.0], vec![3, 1], false);
 
         let result = matmul(&a, &b);
         assert!(result.is_err());
@@ -323,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_transpose_same_dim() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = transpose(&a, 0, 0).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -335,8 +297,8 @@ mod tests {
 
     #[test]
     fn test_gradient_tracking() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![1, 2], true);
-        let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2, 1], true);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![1, 2], true);
+        let b = tensor_of::<f32>(vec![3.0, 4.0], vec![2, 1], true);
 
         let result = matmul(&a, &b).unwrap();
 
@@ -346,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_matmul_dtype_mismatch() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let b = create_test_tensor_f64(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2], false);
 
         let result = matmul(&a, &b);
@@ -355,11 +317,11 @@ mod tests {
 
     #[test]
     fn test_matmul_device_mismatch() {
-        let a =
-            create_test_tensor_f32_on_device(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], Device::cpu());
-        let b = create_test_tensor_f32_on_device(
+        let a = tensor_on::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false, Device::cpu());
+        let b = tensor_on::<f32>(
             vec![5.0, 6.0, 7.0, 8.0],
             vec![2, 2],
+            false,
             Device::cuda(None),
         );
 
@@ -379,26 +341,26 @@ mod tests {
     #[test]
     fn test_matmul_vector_operands() {
         // 1-D @ 1-D is a dot product returning a scalar.
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let b = tensor_of::<f32>(vec![3.0, 4.0], vec![2], false);
         let dot = matmul(&a, &b).unwrap();
         assert_eq!(dot.shape().dims(), &[] as &[usize]);
         assert_eq!(dot.data().as_f32_slice().unwrap(), &[11.0]);
 
         // matrix @ vector -> vector.
-        let m = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let m = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let mv = matmul(&m, &a).unwrap();
         assert_eq!(mv.shape().dims(), &[2]);
         assert_eq!(mv.data().as_f32_slice().unwrap(), &[5.0, 11.0]);
 
         // 0-D scalars remain invalid operands.
-        let s = create_test_tensor_f32(vec![1.0], vec![], false);
+        let s = tensor_of::<f32>(vec![1.0], vec![], false);
         assert!(matmul(&s, &s).is_err());
     }
 
     #[test]
     fn test_bmm_basic() {
-        let a = create_test_tensor_f32(
+        let a = tensor_of::<f32>(
             vec![
                 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 0
                 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, // batch 1
@@ -406,7 +368,7 @@ mod tests {
             vec![2, 2, 3],
             false,
         );
-        let b = create_test_tensor_f32(
+        let b = tensor_of::<f32>(
             vec![
                 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, // batch 0
                 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, // batch 1
@@ -426,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_bmm_batch_mismatch() {
-        let a = create_test_tensor_f32(vec![1.0; 12], vec![2, 2, 3], false);
-        let b = create_test_tensor_f32(vec![2.0; 18], vec![3, 3, 2], false);
+        let a = tensor_of::<f32>(vec![1.0; 12], vec![2, 2, 3], false);
+        let b = tensor_of::<f32>(vec![2.0; 18], vec![3, 3, 2], false);
 
         let result = bmm(&a, &b);
         assert!(result.is_err());
@@ -435,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_bmm_rank_error() {
-        let a = create_test_tensor_f32(vec![1.0; 6], vec![2, 3], false);
-        let b = create_test_tensor_f32(vec![2.0; 6], vec![1, 3, 2], false);
+        let a = tensor_of::<f32>(vec![1.0; 6], vec![2, 3], false);
+        let b = tensor_of::<f32>(vec![2.0; 6], vec![1, 3, 2], false);
 
         let result = bmm(&a, &b);
         assert!(result.is_err());
@@ -444,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_diagonal_main() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let result = diagonal(&tensor, 0, 0, 1).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 4.0]);
@@ -453,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_diagonal_with_offset() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
         let upper = diagonal(&tensor, 1, 0, 1).unwrap();
         assert_eq!(upper.data().as_f32_slice().unwrap(), &[2.0, 6.0]);
 
@@ -463,16 +425,15 @@ mod tests {
 
     #[test]
     fn test_diagonal_high_dim_shape() {
-        let tensor =
-            create_test_tensor_f32((0..24).map(|v| v as f32).collect(), vec![2, 3, 4], false);
+        let tensor = tensor_of::<f32>((0..24).map(|v| v as f32).collect(), vec![2, 3, 4], false);
         let result = diagonal(&tensor, 0, 1, 2).unwrap();
         assert_eq!(result.shape().dims(), &[2, 3]);
     }
 
     #[test]
     fn test_diagonal_backward_gradients() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
-        let grad_output = create_test_tensor_f32(vec![1.0, 1.0], vec![2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
+        let grad_output = tensor_of::<f32>(vec![1.0, 1.0], vec![2], false);
 
         let backward_fn = crate::autograd::DiagonalBackward {
             input_shape: tensor.shape().dims().to_vec(),
@@ -493,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_trace_matches_manual_sum() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let traced = trace(&tensor, 0, 0, 1).unwrap();
         let value = traced.data().as_f32_slice().unwrap();
         assert_eq!(value, &[5.0]);
@@ -501,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_triu_basic() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let result = triu(&tensor, 0).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 2.0, 0.0, 4.0]);
@@ -509,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_triu_with_positive_diagonal() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let result = triu(&tensor, 1).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[0.0, 2.0, 0.0, 0.0]);
@@ -517,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_tril_basic() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let result = tril(&tensor, 0).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[1.0, 0.0, 3.0, 4.0]);
@@ -525,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_tril_with_negative_diagonal() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
         let result = tril(&tensor, -1).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[0.0, 0.0, 3.0, 0.0]);

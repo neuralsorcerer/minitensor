@@ -2016,97 +2016,38 @@ impl Tensor {
         let dtype = self.dtype;
         let data = self.data_mut();
 
+        // One arm per dtype, and the walk written once inside them: the five
+        // used to be spelled out in full, and the index arithmetic -- which is
+        // the only part that could be wrong -- was written five times over.
+        macro_rules! scatter_arm {
+            ($read:ident, $write:ident) => {{
+                let slice = data.$write().unwrap();
+                let val_slice = value.data().$read().unwrap();
+                for idx in 0..out_shape.numel() {
+                    // Unravel the flat output position into coordinates, then
+                    // ravel them again against the source's strides and the
+                    // value's, which is what lets one loop serve a strided
+                    // destination and a broadcast source at once.
+                    let mut rem = idx;
+                    let mut src_idx = offset;
+                    let mut val_idx = 0;
+                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
+                        let coord = rem / stride;
+                        rem %= stride;
+                        src_idx += (starts[j] + coord * steps[j]) * strides[orig_dim_map[j]];
+                        val_idx += coord * value_strides[j];
+                    }
+                    slice[src_idx] = val_slice[val_idx];
+                }
+            }};
+        }
+
         match dtype {
-            DataType::Float32 => {
-                let slice = data.as_f32_slice_mut().unwrap();
-                let val_slice = value.data().as_f32_slice().unwrap();
-                for idx in 0..out_shape.numel() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                        val_idx += coord * value_strides[j];
-                    }
-                    slice[src_idx] = val_slice[val_idx];
-                }
-            }
-            DataType::Float64 => {
-                let slice = data.as_f64_slice_mut().unwrap();
-                let val_slice = value.data().as_f64_slice().unwrap();
-                for idx in 0..out_shape.numel() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                        val_idx += coord * value_strides[j];
-                    }
-                    slice[src_idx] = val_slice[val_idx];
-                }
-            }
-            DataType::Int32 => {
-                let slice = data.as_i32_slice_mut().unwrap();
-                let val_slice = value.data().as_i32_slice().unwrap();
-                for idx in 0..out_shape.numel() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                        val_idx += coord * value_strides[j];
-                    }
-                    slice[src_idx] = val_slice[val_idx];
-                }
-            }
-            DataType::Int64 => {
-                let slice = data.as_i64_slice_mut().unwrap();
-                let val_slice = value.data().as_i64_slice().unwrap();
-                for idx in 0..out_shape.numel() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                        val_idx += coord * value_strides[j];
-                    }
-                    slice[src_idx] = val_slice[val_idx];
-                }
-            }
-            DataType::Bool => {
-                let slice = data.as_bool_slice_mut().unwrap();
-                let val_slice = value.data().as_bool_slice().unwrap();
-                for idx in 0..out_shape.numel() {
-                    let mut rem = idx;
-                    let mut src_idx = offset;
-                    let mut val_idx = 0;
-                    for (j, &stride) in out_strides.as_slice().iter().enumerate() {
-                        let coord = rem / stride;
-                        rem %= stride;
-                        let orig_dim = orig_dim_map[j];
-                        let step = steps[j];
-                        src_idx += (starts[j] + coord * step) * strides[orig_dim];
-                        val_idx += coord * value_strides[j];
-                    }
-                    slice[src_idx] = val_slice[val_idx];
-                }
-            }
+            DataType::Float32 => scatter_arm!(as_f32_slice, as_f32_slice_mut),
+            DataType::Float64 => scatter_arm!(as_f64_slice, as_f64_slice_mut),
+            DataType::Int32 => scatter_arm!(as_i32_slice, as_i32_slice_mut),
+            DataType::Int64 => scatter_arm!(as_i64_slice, as_i64_slice_mut),
+            DataType::Bool => scatter_arm!(as_bool_slice, as_bool_slice_mut),
         }
         Ok(())
     }

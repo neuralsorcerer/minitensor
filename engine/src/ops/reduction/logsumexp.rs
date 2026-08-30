@@ -10,6 +10,7 @@ use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::map::par_out_chunks;
+use crate::ops::util::check_dim;
 use crate::ops::util::{accumulating_dtype, accurate_slab_sum};
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
@@ -343,12 +344,7 @@ pub fn cumsum(tensor: &Tensor, dim: isize) -> Result<Tensor> {
 
 /// Backward helper for cumulative sum
 pub fn cumsum_backward(tensor: &Tensor, dim: usize) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let mut result_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());

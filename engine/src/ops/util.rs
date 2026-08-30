@@ -34,6 +34,19 @@ pub fn normalize_dim(dim: isize, ndim: usize) -> Result<usize> {
     }
 }
 
+/// Reject an already-resolved dimension that is past the end.
+///
+/// The counterpart to [`normalize_dim`] for the calls whose `dim` arrived as a
+/// `usize` and so cannot be negative: there is nothing to resolve, only a
+/// bound to check. It was written out thirteen times before this, which is
+/// twelve chances for one of them to report a different message than the rest.
+pub(crate) fn check_dim(dim: usize, ndim: usize) -> Result<()> {
+    if dim >= ndim {
+        return Err(MinitensorError::dim_out_of_range(dim as isize, ndim));
+    }
+    Ok(())
+}
+
 /// [`normalize_dim`] for calls that take more than one dimension, naming the
 /// argument at fault.
 ///

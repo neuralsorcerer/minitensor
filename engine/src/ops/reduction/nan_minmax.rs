@@ -8,6 +8,7 @@ use super::*;
 use crate::ops::map::{
     PAR_CHUNK, outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks, par_out_chunks2,
 };
+use crate::ops::util::check_dim;
 use crate::{
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
@@ -31,12 +32,7 @@ pub(crate) fn reduction_layout(
     dim: usize,
     keepdim: bool,
 ) -> Result<DimReductionLayout> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let input_shape = tensor.shape().dims();
     let mut output_shape = input_shape.to_vec();

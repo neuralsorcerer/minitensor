@@ -9,6 +9,7 @@ use crate::ops::map::{
     par_out_chunks,
 };
 use crate::ops::simd::*;
+use crate::ops::util::check_dim;
 use crate::ops::util::{
     Accumulate, RUN_SUM_CHUNK, accumulating_dtype, accurate_run_sum, pairwise_fold_vectors,
 };
@@ -394,12 +395,7 @@ sum_along_dim_kernel!(
 
 #[inline]
 pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let input_shape = tensor.shape().dims();
     let mut output_shape = input_shape.to_vec();

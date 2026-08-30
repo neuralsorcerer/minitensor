@@ -19,6 +19,7 @@ use crate::autograd::SiluBackward;
 use crate::autograd::SoftmaxBackward;
 use crate::autograd::SoftplusBackward;
 use crate::autograd::SoftsignBackward;
+use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
@@ -679,12 +680,7 @@ pub fn softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
 
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     // Create output tensor data
     let mut output_data =
@@ -779,12 +775,7 @@ pub fn log_softmax(tensor: &Tensor, dim: Option<usize>) -> Result<Tensor> {
 
     let dim = dim.unwrap_or(tensor.ndim() - 1);
 
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let mut output_data =
         TensorData::uninitialized_on_device(tensor.numel(), tensor.dtype(), tensor.device());

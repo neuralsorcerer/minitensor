@@ -390,6 +390,39 @@ pub(crate) fn load_param_buffers(
     Ok(())
 }
 
+/// The parameter walk every [`Optimizer::step`] shares.
+///
+/// Hands `update` each parameter that both wants a gradient and has one, in
+/// the order they were given. Everything an optimizer does that is *per step*
+/// rather than per parameter -- clipping, counting, a momentum schedule --
+/// stays in its own `step`, before this is called.
+///
+/// It exists because the two `continue`s are a policy, not boilerplate: a
+/// parameter with `requires_grad` false is skipped, and one whose gradient was
+/// never computed is skipped rather than treated as a zero, which would decay
+/// its weights on a step it took no part in. That policy was written out nine
+/// times, once per optimizer, where nine copies could drift apart.
+///
+/// [`Optimizer::step`]: super::optimizer::Optimizer::step
+pub(crate) fn step_each_parameter<F>(
+    parameters: &mut [&mut crate::tensor::Tensor],
+    mut update: F,
+) -> Result<()>
+where
+    F: FnMut(&mut crate::tensor::Tensor, &crate::tensor::Tensor) -> Result<()>,
+{
+    for param in parameters.iter_mut() {
+        if !param.requires_grad() {
+            continue;
+        }
+        let Some(grad) = super::optimizer::parameter_gradient(param) else {
+            continue;
+        };
+        update(param, &grad)?;
+    }
+    Ok(())
+}
+
 /// One float width's arm of [`fixed_state_update!`]. Not called directly.
 ///
 /// Split out only because a macro cannot easily expand a nested `macro_rules!`

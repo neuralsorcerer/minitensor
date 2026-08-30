@@ -188,31 +188,11 @@ pub fn repeat_interleave(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        device::Device,
-        tensor::{DataType, TensorData},
-    };
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
+    use crate::test_support::tensor_of;
 
     #[test]
     fn test_reshape_basic() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
 
         let reshaped = reshape(&tensor, Shape::new(vec![3, 2])).unwrap();
 
@@ -225,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_reshape_invalid_size() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = reshape(&tensor, Shape::new(vec![2, 3]));
         assert!(result.is_err());
@@ -233,35 +213,35 @@ mod tests {
 
     #[test]
     fn test_reshape_infer_dim() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![6], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![6], false);
         let reshaped = reshape_with_inference(&tensor, vec![2, -1]).unwrap();
         assert_eq!(reshaped.shape().dims(), &[2, 3]);
     }
 
     #[test]
     fn test_reshape_multiple_negative_one_error() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
         let result = reshape_with_inference(&tensor, vec![-1, -1]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_reshape_infer_mismatch_error() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5], false);
         let result = reshape_with_inference(&tensor, vec![4, -1]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_reshape_zero_dim_with_inference_error() {
-        let tensor = create_test_tensor_f32(vec![], vec![0], false);
+        let tensor = tensor_of::<f32>(vec![], vec![0], false);
         let result = reshape_with_inference(&tensor, vec![-1, 0]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_squeeze_specific_dim() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4, 1], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4, 1], false);
 
         let s0 = squeeze(&tensor, Some(0)).unwrap();
         assert_eq!(s0.shape().dims(), &[4, 1]);
@@ -275,19 +255,19 @@ mod tests {
 
     #[test]
     fn test_squeeze_all() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4, 1], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4, 1], false);
 
         let squeezed = squeeze(&tensor, None).unwrap();
         assert_eq!(squeezed.shape().dims(), &[4]);
 
-        let scalar = create_test_tensor_f32(vec![1.0], vec![1, 1], false);
+        let scalar = tensor_of::<f32>(vec![1.0], vec![1, 1], false);
         let s = squeeze(&scalar, None).unwrap();
         assert!(s.shape().dims().is_empty());
     }
 
     #[test]
     fn test_squeeze_out_of_range() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         assert!(squeeze(&tensor, Some(2)).is_err());
         assert!(squeeze(&tensor, Some(-3)).is_err());
@@ -295,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_unsqueeze() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![4], false);
 
         let u0 = unsqueeze(&tensor, 0).unwrap();
         assert_eq!(u0.shape().dims(), &[1, 4]);
@@ -309,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_gradient_tracking() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], true);
 
         let reshaped = reshape(&tensor, Shape::new(vec![4])).unwrap();
 
@@ -319,8 +299,8 @@ mod tests {
 
     #[test]
     fn test_concatenate_validation() {
-        let tensor1 = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let tensor2 = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
+        let tensor1 = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let tensor2 = tensor_of::<f32>(vec![3.0, 4.0], vec![2], false);
 
         let result = concatenate(&[&tensor1, &tensor2], 0).unwrap();
         assert_eq!(result.shape().dims(), &[4]);
@@ -330,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_index_select_validation() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
 
         let result = index_select(&tensor, 1, &[0, 2]).unwrap();
         assert_eq!(result.shape().dims(), &[2, 2]);
@@ -340,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_slice_empty_range() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = slice(&tensor, 1, 1, 1, 1).unwrap();
         assert_eq!(result.shape().dims(), &[2, 0]);
@@ -349,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_slice_empty_at_end() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = slice(&tensor, 0, 2, 2, 1).unwrap();
         assert_eq!(result.shape().dims(), &[0, 2]);
@@ -358,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_index_select_empty_indices() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
 
         let result = index_select(&tensor, 1, &[]).unwrap();
         assert_eq!(result.shape().dims(), &[2, 0]);
@@ -367,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_slice_validation() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3], false);
 
         let result = slice(&tensor, 1, 0, 2, 1).unwrap();
         assert_eq!(result.shape().dims(), &[2, 2]);
@@ -377,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_repeat_basic() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
         let repeated = repeat(&tensor, &[3]).unwrap();
         assert_eq!(repeated.shape().dims(), &[6]);
         let data = repeated.data().as_f32_slice().unwrap();
@@ -386,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_repeat_zero_numel_shape() {
-        let tensor = create_test_tensor_f32(vec![], vec![0, 2], false);
+        let tensor = tensor_of::<f32>(vec![], vec![0, 2], false);
         let repeated = repeat(&tensor, &[2, 3]).unwrap();
         assert_eq!(repeated.shape().dims(), &[0, 6]);
         assert_eq!(repeated.numel(), 0);
@@ -394,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_repeat_dim_mismatch_error() {
-        let tensor = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let tensor = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
         assert!(repeat(&tensor, &[]).is_err());
     }
 }

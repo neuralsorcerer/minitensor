@@ -669,29 +669,13 @@ mod tests {
     use crate::device::Device;
     use crate::ops::arithmetic::{add, div, mul, neg, sub};
     use crate::tensor::DataType;
+    use crate::test_support::tensor_of;
     use std::sync::Arc;
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
 
     #[test]
     fn test_add_basic() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![4.0, 5.0, 6.0], vec![3], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![4.0, 5.0, 6.0], vec![3], false);
 
         let result = add(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -702,8 +686,8 @@ mod tests {
 
     #[test]
     fn test_add_broadcasting() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![10.0], vec![1], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![10.0], vec![1], false);
 
         let result = add(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -750,8 +734,8 @@ mod tests {
             let bn = bsh.iter().product::<usize>();
             let a: Vec<f32> = (0..an).map(|x| x as f32 + 1.0).collect();
             let b: Vec<f32> = (0..bn).map(|x| (x as f32) * 0.5 - 3.0).collect();
-            let ta = create_test_tensor_f32(a.clone(), ash.to_vec(), false);
-            let tb = create_test_tensor_f32(b.clone(), bsh.to_vec(), false);
+            let ta = tensor_of::<f32>(a.clone(), ash.to_vec(), false);
+            let tb = tensor_of::<f32>(b.clone(), bsh.to_vec(), false);
             let got = add(&ta, &tb).unwrap();
             let expected = naive_add_3d(&a, ash, &b, bsh);
             assert_eq!(
@@ -784,8 +768,8 @@ mod tests {
         ] {
             let a: Vec<f32> = (0..len).map(|i| (i % 977) as f32 * 0.125 - 61.0).collect();
             let b: Vec<f32> = (0..len).map(|i| (i % 641) as f32 * 0.25 - 80.0).collect();
-            let ta = create_test_tensor_f32(a.clone(), vec![len], false);
-            let tb = create_test_tensor_f32(b.clone(), vec![len], false);
+            let ta = tensor_of::<f32>(a.clone(), vec![len], false);
+            let tb = tensor_of::<f32>(b.clone(), vec![len], false);
 
             for (name, got, op) in [
                 (
@@ -820,8 +804,8 @@ mod tests {
                     _ => 1.0,
                 })
                 .collect();
-            let ta = create_test_tensor_f32(a, vec![len], false);
-            let tb = create_test_tensor_f32(vec![0.0; len], vec![len], false);
+            let ta = tensor_of::<f32>(a, vec![len], false);
+            let tb = tensor_of::<f32>(vec![0.0; len], vec![len], false);
             let got = div(&ta, &tb).unwrap();
             let out = got.data().as_f32_slice().unwrap();
             for i in 0..len {
@@ -836,8 +820,8 @@ mod tests {
 
     #[test]
     fn test_sub_basic() {
-        let a = create_test_tensor_f32(vec![5.0, 7.0, 9.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        let a = tensor_of::<f32>(vec![5.0, 7.0, 9.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
 
         let result = sub(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -847,8 +831,8 @@ mod tests {
 
     #[test]
     fn test_mul_basic() {
-        let a = create_test_tensor_f32(vec![2.0, 3.0, 4.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![5.0, 6.0, 7.0], vec![3], false);
+        let a = tensor_of::<f32>(vec![2.0, 3.0, 4.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![5.0, 6.0, 7.0], vec![3], false);
 
         let result = mul(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -858,8 +842,8 @@ mod tests {
 
     #[test]
     fn test_div_basic() {
-        let a = create_test_tensor_f32(vec![10.0, 15.0, 20.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![2.0, 3.0, 4.0], vec![3], false);
+        let a = tensor_of::<f32>(vec![10.0, 15.0, 20.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![2.0, 3.0, 4.0], vec![3], false);
 
         let result = div(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
@@ -869,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_neg_basic() {
-        let a = create_test_tensor_f32(vec![1.0, -2.0, 3.5], vec![3], false);
+        let a = tensor_of::<f32>(vec![1.0, -2.0, 3.5], vec![3], false);
         let result = neg(&a).unwrap();
         let data = result.data().as_f32_slice().unwrap();
         assert_eq!(data, &[-1.0, 2.0, -3.5]);
@@ -877,8 +861,8 @@ mod tests {
 
     #[test]
     fn test_gradient_tracking() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], true);
-        let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], true);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![2], true);
+        let b = tensor_of::<f32>(vec![3.0, 4.0], vec![2], true);
 
         let result = add(&a, &b).unwrap();
 
@@ -888,8 +872,8 @@ mod tests {
 
     #[test]
     fn test_device_mismatch_error() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let b = create_test_tensor_f32(vec![3.0, 4.0], vec![2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let b = tensor_of::<f32>(vec![3.0, 4.0], vec![2], false);
 
         // This would normally fail, but we can't easily create different device tensors in tests
         // So we'll just test that same device works
@@ -899,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_mixed_dtype_promotion() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
 
         // Create an i32 tensor
         let shape_obj = Shape::new(vec![2]);
@@ -922,8 +906,8 @@ mod tests {
 
     #[test]
     fn test_sub_broadcasting_2d() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
-        let b = create_test_tensor_f32(vec![1.0, 2.0], vec![1, 2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let b = tensor_of::<f32>(vec![1.0, 2.0], vec![1, 2], false);
         let result = sub(&a, &b).unwrap();
         let expected = vec![0.0, 0.0, 2.0, 2.0];
         assert_eq!(result.data().as_f32_slice().unwrap(), expected.as_slice());
@@ -932,8 +916,8 @@ mod tests {
 
     #[test]
     fn test_mul_broadcasting_2d() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
-        let b = create_test_tensor_f32(vec![2.0], vec![1, 1], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2], false);
+        let b = tensor_of::<f32>(vec![2.0], vec![1, 1], false);
         let result = mul(&a, &b).unwrap();
         assert_eq!(result.data().as_f32_slice().unwrap(), &[2.0, 4.0, 6.0, 8.0]);
         assert_eq!(result.shape().dims(), &[2, 2]);
@@ -941,8 +925,8 @@ mod tests {
 
     #[test]
     fn test_div_broadcasting_2d() {
-        let a = create_test_tensor_f32(vec![2.0, 4.0, 6.0, 8.0], vec![2, 2], false);
-        let b = create_test_tensor_f32(vec![2.0], vec![1, 1], false);
+        let a = tensor_of::<f32>(vec![2.0, 4.0, 6.0, 8.0], vec![2, 2], false);
+        let b = tensor_of::<f32>(vec![2.0], vec![1, 1], false);
         let result = div(&a, &b).unwrap();
         assert_eq!(result.data().as_f32_slice().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(result.shape().dims(), &[2, 2]);
@@ -994,8 +978,8 @@ mod tests {
 
     #[test]
     fn test_incompatible_shapes_error() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
         assert!(sub(&a, &b).is_err());
         assert!(mul(&a, &b).is_err());
         assert!(div(&a, &b).is_err());
@@ -1003,8 +987,8 @@ mod tests {
 
     #[test]
     fn test_division_by_zero_returns_inf() {
-        let a = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let b = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
+        let a = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let b = tensor_of::<f32>(vec![0.0, 1.0], vec![2], false);
         let result = div(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
         assert!(result_data[0].is_infinite());
@@ -1016,8 +1000,8 @@ mod tests {
         // Broadcasting a scalar zero divisor exercises the non-SIMD path,
         // which must match IEEE 754 (and the SIMD path): -1/0 = -inf,
         // 0/0 = NaN, 1/0 = inf.
-        let a = create_test_tensor_f32(vec![-1.0, 0.0, 1.0], vec![3], false);
-        let b = create_test_tensor_f32(vec![0.0], vec![1], false);
+        let a = tensor_of::<f32>(vec![-1.0, 0.0, 1.0], vec![3], false);
+        let b = tensor_of::<f32>(vec![0.0], vec![1], false);
         let result = div(&a, &b).unwrap();
         let result_data = result.data().as_f32_slice().unwrap();
         assert_eq!(result_data[0], f32::NEG_INFINITY);
@@ -1027,8 +1011,8 @@ mod tests {
 
     #[test]
     fn test_add_handles_zero_sized_broadcast() {
-        let a = create_test_tensor_f32(vec![], vec![0, 3], false);
-        let b = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
+        let a = tensor_of::<f32>(vec![], vec![0, 3], false);
+        let b = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
 
         let result = add(&a, &b).unwrap();
         assert_eq!(result.shape().dims(), &[0, 3]);

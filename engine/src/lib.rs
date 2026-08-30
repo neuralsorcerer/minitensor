@@ -36,7 +36,10 @@ pub mod optim;
 pub mod plugins;
 pub mod random;
 pub mod serialization;
+
 pub mod tensor;
+#[cfg(test)]
+mod test_support;
 
 // Re-export core types
 pub use autograd::{ComputationGraph, GradientFunction};

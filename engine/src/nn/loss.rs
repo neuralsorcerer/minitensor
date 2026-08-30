@@ -13,95 +13,75 @@ use crate::{
     tensor::Tensor,
 };
 
-/// Mean Squared Error loss layer
-#[derive(Debug, Clone)]
-pub struct MSELoss {
-    reduction: String,
-}
-
-impl MSELoss {
-    /// Create a new MSE loss with the specified reduction
-    pub fn new(reduction: impl Into<String>) -> Self {
-        Self {
-            reduction: reduction.into(),
+/// Declares a loss layer whose whole state is its reduction mode.
+///
+/// Five of the layers here were the same struct and the same seven methods,
+/// differing only in which free function `forward` calls. That call is what
+/// this takes; the constructors named for each reduction, the getter and the
+/// setter are written once.
+///
+/// The layers with a hyperparameter of their own -- `HuberLoss`'s delta,
+/// `SmoothL1Loss`'s beta, `FocalLoss`'s alpha and gamma,
+/// `BCEWithLogitsLoss`'s positive-class weight -- stay written out: their
+/// constructors carry that parameter, and it is the part of them worth reading.
+macro_rules! reduction_only_loss {
+    ($name:ident, $forward:ident, $what:literal) => {
+        #[doc = concat!("The ", $what, " loss as a layer.")]
+        #[derive(Debug, Clone)]
+        pub struct $name {
+            reduction: String,
         }
-    }
 
-    /// Create MSE loss with mean reduction (default)
-    pub fn mean() -> Self {
-        Self::new("mean")
-    }
+        impl $name {
+            #[doc = concat!("A ", $what, " loss reducing the way `reduction` says.")]
+            pub fn new(reduction: impl Into<String>) -> Self {
+                Self {
+                    reduction: reduction.into(),
+                }
+            }
 
-    /// Create MSE loss with sum reduction
-    pub fn sum() -> Self {
-        Self::new("sum")
-    }
+            #[doc = concat!("A ", $what, " loss averaged over its elements, which is the usual choice.")]
+            pub fn mean() -> Self {
+                Self::new("mean")
+            }
 
-    /// Create MSE loss with no reduction (element-wise)
-    pub fn none() -> Self {
-        Self::new("none")
-    }
+            #[doc = concat!("A ", $what, " loss summed over its elements.")]
+            pub fn sum() -> Self {
+                Self::new("sum")
+            }
 
-    /// Compute the MSE loss between predictions and targets
-    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        mse_loss(predictions, targets, &self.reduction)
-    }
+            #[doc = concat!("A ", $what, " loss left element-wise, with nothing reduced.")]
+            pub fn none() -> Self {
+                Self::new("none")
+            }
 
-    /// Get the reduction mode
-    pub fn reduction(&self) -> &str {
-        &self.reduction
-    }
+            #[doc = concat!("The ", $what, " loss between `predictions` and `targets`.")]
+            pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+                $forward(predictions, targets, &self.reduction)
+            }
 
-    /// Set the reduction mode
-    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
-        self.reduction = reduction.into();
-    }
-}
+            /// The reduction mode this layer was built with.
+            pub fn reduction(&self) -> &str {
+                &self.reduction
+            }
 
-/// Mean Absolute Error loss layer
-#[derive(Debug, Clone)]
-pub struct MAELoss {
-    reduction: String,
-}
-
-impl MAELoss {
-    /// Create a new MAE loss with the specified reduction
-    pub fn new(reduction: impl Into<String>) -> Self {
-        Self {
-            reduction: reduction.into(),
+            /// Change the reduction mode.
+            pub fn set_reduction(&mut self, reduction: impl Into<String>) {
+                self.reduction = reduction.into();
+            }
         }
-    }
-
-    /// Create MAE loss with mean reduction (default)
-    pub fn mean() -> Self {
-        Self::new("mean")
-    }
-
-    /// Create MAE loss with sum reduction
-    pub fn sum() -> Self {
-        Self::new("sum")
-    }
-
-    /// Create MAE loss with no reduction (element-wise)
-    pub fn none() -> Self {
-        Self::new("none")
-    }
-
-    /// Compute the MAE loss between predictions and targets
-    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        mae_loss(predictions, targets, &self.reduction)
-    }
-
-    /// Get the reduction mode
-    pub fn reduction(&self) -> &str {
-        &self.reduction
-    }
-
-    /// Set the reduction mode
-    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
-        self.reduction = reduction.into();
-    }
+    };
 }
+
+reduction_only_loss!(MSELoss, mse_loss, "mean squared error");
+reduction_only_loss!(MAELoss, mae_loss, "mean absolute error");
+reduction_only_loss!(LogCoshLoss, log_cosh_loss, "log-cosh");
+reduction_only_loss!(
+    CrossEntropyLoss,
+    cross_entropy_loss,
+    "softmax cross entropy"
+);
+reduction_only_loss!(BCELoss, binary_cross_entropy_loss, "binary cross entropy");
 
 /// Huber loss layer for robust regression
 #[derive(Debug, Clone)]
@@ -219,84 +199,18 @@ impl SmoothL1Loss {
     }
 }
 
-/// Log-cosh loss layer
-#[derive(Debug, Clone)]
-pub struct LogCoshLoss {
-    reduction: String,
-}
-
-impl LogCoshLoss {
-    /// Create a new Log-cosh loss with the specified reduction
-    pub fn new(reduction: impl Into<String>) -> Self {
-        Self {
-            reduction: reduction.into(),
-        }
-    }
-
-    /// Create Log-cosh loss with mean reduction (default)
-    pub fn mean() -> Self {
-        Self::new("mean")
-    }
-
-    /// Create Log-cosh loss with sum reduction
-    pub fn sum() -> Self {
-        Self::new("sum")
-    }
-
-    /// Create Log-cosh loss with no reduction (element-wise)
-    pub fn none() -> Self {
-        Self::new("none")
-    }
-
-    /// Compute the Log-cosh loss between predictions and targets
-    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        log_cosh_loss(predictions, targets, &self.reduction)
-    }
-
-    /// Get the reduction mode
-    pub fn reduction(&self) -> &str {
-        &self.reduction
-    }
-
-    /// Set the reduction mode
-    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
-        self.reduction = reduction.into();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        device::Device,
-        tensor::{DataType, Shape, Tensor, TensorData},
-    };
-    use std::sync::Arc;
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
+    use crate::test_support::tensor_of;
 
     #[test]
     fn test_mse_loss_layer() {
         let mse = MSELoss::mean();
         assert_eq!(mse.reduction(), "mean");
 
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.5], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5, 2.5], vec![3], false);
 
         let loss = mse.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -310,8 +224,8 @@ mod tests {
         let mae = MAELoss::mean();
         assert_eq!(mae.reduction(), "mean");
 
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0, 3.0], vec![3], false);
-        let targets = create_test_tensor_f32(vec![1.5, 2.5, 2.0], vec![3], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0, 3.0], vec![3], false);
+        let targets = tensor_of::<f32>(vec![1.5, 2.5, 2.0], vec![3], false);
 
         let loss = mae.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -326,8 +240,8 @@ mod tests {
         assert_eq!(huber.delta(), 1.0);
         assert_eq!(huber.reduction(), "mean");
 
-        let predictions = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![1.2, 2.3], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![1.2, 2.3], vec![2], false);
 
         let loss = huber.forward(&predictions, &targets).unwrap();
         // A reduced loss is a 0-dim scalar.
@@ -339,8 +253,8 @@ mod tests {
         let smooth = SmoothL1Loss::mean();
         assert_eq!(smooth.reduction(), "mean");
 
-        let predictions = create_test_tensor_f32(vec![0.5, 2.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.5, 2.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0], vec![2], false);
 
         let loss = smooth.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -354,8 +268,8 @@ mod tests {
         let log_cosh = LogCoshLoss::mean();
         assert_eq!(log_cosh.reduction(), "mean");
 
-        let predictions = create_test_tensor_f32(vec![0.0, 1.0], vec![2], false);
-        let targets = create_test_tensor_f32(vec![0.0, 0.0], vec![2], false);
+        let predictions = tensor_of::<f32>(vec![0.0, 1.0], vec![2], false);
+        let targets = tensor_of::<f32>(vec![0.0, 0.0], vec![2], false);
 
         let loss = log_cosh.forward(&predictions, &targets).unwrap();
         let loss_data = loss.data().as_f32_slice().unwrap();
@@ -412,96 +326,6 @@ mod tests {
         let mut log_cosh = LogCoshLoss::mean();
         log_cosh.set_reduction("sum");
         assert_eq!(log_cosh.reduction(), "sum");
-    }
-}
-
-/// Cross Entropy loss layer for classification
-#[derive(Debug, Clone)]
-pub struct CrossEntropyLoss {
-    reduction: String,
-}
-
-impl CrossEntropyLoss {
-    /// Create a new Cross Entropy loss with the specified reduction
-    pub fn new(reduction: impl Into<String>) -> Self {
-        Self {
-            reduction: reduction.into(),
-        }
-    }
-
-    /// Create Cross Entropy loss with mean reduction (default)
-    pub fn mean() -> Self {
-        Self::new("mean")
-    }
-
-    /// Create Cross Entropy loss with sum reduction
-    pub fn sum() -> Self {
-        Self::new("sum")
-    }
-
-    /// Create Cross Entropy loss with no reduction (element-wise)
-    pub fn none() -> Self {
-        Self::new("none")
-    }
-
-    /// Compute the Cross Entropy loss between predictions (logits) and targets
-    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        cross_entropy_loss(predictions, targets, &self.reduction)
-    }
-
-    /// Get the reduction mode
-    pub fn reduction(&self) -> &str {
-        &self.reduction
-    }
-
-    /// Set the reduction mode
-    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
-        self.reduction = reduction.into();
-    }
-}
-
-/// Binary Cross Entropy loss layer
-#[derive(Debug, Clone)]
-pub struct BCELoss {
-    reduction: String,
-}
-
-impl BCELoss {
-    /// Create a new BCE loss with the specified reduction
-    pub fn new(reduction: impl Into<String>) -> Self {
-        Self {
-            reduction: reduction.into(),
-        }
-    }
-
-    /// Create BCE loss with mean reduction (default)
-    pub fn mean() -> Self {
-        Self::new("mean")
-    }
-
-    /// Create BCE loss with sum reduction
-    pub fn sum() -> Self {
-        Self::new("sum")
-    }
-
-    /// Create BCE loss with no reduction (element-wise)
-    pub fn none() -> Self {
-        Self::new("none")
-    }
-
-    /// Compute the BCE loss between predictions (probabilities) and targets
-    pub fn forward(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-        binary_cross_entropy_loss(predictions, targets, &self.reduction)
-    }
-
-    /// Get the reduction mode
-    pub fn reduction(&self) -> &str {
-        &self.reduction
-    }
-
-    /// Set the reduction mode
-    pub fn set_reduction(&mut self, reduction: impl Into<String>) {
-        self.reduction = reduction.into();
     }
 }
 
@@ -654,28 +478,7 @@ impl FocalLoss {
 #[cfg(test)]
 mod classification_tests {
     use super::*;
-    use crate::{
-        device::Device,
-        tensor::{DataType, Shape, Tensor, TensorData},
-    };
-    use std::sync::Arc;
-
-    fn create_test_tensor_f32(data: Vec<f32>, shape: Vec<usize>, requires_grad: bool) -> Tensor {
-        let shape_obj = Shape::new(shape);
-        let mut tensor_data = TensorData::zeros(shape_obj.numel(), DataType::Float32);
-
-        if let Some(slice) = tensor_data.as_f32_slice_mut() {
-            slice.copy_from_slice(&data);
-        }
-
-        Tensor::new(
-            Arc::new(tensor_data),
-            shape_obj,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        )
-    }
+    use crate::test_support::tensor_of;
 
     #[test]
     fn test_cross_entropy_loss_layer() {
@@ -683,8 +486,8 @@ mod classification_tests {
         assert_eq!(ce_loss.reduction(), "mean");
 
         // Create simple 2-class classification example
-        let predictions = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
 
         let loss = ce_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully
@@ -697,8 +500,8 @@ mod classification_tests {
         assert_eq!(bce_loss.reduction(), "mean");
 
         // Create binary classification example with probabilities
-        let predictions = create_test_tensor_f32(vec![0.8, 0.2, 0.3, 0.9], vec![4], false);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![4], false);
+        let predictions = tensor_of::<f32>(vec![0.8, 0.2, 0.3, 0.9], vec![4], false);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0, 0.0, 1.0], vec![4], false);
 
         let loss = bce_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully
@@ -713,8 +516,8 @@ mod classification_tests {
         assert_eq!(focal_loss.reduction(), "mean");
 
         // Create simple classification example
-        let predictions = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
-        let targets = create_test_tensor_f32(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+        let predictions = tensor_of::<f32>(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
+        let targets = tensor_of::<f32>(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2], false);
 
         let loss = focal_loss.forward(&predictions, &targets);
         // Just check that the loss was computed successfully

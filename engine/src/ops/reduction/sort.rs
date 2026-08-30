@@ -8,6 +8,7 @@ use super::*;
 use crate::ops::map::{outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2};
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
+use crate::ops::util::check_dim;
 use crate::ops::util::{
     Accumulate, accumulating_dtype, accurate_run_sum, accurate_slab_sum, deterministic_par_sum,
     pairwise_fold,
@@ -1071,12 +1072,7 @@ pub(crate) fn nanmean_from_sum_count(
 
 #[inline]
 pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let input_shape = tensor.shape().dims();
     let mut output_shape = input_shape.to_vec();
@@ -1112,12 +1108,7 @@ pub fn nansum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Te
 
 #[inline]
 pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
-    if dim >= tensor.ndim() {
-        return Err(MinitensorError::dim_out_of_range(
-            dim as isize,
-            tensor.ndim(),
-        ));
-    }
+    check_dim(dim, tensor.ndim())?;
 
     let input_shape = tensor.shape().dims();
     let mut output_shape = input_shape.to_vec();

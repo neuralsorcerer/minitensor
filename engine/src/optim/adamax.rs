@@ -6,9 +6,10 @@
 
 use super::optimizer::{
     GradientClipping, Optimizer, ParamGroups, ParameterGroup, check_param_grad_match,
-    parameter_gradient,
 };
-use super::utils::{fixed_state_update, load_param_buffers, save_param_buffers};
+use super::utils::{
+    fixed_state_update, load_param_buffers, save_param_buffers, step_each_parameter,
+};
 use crate::serialization::OptimizerState;
 use crate::{autograd::TensorId, error::Result, tensor::Tensor};
 use rustc_hash::FxHashMap;
@@ -182,19 +183,11 @@ impl Optimizer for Adamax {
         self.clip_gradients(parameters, &self.gradient_clipping)?;
         self.step_count += 1;
 
-        for param in parameters.iter_mut() {
-            if !param.requires_grad() {
-                continue;
-            }
-            let Some(grad) = parameter_gradient(param) else {
-                continue;
-            };
+        step_each_parameter(parameters, |param, grad| {
             let lr = self.groups.lr(param.id());
             let weight_decay = self.groups.weight_decay(param.id());
-            self.apply_update(param, &grad, lr, weight_decay)?;
-        }
-
-        Ok(())
+            self.apply_update(param, grad, lr, weight_decay)
+        })
     }
 
     fn describe(&self) -> String {

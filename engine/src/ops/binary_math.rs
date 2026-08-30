@@ -365,28 +365,15 @@ float_binary_op!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::vector;
     use crate::{autograd::backward_collect, device::Device, tensor::TensorData};
 
     fn f64_tensor(data: Vec<f64>) -> Tensor {
-        let len = data.len();
-        Tensor::new(
-            Arc::new(TensorData::from_vec_f64(data, Device::cpu())),
-            Shape::new(vec![len]),
-            DataType::Float64,
-            Device::cpu(),
-            false,
-        )
+        vector(data)
     }
 
     fn i64_tensor(data: Vec<i64>) -> Tensor {
-        let len = data.len();
-        Tensor::new(
-            Arc::new(TensorData::from_vec_i64(data, Device::cpu())),
-            Shape::new(vec![len]),
-            DataType::Int64,
-            Device::cpu(),
-            false,
-        )
+        vector(data)
     }
 
     fn wide(tensor: &Tensor) -> Vec<f64> {

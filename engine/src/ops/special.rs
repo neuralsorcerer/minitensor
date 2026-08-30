@@ -304,6 +304,7 @@ pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::vector;
     use crate::{
         autograd::backward_collect,
         device::Device,
@@ -312,25 +313,11 @@ mod tests {
     use std::sync::Arc;
 
     fn f64_tensor(data: Vec<f64>) -> Tensor {
-        let len = data.len();
-        Tensor::new(
-            Arc::new(TensorData::from_vec_f64(data, Device::cpu())),
-            Shape::new(vec![len]),
-            DataType::Float64,
-            Device::cpu(),
-            false,
-        )
+        vector(data)
     }
 
     fn f32_tensor(data: Vec<f32>) -> Tensor {
-        let len = data.len();
-        Tensor::new(
-            Arc::new(TensorData::from_vec_f32(data, Device::cpu())),
-            Shape::new(vec![len]),
-            DataType::Float32,
-            Device::cpu(),
-            false,
-        )
+        vector(data)
     }
 
     fn wide(tensor: &Tensor) -> Vec<f64> {

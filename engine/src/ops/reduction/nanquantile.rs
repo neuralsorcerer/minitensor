@@ -235,127 +235,54 @@ pub(crate) fn median_along_dim(
     let outer_stride = dim_size * inner;
     let median_pos = (dim_size - 1) / 2;
 
+    // One arm per dtype, and the eight arguments they all pass written once:
+    // only the accessors, the NaN sentinel and the comparator differ, and
+    // spelling the rest out five times is five chances to pass `inner` where
+    // `outer_stride` belongs.
+    macro_rules! median_arm {
+        ($read:ident, $write:ident, $name:literal, $nan:expr, $cmp:expr) => {{
+            let input = tensor.data().$read().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
+            })?;
+            let values = values_data.$write().ok_or_else(|| {
+                MinitensorError::internal_error(concat!("Failed to get mutable ", $name, " slice"))
+            })?;
+            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get mutable i64 slice")
+            })?;
+
+            median_along_dim_par(
+                input,
+                values,
+                indices,
+                inner,
+                dim_size,
+                outer_stride,
+                median_pos,
+                $nan,
+                $cmp,
+            );
+        }};
+    }
+
     match tensor.dtype() {
-        DataType::Float32 => {
-            let input = tensor
-                .data()
-                .as_f32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f32 slice"))?;
-            let values = values_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                Some((f32::NAN, |v: &f32| v.is_nan())),
-                cmp_f32_asc,
-            );
-        }
-        DataType::Float64 => {
-            let input = tensor
-                .data()
-                .as_f64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get f64 slice"))?;
-            let values = values_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                Some((f64::NAN, |v: &f64| v.is_nan())),
-                cmp_f64_asc,
-            );
-        }
-        DataType::Int32 => {
-            let input = tensor
-                .data()
-                .as_i32_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i32 slice"))?;
-            let values = values_data.as_i32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i32 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                None,
-                cmp_i32_asc,
-            );
-        }
-        DataType::Int64 => {
-            let input = tensor
-                .data()
-                .as_i64_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get i64 slice"))?;
-            let values = values_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                None,
-                cmp_i64_asc,
-            );
-        }
-        DataType::Bool => {
-            let input = tensor
-                .data()
-                .as_bool_slice()
-                .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
-            let values = values_data.as_bool_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable bool slice")
-            })?;
-            let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable i64 slice")
-            })?;
-
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                None,
-                cmp_bool_asc,
-            );
-        }
+        DataType::Float32 => median_arm!(
+            as_f32_slice,
+            as_f32_slice_mut,
+            "f32",
+            Some((f32::NAN, |v: &f32| v.is_nan())),
+            cmp_f32_asc
+        ),
+        DataType::Float64 => median_arm!(
+            as_f64_slice,
+            as_f64_slice_mut,
+            "f64",
+            Some((f64::NAN, |v: &f64| v.is_nan())),
+            cmp_f64_asc
+        ),
+        DataType::Int32 => median_arm!(as_i32_slice, as_i32_slice_mut, "i32", None, cmp_i32_asc),
+        DataType::Int64 => median_arm!(as_i64_slice, as_i64_slice_mut, "i64", None, cmp_i64_asc),
+        DataType::Bool => median_arm!(as_bool_slice, as_bool_slice_mut, "bool", None, cmp_bool_asc),
     }
 
     let values = Tensor::new(
