@@ -74,7 +74,13 @@ def _reference_lrn(values, size, alpha=1e-4, beta=0.75, k=1.0):
 
 @pytest.mark.parametrize(
     "shape,groups",
-    [((2, 6, 4, 4), 3), ((3, 4, 5), 2), ((2, 8, 3, 3, 3), 8), ((1, 4, 2, 2), 1), ((2, 6, 4, 4), 6)],
+    [
+        ((2, 6, 4, 4), 3),
+        ((3, 4, 5), 2),
+        ((2, 8, 3, 3, 3), 8),
+        ((1, 4, 2, 2), 1),
+        ((2, 6, 4, 4), 6),
+    ],
 )
 def test_group_norm_matches_the_definition(shape, groups):
     values = RNG.normal(size=shape)
@@ -216,7 +222,8 @@ def test_instance_norm_needs_positions_to_normalize_over():
 
 
 @pytest.mark.parametrize(
-    "shape,size", [((2, 6, 4, 4), 3), ((1, 5, 7), 2), ((2, 4, 3, 3, 3), 5), ((1, 3, 2, 2), 1)]
+    "shape,size",
+    [((2, 6, 4, 4), 3), ((1, 5, 7), 2), ((2, 4, 3, 3, 3), 5), ((1, 3, 2, 2), 1)],
 )
 def test_local_response_norm_matches_the_definition(shape, size):
     values = RNG.normal(size=shape)

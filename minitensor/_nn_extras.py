@@ -277,6 +277,207 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
     )
 
 
+# --- completing the pairs ---------------------------------------------------
+
+
+def embedding(input: object, weight: object, padding_idx: int | None = None) -> Tensor:
+    """The rows of `weight` that `input` names, one per index.
+
+    `index_select` over a flattened index and a reshape back, which is what a
+    lookup table is. `nn.Embedding` is this with the table owned by a module;
+    this is the form for a table the caller already holds -- a frozen one, or
+    one shared between two models.
+
+    `padding_idx` names a row that takes no gradient. The forward is unaffected
+    -- the row is whatever it holds -- and only the gradient is masked, which
+    is `torch.nn.functional.embedding`'s contract. The mask is arithmetic
+    rather than a special case in a backward: the row is read through a
+    detached copy of itself, which is the same number and no longer a path the
+    gradient can take.
+    """
+
+    indices = _atleast_tensor(input)
+    table = _atleast_tensor(weight)
+    if table.ndim() != 2:
+        raise ValueError(
+            f"embedding expects a two-dimensional table, got {table.ndim()} dimensions"
+        )
+    rows, features = (int(size) for size in table.shape)
+
+    if padding_idx is not None:
+        position = _operator.index(padding_idx)
+        if position < 0:
+            position += rows
+        if not 0 <= position < rows:
+            raise IndexError(
+                f"embedding padding_idx {padding_idx} is out of range for a table "
+                f"of {rows} rows"
+            )
+        keep = _np.ones((rows, 1))
+        keep[position, 0] = 0.0
+        mask = (
+            Tensor.from_numpy(keep).astype(str(table.dtype)).to(_C.Device(table.device))
+        )
+        # Numerically `table`, since the two branches partition the rows; the
+        # detached branch is simply not a path a gradient can travel.
+        table = table * mask + table.detach() * (1.0 - mask)
+
+    flat = indices.reshape(int(_np.prod(tuple(indices.shape), dtype=_np.int64)))
+    looked_up = _F.index_select(table, 0, flat)
+    return looked_up.reshape([int(size) for size in indices.shape] + [features])
+
+
+def channel_shuffle(input: object, groups: int) -> Tensor:
+    """Interleave the channels so each group draws from all the others.
+
+    `(n, g * c, ...)` is read as `(n, g, c, ...)`, the two are swapped, and it
+    is flattened back. That is the whole operation, and its point: a grouped
+    convolution never mixes its groups, so stacking two of them leaves two
+    networks side by side. One shuffle between them is what makes it one
+    network -- and it costs a permutation, no parameters and no arithmetic.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError(
+            f"channel_shuffle expects a batch and a channel axis, got "
+            f"{tensor.ndim()} dimensions"
+        )
+    count = _operator.index(groups)
+    if count < 1:
+        raise ValueError(f"channel_shuffle requires at least one group, got {groups}")
+    sizes = [int(size) for size in tensor.shape]
+    channels = sizes[1]
+    if channels % count:
+        raise ValueError(
+            f"channel_shuffle needs the channel count ({channels}) to divide by "
+            f"the number of groups ({count})"
+        )
+
+    split = tensor.reshape([sizes[0], count, channels // count, *sizes[2:]])
+    order = [0, 2, 1] + list(range(3, len(sizes) + 1))
+    return _F.permute(split, order).reshape(sizes)
+
+
+def _lp_pool(
+    op: str,
+    pooling: object,
+    input: object,
+    norm_type: float,
+    kernel_size: object,
+    stride: object,
+    rank: int,
+) -> Tensor:
+    tensor = _atleast_tensor(input)
+    power = float(norm_type)
+    if power <= 0:
+        raise ValueError(f"{op} requires a positive norm type, got {norm_type}")
+    window = _sliding_argument(kernel_size, "kernel_size", rank, 1, op)
+    step = (
+        window if stride is None else _sliding_argument(stride, "stride", rank, 1, op)
+    )
+
+    # `abs` before the power, which is what makes this the L_p norm of the
+    # window at every `norm_type` rather than only at even ones. `torch` raises
+    # `x` itself to the power, so an odd norm over negative values gives it the
+    # root of a negative number; the two agree wherever that one is defined.
+    raised = _F.abs(tensor) ** power
+    area = float(_math.prod(window))
+    averaged = pooling(
+        raised, window if rank > 1 else window[0], step if rank > 1 else step[0]
+    )
+    return (averaged * area) ** (1.0 / power)
+
+
+def lp_pool1d(
+    input: object,
+    norm_type: float,
+    kernel_size: object,
+    stride: object | None = None,
+) -> Tensor:
+    """The `p`-norm of each window along the last axis, not its largest or mean.
+
+    A norm type of 1 is the sum and a large one approaches the maximum, so this
+    is the family `avg_pool1d` and `max_pool1d` are the ends of -- with a
+    gradient everywhere, which is what makes it trainable where the maximum's
+    hard selection is not.
+    """
+
+    return _lp_pool(
+        "lp_pool1d", _F.avg_pool1d, input, norm_type, kernel_size, stride, 1
+    )
+
+
+def lp_pool2d(
+    input: object,
+    norm_type: float,
+    kernel_size: object,
+    stride: object | None = None,
+) -> Tensor:
+    """The `p`-norm of each 2-D window. See `lp_pool1d`."""
+
+    return _lp_pool(
+        "lp_pool2d", _F.avg_pool2d, input, norm_type, kernel_size, stride, 2
+    )
+
+
+def affine_grid(theta: object, size: object, align_corners: bool = False) -> Tensor:
+    """The sampling grid an affine transform describes, for `grid_sample`.
+
+    `theta` is `(n, 2, 3)` over an `(n, c, h, w)` output or `(n, 3, 4)` over an
+    `(n, c, d, h, w)` one: the matrix that takes an output coordinate to the
+    input coordinate it should read. Feeding the result to `grid_sample` is a
+    spatial transformer, and the gradient reaches `theta`, which is what lets
+    the transform be learned rather than specified.
+
+    The base grid -- the normalised coordinate of every output position --
+    depends only on the output size, so NumPy builds it, per "Where an
+    operation belongs" in `docs/development.md`. `align_corners` decides
+    whether -1 and 1 name the outer sample centres or the edges of the volume,
+    and it must match what `grid_sample` is then given.
+    """
+
+    matrix = _atleast_tensor(theta)
+    if matrix.ndim() != 3:
+        raise ValueError(
+            f"affine_grid expects a batch of matrices, got {matrix.ndim()} dimensions"
+        )
+    sizes = [_operator.index(value) for value in size]
+    if len(sizes) not in (4, 5):
+        raise ValueError(
+            f"affine_grid takes a four- or five-element output size, got {len(sizes)}"
+        )
+    spatial = sizes[2:]
+    rank = len(spatial)
+    if [int(value) for value in matrix.shape] != [sizes[0], rank, rank + 1]:
+        raise ValueError(
+            f"affine_grid expects theta of shape {[sizes[0], rank, rank + 1]} for an "
+            f"output of {sizes}, got {[int(value) for value in matrix.shape]}"
+        )
+    if any(value < 1 for value in sizes):
+        raise ValueError(f"affine_grid requires positive sizes, got {sizes}")
+
+    # One axis at a time: with the corners aligned the ends are exactly -1 and
+    # 1, and without them each sample sits at the centre of its own cell.
+    def _coordinates(length: int) -> "_np.ndarray":
+        if align_corners:
+            return _np.linspace(-1.0, 1.0, length) if length > 1 else _np.zeros(1)
+        return (2.0 * _np.arange(length) + 1.0) / length - 1.0
+
+    # `grid_sample` reads coordinates in `x, y (, z)` order, which is the
+    # reverse of the axes they index, so the spatial sizes are reversed here.
+    axes = _np.meshgrid(*[_coordinates(length) for length in spatial], indexing="ij")
+    base = _np.stack([*reversed(axes), _np.ones(spatial)], axis=-1)
+
+    homogeneous = (
+        Tensor.from_numpy(base.reshape(1, -1, rank + 1))
+        .astype(str(matrix.dtype))
+        .to(_C.Device(matrix.device))
+    )
+    mapped = _F.matmul(homogeneous, _F.transpose(matrix, -1, -2))
+    return mapped.reshape([sizes[0], *spatial, rank])
+
+
 # --- normalizing over something other than the batch ------------------------
 
 
@@ -972,13 +1173,18 @@ def fold(
 
 
 _NN_EXTRAS = (
+    "affine_grid",
     "avg_pool3d",
+    "channel_shuffle",
     "conv3d",
+    "embedding",
     "fold",
     "group_norm",
     "gumbel_softmax",
     "instance_norm",
     "local_response_norm",
+    "lp_pool1d",
+    "lp_pool2d",
     "nll_loss",
     "pixel_shuffle",
     "max_pool3d",
