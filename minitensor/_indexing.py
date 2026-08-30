@@ -396,3 +396,154 @@ def cartesian_prod(*tensors: object) -> Tensor:
 
     grids = _meshgrid(*vectors, indexing="ij")
     return _F.stack([grid.reshape(-1) for grid in grids], 1)
+
+
+def _scatter_into(
+    op: str, tensor: Tensor, source: object, positions: "_np.ndarray"
+) -> Tensor:
+    """`tensor` with `source` written at `positions`, as a new tensor.
+
+    `positions` holds the flat offset of every element the operation writes,
+    shaped the way the caller sees the region. The source is lined up against
+    it by broadcasting, the way an assignment lines its right-hand side up,
+    rather than by demanding an exact shape.
+
+    The gradient is `scatter`'s: it reaches `source` at the positions it landed
+    on and `tensor` everywhere else, which is what makes these expressions and
+    not in-place writes.
+    """
+
+    values = _atleast_tensor(source)
+    region = tuple(int(size) for size in positions.shape)
+    if tuple(values.shape) != region:
+        try:
+            values = broadcast_to(values, region)
+        except (ValueError, RuntimeError):
+            raise ValueError(
+                f"{op} writes a region of shape {region}, and a source of shape "
+                f"{tuple(values.shape)} does not broadcast to it"
+            ) from None
+
+    count = int(_np.prod(tuple(tensor.shape), dtype=_np.int64))
+    written = _F.scatter(
+        tensor.reshape(count),
+        0,
+        Tensor.from_numpy(positions.reshape(-1).astype(_np.int64)).to(
+            _C.Device(tensor.device)
+        ),
+        values.reshape(int(positions.size)),
+    )
+    return written.reshape(list(tensor.shape))
+
+
+def _axis_positions(
+    shape: tuple[int, ...], axis: int, along: "_np.ndarray"
+) -> "_np.ndarray":
+    """The flat offsets of `along` on `axis`, with every other axis in full.
+
+    `ix_` opens the per-axis ranges into a mesh and `ravel_multi_index` folds
+    the mesh into offsets, so only the selected region is ever materialised --
+    where slicing a full index template would allocate one integer per element
+    of the whole tensor. Both are arithmetic on shapes, which is why NumPy does
+    it; see "Where an operation belongs" in `docs/development.md`.
+    """
+
+    ranges = [_np.arange(size) for size in shape]
+    ranges[axis] = along
+    return _np.ravel_multi_index(_np.ix_(*ranges), shape)
+
+
+def slice_scatter(
+    input: object,
+    src: object,
+    dim: int = 0,
+    start: int | None = None,
+    end: int | None = None,
+    step: int = 1,
+) -> Tensor:
+    """`input` with `src` written into the slice along `dim`, as a new tensor.
+
+    The functional form of `x[..., start:end:step, ...] = src`, for the cases
+    an assignment cannot serve: inside a larger expression, or on a tensor that
+    has to keep the place it already holds in the graph. The gradient goes to
+    both operands -- to `src` at the positions it landed on, and to `input`
+    everywhere else.
+
+    `start`, `end` and `step` mean exactly what they mean in a Python slice,
+    negative and out-of-range values included, because a Python slice is what
+    computes them.
+    """
+
+    tensor = _atleast_tensor(input)
+    axis = _normalize_axis(dim, tensor.ndim(), "slice_scatter")
+    shape = tuple(int(size) for size in tensor.shape)
+    try:
+        bounds = slice(start, end, _operator.index(step)).indices(shape[axis])
+    except ValueError as exc:
+        raise ValueError(f"slice_scatter: {exc}") from None
+    return _scatter_into(
+        "slice_scatter", tensor, src, _axis_positions(shape, axis, _np.arange(*bounds))
+    )
+
+
+def select_scatter(input: object, src: object, dim: int, index: int) -> Tensor:
+    """`input` with `src` written over the slice `select` would return.
+
+    The other direction of `select`, and shaped to match it: `src` has one axis
+    fewer than `input`, because the axis being written to is a single position
+    rather than a range. That is the difference from `slice_scatter`, which
+    keeps the axis.
+    """
+
+    tensor = _atleast_tensor(input)
+    axis = _normalize_axis(dim, tensor.ndim(), "select_scatter")
+    shape = tuple(int(size) for size in tensor.shape)
+    length = shape[axis]
+    position = _operator.index(index)
+    if position < 0:
+        position += length
+    if not 0 <= position < length:
+        raise IndexError(
+            f"select_scatter index {index} is out of range for dimension {dim} "
+            f"of size {length}"
+        )
+    positions = _axis_positions(shape, axis, _np.array([position]))
+    return _scatter_into(
+        "select_scatter",
+        tensor,
+        src,
+        positions.reshape(shape[:axis] + shape[axis + 1 :]),
+    )
+
+
+def diagonal_scatter(input: object, src: object, offset: int = 0) -> Tensor:
+    """`input` with `src` written onto the diagonal `diagonal` would return.
+
+    The two line up by construction: `src` has the shape of
+    `diagonal(input, offset)`, which reads the last two axes and leaves the
+    diagonal as a new trailing one. Everything off the diagonal keeps its value
+    and its gradient.
+
+    An `offset` that runs the diagonal off the matrix leaves nothing to write,
+    which is a length of zero rather than an error -- the same answer
+    `diagonal` gives for it.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError(
+            f"diagonal_scatter needs at least two dimensions, got {tensor.ndim()}"
+        )
+    shape = tuple(int(size) for size in tensor.shape)
+    rows, columns = shape[-2:]
+    displacement = _operator.index(offset)
+    down, across = max(0, -displacement), max(0, displacement)
+    length = max(0, min(rows - down, columns - across))
+
+    # One range per leading axis and one for the diagonal; the two matrix axes
+    # share that last one, offset against each other by where it starts.
+    grids = _np.ix_(*[_np.arange(size) for size in shape[:-2]], _np.arange(length))
+    coordinates = [*grids[:-1], grids[-1] + down, grids[-1] + across]
+    return _scatter_into(
+        "diagonal_scatter", tensor, src, _np.ravel_multi_index(coordinates, shape)
+    )

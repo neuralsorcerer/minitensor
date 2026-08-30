@@ -88,6 +88,9 @@ of convenience aliases.
 | `index_copy(input, dim, index, source)` | Write `source` over the slices `index` names. A repeated index leaves whichever write landed last. |
 | `index_fill(input, dim, index, value)` | Set the slices `index` names to `value`. |
 | `masked_scatter(input, mask, source)` | Fill the positions `mask` selects with the leading elements of a flattened `source`, in order -- a positional write, where `masked_fill` writes one value everywhere. |
+| `slice_scatter(input, src, dim=0, start=None, end=None, step=1)` | `input` with `src` written into the slice along `dim`, as a new tensor -- the functional form of `x[..., start:end:step, ...] = src`, for when the write has to be an expression or the tensor has to keep its place in the graph. `start`, `end` and `step` are resolved by a Python slice, so negative steps and out-of-range bounds mean what they mean there. The gradient reaches `src` at the positions it landed on and `input` everywhere else. |
+| `select_scatter(input, src, dim, index)` | The same write against one position rather than a range, so `src` has one axis fewer -- lined up with what `select(input, dim, index)` returns, where `slice_scatter` lines up with `narrow`. |
+| `diagonal_scatter(input, src, offset=0)` | `input` with `src` written onto the diagonal, where `src` has the shape `diagonal(input, offset)` returns. An `offset` that runs off the matrix writes nothing rather than raising, which is what `diagonal` does for it too. |
 | `select(input, dim, index)` | One slice along `dim`, with that dimension removed. `narrow` keeps the axis at length one; this is what makes `select(t, 0, i)` the same as `t[i]`. |
 | `flatnonzero(input)` | The flat positions of every non-zero element, as a 1-D int64 tensor. |
 | `argwhere(input)` | The indices of every non-zero element, one row each -- the same answer `nonzero` gives, under the name NumPy users reach for. |
