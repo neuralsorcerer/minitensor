@@ -34,7 +34,14 @@ import operator as _operator
 import numpy as _np
 
 from . import _core as _C
-from ._shape import _atleast_tensor, _normalize_axis, broadcast_to
+from ._shape import (
+    _atleast_tensor,
+    _constant_like,
+    _element_count,
+    _index_tensor,
+    _normalize_axis,
+    broadcast_to,
+)
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -315,14 +322,12 @@ def embedding(input: object, weight: object, padding_idx: int | None = None) -> 
             )
         keep = _np.ones((rows, 1))
         keep[position, 0] = 0.0
-        mask = (
-            Tensor.from_numpy(keep).astype(str(table.dtype)).to(_C.Device(table.device))
-        )
+        mask = _constant_like(keep, table)
         # Numerically `table`, since the two branches partition the rows; the
         # detached branch is simply not a path a gradient can travel.
         table = table * mask + table.detach() * (1.0 - mask)
 
-    flat = indices.reshape(int(_np.prod(tuple(indices.shape), dtype=_np.int64)))
+    flat = indices.reshape(_element_count(indices))
     looked_up = _F.index_select(table, 0, flat)
     return looked_up.reshape([int(size) for size in indices.shape] + [features])
 
@@ -469,11 +474,7 @@ def affine_grid(theta: object, size: object, align_corners: bool = False) -> Ten
     axes = _np.meshgrid(*[_coordinates(length) for length in spatial], indexing="ij")
     base = _np.stack([*reversed(axes), _np.ones(spatial)], axis=-1)
 
-    homogeneous = (
-        Tensor.from_numpy(base.reshape(1, -1, rank + 1))
-        .astype(str(matrix.dtype))
-        .to(_C.Device(matrix.device))
-    )
+    homogeneous = _constant_like(base.reshape(1, -1, rank + 1), matrix)
     mapped = _F.matmul(homogeneous, _F.transpose(matrix, -1, -2))
     return mapped.reshape([sizes[0], *spatial, rank])
 
@@ -758,7 +759,7 @@ def _depth_planes(
 
     planes = []
     for tap in range(kernel[0]):
-        positions = _positions(starts + tap * spaced[0], moved)
+        positions = _index_tensor(starts + tap * spaced[0], moved)
         taken = _F.index_select(moved, 1, positions)
         planes.append(taken.reshape(batch * out_depth, channels, height, width))
     return planes, batch, out_depth
@@ -1029,12 +1030,6 @@ def _sliding_geometry(
     return kernel, margin, padded, _np.ravel_multi_index(coordinates, padded)
 
 
-def _positions(index: "_np.ndarray", like: Tensor) -> Tensor:
-    """The index map as an int64 tensor beside the data it will address."""
-
-    return Tensor.from_numpy(index.astype(_np.int64)).to(_C.Device(like.device))
-
-
 def unfold(
     input: object,
     kernel_size: object,
@@ -1088,9 +1083,11 @@ def unfold(
     # an empty batch or an empty channel axis leaves nothing for the inference
     # to divide by, and the failure would read as a reshape error rather than
     # as the empty answer it should be.
-    plane = int(_np.prod(padded, dtype=_np.int64))
+    plane = _element_count(padded)
     gathered = _F.index_select(
-        tensor.reshape(batch, channels, plane), 2, _positions(index.reshape(-1), tensor)
+        tensor.reshape(batch, channels, plane),
+        2,
+        _index_tensor(index.reshape(-1), tensor),
     )
     # `(n, c, taps * blocks)` and `(n, c * taps, blocks)` are the same buffer:
     # the tap axis is already between the channel and the block.
@@ -1155,10 +1152,11 @@ def fold(
     # rather than tiled: materialising one copy per (batch, channel) would cost
     # more memory than the data being folded.
     positions = broadcast_to(
-        _positions(index.reshape(1, 1, -1), tensor), (batch, channels, taps * columns)
+        _index_tensor(index.reshape(1, 1, -1), tensor),
+        (batch, channels, taps * columns),
     )
     target = Tensor.zeros(
-        [batch, channels, int(_np.prod(padded, dtype=_np.int64))],
+        [batch, channels, _element_count(padded)],
         dtype=tensor.dtype,
         device=_C.Device(tensor.device),
     )

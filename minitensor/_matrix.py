@@ -29,20 +29,27 @@ import operator as _operator
 
 from . import _core as _C
 from ._elementwise import signbit as _signbit
-from ._shape import _atleast_tensor, _normalize_axis
+from ._shape import _atleast_tensor, _element_count, _normalize_axis
 
 Tensor = _C.Tensor
 _F = _C.functional
 
 
-def _square_matrix(input: object, name: str) -> tuple[Tensor, int]:
-    """`input` as a stack of square matrices, with the side length."""
+def _matrix_stack(input: object, name: str) -> Tensor:
+    """`input` as a stack of matrices: at least two dimensions."""
 
     matrix = _atleast_tensor(input)
     if matrix.ndim() < 2:
         raise ValueError(
             f"{name} requires at least two dimensions, got {matrix.ndim()}"
         )
+    return matrix
+
+
+def _square_matrix(input: object, name: str) -> tuple[Tensor, int]:
+    """`input` as a stack of square matrices, with the side length."""
+
+    matrix = _matrix_stack(input, name)
     size = int(matrix.shape[-1])
     if int(matrix.shape[-2]) != size:
         raise ValueError(
@@ -410,15 +417,6 @@ def angle(input: object) -> Tensor:
 _MATRIX_NORM_ORDERS = ("fro", "nuc", 1, -1, 2, -2, _math.inf, -_math.inf)
 
 
-def _matrix_stack(input: object, name: str) -> Tensor:
-    matrix = _atleast_tensor(input)
-    if matrix.ndim() < 2:
-        raise ValueError(
-            f"{name} requires at least two dimensions, got {matrix.ndim()}"
-        )
-    return matrix
-
-
 def matrix_norm(input: object, ord: object = "fro", keepdim: bool = False) -> Tensor:
     """A norm of each matrix in the stack, taken over its last two axes.
 
@@ -653,10 +651,6 @@ def matrix_exp(input: object) -> Tensor:
 # --- linear systems over more than two axes ---------------------------------
 
 
-def _flat_size(sizes: object) -> int:
-    return _math.prod(int(size) for size in sizes)
-
-
 def tensorsolve(a: object, b: object, axes: object = None) -> Tensor:
     """Solve `a x = b` where the contraction runs over several axes at once.
 
@@ -686,16 +680,16 @@ def tensorsolve(a: object, b: object, axes: object = None) -> Tensor:
             f"right-hand side, got {tensor.ndim()} against {rhs.ndim()}"
         )
     answer_shape = list(tensor.shape)[rhs.ndim() :]
-    unknowns = _flat_size(answer_shape)
-    if _flat_size(tensor.shape) != unknowns * unknowns:
+    unknowns = _element_count(answer_shape)
+    if _element_count(tensor.shape) != unknowns * unknowns:
         raise ValueError(
             f"tensorsolve needs a square system: {list(tensor.shape)} does not "
             f"flatten to {unknowns} by {unknowns}"
         )
-    if _flat_size(rhs.shape) != unknowns:
+    if _element_count(rhs.shape) != unknowns:
         raise ValueError(
             f"tensorsolve needs {unknowns} right-hand side values for "
-            f"{unknowns} unknowns, got {_flat_size(rhs.shape)}"
+            f"{unknowns} unknowns, got {_element_count(rhs.shape)}"
         )
 
     solved = _F.solve(tensor.reshape(unknowns, unknowns), rhs.reshape(unknowns, 1))
@@ -718,7 +712,7 @@ def tensorinv(a: object, ind: int = 2) -> Tensor:
             f"is not one for a rank of {tensor.ndim()}"
         )
     shape = list(tensor.shape)
-    rows, columns = _flat_size(shape[:split]), _flat_size(shape[split:])
+    rows, columns = _element_count(shape[:split]), _element_count(shape[split:])
     if rows != columns:
         raise ValueError(
             f"tensorinv needs the two halves of {shape} to have the same number "

@@ -233,8 +233,27 @@ def test_a_float_index_is_refused():
 
 
 def test_a_shape_that_is_not_integers_is_refused():
-    with pytest.raises(TypeError, match="integer or a sequence"):
+    with pytest.raises(TypeError, match="dimensions must be integers"):
         mt.unravel_index(_i([0]), "nope")
+
+
+def test_a_shape_argument_is_normalized_the_way_every_other_one_is():
+    """One rejection message for `shape`, not one per function that takes it."""
+
+    for reject in ("nope", 1.5, [1, "two"]):
+        with pytest.raises(TypeError) as mine:
+            mt.unravel_index(_i([0]), reject)
+        with pytest.raises(TypeError) as theirs:
+            mt.broadcast_shapes(reject)
+        assert str(mine.value).split(" ", 1)[1] == str(theirs.value).split(" ", 1)[1]
+
+
+def test_a_shape_with_no_axes_has_no_coordinates_to_convert():
+    """The one thing a shape argument may be elsewhere and not here."""
+
+    assert mt.broadcast_shapes(()) == ()
+    with pytest.raises(ValueError, match="at least one axis"):
+        mt.unravel_index(_i([0]), ())
 
 
 def test_diag_indices_refuses_a_negative_size():

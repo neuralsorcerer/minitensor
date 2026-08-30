@@ -27,6 +27,14 @@ arguments are Python integers has no device, no gradient and no seed to protect,
 and there is nothing left to weigh: NumPy does it. The tests below hold both
 halves of that -- the integers-only helpers delegate, and the tensor-taking
 samplers still answer to `manual_seed`.
+
+There is a third case, and it is the one that goes wrong quietly: a function
+that computes *part* of its answer with NumPy -- an index map, a coordinate
+grid, a mask -- and then combines it with tensor data. What NumPy builds arrives
+in float64 on the host, so the crossing back has to carry the input's dtype and
+device or the result silently changes precision. `_index_tensor` and
+`_constant_like` are that crossing, and the sweep at the end of this file holds
+every function that uses one to the dtype it was given.
 """
 
 from __future__ import annotations
@@ -147,3 +155,65 @@ def test_a_sampler_answers_to_the_librarys_own_seed(draw):
 
     mt.manual_seed(202)
     assert not np.array_equal(sample(), first), "a different seed, the same draw"
+
+
+# --- the crossing back ------------------------------------------------------
+
+
+def _f32(shape, fill=None):
+    values = (
+        np.full(shape, fill, dtype=np.float32)
+        if fill is not None
+        else np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape) / 7.0
+    )
+    return mt.Tensor(values, dtype="float32")
+
+
+#: Every operation that builds part of its answer with NumPy and then combines
+#: it with tensor data. Named here so a new one is added by being written.
+_MIXES_NUMPY_WITH_TENSORS = {
+    "unfold": lambda: mt.functional.unfold(_f32((1, 2, 5, 5)), 2, padding=1),
+    "fold": lambda: mt.functional.fold(_f32((1, 8, 36)), (5, 5), 2, padding=1),
+    "conv3d": lambda: mt.functional.conv3d(
+        _f32((1, 2, 4, 4, 4)), _f32((3, 2, 2, 2, 2))
+    ),
+    "max_pool3d": lambda: mt.functional.max_pool3d(_f32((1, 2, 4, 4, 4)), 2),
+    "avg_pool3d": lambda: mt.functional.avg_pool3d(_f32((1, 2, 4, 4, 4)), 2),
+    "local_response_norm": lambda: mt.functional.local_response_norm(
+        _f32((1, 4, 3, 3)), 3
+    ),
+    "affine_grid": lambda: mt.functional.affine_grid(
+        _f32((1, 2, 3), fill=1.0), (1, 1, 3, 3)
+    ),
+    "embedding": lambda: mt.functional.embedding(
+        mt.Tensor.from_numpy(np.array([0, 1], dtype=np.int64)), _f32((4, 3)), 0
+    ),
+    "slice_scatter": lambda: mt.slice_scatter(_f32((3, 4)), _f32((1, 4)), 0, 1, 2),
+    "select_scatter": lambda: mt.select_scatter(_f32((3, 4)), _f32((4,)), 0, 1),
+    "diagonal_scatter": lambda: mt.diagonal_scatter(_f32((3, 4)), _f32((3,))),
+    "put": lambda: mt.put(
+        _f32((3, 4)), mt.Tensor.from_numpy(np.array([0], dtype=np.int64)), _f32((1,))
+    ),
+    "pdist": lambda: mt.pdist(_f32((4, 3))),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MIXES_NUMPY_WITH_TENSORS))
+def test_a_numpy_built_part_does_not_change_the_dtype(name):
+    """What NumPy builds is float64 on the host; the input's dtype has to win.
+
+    Promoting to float64 here would double the memory of a half-precision model
+    and still produce right-looking numbers, which is why it needs a test and
+    not a convention.
+    """
+
+    result = _MIXES_NUMPY_WITH_TENSORS[name]()
+    assert "float32" in str(result.dtype), f"{name} returned {result.dtype}"
+
+
+@pytest.mark.parametrize("name", sorted(_MIXES_NUMPY_WITH_TENSORS))
+def test_a_numpy_built_part_stays_on_the_input_device(name):
+    """Vacuous on a CPU-only build, and the assertion that would catch it."""
+
+    result = _MIXES_NUMPY_WITH_TENSORS[name]()
+    assert str(result.device) == str(_f32((1,)).device)

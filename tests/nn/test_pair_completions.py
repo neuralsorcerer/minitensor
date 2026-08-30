@@ -71,9 +71,7 @@ def test_padding_idx_takes_no_gradient_and_changes_no_value():
     weight = _t(table, requires_grad=True)
 
     # The row is read, and read unchanged.
-    np.testing.assert_array_equal(
-        F.embedding(_i([0]), weight, 0).numpy()[0], table[0]
-    )
+    np.testing.assert_array_equal(F.embedding(_i([0]), weight, 0).numpy()[0], table[0])
 
     F.embedding(_i([0, 1, 0, 2]), weight, 0).sum().backward()
     gradient = weight.grad.numpy()
@@ -115,11 +113,14 @@ def test_channel_shuffle_interleaves_the_groups():
     values = np.arange(6.0).reshape(1, 6, 1, 1)
     # Three groups of two become two groups of three, taking one from each.
     np.testing.assert_array_equal(
-        F.channel_shuffle(_t(values), 3).numpy()[0, :, 0, 0], [0.0, 2.0, 4.0, 1.0, 3.0, 5.0]
+        F.channel_shuffle(_t(values), 3).numpy()[0, :, 0, 0],
+        [0.0, 2.0, 4.0, 1.0, 3.0, 5.0],
     )
 
 
-@pytest.mark.parametrize("shape,groups", [((2, 8, 3, 3), 4), ((1, 6, 5), 2), ((2, 9, 2, 2, 2), 3)])
+@pytest.mark.parametrize(
+    "shape,groups", [((2, 8, 3, 3), 4), ((1, 6, 5), 2), ((2, 9, 2, 2, 2), 3)]
+)
 def test_channel_shuffle_matches_the_reshape_it_names(shape, groups):
     values = RNG.normal(size=shape)
     reshaped = values.reshape(shape[0], groups, shape[1] // groups, *shape[2:])
@@ -195,7 +196,8 @@ def test_a_negative_window_has_a_real_norm_at_an_odd_norm_type():
 
     values = -np.ones((1, 1, 4))
     np.testing.assert_allclose(
-        F.lp_pool1d(_t(values), 3.0, 2).numpy(), np.full((1, 1, 2), 2 ** (1 / 3)),
+        F.lp_pool1d(_t(values), 3.0, 2).numpy(),
+        np.full((1, 1, 2), 2 ** (1 / 3)),
         rtol=1e-13,
     )
 

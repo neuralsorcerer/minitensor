@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math as _math
 import operator as _operator
 
 import numpy as _np
@@ -30,6 +31,45 @@ def _normalize_dimension(dim: object, name: str) -> int:
     if normalized < 0:
         raise ValueError(f"{name} dimensions must be non-negative")
     return normalized
+
+
+def _element_count(sizes: object) -> int:
+    """How many elements a shape holds, or a tensor does.
+
+    Spelled out rather than inferred with `-1` in a reshape: an axis of length
+    zero leaves the inference nothing to divide by, and the failure then reads
+    as a reshape error rather than as the empty answer it should be.
+    """
+
+    return _math.prod(int(size) for size in getattr(sizes, "shape", sizes))
+
+
+def _index_tensor(array: "_np.ndarray", like: Tensor) -> Tensor:
+    """A NumPy index as an int64 tensor beside the data it will address.
+
+    The other half of the rule in "Where an operation belongs"
+    (`docs/development.md`): NumPy computes the positions, and this is where
+    they cross back, onto the device holding what they index.
+    """
+
+    return Tensor.from_numpy(_np.ascontiguousarray(array, dtype=_np.int64)).to(
+        _C.Device(like.device)
+    )
+
+
+def _constant_like(array: "_np.ndarray", like: Tensor) -> Tensor:
+    """A NumPy array as a tensor in `like`'s dtype and on its device.
+
+    For a constant computed from shapes rather than from data -- a mask, a
+    coordinate grid -- which must join an expression without changing its
+    precision or moving it off its device.
+    """
+
+    return (
+        Tensor.from_numpy(_np.ascontiguousarray(array, dtype=_np.float64))
+        .astype(str(like.dtype))
+        .to(_C.Device(like.device))
+    )
 
 
 def _normalize_shape_argument(shape: object, name: str) -> tuple[int, ...]:

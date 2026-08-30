@@ -30,7 +30,10 @@ import numpy as _np
 from . import _core as _C
 from ._shape import (
     _atleast_tensor,
+    _element_count,
+    _index_tensor,
     _normalize_axis,
+    _normalize_shape_argument,
     broadcast_to,
 )
 from ._shape import meshgrid as _meshgrid
@@ -424,13 +427,10 @@ def _scatter_into(
                 f"{tuple(values.shape)} does not broadcast to it"
             ) from None
 
-    count = int(_np.prod(tuple(tensor.shape), dtype=_np.int64))
     written = _F.scatter(
-        tensor.reshape(count),
+        tensor.reshape(_element_count(tensor)),
         0,
-        Tensor.from_numpy(positions.reshape(-1).astype(_np.int64)).to(
-            _C.Device(tensor.device)
-        ),
+        _index_tensor(positions.reshape(-1), tensor),
         values.reshape(int(positions.size)),
     )
     return written.reshape(list(tensor.shape))
@@ -569,7 +569,7 @@ def put(
     values = _atleast_tensor(source)
     indices = _as_index(index, "put")
 
-    flat = tensor.reshape(int(_np.prod(tuple(tensor.shape), dtype=_np.int64)))
+    flat = tensor.reshape(_element_count(tensor))
     positions = _wrap_negative(indices.reshape(-1), int(flat.shape[0]))
     written = _atleast_tensor(broadcast_to(values, tuple(indices.shape))).reshape(
         int(positions.shape[0])
@@ -596,30 +596,24 @@ def diag_indices(n: int, ndim: int = 2) -> Tensor:
 
 
 def _shape_argument(shape: object, name: str) -> tuple[int, ...]:
-    """`shape` as sizes, whether it arrived as a sequence or a single integer."""
+    """`shape` as sizes, whether it arrived as a sequence or a single integer.
 
-    try:
-        return (_operator.index(shape),)
-    except TypeError:
-        pass
-    try:
-        sizes = tuple(_operator.index(size) for size in shape)  # type: ignore[union-attr]
-    except TypeError:
-        raise TypeError(
-            f"{name} expects a shape as an integer or a sequence of them, "
-            f"got {type(shape).__name__}"
-        ) from None
+    The same normalisation `broadcast_shapes` and the creation functions use,
+    so a shape that one of them accepts is a shape all of them accept, plus the
+    one thing those allow and a coordinate conversion cannot: a shape with no
+    axes at all, which has no coordinates to convert.
+    """
+
+    sizes = _normalize_shape_argument(shape, name)
     if not sizes:
         raise ValueError(f"{name} expects a shape with at least one axis")
-    if any(size < 0 for size in sizes):
-        raise ValueError(f"{name} expects non-negative sizes, got {sizes}")
     return sizes
 
 
 def _bounds(tensor: Tensor) -> tuple[int, int]:
     """The smallest and largest value in `tensor`, as Python integers."""
 
-    if int(_np.prod(tuple(tensor.shape), dtype=_np.int64)) == 0:
+    if _element_count(tensor) == 0:
         return 0, -1
     return int(tensor.min().item()), int(tensor.max().item())
 
@@ -643,7 +637,7 @@ def unravel_index(indices: object, shape: object) -> tuple[Tensor, ...]:
 
     sizes = _shape_argument(shape, "unravel_index")
     flat = _as_index(indices, "unravel_index")
-    total = int(_np.prod(sizes, dtype=_np.int64))
+    total = _element_count(sizes)
 
     low, high = _bounds(flat)
     if low < 0 or high >= total:
