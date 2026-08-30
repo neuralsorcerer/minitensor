@@ -52,9 +52,7 @@ def _reference_conv3d(volume, weight, bias, stride, padding, dilation, groups):
     batch = volume.shape[0]
     out_channels, in_per_group = weight.shape[:2]
     kernel = weight.shape[2:]
-    padded = np.pad(
-        volume, ((0, 0), (0, 0)) + tuple((pad, pad) for pad in padding)
-    )
+    padded = np.pad(volume, ((0, 0), (0, 0)) + tuple((pad, pad) for pad in padding))
     sizes = [
         (padded.shape[2 + axis] - dilation[axis] * (kernel[axis] - 1) - 1)
         // stride[axis]
@@ -70,13 +68,17 @@ def _reference_conv3d(volume, weight, bias, stride, padding, dilation, groups):
             window = padded[
                 :,
                 channels,
-                i * stride[0] : i * stride[0] + dilation[0] * (kernel[0] - 1) + 1 : dilation[0],
-                j * stride[1] : j * stride[1] + dilation[1] * (kernel[1] - 1) + 1 : dilation[1],
-                k * stride[2] : k * stride[2] + dilation[2] * (kernel[2] - 1) + 1 : dilation[2],
+                i * stride[0] : i * stride[0]
+                + dilation[0] * (kernel[0] - 1)
+                + 1 : dilation[0],
+                j * stride[1] : j * stride[1]
+                + dilation[1] * (kernel[1] - 1)
+                + 1 : dilation[1],
+                k * stride[2] : k * stride[2]
+                + dilation[2] * (kernel[2] - 1)
+                + 1 : dilation[2],
             ]
-            out[:, channel, i, j, k] = (window * weight[channel]).sum(
-                axis=(1, 2, 3, 4)
-            )
+            out[:, channel, i, j, k] = (window * weight[channel]).sum(axis=(1, 2, 3, 4))
     if bias is not None:
         out += bias.reshape(1, out_channels, 1, 1, 1)
     return out
@@ -131,7 +133,9 @@ def test_conv3d_matches_the_definition(
     weight = RNG.normal(size=weight_shape)
     bias = RNG.normal(size=weight_shape[0])
     np.testing.assert_allclose(
-        F.conv3d(_t(volume), _t(weight), _t(bias), stride, padding, dilation, groups).numpy(),
+        F.conv3d(
+            _t(volume), _t(weight), _t(bias), stride, padding, dilation, groups
+        ).numpy(),
         _reference_conv3d(volume, weight, bias, stride, padding, dilation, groups),
         rtol=1e-11,
         atol=1e-12,
@@ -215,9 +219,7 @@ def test_avg_pool3d_matches_the_definition(
 ):
     volume = RNG.normal(size=shape)
     np.testing.assert_allclose(
-        F.avg_pool3d(
-            _t(volume), kernel, stride, padding, count_include_pad
-        ).numpy(),
+        F.avg_pool3d(_t(volume), kernel, stride, padding, count_include_pad).numpy(),
         _reference_pool3d(
             volume,
             kernel,
@@ -253,7 +255,9 @@ def test_depth_padding_is_a_real_zero_for_a_mean():
     corner = F.avg_pool3d(_t(ones), 3, 1, 1).numpy()[0, 0, 0, 0, 0]
     assert corner == pytest.approx(8 / 27)
     # And with it not counted, only the real positions divide.
-    assert F.avg_pool3d(_t(ones), 3, 1, 1, False).numpy()[0, 0, 0, 0, 0] == pytest.approx(1.0)
+    assert F.avg_pool3d(_t(ones), 3, 1, 1, False).numpy()[
+        0, 0, 0, 0, 0
+    ] == pytest.approx(1.0)
 
 
 def test_the_two_divisors_agree_where_there_is_no_padding():

@@ -402,6 +402,86 @@ def angle(input: object) -> Tensor:
     )
 
 
+# --- matrix norms and the conditioning they measure -------------------------
+
+#: The orders `matrix_norm` accepts. `"fro"` is elementwise; `1` and `inf` are
+#: induced norms, which are absolute column and row sums; the rest are Schatten
+#: norms, which only the singular values give.
+_MATRIX_NORM_ORDERS = ("fro", "nuc", 1, -1, 2, -2, _math.inf, -_math.inf)
+
+
+def _matrix_stack(input: object, name: str) -> Tensor:
+    matrix = _atleast_tensor(input)
+    if matrix.ndim() < 2:
+        raise ValueError(
+            f"{name} requires at least two dimensions, got {matrix.ndim()}"
+        )
+    return matrix
+
+
+def matrix_norm(input: object, ord: object = "fro", keepdim: bool = False) -> Tensor:
+    """A norm of each matrix in the stack, taken over its last two axes.
+
+    `"fro"` is the elementwise 2-norm and `"nuc"` the sum of the singular
+    values. `1` and `inf` are the induced norms -- the largest absolute column
+    sum and the largest absolute row sum -- and `2` is the largest singular
+    value. Each negative order is the same quantity minimised rather than
+    maximised, which is what `cond` is built from and is not itself a norm.
+
+    The axes are the last two, as they are for `inverse`, `diagonal` and `svd`.
+    `permute` first to use others; `torch.linalg.matrix_norm` takes them as an
+    argument instead, and this does not, so that every matrix operation in this
+    module reads the same way.
+
+    A condition number in an order other than 2 is
+    `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`. `cond` itself is the
+    2-norm one, which has a kernel because the ratio of the extreme singular
+    values needs no inverse.
+    """
+
+    matrix = _matrix_stack(input, "matrix_norm")
+    if isinstance(ord, str):
+        if ord not in ("fro", "nuc"):
+            raise ValueError(
+                f"matrix_norm takes one of {_MATRIX_NORM_ORDERS} as its order, "
+                f"got {ord!r}"
+            )
+        order: object = ord
+    else:
+        try:
+            order = float(ord)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"matrix_norm takes one of {_MATRIX_NORM_ORDERS} as its order, "
+                f"got {ord!r}"
+            ) from None
+        if order not in (1.0, -1.0, 2.0, -2.0, _math.inf, -_math.inf):
+            raise ValueError(
+                f"matrix_norm takes one of {_MATRIX_NORM_ORDERS} as its order, "
+                f"got {ord!r}"
+            )
+
+    if order == "fro":
+        result = _F.norm(matrix, 2.0, [-2, -1])
+    elif order in ("nuc", 2.0, -2.0):
+        values = _F.svdvals(matrix)
+        if order == "nuc":
+            result = _F.sum(values, -1)
+        else:
+            # `svdvals` is descending, so the ends are the extremes.
+            result = _F.amax(values, -1) if order == 2.0 else _F.amin(values, -1)
+    else:
+        # An induced 1-norm sums down the columns and an induced inf-norm
+        # across the rows; the sign of the order says whether to take the
+        # largest of those sums or the smallest.
+        summed = _F.sum(_F.abs(matrix), -2 if abs(order) == 1.0 else -1)
+        result = _F.amax(summed, -1) if order > 0 else _F.amin(summed, -1)
+
+    if not keepdim:
+        return result
+    return result.reshape(list(result.shape) + [1, 1])
+
+
 # --- the matrix exponential -------------------------------------------------
 
 #: The largest 1-norm each Pade degree handles at the precision named, from
@@ -659,6 +739,7 @@ _MATRIX = (
     "inverse",
     "logdet",
     "matrix_exp",
+    "matrix_norm",
     "mm",
     "mv",
     "numel",

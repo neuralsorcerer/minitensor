@@ -18,6 +18,7 @@ from __future__ import annotations
 import operator as _operator
 
 from . import _core as _C
+from ._indexing import triu_indices as _triu_indices
 from ._shape import _atleast_tensor, _normalize_axis
 
 Tensor = _C.Tensor
@@ -108,6 +109,80 @@ def cdist(input: object, other: object, p: float = 2.0) -> Tensor:
         )
 
     return _F.norm(a.unsqueeze(-2) - b.unsqueeze(-3), p, [-1])
+
+
+def normalize(
+    input: object, p: float = 2.0, dim: int = 1, eps: float = 1e-12
+) -> Tensor:
+    """`input` scaled so each slice along `dim` has unit `p`-norm.
+
+    `eps` is a floor under the norm, not a term added to it: a zero vector
+    comes back as zero rather than as a division by zero, and every other
+    vector is divided by its own norm exactly. Adding `eps` instead would
+    shrink every vector slightly, which is a bias no caller asked for.
+    """
+
+    tensor = _require_float(_atleast_tensor(input), "normalize")
+    axis = _normalize_axis(dim, tensor.ndim(), "normalize")
+    lengths = _F.clamp(_F.norm(tensor, p, [axis], True), float(eps), None)
+    return tensor / lengths
+
+
+def pairwise_distance(
+    input: object,
+    other: object,
+    p: float = 2.0,
+    eps: float = 1e-6,
+    keepdim: bool = False,
+) -> Tensor:
+    """The `p`-distance between corresponding rows, one number per row.
+
+    `cdist` gives every pair; this gives the diagonal of that, which is what a
+    loss over matched pairs wants and costs `n` distances rather than `n * m`.
+    The operands are broadcast, so a single row can be compared against a
+    batch of them.
+
+    `eps` is added to the difference before the norm, which biases every
+    distance upward: two identical rows are `eps * d ** (1 / p)` apart rather
+    than zero. It is here because `torch.nn.functional.pairwise_distance` has
+    it and defaults it to the same value, so ported code gets the same numbers.
+
+    The reason it exists there does not apply here. A `p`-norm has no
+    derivative at the origin, and PyTorch needs the shift to keep a loss that
+    pulls two rows together from producing NaN at the moment it succeeds --
+    but this library's `norm` already answers zero for that gradient rather
+    than NaN. So `eps=0.0` is safe, gives the true distance, and is the better
+    choice for anything not being compared against torch.
+    """
+
+    a = _require_float(_atleast_tensor(input), "pairwise_distance")
+    b = _require_float(_atleast_tensor(other), "pairwise_distance")
+    return _F.norm(a - b + float(eps), p, [-1], keepdim)
+
+
+def pdist(input: object, p: float = 2.0) -> Tensor:
+    """The `p`-distance between every pair of rows, without the repeats.
+
+    An `(n, d)` input gives `n * (n - 1) / 2` distances, ordered by row and
+    then by column -- the strict upper triangle of what `cdist(x, x)` would
+    give, which is the same numbers with the diagonal and one of each mirrored
+    pair dropped.
+
+    It is built from the pairs rather than from that matrix, so it forms
+    `n * (n - 1) / 2` differences instead of `n * n` of them: the half that is
+    wanted, and not the half that would be discarded.
+    """
+
+    tensor = _require_float(_atleast_tensor(input), "pdist")
+    if tensor.ndim() != 2:
+        raise ValueError(
+            f"pdist takes a single matrix of rows, got {tensor.ndim()} dimensions"
+        )
+    rows = int(tensor.shape[0])
+    pairs = _triu_indices(rows, rows, 1)
+    left = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 0, 1), 0))
+    right = _F.index_select(tensor, 0, _F.squeeze(_F.narrow(pairs, 0, 1, 1), 0))
+    return _F.norm(left - right, p, [-1])
 
 
 def diff(input: object, n: int = 1, dim: int = -1) -> Tensor:

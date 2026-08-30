@@ -284,6 +284,7 @@ _FUNCTIONAL_FORWARDERS = (
     "inverse",
     "pinverse",
     "matrix_exp",
+    "matrix_norm",
     "logdet",
     "renorm",
     "vander",

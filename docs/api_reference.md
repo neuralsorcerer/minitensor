@@ -78,6 +78,9 @@ of convenience aliases.
 | `kron(input, other)` | The Kronecker product: each element of `input` scaling a copy of `other`. Ranks need not match; the shorter is padded with leading 1s. |
 | `dist(input, other, p=2.0)` | The `p`-norm of the difference. |
 | `cdist(input, other, p=2.0)` | Every pairwise `p`-distance between the rows of two batches: `(..., n, d)` and `(..., m, d)` give `(..., n, m)`. Forms the difference in full, so it costs `n * m * d` elements. |
+| `normalize(input, p=2.0, dim=1, eps=1e-12)` | `input` scaled so each slice along `dim` has unit `p`-norm. `eps` is a floor *under* the norm rather than a term added to it, so a zero vector comes back as zero and every other vector is exactly unit length -- adding `eps` would shrink all of them. |
+| `pairwise_distance(input, other, p=2.0, eps=1e-6, keepdim=False)` | The `p`-distance between corresponding rows: the diagonal of `cdist`, at `n` distances rather than `n * m`. Operands broadcast. `eps` is added to the difference, biasing every distance up by `eps * d ** (1 / p)`; it matches `torch.nn.functional.pairwise_distance` and is a compatibility default, not a requirement -- PyTorch needs it to avoid a NaN gradient where two rows coincide, and this library's `norm` answers zero there, so `eps=0.0` gives the true distance safely. |
+| `pdist(input, p=2.0)` | The `p`-distance between every pair of rows without the repeats: `n * (n - 1) / 2` values, ordered by row then column -- the strict upper triangle of `cdist(x, x)`. Built from the pairs rather than from that matrix, so it forms half as many differences as it would discard. |
 | `diff(input, n=1, dim=-1)` | The `n`-th discrete difference along `dim`. |
 | `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
 | `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. |
@@ -114,6 +117,7 @@ of convenience aliases.
 | `inverse(input)` | The inverse of each square matrix, solved against an identity. For `inverse(A) @ b`, ask `solve(A, b)` instead -- same answer, without forming the inverse, faster and better conditioned. |
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse, over the singular values above `rcond * s_max`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
+| `matrix_norm(input, ord="fro", keepdim=False)` | A norm of each matrix over its last two axes. `"fro"` is the elementwise 2-norm and `"nuc"` the sum of the singular values; `1` and `inf` are the induced norms (largest absolute column and row sum) and `2` the largest singular value, with each negative order the same quantity minimised. The axes are the last two, as for `inverse`, `diagonal` and `svd` -- `permute` first to use others. A condition number in an order other than 2 is `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`; `cond` is the 2-norm one, which needs no inverse. |
 | `tensorsolve(a, b, axes=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `axes` names axes of `a` to move to the end first. |
 | `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
@@ -1601,7 +1605,8 @@ pad,
 
 # Matrix products, inverses and rescalings
 t, numel, mm, mv, inner, tensordot, tensorsolve, tensorinv, addmm, baddbmm,
-inverse, pinverse, matrix_exp, logdet, renorm, vander, real, conj, imag, angle,
+inverse, pinverse, matrix_exp, matrix_norm, logdet, renorm, vander, real, conj,
+imag, angle,
 
 # Joining, splitting and indexing
 cat, stack, split, chunk, index_select, gather, narrow, scatter, scatter_add,
