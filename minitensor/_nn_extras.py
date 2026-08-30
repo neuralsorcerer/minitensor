@@ -28,6 +28,7 @@ different functions rather than one written twice.
 
 from __future__ import annotations
 
+import math as _math
 import operator as _operator
 
 import numpy as _np
@@ -274,6 +275,229 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
     return _F.permute(unpacked, order).reshape(
         [*batch, channels * factor * factor, out_height, out_width]
     )
+
+
+# --- normalizing over something other than the batch ------------------------
+
+
+def _feature_shape(channels: int, rank: int) -> list[int]:
+    """`(1, channels, 1, 1, ...)`: a per-channel vector lined up with a batch."""
+
+    return [1, channels] + [1] * (rank - 2)
+
+
+def _affine(
+    normalized: Tensor, weight: object | None, bias: object | None, op: str
+) -> Tensor:
+    """Scale and shift by one value per channel, if either was given."""
+
+    if weight is None and bias is None:
+        return normalized
+    channels = int(normalized.shape[1])
+    shape = _feature_shape(channels, normalized.ndim())
+    for name, value in (("weight", weight), ("bias", bias)):
+        if value is None:
+            continue
+        parameter = _atleast_tensor(value)
+        if int(parameter.reshape(-1).shape[0]) != channels:
+            raise ValueError(
+                f"{op} expects one {name} per channel ({channels}), got "
+                f"{int(parameter.reshape(-1).shape[0])}"
+            )
+        normalized = (
+            normalized * parameter.reshape(shape)
+            if name == "weight"
+            else normalized + parameter.reshape(shape)
+        )
+    return normalized
+
+
+def _normalized_groups(
+    op: str, tensor: Tensor, groups: int, eps: float
+) -> tuple[Tensor, Tensor, Tensor]:
+    """`tensor` with each group centred and scaled, and the statistics used.
+
+    The groups are `(batch, groups, everything else)`, so one reshape puts every
+    element a group owns on a single axis and the mean and variance are one
+    reduction each. Which elements a group owns -- some channels and all of
+    their positions -- is the whole difference between this, `layer_norm` and
+    `batch_norm`; the arithmetic afterwards is the same in all three.
+    """
+
+    sizes = [int(size) for size in tensor.shape]
+    batch, channels = sizes[0], sizes[1]
+    if channels % groups:
+        raise ValueError(
+            f"{op} needs the channel count ({channels}) to divide by the number "
+            f"of groups ({groups})"
+        )
+    per_group = (channels // groups) * _math.prod(sizes[2:])
+    grouped = tensor.reshape(batch, groups, per_group)
+
+    mean = _F.mean(grouped, -1, True)
+    variance = _F.var(grouped, -1, False, True)
+    centred = (grouped - mean) / _F.sqrt(variance + float(eps))
+    return centred.reshape(sizes), mean, variance
+
+
+def group_norm(
+    input: object,
+    num_groups: int,
+    weight: object | None = None,
+    bias: object | None = None,
+    eps: float = 1e-5,
+) -> Tensor:
+    """Normalize over each group of channels and all of their positions.
+
+    Between `layer_norm`, which takes every channel together, and
+    `instance_norm`, which takes each on its own: `num_groups` says how finely
+    to divide them, and those two are the ends of that range. Unlike
+    `batch_norm` the statistics never cross the batch, so the result for one
+    sample does not depend on which others it was computed with -- which is
+    what makes it usable at a batch size of one.
+
+    `weight` and `bias` are one value per channel, not per group.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError(
+            f"group_norm expects a batch and a channel axis, got {tensor.ndim()} "
+            "dimensions"
+        )
+    groups = _operator.index(num_groups)
+    if groups < 1:
+        raise ValueError(f"group_norm requires at least one group, got {num_groups}")
+    normalized, _mean, _variance = _normalized_groups("group_norm", tensor, groups, eps)
+    return _affine(normalized, weight, bias, "group_norm")
+
+
+def instance_norm(
+    input: object,
+    running_mean: object | None = None,
+    running_var: object | None = None,
+    weight: object | None = None,
+    bias: object | None = None,
+    use_input_stats: bool = True,
+    momentum: float = 0.1,
+    eps: float = 1e-5,
+) -> Tensor:
+    """Normalize each channel of each sample over its own positions.
+
+    `group_norm` with one group per channel, which is what it is -- so it is
+    written that way rather than twice. What it adds is the running statistics:
+    with buffers passed in and `use_input_stats`, they are updated from this
+    batch, and with `use_input_stats` false they are used instead of it, which
+    is how an evaluation pass reproduces training-time behaviour.
+
+    The buffers are updated with the *unbiased* variance while the
+    normalization uses the biased one, which is what `batch_norm` does here and
+    in torch: the divisor that makes a good estimate of the population variance
+    is not the one that makes this batch have unit variance.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 3:
+        raise ValueError(
+            "instance_norm expects a batch, a channel and at least one position "
+            f"axis, got {tensor.ndim()} dimensions"
+        )
+    sizes = [int(size) for size in tensor.shape]
+    channels = sizes[1]
+    positions = _math.prod(sizes[2:])
+
+    if not use_input_stats:
+        if running_mean is None or running_var is None:
+            raise ValueError(
+                "instance_norm without input statistics needs both running_mean "
+                "and running_var"
+            )
+        shape = _feature_shape(channels, tensor.ndim())
+        mean = _atleast_tensor(running_mean).reshape(shape)
+        variance = _atleast_tensor(running_var).reshape(shape)
+        normalized = (tensor - mean) / _F.sqrt(variance + float(eps))
+        return _affine(normalized, weight, bias, "instance_norm")
+
+    normalized, _mean, _variance = _normalized_groups(
+        "instance_norm", tensor, channels, eps
+    )
+    if running_mean is not None or running_var is not None:
+        _update_running(
+            tensor.reshape(sizes[0], channels, positions),
+            running_mean,
+            running_var,
+            float(momentum),
+        )
+    return _affine(normalized, weight, bias, "instance_norm")
+
+
+def _update_running(
+    flat: Tensor,
+    running_mean: object | None,
+    running_var: object | None,
+    momentum: float,
+) -> None:
+    """Move the running buffers towards this batch's per-channel statistics.
+
+    Written in place, because a buffer is what the caller keeps -- and outside
+    the graph, because a running average of past batches is not something the
+    loss should differentiate through.
+    """
+
+    with _C.no_grad():
+        if running_mean is not None:
+            buffer = _atleast_tensor(running_mean)
+            batch_mean = _F.mean(_F.mean(flat, -1), 0).detach()
+            buffer.copy_(buffer * (1.0 - momentum) + batch_mean * momentum)
+        if running_var is not None:
+            buffer = _atleast_tensor(running_var)
+            batch_var = _F.mean(_F.var(flat, -1, True), 0).detach()
+            buffer.copy_(buffer * (1.0 - momentum) + batch_var * momentum)
+
+
+def local_response_norm(
+    input: object,
+    size: int,
+    alpha: float = 1e-4,
+    beta: float = 0.75,
+    k: float = 1.0,
+) -> Tensor:
+    """Divide each element by the energy in a window of neighbouring channels.
+
+    `x / (k + alpha * mean(x**2 over `size` channels around it)) ** beta`. The
+    normalization AlexNet used: a channel that responds strongly suppresses the
+    same position in the channels beside it, so only a few channels stay large.
+    Superseded by `batch_norm` and the ones beside it, and still wanted to run
+    a network from when it was not.
+
+    The window is an average over the channel axis, which is `avg_pool3d` with
+    a window of one in the two positional axes -- so the channel axis is moved
+    where a pooling expects to find a spatial one, and no new kernel is needed.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 3:
+        raise ValueError(
+            "local_response_norm expects a batch, a channel and at least one "
+            f"position axis, got {tensor.ndim()} dimensions"
+        )
+    window = _operator.index(size)
+    if window < 1:
+        raise ValueError(
+            f"local_response_norm requires a window of at least one, got {size}"
+        )
+
+    sizes = [int(each) for each in tensor.shape]
+    positions = _math.prod(sizes[2:])
+    # `(batch, 1, channels, positions, 1)`: the channel axis in the depth slot
+    # of a 3-D pooling, and one on either side of it so the window is 1-D.
+    stacked = (tensor * tensor).reshape(sizes[0], 1, sizes[1], positions, 1)
+    # An even window has no centre, so it takes one more from below than above
+    # -- the same side `torch` takes it from.
+    padded = _F.pad(stacked, [0, 0, 0, 0, window // 2, (window - 1) // 2])
+    energy = avg_pool3d(padded, (window, 1, 1), (1, 1, 1))
+    divisor = (energy.reshape(sizes) * float(alpha) + float(k)) ** float(beta)
+    return tensor / divisor
 
 
 # --- three spatial axes, out of the two the kernels have --------------------
@@ -751,7 +975,10 @@ _NN_EXTRAS = (
     "avg_pool3d",
     "conv3d",
     "fold",
+    "group_norm",
     "gumbel_softmax",
+    "instance_norm",
+    "local_response_norm",
     "nll_loss",
     "pixel_shuffle",
     "max_pool3d",

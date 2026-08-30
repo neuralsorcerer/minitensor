@@ -128,7 +128,10 @@ def test_pairwise_distance_broadcasts_a_single_row_against_a_batch():
 
 def test_pairwise_distance_keeps_the_axis_when_asked():
     left, right = RNG.normal(size=(4, 5)), RNG.normal(size=(4, 5))
-    assert tuple(mt.pairwise_distance(_t(left), _t(right), keepdim=True).shape) == (4, 1)
+    assert tuple(mt.pairwise_distance(_t(left), _t(right), keepdim=True).shape) == (
+        4,
+        1,
+    )
 
 
 def test_eps_biases_the_distance_upward_by_a_known_amount():
