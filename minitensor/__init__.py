@@ -38,6 +38,7 @@ from ._indexing import (
     argwhere,
     block_diag,
     cartesian_prod,
+    diag_indices,
     diagflat,
     diagonal_scatter,
     flatnonzero,
@@ -46,6 +47,8 @@ from ._indexing import (
     index_fill,
     isin,
     masked_scatter,
+    put,
+    ravel_multi_index,
     select,
     select_scatter,
     slice_scatter,
@@ -53,6 +56,7 @@ from ._indexing import (
     take_along_dim,
     tril_indices,
     triu_indices,
+    unravel_index,
 )
 from ._sampling import bernoulli, multinomial, normal
 from ._shape import (
@@ -401,6 +405,10 @@ _BASE_EXPORTS = (
     "isin",
     "tril_indices",
     "triu_indices",
+    "diag_indices",
+    "put",
+    "unravel_index",
+    "ravel_multi_index",
     "diagflat",
     "block_diag",
     "cartesian_prod",

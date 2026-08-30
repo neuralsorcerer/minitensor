@@ -547,3 +547,161 @@ def diagonal_scatter(input: object, src: object, offset: int = 0) -> Tensor:
     return _scatter_into(
         "diagonal_scatter", tensor, src, _np.ravel_multi_index(coordinates, shape)
     )
+
+
+def put(
+    input: object, index: object, source: object, accumulate: bool = False
+) -> Tensor:
+    """`input` with `source` written at the flat positions `index` names.
+
+    The write direction of `take`, and read the same way: row-major over the
+    whole tensor whatever its shape, with negative positions counting from the
+    end. `accumulate` adds into the target instead of overwriting, which is
+    also what decides what a repeated position means -- the sum of what landed
+    there, or whichever write came last.
+
+    The gradient reaches `source` at the positions it landed on and `input`
+    everywhere else, or everywhere when accumulating, since an addition leaves
+    what was already there.
+    """
+
+    tensor = _atleast_tensor(input)
+    values = _atleast_tensor(source)
+    indices = _as_index(index, "put")
+
+    flat = tensor.reshape(int(_np.prod(tuple(tensor.shape), dtype=_np.int64)))
+    positions = _wrap_negative(indices.reshape(-1), int(flat.shape[0]))
+    written = _atleast_tensor(broadcast_to(values, tuple(indices.shape))).reshape(
+        int(positions.shape[0])
+    )
+    scatter = _F.scatter_add if accumulate else _F.scatter
+    return scatter(flat, 0, positions, written).reshape(list(tensor.shape))
+
+
+def diag_indices(n: int, ndim: int = 2) -> Tensor:
+    """The `[ndim, n]` indices of the main diagonal of an `n`-sided cube.
+
+    Every row is the same range, because the main diagonal is where all the
+    coordinates agree. `tril_indices` and `triu_indices` shape their answers the
+    same way, so the three can be used interchangeably.
+    """
+
+    side = _operator.index(n)
+    rank = _operator.index(ndim)
+    if side < 0:
+        raise ValueError(f"diag_indices requires a non-negative size, got {n}")
+    if rank < 1:
+        raise ValueError(f"diag_indices requires at least one dimension, got {ndim}")
+    return Tensor.from_numpy(_np.array(_np.diag_indices(side, rank), dtype=_np.int64))
+
+
+def _shape_argument(shape: object, name: str) -> tuple[int, ...]:
+    """`shape` as sizes, whether it arrived as a sequence or a single integer."""
+
+    try:
+        return (_operator.index(shape),)
+    except TypeError:
+        pass
+    try:
+        sizes = tuple(_operator.index(size) for size in shape)  # type: ignore[union-attr]
+    except TypeError:
+        raise TypeError(
+            f"{name} expects a shape as an integer or a sequence of them, "
+            f"got {type(shape).__name__}"
+        ) from None
+    if not sizes:
+        raise ValueError(f"{name} expects a shape with at least one axis")
+    if any(size < 0 for size in sizes):
+        raise ValueError(f"{name} expects non-negative sizes, got {sizes}")
+    return sizes
+
+
+def _bounds(tensor: Tensor) -> tuple[int, int]:
+    """The smallest and largest value in `tensor`, as Python integers."""
+
+    if int(_np.prod(tuple(tensor.shape), dtype=_np.int64)) == 0:
+        return 0, -1
+    return int(tensor.min().item()), int(tensor.max().item())
+
+
+def unravel_index(indices: object, shape: object) -> tuple[Tensor, ...]:
+    """The coordinates of flat positions `indices` in a tensor of `shape`.
+
+    One tensor per axis, each shaped like `indices` -- the form NumPy and
+    PyTorch both return, so `input[unravel_index(k, input.shape)]` reads the
+    way it does there. `stack` them on a new leading axis to get the `[ndim, n]`
+    layout `tril_indices` and `diag_indices` use.
+
+    The strides come from `shape` alone, so they are computed once in Python
+    and applied to the whole index tensor at once, rather than a division at a
+    time down the axes.
+
+    Positions are checked against the tensor they claim to index, which costs
+    one pass over `indices` -- a flat position that is out of range does not
+    fail on its own, it silently names the wrong element.
+    """
+
+    sizes = _shape_argument(shape, "unravel_index")
+    flat = _as_index(indices, "unravel_index")
+    total = int(_np.prod(sizes, dtype=_np.int64))
+
+    low, high = _bounds(flat)
+    if low < 0 or high >= total:
+        raise IndexError(
+            f"unravel_index was given positions in [{low}, {high}] for a shape "
+            f"of {sizes}, which holds {total}"
+        )
+
+    # `strides[i]` is how far one step along axis `i` moves in row-major order.
+    strides = _np.append(_np.cumprod(sizes[:0:-1])[::-1], 1)
+    return tuple(
+        (flat // int(stride)) % int(size) for stride, size in zip(strides, sizes)
+    )
+
+
+def ravel_multi_index(multi_index: object, dims: object) -> Tensor:
+    """The flat position of each coordinate, the inverse of `unravel_index`.
+
+    `multi_index` is one tensor per axis, or a single tensor whose *leading*
+    axis is the coordinate -- which is the layout `tril_indices`,
+    `triu_indices` and `diag_indices` produce, so their output can be handed
+    straight here.
+
+    Each coordinate is checked against the axis it indexes, for the same reason
+    `unravel_index` checks: an out-of-range coordinate produces a position that
+    is wrong rather than one that fails.
+    """
+
+    sizes = _shape_argument(dims, "ravel_multi_index")
+    if isinstance(multi_index, (tuple, list)):
+        coordinates = [_as_index(part, "ravel_multi_index") for part in multi_index]
+    else:
+        stacked = _as_index(multi_index, "ravel_multi_index")
+        if stacked.ndim() < 1:
+            raise ValueError(
+                "ravel_multi_index needs one coordinate per axis, and a scalar "
+                "carries none"
+            )
+        coordinates = [
+            _F.squeeze(_F.narrow(stacked, 0, axis, 1), 0)
+            for axis in range(int(stacked.shape[0]))
+        ]
+
+    if len(coordinates) != len(sizes):
+        raise ValueError(
+            f"ravel_multi_index was given {len(coordinates)} coordinate(s) for a "
+            f"shape of {sizes}"
+        )
+    for axis, (coordinate, size) in enumerate(zip(coordinates, sizes)):
+        low, high = _bounds(coordinate)
+        if low < 0 or high >= size:
+            raise IndexError(
+                f"ravel_multi_index was given coordinates in [{low}, {high}] for "
+                f"axis {axis} of size {size}"
+            )
+
+    strides = _np.append(_np.cumprod(sizes[:0:-1])[::-1], 1)
+    position = coordinates[0] * int(strides[0])
+    for coordinate, stride in zip(coordinates[1:], strides[1:]):
+        position = position + coordinate * int(stride)
+    return position

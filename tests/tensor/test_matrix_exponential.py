@@ -97,7 +97,8 @@ def test_the_exponential_of_zero_is_the_identity():
 def test_a_diagonal_matrix_exponentiates_along_its_diagonal():
     diagonal = np.array([0.5, -1.5, 2.0, 0.0])
     np.testing.assert_allclose(
-        mt.matrix_exp(_t(np.diag(diagonal))).numpy(), np.diag(np.exp(diagonal)),
+        mt.matrix_exp(_t(np.diag(diagonal))).numpy(),
+        np.diag(np.exp(diagonal)),
         rtol=1e-14,
     )
 
@@ -110,7 +111,9 @@ def test_a_nilpotent_matrix_has_a_series_that_stops():
         np.linalg.matrix_power(nilpotent, power) / math.factorial(power)
         for power in range(4)
     )
-    np.testing.assert_allclose(mt.matrix_exp(_t(nilpotent)).numpy(), expected, rtol=1e-14)
+    np.testing.assert_allclose(
+        mt.matrix_exp(_t(nilpotent)).numpy(), expected, rtol=1e-14
+    )
 
 
 @pytest.mark.parametrize("angle", [0.0, 0.7, 1.3, 3.0])
