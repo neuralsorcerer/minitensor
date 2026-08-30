@@ -34,6 +34,7 @@ import operator as _operator
 import numpy as _np
 
 from . import _core as _C
+from ._sampling import bernoulli as _bernoulli
 from ._shape import (
     _atleast_tensor,
     _constant_like,
@@ -282,6 +283,164 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
     return _F.permute(unpacked, order).reshape(
         [*batch, channels * factor * factor, out_height, out_width]
     )
+
+
+# --- the stochastic regularizers -------------------------------------------
+
+#: The value SELU saturates to, `-scale * alpha`. Dropping an element to this
+#: rather than to zero is what makes `alpha_dropout` the one that suits a
+#: self-normalizing network: zero is not a neutral value for an activation
+#: whose negative limit is here.
+_SELU_SATURATION = -1.7580993408473766
+
+
+def _dropout_probability(op: str, p: object) -> float:
+    probability = float(p)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError(f"{op} probability must be between 0 and 1, got {probability}")
+    return probability
+
+
+def _channelwise(op: str, input: object, p: float, training: bool, rank: int) -> Tensor:
+    """`dropout2d` at a rank it does not take, by way of one it does.
+
+    Dropping a whole channel is the same operation whatever the positions are
+    shaped like, so the positions are flattened into one axis and a second of
+    length one is added -- which is a four-dimensional tensor, and the kernel
+    handles it.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() != rank:
+        raise ValueError(
+            f"{op} expects a {rank}-dimensional input of (batch, channels, "
+            f"{'positions' if rank == 3 else 'depth, height, width'}), got "
+            f"{tensor.ndim()} dimensions"
+        )
+    sizes = [int(size) for size in tensor.shape]
+    flattened = tensor.reshape([sizes[0], sizes[1], _element_count(sizes[2:]), 1])
+    return _F.dropout2d(flattened, p, training).reshape(sizes)
+
+
+def dropout1d(input: object, p: float = 0.5, training: bool = True) -> Tensor:
+    """Zero whole channels of a `(batch, channels, positions)` input.
+
+    `dropout2d` for a signal rather than an image. Dropping a whole channel
+    rather than scattered elements is what makes it worth having: adjacent
+    positions in a feature map are correlated, so zeroing one of them leaves
+    its value recoverable from its neighbours and regularises very little.
+    """
+
+    return _channelwise("dropout1d", input, p, training, 3)
+
+
+def dropout3d(input: object, p: float = 0.5, training: bool = True) -> Tensor:
+    """Zero whole channels of a `(batch, channels, depth, height, width)` input."""
+
+    return _channelwise("dropout3d", input, p, training, 5)
+
+
+def _alpha_dropout(
+    op: str, input: object, p: float, training: bool, per_channel: bool
+) -> Tensor:
+    tensor = _atleast_tensor(input)
+    probability = _dropout_probability(op, p)
+    if not training or probability == 0.0:
+        return tensor
+    if per_channel and tensor.ndim() < 2:
+        raise ValueError(
+            f"{op} expects a batch and a channel axis, got {tensor.ndim()} dimensions"
+        )
+
+    saturation = _SELU_SATURATION
+    if probability == 1.0:
+        # Every element takes the saturation value, so the answer has no
+        # variance for the rescaling to restore; the limit of the formula below
+        # is the mean it would shift to, which is zero. Computing it instead
+        # gives `inf - inf`.
+        return tensor * 0.0
+
+    # The affine correction that keeps a standard normal standard: with `m` the
+    # keep mask, `a * (x * m + s * (1 - m)) + b` has mean 0 and variance 1 when
+    # `x` does. `a` is what rescales the variance and `b` recentres the mean.
+    keep = 1.0 - probability
+    scale = (keep * (1.0 + probability * saturation * saturation)) ** -0.5
+    shift = -scale * saturation * probability
+
+    shape = list(tensor.shape)
+    if per_channel:
+        shape = shape[:2] + [1] * (len(shape) - 2)
+    mask = _bernoulli(Tensor.full(shape, keep, dtype=tensor.dtype))
+    kept = tensor * mask + (1.0 - mask) * saturation
+    return kept * scale + shift
+
+
+def alpha_dropout(input: object, p: float = 0.5, training: bool = True) -> Tensor:
+    """Dropout that leaves a self-normalizing network self-normalizing.
+
+    Ordinary dropout zeroes an element and rescales the rest, which keeps the
+    mean and changes the variance. That is fine after a rectifier, whose
+    negative side is zero anyway, and wrong after `selu`, whose whole point is
+    that activations hold a mean of zero and a variance of one from layer to
+    layer.
+
+    So this drops to `selu`'s own negative saturation value rather than to
+    zero, and then applies the affine correction that restores both moments at
+    once. A standard normal input comes back standard normal, at any `p`, which
+    is the property and is what the test checks.
+    """
+
+    return _alpha_dropout("alpha_dropout", input, p, training, False)
+
+
+def feature_alpha_dropout(
+    input: object, p: float = 0.5, training: bool = True
+) -> Tensor:
+    """`alpha_dropout` over whole channels, as `dropout2d` is over `dropout`.
+
+    The same correction and the same saturation value; only the mask is
+    coarser, one draw per channel rather than one per element.
+    """
+
+    return _alpha_dropout("feature_alpha_dropout", input, p, training, True)
+
+
+def rrelu(
+    input: object,
+    lower: float = 1.0 / 8,
+    upper: float = 1.0 / 3,
+    training: bool = True,
+) -> Tensor:
+    """A leaky rectifier whose negative slope is drawn rather than fixed.
+
+    In training each element gets its own slope, uniform on `[lower, upper]`;
+    in evaluation every element gets the midpoint, so the network sees the
+    average of what it was trained against rather than a fresh draw.
+
+    Written as `relu(x) + slope * (x - relu(x))`, which is bit-exact on the
+    positive side -- `x - relu(x)` is exactly zero there -- and takes the
+    negative side's derivative at the origin, agreeing with `leaky_relu` and
+    `prelu` on the one point where the two sides disagree.
+    """
+
+    tensor = _atleast_tensor(input)
+    low, high = float(lower), float(upper)
+    if low > high:
+        raise ValueError(
+            f"rrelu takes a range with the lower bound first, got [{low}, {high}]"
+        )
+    if low < 0.0:
+        raise ValueError(f"rrelu requires non-negative slopes, got {low}")
+
+    # A fresh slope per element while training; the midpoint otherwise, so the
+    # network sees the average of what it was trained against. A range with
+    # nothing in it is the midpoint either way.
+    if training and low != high:
+        slope: object = Tensor.rand_like(tensor) * (high - low) + low
+    else:
+        slope = (low + high) / 2.0
+    positive = _F.relu(tensor)
+    return positive + slope * (tensor - positive)
 
 
 # --- completing the pairs ---------------------------------------------------
@@ -1172,10 +1331,14 @@ def fold(
 
 _NN_EXTRAS = (
     "affine_grid",
+    "alpha_dropout",
     "avg_pool3d",
     "channel_shuffle",
     "conv3d",
+    "dropout1d",
+    "dropout3d",
     "embedding",
+    "feature_alpha_dropout",
     "fold",
     "group_norm",
     "gumbel_softmax",
@@ -1188,5 +1351,6 @@ _NN_EXTRAS = (
     "max_pool3d",
     "pixel_unshuffle",
     "prelu",
+    "rrelu",
     "unfold",
 )
