@@ -7,7 +7,33 @@
 use crate::{
     device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
 };
+use rayon::prelude::*;
 use std::cell::UnsafeCell;
+
+/// Above this many bytes a buffer copy is split across rayon's workers.
+///
+/// Measured rather than assumed, because the shape of the curve is not the one
+/// a copy suggests. Below 32 MiB the serial `memcpy` wins by a wide margin:
+/// entering a rayon region costs a fixed ~25us (see
+/// [`crate::ops::map::PAR_THRESHOLD`]), and the destination pages are usually
+/// already faulted in, because the allocator satisfies the request from the
+/// heap and hands back the block the previous copy freed. At 32 MiB that
+/// stops. It is glibc's largest dynamic mmap threshold, so every allocation
+/// from there up is a fresh mapping whose pages fault on first write, and the
+/// copy becomes bound by those faults rather than by memory bandwidth. Faults
+/// are per-core work, so spreading them over the workers is what recovers the
+/// difference -- the same reason the element-wise kernels, which write just as
+/// many fresh bytes, are three times quicker than a copy of the same size was.
+///
+/// Best of fifteen, release, four workers:
+///
+/// ```text
+///     bytes      serial    parallel
+///     16 MiB     1.44 ms     1.47 ms    0.98x
+///     32 MiB    22.28 ms     8.03 ms    2.78x
+///     64 MiB    45.87 ms    16.83 ms    2.73x
+/// ```
+const PARALLEL_COPY_THRESHOLD: usize = 32 << 20;
 
 /// Tensor data storage.
 ///
@@ -183,6 +209,22 @@ impl TensorData {
     #[inline(always)]
     fn owned_zeroed_buffer(size_bytes: usize) -> Vec<u8> {
         vec![0u8; size_bytes]
+    }
+
+    /// A copy of `src`, split across rayon's workers once it is large enough
+    /// to be bound by page faults rather than by bandwidth. See
+    /// [`PARALLEL_COPY_THRESHOLD`] for where that point is and why it is
+    /// there.
+    fn copied_bytes(src: &[u8]) -> Vec<u8> {
+        if src.len() < PARALLEL_COPY_THRESHOLD {
+            return src.to_vec();
+        }
+        let chunk = (src.len() / rayon::current_num_threads().max(1)).max(1 << 16);
+        let mut copy = Self::owned_zeroed_buffer(src.len());
+        copy.par_chunks_mut(chunk)
+            .zip(src.par_chunks(chunk))
+            .for_each(|(destination, piece)| destination.copy_from_slice(piece));
+        copy
     }
 
     /// Allocate a CPU buffer for an operation output obtained through
@@ -653,12 +695,12 @@ impl TensorData {
     /// Create a copy of the tensor data
     pub fn clone_data(&self) -> Self {
         let new_buffer = match self.buffer_ref() {
-            TensorBuffer::Owned(vec) => TensorBuffer::Owned(vec.clone()),
+            TensorBuffer::Owned(vec) => TensorBuffer::Owned(Self::copied_bytes(vec)),
             TensorBuffer::Raw { ptr, size, device } => {
                 if device.is_cpu() {
                     // Raw CPU pointer: copy into a Vec for safety
-                    let bytes = unsafe { std::slice::from_raw_parts(*ptr, *size) }.to_vec();
-                    TensorBuffer::Owned(bytes)
+                    let bytes = unsafe { std::slice::from_raw_parts(*ptr, *size) };
+                    TensorBuffer::Owned(Self::copied_bytes(bytes))
                 } else {
                     // For GPU, allocate new memory and copy
                     match global_allocate(*size, *device) {
@@ -961,6 +1003,27 @@ mod tests {
             check!(i64, Int64, as_i64_slice, from_vec_i64);
             check!(bool, Bool, as_bool_slice, from_vec_bool);
         }
+    }
+
+    /// The copy splits across workers once it is past
+    /// [`PARALLEL_COPY_THRESHOLD`], and the split is where a chunking mistake
+    /// would live: a boundary off by one, or a tail chunk left unwritten. The
+    /// buffer here is one element past the threshold, so it takes that branch
+    /// with a final chunk that does not divide evenly.
+    #[test]
+    fn test_a_copy_past_the_parallel_threshold_reproduces_every_byte() {
+        let numel = PARALLEL_COPY_THRESHOLD / 4 + 1;
+        let values: Vec<f32> = (0..numel).map(|i| i as f32).collect();
+        let original = TensorData::from_vec_f32(values.clone(), Device::cpu());
+
+        let mut cloned = original.clone_data();
+
+        assert_eq!(cloned.as_f32_slice().unwrap(), values.as_slice());
+        cloned.as_f32_slice_mut().unwrap()[numel - 1] = -1.0;
+        assert_eq!(
+            original.as_f32_slice().unwrap()[numel - 1],
+            (numel - 1) as f32
+        );
     }
 
     #[test]
