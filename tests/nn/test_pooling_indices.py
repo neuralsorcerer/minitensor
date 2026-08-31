@@ -92,7 +92,9 @@ def test_the_plain_call_still_returns_one_tensor():
 )
 def test_the_indices_are_where_the_maxima_are(shape, kernel, stride, padding):
     values = RNG.normal(size=shape)
-    pooled, indices = F.max_pool2d(_t(values), kernel, stride, padding, return_indices=True)
+    pooled, indices = F.max_pool2d(
+        _t(values), kernel, stride, padding, return_indices=True
+    )
 
     assert "int64" in str(indices.dtype)
     assert tuple(indices.shape) == tuple(pooled.shape)
@@ -140,7 +142,12 @@ def test_unpooling_puts_the_maxima_back_and_nothing_else():
     pooled, indices = F.max_pool2d(_t(values), 2, return_indices=True)
     np.testing.assert_array_equal(
         F.max_unpool2d(pooled, indices, 2).numpy()[0, 0],
-        [[0.0, 0.0, 0.0, 0.0], [0.0, 5.0, 0.0, 7.0], [0.0, 0.0, 0.0, 0.0], [0.0, 13.0, 0.0, 15.0]],
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 5.0, 0.0, 7.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 13.0, 0.0, 15.0],
+        ],
     )
 
 
@@ -155,7 +162,9 @@ def test_pooling_an_unpooled_tensor_returns_it_where_it_was_not_negative(shape, 
     activations happened to be positive.
     """
 
-    pooled, indices = F.max_pool2d(_t(RNG.normal(size=shape)), kernel, return_indices=True)
+    pooled, indices = F.max_pool2d(
+        _t(RNG.normal(size=shape)), kernel, return_indices=True
+    )
     spread = F.max_unpool2d(pooled, indices, kernel)
     again, _ = F.max_pool2d(spread, kernel, return_indices=True)
     np.testing.assert_array_equal(again.numpy(), np.maximum(pooled.numpy(), 0.0))
@@ -185,9 +194,12 @@ def test_output_size_says_which_input_it_came_from():
     assert tuple(pooled.shape) == (1, 1, 1, 3)
 
     assert tuple(F.max_unpool2d(pooled, indices, (1, 2)).shape) == (1, 1, 1, 6)
-    assert tuple(
-        F.max_unpool2d(pooled, indices, (1, 2), output_size=(1, 7)).shape
-    ) == (1, 1, 1, 7)
+    assert tuple(F.max_unpool2d(pooled, indices, (1, 2), output_size=(1, 7)).shape) == (
+        1,
+        1,
+        1,
+        7,
+    )
 
 
 def test_unpooling_a_signal_works_the_same_way():

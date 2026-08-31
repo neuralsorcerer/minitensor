@@ -321,6 +321,7 @@ _FUNCTIONAL_ONLY = (
     "batch_norm",
     "channel_shuffle",
     "embedding",
+    "embedding_bag",
     "group_norm",
     "instance_norm",
     "local_response_norm",

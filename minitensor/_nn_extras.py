@@ -652,6 +652,125 @@ def embedding(input: object, weight: object, padding_idx: int | None = None) -> 
     return looked_up.reshape([int(size) for size in indices.shape] + [features])
 
 
+def embedding_bag(
+    input: object,
+    weight: object,
+    offsets: object | None = None,
+    mode: str = "mean",
+    per_sample_weights: object | None = None,
+    include_last_offset: bool = False,
+    padding_idx: int | None = None,
+) -> Tensor:
+    """One vector per bag of indices, reduced without ever forming the bags.
+
+    `embedding` followed by a reduction, for the case where the reduction is
+    the only reason the lookup happened -- a bag-of-words encoder, or the
+    sparse features of a recommender. Doing it in two steps is correct and
+    costs a `(total, dim)` intermediate that is thrown away; this is the same
+    two steps with the intermediate never named, which is the whole reason the
+    fused operation exists elsewhere.
+
+    Bags arrive either way. A two-dimensional `input` is one bag per row, all
+    the same length. A one-dimensional `input` needs `offsets` saying where
+    each bag starts, which is what allows them to differ -- and with
+    `include_last_offset` the final entry is the end rather than a start, which
+    is how a caller passes the cumulative counts they already have.
+
+    `mode` is `"sum"`, `"mean"` or `"max"`. An empty bag reduces to zero in all
+    three, having nothing else to reduce to. `per_sample_weights` scales each
+    row before it is summed and is meaningful only for `"sum"`, which is what
+    `torch` says too -- a weighted mean would need the weights in the divisor
+    as well, and that is a different operation.
+    """
+
+    if mode not in ("sum", "mean", "max"):
+        raise ValueError(
+            f'embedding_bag takes a mode of "sum", "mean" or "max", got {mode!r}'
+        )
+    indices = _atleast_tensor(input)
+    table = _atleast_tensor(weight)
+
+    if indices.ndim() == 2:
+        if offsets is not None:
+            raise ValueError(
+                "embedding_bag takes offsets with a one-dimensional input; a "
+                "two-dimensional one already says where each bag is"
+            )
+        bags, length = (int(size) for size in indices.shape)
+        starts = _index_tensor(_np.arange(bags) * length, indices)
+        flat = indices.reshape(bags * length)
+    elif indices.ndim() == 1:
+        if offsets is None:
+            raise ValueError(
+                "embedding_bag needs offsets to divide a one-dimensional input "
+                "into bags"
+            )
+        boundaries = _atleast_tensor(offsets)
+        if boundaries.ndim() != 1:
+            raise ValueError(
+                f"embedding_bag expects one-dimensional offsets, got "
+                f"{boundaries.ndim()} dimensions"
+            )
+        given = int(boundaries.shape[0])
+        bags = given - 1 if include_last_offset else given
+        if bags < 0:
+            raise ValueError(
+                "embedding_bag with include_last_offset needs at least one offset"
+            )
+        # Only the starts take part; a trailing end would otherwise open a bag
+        # of its own.
+        starts = _F.narrow(boundaries, 0, 0, bags)
+        flat = indices
+    else:
+        raise ValueError(
+            f"embedding_bag takes a one- or two-dimensional input, got "
+            f"{indices.ndim()} dimensions"
+        )
+
+    rows = embedding(flat, table, padding_idx)
+    total, features = (int(size) for size in rows.shape)
+
+    if per_sample_weights is not None:
+        if mode != "sum":
+            raise ValueError(
+                f'embedding_bag takes per_sample_weights only with mode="sum", '
+                f"not {mode!r}"
+            )
+        scaling = _atleast_tensor(per_sample_weights).reshape(total, 1)
+        rows = rows * scaling
+
+    # Which bag each row belongs to: the number of starts at or below its
+    # position, less one. Repeated starts mean an empty bag, and this steps
+    # over it rather than into it.
+    positions = _index_tensor(_np.arange(total), rows)
+    bag_of = _F.searchsorted(starts.astype("int64"), positions, True) - 1
+    if total and bags:
+        low = int(bag_of.min().item())
+        if low < 0:
+            raise IndexError(
+                "embedding_bag needs its first offset at zero, so that every "
+                "index belongs to a bag"
+            )
+    scattered = broadcast_to(bag_of.reshape(total, 1), (total, features))
+    target = Tensor.zeros(
+        [bags, features], dtype=rows.dtype, device=_C.Device(rows.device)
+    )
+
+    if mode == "max":
+        # From the reduction's identity rather than from the zeros already
+        # there, so a bag of negatives reduces to its own maximum -- and a bag
+        # with nothing in it is never written to and keeps the zero.
+        return _F.scatter_reduce(target, 0, scattered, rows, "amax", False)
+
+    summed = _F.scatter_add(target, 0, scattered, rows)
+    if mode == "sum":
+        return summed
+    counts = _F.bincount(bag_of, None, bags).reshape(bags, 1).astype(str(rows.dtype))
+    # An empty bag has nothing to average, and zero over one is the zero its
+    # sum already is.
+    return summed / _F.clamp(counts, 1.0, None)
+
+
 def channel_shuffle(input: object, groups: int) -> Tensor:
     """Interleave the channels so each group draws from all the others.
 
@@ -1499,6 +1618,7 @@ _NN_EXTRAS = (
     "dropout1d",
     "dropout3d",
     "embedding",
+    "embedding_bag",
     "feature_alpha_dropout",
     "fold",
     "group_norm",
