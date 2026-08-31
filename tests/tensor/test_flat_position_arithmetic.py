@@ -264,3 +264,22 @@ def test_diag_indices_refuses_a_negative_size():
 def test_diag_indices_refuses_a_rank_below_one():
     with pytest.raises(ValueError, match="at least one dimension"):
         mt.diag_indices(3, 0)
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_coordinates_are_never_the_index_tensor_they_came_from(shape):
+    """Both converters skip the arithmetic that cannot change an answer -- the
+    divide by a stride of one, the modulus the bounds check already settled.
+    On a one-axis shape every skip applies at once, and the result would be
+    the caller's own tensor unless something copies it. NumPy's converters
+    hand back storage of their own, and a coordinate written to afterwards
+    must not reach back into the positions it was derived from."""
+
+    positions = _i(np.arange(int(np.prod(shape))))
+    coordinates = mt.unravel_index(positions, shape)
+    assert all(axis is not positions for axis in coordinates)
+    assert mt.ravel_multi_index(coordinates, shape) is not coordinates[0]
+
+    before = positions.numpy().copy()
+    coordinates[0].fill_(99)
+    np.testing.assert_array_equal(positions.numpy(), before)

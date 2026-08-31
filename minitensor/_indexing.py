@@ -648,9 +648,23 @@ def unravel_index(indices: object, shape: object) -> tuple[Tensor, ...]:
 
     # `strides[i]` is how far one step along axis `i` moves in row-major order.
     strides = _np.append(_np.cumprod(sizes[:0:-1])[::-1], 1)
-    return tuple(
-        (flat // int(stride)) % int(size) for stride, size in zip(strides, sizes)
-    )
+    coordinates = []
+    for axis, (stride, size) in enumerate(zip(strides, sizes)):
+        # The last axis has a stride of one, so its division cannot change
+        # anything; and the leading axis needs no modulus, because a position
+        # below `total` divided by that axis's stride is already below its size
+        # -- which is what the bounds check above has just established. Each is
+        # a full pass of integer division, the slowest arithmetic here, and
+        # together they are half of it.
+        quotient = flat if stride == 1 else flat // int(stride)
+        if axis:
+            coordinates.append(quotient % int(size))
+        else:
+            # A one-axis shape skips both and would hand back the very tensor
+            # it was given; the copy is what keeps a later write to a
+            # coordinate off the positions that produced it.
+            coordinates.append(quotient.clone() if quotient is flat else quotient)
+    return tuple(coordinates)
 
 
 def ravel_multi_index(multi_index: object, dims: object) -> Tensor:
@@ -695,7 +709,13 @@ def ravel_multi_index(multi_index: object, dims: object) -> Tensor:
             )
 
     strides = _np.append(_np.cumprod(sizes[:0:-1])[::-1], 1)
-    position = coordinates[0] * int(strides[0])
-    for coordinate, stride in zip(coordinates[1:], strides[1:]):
-        position = position + coordinate * int(stride)
+    single = len(coordinates) == 1
+    position = None
+    for coordinate, stride in zip(coordinates, strides):
+        # A stride of one is the last axis, whose coordinate is already its own
+        # contribution -- unless it is also the only axis, where the multiply is
+        # what makes the answer a tensor of its own rather than the one that was
+        # handed in.
+        term = coordinate if stride == 1 and not single else coordinate * int(stride)
+        position = term if position is None else position + term
     return position
