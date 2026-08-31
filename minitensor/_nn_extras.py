@@ -285,6 +285,167 @@ def pixel_unshuffle(input: object, downscale_factor: int) -> Tensor:
     )
 
 
+# --- putting a pooled tensor back where it came from ------------------------
+
+
+def _unpool(
+    op: str,
+    input: object,
+    indices: object,
+    spatial: tuple[int, ...],
+    rank: int,
+) -> Tensor:
+    """`input` scattered back to the positions `indices` names.
+
+    `max_pool` reports where each maximum came from, as a flat offset into the
+    plane of one channel of one sample. Every plane names its own positions, so
+    the planes are laid end to end and each one's offsets are shifted by where
+    it starts -- which is arithmetic on sizes, so NumPy computes the shifts.
+
+    The rest is `scatter` into zeros, whose gradient is a gather at the same
+    positions: exactly what `max_pool`'s own backward does, and for the same
+    reason.
+    """
+
+    values = _atleast_tensor(input)
+    positions = _atleast_tensor(indices)
+    if values.ndim() != rank:
+        raise ValueError(
+            f"{op} expects a {rank}-dimensional input of (batch, channels, "
+            f"{'positions' if rank == 3 else 'height, width'}), got "
+            f"{values.ndim()} dimensions"
+        )
+    if list(positions.shape) != list(values.shape):
+        raise ValueError(
+            f"{op} needs one index per value, got {list(positions.shape)} "
+            f"against {list(values.shape)}"
+        )
+    if "int" not in str(positions.dtype):
+        raise TypeError(f"{op} requires integer indices, got {positions.dtype}")
+
+    sizes = [int(size) for size in values.shape]
+    planes = sizes[0] * sizes[1]
+    plane = _element_count(spatial)
+    pooled = _element_count(sizes[2:])
+
+    low, high = int(positions.min().item()), int(positions.max().item())
+    if planes and pooled and (low < 0 or high >= plane):
+        raise IndexError(
+            f"{op} was given positions in [{low}, {high}] for a plane of "
+            f"{spatial}, which holds {plane}"
+        )
+
+    shifts = _index_tensor((_np.arange(planes) * plane).reshape(planes, 1), positions)
+    flat = (positions.reshape(planes, pooled).astype("int64") + shifts).reshape(
+        planes * pooled
+    )
+    target = Tensor.zeros(
+        [planes * plane], dtype=values.dtype, device=_C.Device(values.device)
+    )
+    scattered = _F.scatter(target, 0, flat, values.reshape(planes * pooled))
+    return scattered.reshape([sizes[0], sizes[1], *spatial])
+
+
+def _unpool_size(
+    op: str,
+    pooled: list[int],
+    output_size: object,
+    kernel: tuple[int, ...],
+    step: tuple[int, ...],
+    margin: tuple[int, ...],
+) -> tuple[int, ...]:
+    """The plane to scatter into: the one given, or the smallest that pools to
+    this shape.
+
+    Pooling loses the remainder, so several input sizes give the same output
+    and the inverse is not determined -- `output_size` is how a caller says
+    which one they had. Without it the smallest is assumed, which is what
+    `torch` does too.
+    """
+
+    if output_size is not None:
+        spatial = tuple(_operator.index(size) for size in output_size)
+        if len(spatial) != len(kernel):
+            raise ValueError(
+                f"{op} expects an output size with one entry per spatial axis "
+                f"({len(kernel)}), got {len(spatial)}"
+            )
+        return spatial
+    return tuple(
+        (count - 1) * s + k - 2 * pad
+        for count, k, s, pad in zip(pooled, kernel, step, margin)
+    )
+
+
+def max_unpool1d(
+    input: object,
+    indices: object,
+    kernel_size: object,
+    stride: object | None = None,
+    padding: object = 0,
+    output_size: object = None,
+) -> Tensor:
+    """Scatter a pooled signal back to where `max_pool1d` found it.
+
+    The partial inverse of `max_pool1d(..., return_indices=True)`: the maxima
+    go back to the positions they came from and everything else is zero, which
+    is what an unpooling decoder wants -- it recovers the shape and the
+    locations, and the values it discarded stay discarded.
+    """
+
+    kernel = _sliding_argument(kernel_size, "kernel_size", 1, 1, "max_unpool1d")
+    step = (
+        kernel
+        if stride is None
+        else _sliding_argument(stride, "stride", 1, 1, "max_unpool1d")
+    )
+    margin = _sliding_argument(padding, "padding", 1, 0, "max_unpool1d")
+    values = _atleast_tensor(input)
+    spatial = _unpool_size(
+        "max_unpool1d",
+        [int(size) for size in values.shape][2:],
+        output_size,
+        kernel,
+        step,
+        margin,
+    )
+    return _unpool("max_unpool1d", values, indices, spatial, 3)
+
+
+def max_unpool2d(
+    input: object,
+    indices: object,
+    kernel_size: object,
+    stride: object | None = None,
+    padding: object = 0,
+    output_size: object = None,
+) -> Tensor:
+    """Scatter a pooled image back to where `max_pool2d` found it.
+
+    See `max_unpool1d`. `output_size` matters more here than there: pooling a
+    seven-wide input by two gives the same three columns as pooling a six-wide
+    one, so without it the smaller is assumed.
+    """
+
+    kernel = _sliding_argument(kernel_size, "kernel_size", 2, 1, "max_unpool2d")
+    step = (
+        kernel
+        if stride is None
+        else _sliding_argument(stride, "stride", 2, 1, "max_unpool2d")
+    )
+    margin = _sliding_argument(padding, "padding", 2, 0, "max_unpool2d")
+    values = _atleast_tensor(input)
+    spatial = _unpool_size(
+        "max_unpool2d",
+        [int(size) for size in values.shape][2:],
+        output_size,
+        kernel,
+        step,
+        margin,
+    )
+    return _unpool("max_unpool2d", values, indices, spatial, 4)
+
+
 # --- the stochastic regularizers -------------------------------------------
 
 #: The value SELU saturates to, `-scale * alpha`. Dropping an element to this
@@ -1349,6 +1510,8 @@ _NN_EXTRAS = (
     "nll_loss",
     "pixel_shuffle",
     "max_pool3d",
+    "max_unpool1d",
+    "max_unpool2d",
     "pixel_unshuffle",
     "prelu",
     "rrelu",

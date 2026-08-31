@@ -44,7 +44,13 @@ def _t(values):
 
 @pytest.mark.parametrize(
     "start,stop,steps",
-    [(0.0, 1.0, 7), (-3.0, 3.0660367390488967, 6), (1e-8, 1e8, 101), (2.0, 2.0, 1), (0.0, 1.0, 2)],
+    [
+        (0.0, 1.0, 7),
+        (-3.0, 3.0660367390488967, 6),
+        (1e-8, 1e8, 101),
+        (2.0, 2.0, 1),
+        (0.0, 1.0, 2),
+    ],
 )
 def test_linspace_ends_exactly_where_it_was_told_to(start, stop, steps):
     """`a + (n-1) * step` is a few ulps off, and comparisons against it fail."""
@@ -95,9 +101,7 @@ def test_the_edges_may_be_given_outright_and_need_not_be_even():
     sample = RNG.normal(size=(100, 2))
     given = [np.array([-3.0, -1.0, 0.0, 1.0, 3.0]), np.array([-2.0, 0.0, 2.0])]
     counts, edges = mt.histogramdd(_t(sample), [_t(edge) for edge in given])
-    np.testing.assert_array_equal(
-        counts.numpy(), np.histogramdd(sample, bins=given)[0]
-    )
+    np.testing.assert_array_equal(counts.numpy(), np.histogramdd(sample, bins=given)[0])
     for mine, theirs in zip(edges, given):
         np.testing.assert_array_equal(mine.numpy(), theirs)
 
@@ -115,7 +119,9 @@ def test_weights_are_summed_rather_than_counted():
 def test_density_divides_by_the_total_and_by_each_cell_s_own_volume():
     sample = RNG.normal(size=(100, 2))
     given = [np.array([-3.0, -1.0, 0.0, 3.0]), np.array([-2.0, 0.0, 1.0, 2.0])]
-    density, edges = mt.histogramdd(_t(sample), [_t(edge) for edge in given], density=True)
+    density, edges = mt.histogramdd(
+        _t(sample), [_t(edge) for edge in given], density=True
+    )
     np.testing.assert_allclose(
         density.numpy(), np.histogramdd(sample, bins=given, density=True)[0], rtol=1e-12
     )

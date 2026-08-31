@@ -2007,9 +2007,11 @@ when you already hold the weights and do not want a module:
 | `dense_layer(input, weight, bias=None)` | Fully connected transform `x @ Wᵀ + b`. |
 | `conv2d(input, weight, bias=None, stride=None, padding=None)` | 2-D convolution. Float32 or Float64 CPU tensors; input, weight and bias must share a dtype. |
 | `conv1d(input, weight, bias=None, stride=1, padding=0)` | 1-D convolution over `[N, C_in, L]` with a `[C_out, C_in, K]` kernel. Same dtype and device support as `conv2d`, which it is built on. |
-| `max_pool1d(input, kernel_size, stride=None, padding=0)` | 1-D max pooling; `stride` defaults to `kernel_size`. |
+| `max_pool1d(input, kernel_size, stride=None, padding=0, return_indices=False)` | 1-D max pooling; `stride` defaults to `kernel_size`. With `return_indices` the result is `(values, indices)`, each index the position along the axis its maximum came from. |
+| `max_unpool1d(input, indices, kernel_size, stride=None, padding=0, output_size=None)` | Scatter a pooled signal back to the positions `max_pool1d(..., return_indices=True)` reported, zero elsewhere. |
 | `avg_pool1d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | 1-D average pooling. |
 | `conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1)` | 3-D cross-correlation with a `(out, in / groups, kD, kH, kW)` kernel. Written as `kD` two-dimensional convolutions -- each depth tap of the kernel applied to the depth slices it reads, summed -- so the arithmetic stays with the `conv2d` kernel and the memory stays at its cost. Laying the volume out as columns instead would take twenty-seven times the volume for a 3x3x3 kernel over eight channels. |
+| `max_unpool2d(input, indices, kernel_size, stride=None, padding=0, output_size=None)` | Scatter a pooled image back to where `max_pool2d` found each maximum, zero elsewhere. A partial inverse in two ways, both deliberate: it cannot restore what pooling discarded -- an unpooling decoder wants the shape and the locations back, not the values -- and it cannot know the input's size, because a seven-wide input and a six-wide one pool to the same three columns. `output_size` is how the caller says which. |
 | `max_pool3d(input, kernel_size, stride=None, padding=0)` | The largest value in each 3-D window; stride defaults to the window. The maximum over a stack is the maximum of the maxima, so this is `max_pool2d` per depth tap and an elementwise maximum across them. Depth padding is negative infinity, so a padded position never wins. |
 | `avg_pool3d(input, kernel_size, stride=None, padding=0, count_include_pad=True)` | The mean of each 3-D window; stride defaults to the window. Without `count_include_pad` the divisor is only the positions really there, computed by running the same pipeline over a volume of ones -- so the numerator and the divisor cannot disagree about which positions those are. |
 | `batch_norm(input, running_mean=None, running_var=None, weight=None, bias=None, training=True, momentum=0.1, eps=1e-5)` | Batch normalization; updates the running buffers in place when `training=True`. |
@@ -2295,8 +2297,17 @@ maximum.
 
 For `AvgPool2d`, `count_include_pad` decides whether padded cells count towards
 the divisor. The functional forms are `functional.max_pool2d(input,
-kernel_size, stride=None, padding=None)` and `functional.avg_pool2d(input,
-kernel_size, stride=None, padding=None, count_include_pad=True)`.
+kernel_size, stride=None, padding=None, return_indices=False)` and
+`functional.avg_pool2d(input, kernel_size, stride=None, padding=None,
+count_include_pad=True)`.
+
+With `return_indices` the max pooling returns `(values, indices)` rather than
+one tensor, each index a flat offset into the unpadded input plane. The kernel
+finds that position anyway -- the backward pass has to send the gradient to the
+element that won -- so asking for it costs one copy of a vector that already
+exists, and only when asked. It is what `max_unpool2d` scatters back into, and
+because the padding may not exceed half the window, every index names a real
+element.
 
 ```python
 import minitensor as mt

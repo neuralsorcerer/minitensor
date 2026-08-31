@@ -555,12 +555,44 @@ where
 ///
 /// Returns the pooled values; the winning positions are retained internally for
 /// the backward pass.
+/// Max pooling over a 4-D `[N, C, H, W]` input.
 pub fn max_pool2d(
     input: &Tensor,
     kernel: (usize, usize),
     stride: (usize, usize),
     padding: (usize, usize),
 ) -> Result<Tensor> {
+    Ok(max_pool2d_parts(input, kernel, stride, padding, false)?.0)
+}
+
+/// Max pooling, and where in the input each maximum came from.
+///
+/// The position costs nothing to report: the kernel has to find it anyway,
+/// because the backward pass sends the gradient to the element that won. What
+/// it costs is one copy of a vector that already exists, and only when asked.
+///
+/// Each index is a flat offset into the *unpadded* input plane, which is the
+/// convention `torch` uses and the one `max_unpool2d` scatters back into. Every
+/// index names a real element: a window with none would report `-1`, and the
+/// padding rule this checks -- no more than half the window -- is what makes
+/// such a window impossible.
+pub fn max_pool2d_with_indices(
+    input: &Tensor,
+    kernel: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+) -> Result<(Tensor, Tensor)> {
+    let (values, indices) = max_pool2d_parts(input, kernel, stride, padding, true)?;
+    Ok((values, indices.expect("indices were asked for")))
+}
+
+fn max_pool2d_parts(
+    input: &Tensor,
+    kernel: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+    expose_indices: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
     let geometry = pool_geometry(input, kernel, stride, padding, "max_pool2d")?;
     let out_shape = Shape::new(vec![
         geometry.batch,
@@ -587,11 +619,23 @@ pub fn max_pool2d(
 
     let mut output = Tensor::new(
         Arc::new(data),
-        out_shape,
+        out_shape.clone(),
         input.dtype(),
         input.device(),
         input.requires_grad(),
     );
+
+    // Cloned only when the caller asked for them, since the backward takes
+    // ownership of the vector the kernel produced.
+    let exposed = expose_indices.then(|| {
+        Tensor::new(
+            Arc::new(TensorData::from_vec_i64(indices.clone(), input.device())),
+            out_shape,
+            DataType::Int64,
+            input.device(),
+            false,
+        )
+    });
 
     if input.requires_grad() {
         let grad_fn = Arc::new(MaxPool2dBackward {
@@ -602,7 +646,7 @@ pub fn max_pool2d(
         output = with_grad_fn(output, grad_fn)?;
     }
 
-    Ok(output)
+    Ok((output, exposed))
 }
 
 /// Average pooling over a 4-D `[N, C, H, W]` input.
@@ -693,6 +737,30 @@ fn pool1d(
 /// equals `kernel`; the wrappers in `nn` apply that default.
 pub fn max_pool1d(input: &Tensor, kernel: usize, stride: usize, padding: usize) -> Result<Tensor> {
     pool1d(input, kernel, stride, padding, "max_pool1d", max_pool2d)
+}
+
+/// 1-D max pooling, and where along the axis each maximum came from.
+///
+/// The widened plane is one row deep, so a flat offset into it is the position
+/// along the axis and needs no unpacking.
+pub fn max_pool1d_with_indices(
+    input: &Tensor,
+    kernel: usize,
+    stride: usize,
+    padding: usize,
+) -> Result<(Tensor, Tensor)> {
+    if input.ndim() != 3 {
+        return Err(MinitensorError::invalid_operation(
+            "max_pool1d expects a 3D input tensor [N, C, L]",
+        ));
+    }
+    let dims = input.shape().dims().to_vec();
+    let widened = input.reshape(Shape::new(vec![dims[0], dims[1], 1, dims[2]]))?;
+    let (pooled, indices) =
+        max_pool2d_with_indices(&widened, (1, kernel), (1, stride), (0, padding))?;
+    let out = pooled.shape().dims().to_vec();
+    let flat = Shape::new(vec![out[0], out[1], out[3]]);
+    Ok((pooled.reshape(flat.clone())?, indices.reshape(flat)?))
 }
 
 /// 1-D average pooling over `[N, C, L]`.

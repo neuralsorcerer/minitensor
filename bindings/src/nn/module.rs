@@ -55,7 +55,8 @@ use engine::ops::pooling::{
     adaptive_avg_pool1d as adaptive_avg_pool1d_op, adaptive_avg_pool2d as adaptive_avg_pool2d_op,
     adaptive_max_pool1d as adaptive_max_pool1d_op, adaptive_max_pool2d as adaptive_max_pool2d_op,
     avg_pool1d as avg_pool1d_op, avg_pool2d as avg_pool2d_op, max_pool1d as max_pool1d_op,
-    max_pool2d as max_pool2d_op,
+    max_pool1d_with_indices as max_pool1d_with_indices_op, max_pool2d as max_pool2d_op,
+    max_pool2d_with_indices as max_pool2d_with_indices_op,
 };
 use engine::serialization::{ModelMetadata, ModelSerializer, SerializationFormat, SerializedModel};
 use pyo3::PyClassInitializer;
@@ -294,21 +295,34 @@ fn conv1d(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Largest value in each window along the last dimension. Stride defaults to the window, unlike convolution.
+/// Largest value in each window along the last dimension. Stride defaults to the window, unlike convolution. With `return_indices` the result is `(values, indices)`, where each index is the position along the axis -- what `max_unpool1d` scatters back into.
 #[pyfunction]
-#[pyo3(signature = (input, kernel_size, stride=None, padding=0))]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=0, return_indices=false))]
 fn max_pool1d(
+    py: Python<'_>,
     input: &Bound<PyAny>,
     kernel_size: usize,
     stride: Option<usize>,
     padding: usize,
-) -> PyResult<PyTensor> {
+    return_indices: bool,
+) -> PyResult<Py<PyAny>> {
     let input_tensor = borrow_tensor(input)?;
     // Pooling defaults its stride to the window, unlike convolution.
     let stride = stride.unwrap_or(kernel_size);
-    let result = max_pool1d_op(input_tensor.tensor(), kernel_size, stride, padding)
-        .map_err(_convert_error)?;
-    Ok(PyTensor::from_tensor(result))
+    if !return_indices {
+        let result = max_pool1d_op(input_tensor.tensor(), kernel_size, stride, padding)
+            .map_err(_convert_error)?;
+        return Ok(PyTensor::from_tensor(result).into_pyobject(py)?.into());
+    }
+    let (values, indices) =
+        max_pool1d_with_indices_op(input_tensor.tensor(), kernel_size, stride, padding)
+            .map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(values),
+        PyTensor::from_tensor(indices),
+    )
+        .into_pyobject(py)?
+        .into())
 }
 
 /// Mean of each window along the last dimension. Stride defaults to the window.
@@ -334,23 +348,36 @@ fn avg_pool1d(
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Largest value in each 2-D window. Stride defaults to the window, unlike convolution.
+/// Largest value in each 2-D window. Stride defaults to the window, unlike convolution. With `return_indices` the result is `(values, indices)`, where each index is a flat offset into the unpadded input plane -- what `max_unpool2d` scatters back into.
 #[pyfunction]
-#[pyo3(signature = (input, kernel_size, stride=None, padding=None))]
+#[pyo3(signature = (input, kernel_size, stride=None, padding=None, return_indices=false))]
 fn max_pool2d(
+    py: Python<'_>,
     input: &Bound<PyAny>,
     kernel_size: &Bound<PyAny>,
     stride: Option<&Bound<PyAny>>,
     padding: Option<&Bound<PyAny>>,
-) -> PyResult<PyTensor> {
+    return_indices: bool,
+) -> PyResult<Py<PyAny>> {
     let input_tensor = borrow_tensor(input)?;
     let kernel = parse_pair_arg("kernel_size", Some(kernel_size), (1, 1))?;
     // Pooling defaults its stride to the window, unlike convolution.
     let stride = parse_pair_arg("stride", stride, kernel)?;
     let padding = parse_pair_arg("padding", padding, (0, 0))?;
-    let result =
-        max_pool2d_op(input_tensor.tensor(), kernel, stride, padding).map_err(_convert_error)?;
-    Ok(PyTensor::from_tensor(result))
+    if !return_indices {
+        let result = max_pool2d_op(input_tensor.tensor(), kernel, stride, padding)
+            .map_err(_convert_error)?;
+        return Ok(PyTensor::from_tensor(result).into_pyobject(py)?.into());
+    }
+    let (values, indices) =
+        max_pool2d_with_indices_op(input_tensor.tensor(), kernel, stride, padding)
+            .map_err(_convert_error)?;
+    Ok((
+        PyTensor::from_tensor(values),
+        PyTensor::from_tensor(indices),
+    )
+        .into_pyobject(py)?
+        .into())
 }
 
 /// Resample a `[N, C, L]` or `[N, C, H, W]` signal to a different size, without parameters. Give exactly one of `size` and `scale_factor`. `mode` is `"nearest"`, or `"linear"`/`"bilinear"` for a weighted average of neighbours. `align_corners` puts the first and last output positions exactly on the first and last input samples; the default spaces them as cell centres instead, which is what makes resampling twice by two match resampling once by four.

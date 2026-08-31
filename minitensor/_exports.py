@@ -346,6 +346,8 @@ _FUNCTIONAL_ONLY = (
     "max_pool1d",
     "max_pool2d",
     "max_pool3d",
+    "max_unpool1d",
+    "max_unpool2d",
     "mse_loss",
     "smooth_l1_loss",
     "interpolate",
