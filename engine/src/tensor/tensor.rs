@@ -1959,6 +1959,23 @@ impl Tensor {
                 "Too many indices for tensor",
             ));
         }
+        // The write at the end of this function reads `value` through the
+        // destination's own accessor -- one dtype, one slice type -- so a
+        // value of any other dtype has no slice there to read. Refusing here
+        // is what turns that into a returned error: it used to reach the
+        // accessor and take the process down with it.
+        if value.dtype() != self.dtype {
+            return Err(MinitensorError::type_mismatch(
+                format!("{:?}", self.dtype),
+                format!("{:?}", value.dtype()),
+            ));
+        }
+        if value.device() != self.device {
+            return Err(MinitensorError::device_mismatch(
+                format!("{:?}", self.device),
+                format!("{:?}", value.device()),
+            ));
+        }
 
         let shape_dims = self.shape.dims().to_vec();
         // Owned so the later `self.data_mut()` can take its whole-struct
@@ -3807,6 +3824,31 @@ mod tests {
 
         assert_eq!(detached.data().as_f64_slice().unwrap(), &[0.0, 1.0, 0.0]);
         assert_eq!(source.data().as_f64_slice().unwrap(), &[0.0, 0.0, 0.0]);
+    }
+
+    /// The write reads the value through the destination's accessor, so a
+    /// value of another dtype has no slice there to read. That used to reach
+    /// an `unwrap` on `None` and abort the process; it is an error now, and
+    /// the destination is left as it was.
+    #[test]
+    fn test_index_assign_refuses_a_value_of_another_dtype() {
+        use crate::device::Device;
+
+        for dtype in [DataType::Float32, DataType::Int64, DataType::Bool] {
+            let mut destination =
+                Tensor::zeros(Shape::new(vec![3]), DataType::Float64, Device::cpu(), false);
+            let value = Tensor::ones(Shape::new(vec![1]), dtype, Device::cpu(), false);
+
+            let refused = destination.index_assign(&[TensorIndex::Index(1)], &value);
+
+            assert!(refused.is_err(), "{dtype:?} was accepted");
+            let message = refused.unwrap_err().to_string();
+            assert!(
+                message.contains("expected Float64"),
+                "the destination is the dtype expected, got: {message}"
+            );
+            assert_eq!(destination.data().as_f64_slice().unwrap(), &[0.0, 0.0, 0.0]);
+        }
     }
 }
 

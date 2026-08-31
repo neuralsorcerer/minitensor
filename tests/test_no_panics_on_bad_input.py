@@ -253,6 +253,34 @@ def test_indexing_declines_exotic_keys():
             )
 
 
+def test_assignment_declines_every_value_it_cannot_write():
+    """`__setitem__` was the one indexing entry point this sweep never called,
+    and the only one that could still panic: the write reads the value through
+    the destination's own accessor, so a value of any other dtype had no slice
+    there and the `unwrap` on it ended the process instead of the call."""
+
+    keys = [0, -1, slice(None), slice(1, 3), (0, 0), Ellipsis, 99, slice(3, 1)]
+    values = [
+        _t(np.array([7.0], dtype=np.float32)),
+        _t(np.array([7.0, 8.0], dtype=np.float64)),
+        _t(np.array([7, 8], dtype=np.int64)),
+        _t(np.array([True, False])),
+        _t(AWKWARD["empty-1d"]),
+        _t(AWKWARD["rank-3"]),
+        _t(AWKWARD["zero-dim"]),
+        7.0,
+        [7.0, 8.0],
+    ]
+    for i, source in enumerate((np.arange(5, dtype=np.float32), AWKWARD["rank-3"])):
+        for key in keys:
+            for j, value in enumerate(values):
+
+                def assign(k=key, v=value, s=source):
+                    _t(s.copy())[k] = v
+
+                _assert_no_panic(f"setitem(t{i},{key!r},v{j})", assign)
+
+
 def test_autograd_misuse_declines_without_panicking():
     def backward_twice():
         x = _t(np.ones(3, dtype=np.float32)).requires_grad_(True)

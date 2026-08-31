@@ -537,16 +537,18 @@ pub fn binary_cross_entropy_with_logits_loss(
     // see one flat, aligned buffer rather than re-deriving the mapping.
     let pos_weight = match pos_weight {
         Some(w) => {
+            // `logits` is the reference the weight has to match, so it
+            // is the one named as expected.
             if w.device() != logits.device() {
                 return Err(MinitensorError::device_mismatch(
-                    format!("{:?}", w.device()),
                     format!("{:?}", logits.device()),
+                    format!("{:?}", w.device()),
                 ));
             }
             if w.dtype() != logits.dtype() {
                 return Err(MinitensorError::type_mismatch(
-                    format!("{:?}", w.dtype()),
                     format!("{:?}", logits.dtype()),
+                    format!("{:?}", w.dtype()),
                 ));
             }
             let target_dims: Vec<isize> =

@@ -29,6 +29,7 @@ import numpy as _np
 
 from . import _core as _C
 from ._shape import (
+    _as_written_values,
     _atleast_tensor,
     _element_count,
     _index_tensor,
@@ -148,7 +149,7 @@ def index_add(
     """
 
     tensor = _atleast_tensor(input)
-    values = _atleast_tensor(source)
+    values = _as_written_values(source, tensor)
     axis = _normalize_axis(dim, tensor.ndim(), "index_add")
     positions = _wrap_negative(_as_index(index, "index_add"), tensor.shape[axis])
     spread = _slice_index(positions, axis, list(values.shape), "index_add")
@@ -161,7 +162,7 @@ def index_copy(input: object, dim: int, index: object, source: object) -> Tensor
     names. A repeated index leaves whichever write landed last."""
 
     tensor = _atleast_tensor(input)
-    values = _atleast_tensor(source)
+    values = _as_written_values(source, tensor)
     axis = _normalize_axis(dim, tensor.ndim(), "index_copy")
     positions = _wrap_negative(_as_index(index, "index_copy"), tensor.shape[axis])
     spread = _slice_index(positions, axis, list(values.shape), "index_copy")
@@ -194,7 +195,17 @@ def masked_scatter(input: object, mask: object, source: object) -> Tensor:
 
     tensor = _atleast_tensor(input)
     selected = _atleast_tensor(mask)
-    values = _atleast_tensor(source).reshape(-1)
+    values = _as_written_values(source, tensor).reshape(-1)
+    # Every other write in this family reaches a `scatter` kernel, which
+    # refuses a source of another dtype. This one ends at `where`, which
+    # promotes instead -- so a float64 source turned a float32 destination
+    # into a float64 result, and the write changed the dtype of the tensor it
+    # was writing into. Refused here to keep the one rule.
+    if str(values.dtype) != str(tensor.dtype):
+        raise TypeError(
+            f"masked_scatter writes into a {tensor.dtype} tensor, and a source "
+            f"of dtype {values.dtype} would change it"
+        )
 
     shape = list(tensor.shape)
     flat_mask = broadcast_to(selected, shape).reshape(-1).astype("bool")
@@ -416,7 +427,7 @@ def _scatter_into(
     not in-place writes.
     """
 
-    values = _atleast_tensor(source)
+    values = _as_written_values(source, tensor)
     region = tuple(int(size) for size in positions.shape)
     if tuple(values.shape) != region:
         try:
@@ -566,7 +577,7 @@ def put(
     """
 
     tensor = _atleast_tensor(input)
-    values = _atleast_tensor(source)
+    values = _as_written_values(source, tensor)
     indices = _as_index(index, "put")
 
     flat = tensor.reshape(_element_count(tensor))

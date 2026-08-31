@@ -213,6 +213,26 @@ def _atleast_tensor(input: object) -> Tensor:
     return as_tensor(input)
 
 
+def _as_written_values(value: object, into: Tensor) -> Tensor:
+    """`value` as something the write family can put into `into`.
+
+    An operand that carries a dtype of its own -- a tensor, an array -- keeps
+    it, and a disagreement with the destination is the engine's to refuse: two
+    typed operands really do disagree. A Python number or list carries no
+    dtype, so it takes the destination's, the way `x[i] = 7.0` does and the way
+    `index_fill` and `masked_fill` already do with the value they are handed.
+
+    Without this a literal was built at the default dtype and then rejected
+    against anything else, so `put(x, i, 7.0)` worked on a float32 tensor and
+    raised on a float64 one -- the same expression, refused for the dtype of
+    the tensor it was writing into rather than for anything about the value.
+    """
+
+    if isinstance(value, (Tensor, _np.ndarray)):
+        return value if isinstance(value, Tensor) else as_tensor(value)
+    return as_tensor(value, dtype=str(into.dtype))
+
+
 def _return_atleast_result(results: list[Tensor]) -> Tensor | tuple[Tensor, ...]:
     if len(results) == 1:
         return results[0]

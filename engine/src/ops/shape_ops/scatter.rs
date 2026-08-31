@@ -133,15 +133,19 @@ pub(crate) fn scatter_layout(
         ));
     }
     if src.dtype() != tensor.dtype() {
+        // The tensor being written into is what the source has to match, so
+        // it is the one named as expected -- the other way round told the
+        // caller to convert the destination to the source's dtype, which is
+        // the opposite of the fix.
         return Err(MinitensorError::type_mismatch(
-            format!("{:?}", src.dtype()),
             format!("{:?}", tensor.dtype()),
+            format!("{:?}", src.dtype()),
         ));
     }
     if src.device() != tensor.device() || index.device() != tensor.device() {
         return Err(MinitensorError::device_mismatch(
-            format!("{:?}", src.device()),
             format!("{:?}", tensor.device()),
+            format!("{:?}", src.device()),
         ));
     }
     if !tensor.device().is_cpu() {

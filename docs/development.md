@@ -53,6 +53,29 @@ integer carries none of those, so nothing is lost by letting NumPy do the
 arithmetic. `isin` and `multinomial` stay in terms of kernels for exactly this
 reason even though NumPy has both: their arguments are tensors.
 
+## What a write may be handed
+
+Every function that writes values into a tensor -- `put`, `index_copy`,
+`index_add`, `masked_scatter`, the three `*_scatter` counterparts, and
+`x[k] = v` itself -- answers two questions the same way.
+
+A value that carries a dtype of its own keeps it, and a disagreement with
+the destination is refused. Two typed operands really do disagree, and
+neither casting nor promoting silently is a good answer: the result of a
+write must have the dtype of the tensor written into, or the write has
+retyped it.
+
+A Python number or list carries no dtype, so it takes the destination's.
+That is what `x[i] = 7.0` has always meant, and what `index_fill` and
+`masked_fill` already did with the value they are handed. Building the
+literal at the default dtype instead made `put(x, i, 7.0)` work on a
+float32 tensor and fail on a float64 one -- the same expression, refused
+for the dtype of the tensor it was writing into rather than for anything
+about the value.
+
+`_as_written_values` in `minitensor/_shape.py` is that rule, and the only
+place it is written down.
+
 ## Environment setup
 
 MiniTensor source builds require Python 3.10 or newer, Rust/Cargo, and maturin.
