@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 import minitensor as mt
-from minitensor._indexing import _axis_positions
+from minitensor._indexing import _axis_positions, _scatter_into
 
 BASE = np.arange(24.0).reshape(2, 3, 4)
 WEIGHTS = np.arange(1.0, 25.0).reshape(2, 3, 4)
@@ -269,3 +269,108 @@ def test_select_scatter_reports_an_index_past_the_end():
 def test_diagonal_scatter_needs_a_matrix():
     with pytest.raises(ValueError, match="at least two dimensions"):
         mt.diagonal_scatter(_t(np.zeros(4)), _t(0.0))
+
+
+# A step of one writes a run of neighbouring positions, which `cat` assembles
+# from the pieces either side of it -- no offset is named at all. That is a
+# different implementation of the same function, so it is held to the one it
+# replaced: the same values and the same two gradients, over every slice a
+# Python slice can resolve.
+CONTIGUOUS = [
+    (0, slice(None)),  # the whole axis, which has to be written as two
+    (0, slice(0, 1)),
+    (0, slice(1, None)),
+    (1, slice(0, 2)),
+    (1, slice(1, 2)),
+    (1, slice(2, None)),
+    (1, slice(2, 1)),  # empty: `stop` below `start`
+    (1, slice(9, 12)),  # empty: entirely past the end
+    (2, slice(None)),
+    (2, slice(1, 3)),
+    (2, slice(None, -1)),
+]
+
+
+def _by_positions(tensor, source, dim, window):
+    """`slice_scatter` as it was: one flat offset per element written."""
+
+    shape = tuple(int(size) for size in tensor.shape)
+    bounds = window.indices(shape[dim])
+    return _scatter_into(
+        "slice_scatter", tensor, source, _axis_positions(shape, dim, np.arange(*bounds))
+    )
+
+
+@pytest.mark.parametrize("dim,window", CONTIGUOUS)
+def test_a_contiguous_write_matches_the_positions_it_no_longer_builds(dim, window):
+    width = len(range(*window.indices(BASE.shape[dim])))
+    region = BASE.shape[:dim] + (width,) + BASE.shape[dim + 1 :]
+    source = np.arange(1.0, 1 + int(np.prod(region))).reshape(region)
+
+    np.testing.assert_array_equal(
+        mt.slice_scatter(_t(BASE), _t(source), dim, window.start, window.stop).numpy(),
+        _by_positions(_t(BASE), _t(source), dim, window).numpy(),
+    )
+
+
+@pytest.mark.parametrize("dim,window", CONTIGUOUS)
+def test_both_gradients_survive_the_change_of_route(dim, window):
+    """`cat`'s backward splits the gradient back into the pieces it joined,
+    which has to come out where `scatter`'s did -- including the zero the
+    written-into tensor keeps, and including a write that covers the whole
+    axis, where nothing of that tensor reaches the answer at all."""
+
+    width = len(range(*window.indices(BASE.shape[dim])))
+    region = BASE.shape[:dim] + (width,) + BASE.shape[dim + 1 :]
+    source = np.arange(1.0, 1 + int(np.prod(region))).reshape(region)
+
+    grads = []
+    for write in (
+        lambda t, s: mt.slice_scatter(t, s, dim, window.start, window.stop),
+        lambda t, s: _by_positions(t, s, dim, window),
+    ):
+        tensor, values = _t(BASE, True), _t(source, True)
+        (write(tensor, values) * _t(WEIGHTS)).sum().backward()
+        grads.append(
+            tuple(
+                None if g is None else g.numpy().copy()
+                for g in (tensor.grad, values.grad)
+            )
+        )
+        mt.clear_autograd_graph()
+
+    for through_cat, through_positions in zip(*grads):
+        assert (through_cat is None) == (through_positions is None)
+        if through_cat is not None:
+            np.testing.assert_array_equal(through_cat, through_positions)
+
+
+def test_the_tensor_written_over_in_full_still_receives_a_zero_gradient():
+    """Nothing of it reaches the answer, so it could fall out of the graph and
+    leave its gradient `None`. It is written as two -- the first stopping one
+    short so a piece of it survives to carry the zero -- and this is the
+    assertion that says why."""
+
+    tensor, values = _t(BASE, True), _t(BASE + 1, True)
+    mt.slice_scatter(tensor, values, 0).sum().backward()
+    assert tensor.grad is not None
+    np.testing.assert_array_equal(tensor.grad.numpy(), np.zeros_like(BASE))
+    np.testing.assert_array_equal(values.grad.numpy(), np.ones_like(BASE))
+    mt.clear_autograd_graph()
+
+
+@pytest.mark.parametrize("length", [1, 2, 3])
+def test_an_axis_too_short_to_split_is_still_written(length):
+    """The split needs a position to leave standing, so an axis of one has to
+    stay on the positions. The answer is the same either way."""
+
+    base = np.arange(float(length * 2)).reshape(length, 2)
+    source = np.full((length, 2), 7.0)
+    np.testing.assert_array_equal(
+        mt.slice_scatter(_t(base), _t(source), 0).numpy(), source
+    )
+
+    tensor = _t(base, True)
+    mt.slice_scatter(tensor, _t(source), 0).sum().backward()
+    np.testing.assert_array_equal(tensor.grad.numpy(), np.zeros_like(base))
+    mt.clear_autograd_graph()

@@ -412,6 +412,79 @@ def cartesian_prod(*tensors: object) -> Tensor:
     return _F.stack([grid.reshape(-1) for grid in grids], 1)
 
 
+def _region_values(
+    op: str, source: object, tensor: Tensor, region: tuple[int, ...]
+) -> Tensor:
+    """`source` as a tensor of shape `region`, ready to be written into
+    `tensor`. Lined up by broadcasting, the way an assignment lines its
+    right-hand side up, rather than by demanding an exact shape."""
+
+    values = _as_written_values(source, tensor)
+    if tuple(values.shape) == region:
+        return values
+    try:
+        return broadcast_to(values, region)
+    except (ValueError, RuntimeError):
+        raise ValueError(
+            f"{op} writes a region of shape {region}, and a source of shape "
+            f"{tuple(values.shape)} does not broadcast to it"
+        ) from None
+
+
+def _write_contiguous(
+    op: str, tensor: Tensor, source: object, axis: int, start: int, width: int
+) -> Tensor:
+    """`tensor` with `source` written over `width` positions from `start`
+    along `axis`, as a new tensor.
+
+    The answer `_scatter_into` gives when the step is one, without building
+    the positions. A contiguous region cuts the tensor into three -- what is
+    before it, what replaces it, what is after -- and `cat` puts them back,
+    which is a copy per piece. `scatter` instead needs one int64 offset
+    materialised for every element written, and that index tensor, not the
+    write, is most of what it costs: on a 512x512x8 float64 tensor, replacing
+    half the rows was 35.1 ms through the positions and 1.5 ms through `cat`.
+
+    The gradient is the same by another route. `cat`'s backward splits the
+    incoming gradient back into the pieces it was built from, so `source`
+    gets it where it landed and `tensor` gets it either side -- which is
+    exactly what `scatter` gives.
+
+    That needs a piece of `tensor` to survive, because an empty one is
+    dropped rather than carried and `tensor` would fall out of the graph
+    entirely, taking with it the zero gradient `scatter` leaves there. A
+    write covering the whole axis has no such piece, so it is done as two:
+    the first stops one short and leaves the last position of `tensor`
+    standing, the second replaces it. Nothing of `tensor` reaches the answer
+    either way -- the first write is what keeps it in the graph, and the
+    gradient it collects there is zero, which is the point. That costs a
+    second copy and needs an axis with room to split, so a length below two
+    is left to the caller and its positions.
+    """
+
+    length = int(tensor.shape[axis])
+    region = tuple(int(size) for size in tensor.shape)
+    values = _region_values(
+        op, source, tensor, region[:axis] + (width,) + region[axis + 1 :]
+    )
+
+    if width == length:
+        head = _write_contiguous(
+            op, tensor, _F.narrow(values, axis, 0, length - 1), axis, 0, length - 1
+        )
+        return _write_contiguous(
+            op, head, _F.narrow(values, axis, length - 1, 1), axis, length - 1, 1
+        )
+
+    pieces = []
+    if start:
+        pieces.append(_F.narrow(tensor, axis, 0, start))
+    pieces.append(values)
+    if start + width < length:
+        pieces.append(_F.narrow(tensor, axis, start + width, length - start - width))
+    return _F.cat(pieces, axis)
+
+
 def _scatter_into(
     op: str, tensor: Tensor, source: object, positions: "_np.ndarray"
 ) -> Tensor:
@@ -427,16 +500,9 @@ def _scatter_into(
     not in-place writes.
     """
 
-    values = _as_written_values(source, tensor)
-    region = tuple(int(size) for size in positions.shape)
-    if tuple(values.shape) != region:
-        try:
-            values = broadcast_to(values, region)
-        except (ValueError, RuntimeError):
-            raise ValueError(
-                f"{op} writes a region of shape {region}, and a source of shape "
-                f"{tuple(values.shape)} does not broadcast to it"
-            ) from None
+    values = _region_values(
+        op, source, tensor, tuple(int(size) for size in positions.shape)
+    )
 
     written = _F.scatter(
         tensor.reshape(_element_count(tensor)),
@@ -492,6 +558,17 @@ def slice_scatter(
         bounds = slice(start, end, _operator.index(step)).indices(shape[axis])
     except ValueError as exc:
         raise ValueError(f"slice_scatter: {exc}") from None
+
+    first, last, stride = bounds
+    # A step of one writes a contiguous run, which `cat` can assemble without
+    # naming a single position. `last` is below `first` for an empty slice,
+    # where the run has no width and the piece after it starts where it would
+    # have begun. An axis shorter than two that is written in full has no room
+    # for the split `_write_contiguous` needs there, and stays on the
+    # positions.
+    width = max(last - first, 0)
+    if stride == 1 and (width < shape[axis] or shape[axis] > 1):
+        return _write_contiguous("slice_scatter", tensor, src, axis, first, width)
     return _scatter_into(
         "slice_scatter", tensor, src, _axis_positions(shape, axis, _np.arange(*bounds))
     )
@@ -518,6 +595,18 @@ def select_scatter(input: object, src: object, dim: int, index: int) -> Tensor:
             f"select_scatter index {index} is out of range for dimension {dim} "
             f"of size {length}"
         )
+    if length > 1:
+        # One position is a contiguous run of width one. `src` is missing the
+        # axis being written to, since `select` is what it lines up with, so
+        # it is opened back out to width one for the pieces to sit together.
+        values = _as_written_values(src, tensor)
+        region = shape[:axis] + (1,) + shape[axis + 1 :]
+        if tuple(values.shape) != region:
+            values = _region_values(
+                "select_scatter", values, tensor, shape[:axis] + shape[axis + 1 :]
+            ).reshape(region)
+        return _write_contiguous("select_scatter", tensor, values, axis, position, 1)
+
     positions = _axis_positions(shape, axis, _np.array([position]))
     return _scatter_into(
         "select_scatter",
