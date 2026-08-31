@@ -156,7 +156,9 @@ def test_per_sample_weights_scale_each_row_before_the_sum():
 
 def test_padding_idx_is_passed_through_to_the_lookup():
     weight = _t(TABLE, requires_grad=True)
-    F.embedding_bag(_i([0, 1, 0, 2]), weight, _i([0, 2]), "sum", padding_idx=0).sum().backward()
+    F.embedding_bag(
+        _i([0, 1, 0, 2]), weight, _i([0, 2]), "sum", padding_idx=0
+    ).sum().backward()
     np.testing.assert_array_equal(weight.grad.numpy()[0], np.zeros(4))
     np.testing.assert_array_equal(weight.grad.numpy()[1], np.ones(4))
     mt.clear_autograd_graph()
@@ -185,7 +187,9 @@ def test_the_sum_sends_one_to_every_row_and_the_mean_a_share():
 
     weight = _t(TABLE, requires_grad=True)
     F.embedding_bag(_i([1, 2, 3, 4]), weight, _i([0, 2]), "mean").sum().backward()
-    np.testing.assert_allclose(weight.grad.numpy()[1:5], np.full((4, 4), 0.5), rtol=1e-14)
+    np.testing.assert_allclose(
+        weight.grad.numpy()[1:5], np.full((4, 4), 0.5), rtol=1e-14
+    )
     mt.clear_autograd_graph()
 
 
@@ -219,9 +223,7 @@ def test_a_flat_input_without_offsets_is_refused():
 
 def test_per_sample_weights_outside_sum_are_refused():
     with pytest.raises(ValueError, match='only with mode="sum"'):
-        F.embedding_bag(
-            _i([0, 1]), _t(TABLE), _i([0]), "mean", _t([1.0, 1.0])
-        )
+        F.embedding_bag(_i([0, 1]), _t(TABLE), _i([0]), "mean", _t([1.0, 1.0]))
 
 
 def test_offsets_that_do_not_start_at_zero_are_refused():
