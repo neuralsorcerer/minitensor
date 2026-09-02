@@ -6,7 +6,10 @@
 
 use super::*;
 use crate::ops::arithmetic::mul;
-use crate::ops::map::{PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks, unary_map};
+use crate::ops::map::{
+    PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks,
+    unary_map, unary_map_blocks_threshold,
+};
 use crate::ops::util::{NegLogSigmoid, deterministic_par_sum};
 use crate::{
     error::{MinitensorError, Result},
@@ -342,49 +345,62 @@ pub(crate) fn compute_huber_elementwise(
 }
 
 /// Compute natural logarithm of tensor elements
+/// `log`, with the whole non-positive half mapped to `-inf` rather than to
+/// `-inf` at zero and NaN below it.
+///
+/// The losses reach this with probabilities, where a zero is an ordinary
+/// saturated prediction rather than a mistake, and each caller clamps the
+/// `-inf` to a finite floor straight afterwards.
+///
+/// It was a serial scalar loop over the whole tensor, writing into a buffer
+/// that had just been zeroed for it -- so every loss built on it paid for one
+/// core and one wasted pass. `log` has a vectorized kernel and the map
+/// combinators are parallel and write-once; the only thing the kernel does
+/// not do is send negatives to `-inf`, and that is a comparison over a block
+/// already in cache.
 pub(crate) fn log_tensor(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
+    let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from tensor")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                if val <= 0.0 {
-                    output_slice[i] = f32::NEG_INFINITY;
-                } else {
-                    output_slice[i] = val.ln();
-                }
-            }
+            let kernel = crate::ops::simd::F32Kernel::select();
+            // SAFETY: `log` writes every element of each block it is given,
+            // and the pass after it only overwrites what is already there.
+            let out = unsafe {
+                unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+                    kernel.log(src, dst);
+                    for (d, &value) in dst.iter_mut().zip(src.iter()) {
+                        if value <= 0.0 {
+                            d.write(f32::NEG_INFINITY);
+                        }
+                    }
+                })
+            };
+            TensorData::from_vec::<f32>(out, DataType::Float32, tensor.device())
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from tensor")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                if val <= 0.0 {
-                    output_slice[i] = f64::NEG_INFINITY;
-                } else {
-                    output_slice[i] = val.ln();
-                }
-            }
+            TensorData::from_vec::<f64>(
+                unary_map(input_data, |value: f64| {
+                    if value <= 0.0 {
+                        f64::NEG_INFINITY
+                    } else {
+                        value.ln()
+                    }
+                }),
+                DataType::Float64,
+                tensor.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Logarithm only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -397,40 +413,33 @@ pub(crate) fn log_tensor(tensor: &Tensor) -> Result<Tensor> {
 
 /// Negate tensor elements
 fn negate(tensor: &Tensor) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
+    let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from tensor")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = -val;
-            }
+            TensorData::from_vec::<f32>(
+                unary_map(input_data, |value: f32| -value),
+                DataType::Float32,
+                tensor.device(),
+            )
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from tensor")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = -val;
-            }
+            TensorData::from_vec::<f64>(
+                unary_map(input_data, |value: f64| -value),
+                DataType::Float64,
+                tensor.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Negation only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),
@@ -441,7 +450,6 @@ fn negate(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
-/// Compute negative log likelihood for classification
 pub(crate) fn negative_log_likelihood(
     log_predictions: &Tensor,
     targets: &Tensor,
@@ -465,41 +473,34 @@ pub(crate) fn negative_log_likelihood(
 
 /// Raise tensor elements to a power
 pub(crate) fn power(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
-    let mut output_data =
-        TensorData::zeros_on_device(tensor.numel(), tensor.dtype(), tensor.device());
-
-    match tensor.dtype() {
+    let output_data = match tensor.dtype() {
         DataType::Float32 => {
             let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f32 slice from tensor")
             })?;
-            let output_slice = output_data.as_f32_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f32 slice from output")
-            })?;
-
-            let exp_f32 = exponent as f32;
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.powf(exp_f32);
-            }
+            let exponent = exponent as f32;
+            TensorData::from_vec::<f32>(
+                unary_map(input_data, move |value: f32| value.powf(exponent)),
+                DataType::Float32,
+                tensor.device(),
+            )
         }
         DataType::Float64 => {
             let input_data = tensor.data().as_f64_slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get f64 slice from tensor")
             })?;
-            let output_slice = output_data.as_f64_slice_mut().ok_or_else(|| {
-                MinitensorError::internal_error("Failed to get mutable f64 slice from output")
-            })?;
-
-            for (i, &val) in input_data.iter().enumerate() {
-                output_slice[i] = val.powf(exponent);
-            }
+            TensorData::from_vec::<f64>(
+                unary_map(input_data, move |value: f64| value.powf(exponent)),
+                DataType::Float64,
+                tensor.device(),
+            )
         }
         _ => {
             return Err(MinitensorError::invalid_operation(
                 "Power operation only supported for floating point tensors",
             ));
         }
-    }
+    };
 
     Ok(Tensor::new(
         Arc::new(output_data),

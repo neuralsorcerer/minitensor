@@ -455,14 +455,9 @@ pub fn binary_cross_entropy_loss(
         // (exactly 0 or 1) yields a finite loss instead of +inf.
         let log_predictions = log_tensor(predictions)?.clamp_min(-100.0)?;
 
-        let ones = Tensor::ones(
-            predictions.shape().clone(),
-            predictions.dtype(),
-            predictions.device(),
-            false,
-        );
-        let one_minus_targets = sub(&ones, targets)?;
-        let one_minus_predictions = sub(&ones, predictions)?;
+        let one = create_scalar_tensor(1.0, predictions.dtype(), predictions.device())?;
+        let one_minus_targets = sub(&one, targets)?;
+        let one_minus_predictions = sub(&one, predictions)?;
         let log_one_minus_predictions = log_tensor(&one_minus_predictions)?.clamp_min(-100.0)?;
 
         let term1 = mul(targets, &log_predictions)?;
@@ -728,13 +723,12 @@ pub fn focal_loss(
         let softmax_for_grad = softmax_predictions.clone().detach();
 
         // Compute focal loss components
-        let ones = Tensor::ones(
-            softmax_predictions.shape().clone(),
+        let one = create_scalar_tensor(
+            1.0,
             softmax_predictions.dtype(),
             softmax_predictions.device(),
-            false,
-        );
-        let one_minus_p = sub(&ones, &softmax_predictions)?;
+        )?;
+        let one_minus_p = sub(&one, &softmax_predictions)?;
         let focal_weight = power(&one_minus_p, gamma)?;
 
         // Compute negative log likelihood with focal weighting
