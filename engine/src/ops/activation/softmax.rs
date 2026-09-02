@@ -19,6 +19,45 @@ use crate::tensor::Tensor;
 use crate::tensor::TensorData;
 
 use num_traits::Float;
+use std::mem::MaybeUninit;
+
+/// The `exp(x - shift)` pass, which is where `softmax` spends about half of
+/// its time.
+///
+/// It is behind a trait because the two float types answer it very
+/// differently: float32 has a vectorized kernel for it and float64 has only
+/// `libm`. Over four million elements the scalar loop measures 13.0 ms
+/// against the kernel's 1.1 ms, which is worth one dispatch at the top of a
+/// slice. The shift cannot be folded away -- it is what stops `exp`
+/// overflowing on a large input -- so the kernel takes it rather than leaving
+/// a subtraction behind for a scalar loop to do.
+pub(crate) trait ShiftedExp: Float {
+    /// `out[i] = exp(input[i] - shift)`, for every element of `out`.
+    ///
+    /// `input` and `out` are the same length and are different buffers.
+    fn exp_shifted_into(input: &[Self], shift: Self, out: &mut [Self]);
+}
+
+impl ShiftedExp for f32 {
+    fn exp_shifted_into(input: &[f32], shift: f32, out: &mut [f32]) {
+        // The kernel writes through `MaybeUninit` because its other callers
+        // hand it a fresh allocation. This one is already initialized, and an
+        // initialized `T` is a valid `MaybeUninit<T>`; the kernel only writes,
+        // so nothing here reads a value that is not there.
+        let uninit = unsafe {
+            std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f32>, out.len())
+        };
+        crate::ops::simd::F32Kernel::select().exp_shifted(input, uninit, shift as f64);
+    }
+}
+
+impl ShiftedExp for f64 {
+    fn exp_shifted_into(input: &[f64], shift: f64, out: &mut [f64]) {
+        for (o, &v) in out.iter_mut().zip(input.iter()) {
+            *o = (v - shift).exp();
+        }
+    }
+}
 
 pub(crate) fn logaddexp_f32(
     lhs: &Tensor,
@@ -441,7 +480,7 @@ fn softmax_block_columnwise<T: Float>(
 }
 
 /// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
-fn softmax_core<T: Float + Send + Sync>(
+fn softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
     dims: &[usize],
@@ -467,9 +506,7 @@ fn softmax_core<T: Float + Send + Sync>(
                 out_block.fill(T::zero());
                 return;
             }
-            for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
-                *o = (v - max_val).exp();
-            }
+            T::exp_shifted_into(in_block, max_val, out_block);
             // Blocked: a running total over a long axis loses the small terms,
             // and every term here but the largest *is* small. Over a 250k-class
             // vocabulary the probabilities came back summing to 1.0004 rather
@@ -633,7 +670,7 @@ masked_softmax_entry!(
 
 /// `log_softmax` along `dim`, via the shifted log-sum-exp so the exponentials
 /// cannot overflow.
-fn log_softmax_core<T: Float + Send + Sync>(
+fn log_softmax_core<T: ShiftedExp + Send + Sync>(
     input_data: &[T],
     output_slice: &mut [T],
     dims: &[usize],
@@ -657,8 +694,13 @@ fn log_softmax_core<T: Float + Send + Sync>(
                 out_block.fill(neg_inf);
                 return;
             }
-            let sum =
-                accurate_indexed_sum(in_block.len(), T::zero(), |k| (in_block[k] - max_val).exp());
+            // The exponentials are formed into `out_block` and summed from
+            // there rather than one at a time inside the sum: the vectorized
+            // kernel needs somewhere to write, and the block's own final
+            // values are computed from `in_block` below, so it is free to
+            // borrow until then.
+            T::exp_shifted_into(in_block, max_val, out_block);
+            let sum = accurate_indexed_sum(out_block.len(), T::zero(), |k| out_block[k]);
             let logsum = sum.ln() + max_val;
             for (o, &v) in out_block.iter_mut().zip(in_block.iter()) {
                 *o = v - logsum;

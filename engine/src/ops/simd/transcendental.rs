@@ -755,6 +755,19 @@ fn exp_one<const FMA: bool>(x: f32) -> f32 {
     exp_core::<FMA>(x as f64) as f32
 }
 
+/// `exp(x - shift)` for one float32, the pass `softmax` spends about half its
+/// time in.
+///
+/// The shift is what keeps `exp` from overflowing on a large input, so it can
+/// never be folded away; taking it as a parameter is what lets the vectorized
+/// kernel do the subtraction too, rather than handing back a buffer for a
+/// scalar loop to subtract from. It also subtracts in float64, where
+/// `softmax`'s own loop subtracted in float32 and rounded twice.
+#[inline(always)]
+fn exp_shifted_one<const FMA: bool>(x: f32, shift: f64, _unused: f64) -> f32 {
+    exp_core::<FMA>(x as f64 - shift) as f32
+}
+
 /// `expm1` in float64.
 #[inline(always)]
 fn expm1_core<const FMA: bool>(xd: f64) -> f64 {
@@ -1265,6 +1278,12 @@ block_kernel_param!(
     softplus_block_avx512,
     softplus_block_avx2
 );
+block_kernel_param!(
+    exp_shifted_block,
+    exp_shifted_one,
+    exp_shifted_block_avx512,
+    exp_shifted_block_avx2
+);
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
@@ -1469,6 +1488,21 @@ impl F32Kernel {
             silu_backward_block,
             silu_backward_block_avx512,
             silu_backward_block_avx2
+        )
+    }
+
+    /// Write `exp(input[i] - shift)` into every element of `out`.
+    #[inline]
+    pub(crate) fn exp_shifted(self, input: &[f32], out: &mut [MaybeUninit<f32>], shift: f64) {
+        dispatch_param!(
+            self,
+            input,
+            out,
+            shift,
+            0.0,
+            exp_shifted_block,
+            exp_shifted_block_avx512,
+            exp_shifted_block_avx2
         )
     }
 
@@ -1722,6 +1756,94 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         v.push(Backend::NativeFma);
         v
+    }
+
+    /// `exp_shifted` is the one kernel that takes its argument in two
+    /// pieces, so it needs a check of its own: every backend has to agree
+    /// with the others, and all of them with `exp(x - shift)` evaluated in
+    /// float64 and rounded once.
+    ///
+    /// The shifts are the ones `softmax` actually produces -- the maximum of
+    /// the slice, so the largest argument is exactly zero -- including the
+    /// case that motivates the shift at all, where `exp(x)` alone would
+    /// overflow to infinity and `exp(x - max)` is an ordinary number.
+    #[test]
+    fn exp_shifted_matches_a_float64_reference_on_every_backend() {
+        let inputs: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -37.5,
+            88.0,
+            89.0,
+            1e-8,
+            -1e-8,
+            700.0,
+            -700.0,
+            1e20,
+            -1e20,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+        ];
+        let shifts = [0.0f64, 1.0, -1.0, 88.0, 700.0, 1e20, f32::MAX as f64];
+
+        for &shift in &shifts {
+            let mut reference_run: Option<Vec<f32>> = None;
+            for backend in available() {
+                let mut out = vec![MaybeUninit::uninit(); inputs.len()];
+                F32Kernel(backend).exp_shifted(&inputs, &mut out, shift);
+                let got: Vec<f32> = out
+                    .into_iter()
+                    .map(|v| unsafe { v.assume_init() })
+                    .collect();
+
+                for (&x, &have) in inputs.iter().zip(got.iter()) {
+                    let want = (x as f64 - shift).exp() as f32;
+                    if want.is_nan() {
+                        assert!(have.is_nan(), "{x} - {shift} on {backend:?}");
+                        continue;
+                    }
+                    if !want.is_finite() {
+                        // Overflow and underflow have to land on the same
+                        // side, not merely close to it.
+                        assert_eq!(have, want, "exp({x} - {shift}) on {backend:?}");
+                        continue;
+                    }
+                    let tolerance = (want.abs() * 4.0 * f32::EPSILON).max(f32::MIN_POSITIVE);
+                    assert!(
+                        (have - want).abs() <= tolerance,
+                        "exp({x} - {shift}) on {backend:?}: {have} against {want}"
+                    );
+                }
+
+                match &reference_run {
+                    None => reference_run = Some(got),
+                    Some(first) => assert_eq!(
+                        &got, first,
+                        "backends disagree on exp(x - {shift}) at {backend:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The shift is what stops the exponential overflowing, so subtracting it
+    /// has to happen before the exponential and not after.
+    #[test]
+    fn exp_shifted_survives_arguments_whose_exponential_would_not() {
+        let mut out = vec![MaybeUninit::uninit(); 2];
+        F32Kernel::select().exp_shifted(&[200.0, 100.0], &mut out, 200.0);
+        let got: Vec<f32> = out
+            .into_iter()
+            .map(|v| unsafe { v.assume_init() })
+            .collect();
+        assert_eq!(got[0], 1.0);
+        assert!(got[1] > 0.0 && got[1].is_finite(), "got {}", got[1]);
+        assert!((200.0f32).exp().is_infinite(), "the premise of the shift");
     }
 
     /// The float64 routine each kernel is measured against, rounded once.
