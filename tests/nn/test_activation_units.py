@@ -205,3 +205,36 @@ def test_integer_inputs_are_rejected(name):
 def test_empty_tensors_come_back_empty(name):
     call, _ = UNITS[name]
     assert call(mt.from_numpy(np.array([]))).shape == (0,)
+
+
+def test_logsigmoid_keeps_the_term_the_threshold_used_to_drop():
+    """`-softplus(-x)` is `x` once `x` is negative enough, but "enough"
+    depends on the dtype: the term dropped there is `log1p(exp(x))`, which at
+    -20 is a thousandth of a float32 ulp and 580,000 float64 ulps. One
+    threshold served both, so float64 answers were exact only to about 1e-9 --
+    `logsigmoid(-25)` came back as exactly -25 where the value is
+    -25.000000000013838."""
+
+    xs = np.array([-40.0, -30.0, -25.0, -21.0, -20.5], dtype=np.float64)
+    want = -np.logaddexp(0.0, -xs)
+    got = mt.Tensor(np.ascontiguousarray(xs), dtype="float64").logsigmoid().numpy()
+
+    np.testing.assert_allclose(got, want, rtol=1e-15, atol=0.0)
+    assert got[2] != -25.0, "the dropped term is what this test exists for"
+
+
+def test_logsigmoid_float32_still_takes_the_linear_tail():
+    """Where float64 needs the term, float32 cannot represent it: the answer
+    there is `x` itself, and computing `exp(-x)` to find that out would
+    overflow."""
+
+    xs = np.array([-800.0, -100.0, -40.0], dtype=np.float32)
+    got = mt.Tensor(np.ascontiguousarray(xs)).logsigmoid().numpy()
+    np.testing.assert_array_equal(got, xs)
+
+
+def test_logsigmoid_agrees_with_a_float64_reference_across_the_range():
+    xs = np.linspace(-30.0, 30.0, 4001, dtype=np.float32)
+    got = mt.Tensor(np.ascontiguousarray(xs)).logsigmoid().numpy().astype(np.float64)
+    want = -np.logaddexp(0.0, -xs.astype(np.float64))
+    np.testing.assert_allclose(got, want, rtol=2e-7, atol=1e-45)

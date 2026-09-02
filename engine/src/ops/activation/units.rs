@@ -19,7 +19,8 @@ use super::*;
 use crate::{
     autograd::{ActivationUnitBackward, with_grad_fn},
     error::{MinitensorError, Result},
-    ops::map::unary_map,
+    ops::map::{outputs_per_task, par_out_chunks, unary_map},
+    ops::util::NegLogSigmoid,
     tensor::{DataType, Tensor, TensorData},
 };
 use std::sync::Arc;
@@ -251,12 +252,11 @@ unit_grad_kernel!(
     }
 );
 
-unit_kernel!(
-    /// `log(sigmoid(x))`, as `-softplus(-x)` so the log and the exponential
-    /// never both run: below zero `log(sigmoid(x))` underflows to `-inf` while
-    /// this form stays exact.
-    LOGSIGMOID, |x, _p| -stable_softplus!(-x)
-);
+// `logsigmoid`'s value kernel is not declared here. `-softplus(-x)` has a
+// vectorized implementation, so the function computes its own values through
+// `NegLogSigmoid` rather than through the scalar unit machinery, and a
+// constant restating the same formula would be a second definition that
+// nothing evaluates. The gradient has no such kernel and stays.
 unit_grad_kernel!(
     /// `d/dx log(sigmoid(x)) = 1 - sigmoid(x) = sigmoid(-x)`.
     LOGSIGMOID_D, |x, g, _p| g * stable_sigmoid!(-x)
@@ -309,6 +309,22 @@ pub(crate) fn unary_unit(
     params: UnitParams<f64>,
 ) -> Result<Tensor> {
     let output_data = unit_forward_data(tensor, name, kernel, params)?;
+    unary_unit_from_data(tensor, name, output_data, grad_kernel, params)
+}
+
+/// The half of [`unary_unit`] after the values exist: wrap them in a tensor
+/// and record the chain rule.
+///
+/// Split out for the units whose forward has a vectorized kernel and whose
+/// backward does not, so they can compute their own values without also
+/// restating how a unit's gradient is attached.
+pub(crate) fn unary_unit_from_data(
+    tensor: &Tensor,
+    name: &'static str,
+    output_data: TensorData,
+    grad_kernel: UnitGradKernel,
+    params: UnitParams<f64>,
+) -> Result<Tensor> {
     let output = Tensor::new(
         Arc::new(output_data),
         tensor.shape().clone(),
@@ -367,12 +383,45 @@ plain_unit!(
     MISH_D,
     "`x * tanh(softplus(x))`: smooth, non-monotonic, and keeps a small negative tail."
 );
-plain_unit!(
-    logsigmoid,
-    LOGSIGMOID,
-    LOGSIGMOID_D,
-    "`log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the direct form underflows."
-);
+/// `log(sigmoid(x))`, evaluated as `-softplus(-x)` so it stays exact where the
+/// direct form underflows.
+///
+/// Written out rather than declared with `plain_unit!` because `-softplus(-x)`
+/// has a vectorized kernel and the scalar rearrangement it replaces cost two
+/// `libm` calls an element. Only the value kernel changes: the gradient is
+/// still the unit one, attached the way every other unit attaches it.
+pub fn logsigmoid(tensor: &Tensor) -> Result<Tensor> {
+    macro_rules! values_for {
+        ($ty:ty, $slice:ident, $dtype:expr) => {{
+            let input = tensor.data().$slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get slice from input tensor")
+            })?;
+            let mut values = vec![<$ty>::default(); input.len()];
+            par_out_chunks(&mut values, outputs_per_task(1), &|offset, out_block| {
+                let block = &input[offset..offset + out_block.len()];
+                <$ty>::neg_log_sigmoid_into(block, out_block);
+                // The kernel computes `-log(sigmoid(x))`, the form binary
+                // cross-entropy wants; this is the other sign of it. The pass
+                // is over a block still in cache and vectorizes on its own.
+                for o in out_block.iter_mut() {
+                    *o = -*o;
+                }
+            });
+            TensorData::from_vec::<$ty>(values, $dtype, tensor.device())
+        }};
+    }
+
+    let output_data = match tensor.dtype() {
+        DataType::Float32 => values_for!(f32, as_f32_slice, DataType::Float32),
+        DataType::Float64 => values_for!(f64, as_f64_slice, DataType::Float64),
+        other => {
+            return Err(MinitensorError::invalid_operation(format!(
+                "logsigmoid is only supported for floating point tensors, got {other}"
+            )));
+        }
+    };
+    unary_unit_from_data(tensor, "logsigmoid", output_data, LOGSIGMOID_D, [0.0; 2])
+}
 
 /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
 pub fn hardtanh(tensor: &Tensor, min_val: f64, max_val: f64) -> Result<Tensor> {

@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::ops::arithmetic::mul;
-use crate::ops::map::{PAR_THRESHOLD, binary_map, ternary_map, unary_map};
-use crate::ops::util::deterministic_par_sum;
+use crate::ops::map::{PAR_THRESHOLD, binary_map, outputs_per_task, par_out_chunks, unary_map};
+use crate::ops::util::{NegLogSigmoid, deterministic_par_sum};
 use crate::{
     error::{MinitensorError, Result},
     ops::{comparison, selection::masked_fill_scalar},
@@ -220,21 +220,42 @@ pub(crate) fn compute_bce_with_logits_elementwise(
             let t = targets.data().$slice().ok_or_else(|| {
                 MinitensorError::internal_error("Failed to get slice from targets")
             })?;
-            let compute = |x: $ty, t: $ty, w: $ty| {
-                // -log(sigmoid(x)), evaluated through log1p(exp(-|x|)) so the
-                // exponential argument is never positive.
-                let neg_log_sigmoid = (-x.abs()).exp().ln_1p() + if x < 0.0 { -x } else { 0.0 };
+            let weight = match pos_weight {
+                Some(w) => Some(w.data().$slice().ok_or_else(|| {
+                    MinitensorError::internal_error("Failed to get slice from pos_weight")
+                })?),
+                None => None,
+            };
+            // The loss given `-log(sigmoid(x))`, which is the only part of it
+            // that costs anything.
+            let combine = |x: $ty, t: $ty, w: $ty, neg_log_sigmoid: $ty| {
                 (1.0 - t) * x + (1.0 + (w - 1.0) * t) * neg_log_sigmoid
             };
-            let values = match pos_weight {
-                Some(w) => {
-                    let w = w.data().$slice().ok_or_else(|| {
-                        MinitensorError::internal_error("Failed to get slice from pos_weight")
-                    })?;
-                    ternary_map(x, t, w, compute)
+
+            // One pass, with the transcendental done a block at a time rather
+            // than an element at a time. It used to be two scalar `libm` calls
+            // per element -- `exp` then `ln_1p` -- inside an element-wise map;
+            // `neg_log_sigmoid_into` reaches the vectorized `softplus` kernel
+            // for float32. The block lands in the output buffer and the rest
+            // of the loss is finished over it there, while it is still in
+            // cache, so nothing is materialised that was not already needed.
+            let mut values = vec![<$ty>::default(); x.len()];
+            par_out_chunks(&mut values, outputs_per_task(3), &|offset, out_block| {
+                let block = &x[offset..offset + out_block.len()];
+                <$ty>::neg_log_sigmoid_into(block, out_block);
+                match weight {
+                    Some(w) => {
+                        for (i, o) in out_block.iter_mut().enumerate() {
+                            *o = combine(block[i], t[offset + i], w[offset + i], *o);
+                        }
+                    }
+                    None => {
+                        for (i, o) in out_block.iter_mut().enumerate() {
+                            *o = combine(block[i], t[offset + i], 1.0, *o);
+                        }
+                    }
                 }
-                None => binary_map(x, t, |x: $ty, t: $ty| compute(x, t, 1.0)),
-            };
+            });
             TensorData::from_vec::<$ty>(values, $dtype, logits.device())
         }};
     }

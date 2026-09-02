@@ -926,6 +926,26 @@ fn softplus_one<const FMA: bool>(x: f32, beta: f64, threshold: f64) -> f32 {
     }
 }
 
+/// `-log(sigmoid(x))`, which is `softplus(-x)`.
+///
+/// The quantity binary cross-entropy is written in terms of, and `logsigmoid`
+/// negated. Both used to reach it through two scalar `libm` calls per element
+/// -- an `exp` and a `ln_1p` -- while `softplus` itself had this kernel all
+/// along.
+///
+/// The threshold is `softplus`'s own default. Above it the answer is `-x` to
+/// well within float32: the term dropped at the boundary is `log1p(exp(-20))`,
+/// or 2.1e-9, against an ulp of 1.9e-6 at that magnitude. It is not an
+/// optimisation but a necessity -- `exp(-x)` for a large negative `x`
+/// overflows even float64, and the linear branch is what the shift protects.
+#[inline(always)]
+fn neg_log_sigmoid_one<const FMA: bool>(x: f32) -> f32 {
+    softplus_one::<FMA>(-x, 1.0, SOFTPLUS_THRESHOLD)
+}
+
+/// The threshold above which `softplus(z)` is `z` to within float32.
+pub(crate) const SOFTPLUS_THRESHOLD: f64 = 20.0;
+
 // ---------------------------------------------------------------------------
 // logistic family: sigmoid, silu
 // ---------------------------------------------------------------------------
@@ -1285,6 +1305,12 @@ block_kernel_param!(
     exp_shifted_block_avx2
 );
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
+block_kernel!(
+    neg_log_sigmoid_block,
+    neg_log_sigmoid_one,
+    neg_log_sigmoid_block_avx512,
+    neg_log_sigmoid_block_avx2
+);
 block_kernel!(expm1_block, expm1_one, expm1_block_avx512, expm1_block_avx2);
 block_kernel!(sinh_block, sinh_one, sinh_block_avx512, sinh_block_avx2);
 block_kernel!(cosh_block, cosh_one, cosh_block_avx512, cosh_block_avx2);
@@ -1503,6 +1529,19 @@ impl F32Kernel {
             exp_shifted_block,
             exp_shifted_block_avx512,
             exp_shifted_block_avx2
+        )
+    }
+
+    /// Write `-log(sigmoid(input[i]))` into every element of `out`.
+    #[inline]
+    pub(crate) fn neg_log_sigmoid(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            neg_log_sigmoid_block,
+            neg_log_sigmoid_block_avx512,
+            neg_log_sigmoid_block_avx2
         )
     }
 
@@ -1829,6 +1868,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `-log(sigmoid(x))` is `softplus(-x)`, and the kernel has to agree with
+    /// that on every backend and with a float64 evaluation of it.
+    ///
+    /// The reference is `softplus(-x)` written the cancellation-free way,
+    /// `max(z, 0) + log1p(exp(-|z|))`. Spelling it as plain
+    /// `log1p(exp(-x))` would make the *reference* the broken side: at
+    /// `x = -800` that overflows to infinity, where the answer is 800.
+    #[test]
+    fn neg_log_sigmoid_matches_a_float64_reference_on_every_backend() {
+        let inputs: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            15.0,
+            -15.0,
+            19.9,
+            -19.9,
+            20.1,
+            -20.1,
+            88.0,
+            -88.0,
+            800.0,
+            -800.0,
+            1e-8,
+            -1e-8,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+
+        let mut reference_run: Option<Vec<f32>> = None;
+        for backend in available() {
+            let mut out = vec![MaybeUninit::uninit(); inputs.len()];
+            F32Kernel(backend).neg_log_sigmoid(&inputs, &mut out);
+            let got: Vec<f32> = out
+                .into_iter()
+                .map(|v| unsafe { v.assume_init() })
+                .collect();
+
+            for (&x, &have) in inputs.iter().zip(got.iter()) {
+                let z = -(x as f64);
+                let want = (z.max(0.0) + (-z.abs()).exp().ln_1p()) as f32;
+                if want.is_nan() {
+                    assert!(have.is_nan(), "{x} on {backend:?}");
+                    continue;
+                }
+                if !want.is_finite() {
+                    assert_eq!(have, want, "-log(sigmoid({x})) on {backend:?}");
+                    continue;
+                }
+                let tolerance = (want.abs() * 4.0 * f32::EPSILON).max(f32::MIN_POSITIVE);
+                assert!(
+                    (have - want).abs() <= tolerance,
+                    "-log(sigmoid({x})) on {backend:?}: {have} against {want}"
+                );
+            }
+
+            match &reference_run {
+                None => reference_run = Some(got),
+                Some(first) => {
+                    assert_eq!(&got, first, "backends disagree at {backend:?}")
+                }
+            }
+        }
+    }
+
+    /// The linear tail is not an optimisation: `exp(-x)` for a large negative
+    /// `x` overflows even float64, and the answer there is `-x` itself.
+    #[test]
+    fn neg_log_sigmoid_converges_on_minus_x_instead_of_overflowing() {
+        let mut out = vec![MaybeUninit::uninit(); 3];
+        F32Kernel::select().neg_log_sigmoid(&[-800.0, -100.0, 800.0], &mut out);
+        let got: Vec<f32> = out
+            .into_iter()
+            .map(|v| unsafe { v.assume_init() })
+            .collect();
+        assert_eq!(got[0], 800.0);
+        assert_eq!(got[1], 100.0);
+        assert_eq!(got[2], 0.0);
+        assert!((800.0f64).exp().is_infinite(), "the premise of the tail");
     }
 
     /// The shift is what stops the exponential overflowing, so subtracting it
