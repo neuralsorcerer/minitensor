@@ -46,13 +46,26 @@ impl GradientFunction for SumBackward {
 
         let grad = expand_reduction_grad(grad_output, &self.input_shape, &self.dims, self.keepdim)?;
 
-        let ones = Tensor::ones(
-            Shape::new(self.input_shape.clone()),
-            grad_output.dtype(),
-            grad_output.device(),
-            false,
-        );
-        let grad_input = arithmetic::mul(&ones, &grad)?;
+        // Every element of the input contributed once, so its gradient is the
+        // output's, repeated over the axes that were summed away. That is what
+        // `expand` says; multiplying by a tensor of ones said it by
+        // materialising the ones first and then reading them back -- three
+        // passes over the input's worth of memory where one does it.
+        let grad_input = if self.input_shape.contains(&0) {
+            // Nothing was summed, so there is nothing to repeat -- and the
+            // reduced gradient is a single element that `expand` will not
+            // stretch to a zero-length axis. Any tensor of the shape will do:
+            // it holds no elements.
+            Tensor::zeros(
+                Shape::new(self.input_shape.clone()),
+                grad_output.dtype(),
+                grad_output.device(),
+                false,
+            )
+        } else {
+            let dims: Vec<isize> = self.input_shape.iter().map(|&d| d as isize).collect();
+            grad.expand(dims)?.contiguous()?
+        };
         gradients.insert(self.input_id, grad_input);
 
         Ok(gradients)
@@ -242,11 +255,11 @@ impl GradientFunction for ProdBackward {
         let zero = create_scalar_tensor(0.0, dtype, device)?;
         let is_zero = crate::ops::comparison::eq(input, &zero)?; // bool mask
         let is_zero_f = is_zero.astype(dtype)?;
-        let ones = Tensor::ones(input.shape().clone(), dtype, device, false);
+        let one = create_scalar_tensor(1.0, dtype, device)?;
 
         // Per-group zero count and product of the non-zero elements.
         let zero_count = reduction::sum(&is_zero_f, reduce_dims.clone(), true)?;
-        let safe_input = crate::ops::selection::where_op(&is_zero, &ones, input)?;
+        let safe_input = crate::ops::selection::where_op(&is_zero, &one, input)?;
         let prod_nonzero = reduction::prod(&safe_input, reduce_dims, true)?;
 
         let one_scalar = create_scalar_tensor(1.0, dtype, device)?;
@@ -258,7 +271,7 @@ impl GradientFunction for ProdBackward {
         let zero_term = arithmetic::mul(&zero_term, &prod_nonzero)?;
 
         // Contribution at non-zero positions when the group has no zeros.
-        let nonzero_mask = arithmetic::sub(&ones, &is_zero_f)?;
+        let nonzero_mask = arithmetic::sub(&one, &is_zero_f)?;
         let quotient = arithmetic::div(&prod_nonzero, &safe_input)?;
         let nonzero_term = arithmetic::mul(&nonzero_mask, &no_zero)?;
         let nonzero_term = arithmetic::mul(&nonzero_term, &quotient)?;
@@ -418,13 +431,8 @@ impl GradientFunction for LogBackward {
         gradients.reserve(1);
 
         // d/dx(log(x)) = 1/x * grad_output
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let inv = arithmetic::div(&ones, &self.input.detach())?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let inv = arithmetic::div(&one, &self.input.detach())?;
         let grad = arithmetic::mul(&inv, grad_output)?;
         gradients.insert(self.input_id, grad);
 
@@ -447,13 +455,8 @@ impl GradientFunction for Log1pBackward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::add(&ones, &self.input.detach())?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::add(&one, &self.input.detach())?;
         let grad = arithmetic::div(grad_output, &denom)?;
         gradients.insert(self.input_id, grad);
 
@@ -476,13 +479,8 @@ impl GradientFunction for Expm1Backward {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
 
-        let ones = Tensor::ones(
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
-            false,
-        );
-        let term = arithmetic::add(&self.output.detach(), &ones)?;
+        let one = create_scalar_tensor(1.0, self.output.dtype(), self.output.device())?;
+        let term = arithmetic::add(&self.output.detach(), &one)?;
         let grad = arithmetic::mul(&term, grad_output)?;
         gradients.insert(self.input_id, grad);
 
@@ -556,13 +554,8 @@ impl GradientFunction for TanBackward {
 
         // d/dx(tan(x)) = (1 + tan²(x)) * grad_output
         let tan_sq = arithmetic::mul(&self.output, &self.output)?;
-        let ones = Tensor::ones(
-            self.output.shape().clone(),
-            self.output.dtype(),
-            self.output.device(),
-            false,
-        );
-        let term = arithmetic::add(&ones, &tan_sq)?;
+        let one = create_scalar_tensor(1.0, self.output.dtype(), self.output.device())?;
+        let term = arithmetic::add(&one, &tan_sq)?;
         let grad = arithmetic::mul(&term, grad_output)?;
         gradients.insert(self.input_id, grad);
 
@@ -587,13 +580,8 @@ impl GradientFunction for AsinBackward {
 
         // d/dx(asin(x)) = grad_output / sqrt(1 - x^2)
         let square = arithmetic::mul(&self.input, &self.input)?;
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::sub(&ones, &square)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::sub(&one, &square)?;
         let sqrt = denom.sqrt()?;
         let grad = arithmetic::div(grad_output, &sqrt)?;
         gradients.insert(self.input_id, grad);
@@ -619,13 +607,8 @@ impl GradientFunction for AcosBackward {
 
         // d/dx(acos(x)) = -grad_output / sqrt(1 - x^2)
         let square = arithmetic::mul(&self.input, &self.input)?;
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::sub(&ones, &square)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::sub(&one, &square)?;
         let sqrt = denom.sqrt()?;
         let frac = arithmetic::div(grad_output, &sqrt)?;
         let grad = arithmetic::neg(&frac)?;
@@ -652,13 +635,8 @@ impl GradientFunction for AtanBackward {
 
         // d/dx(atan(x)) = grad_output / (1 + x^2)
         let square = arithmetic::mul(&self.input, &self.input)?;
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::add(&ones, &square)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::add(&one, &square)?;
         let grad = arithmetic::div(grad_output, &denom)?;
         gradients.insert(self.input_id, grad);
 
@@ -731,13 +709,8 @@ impl GradientFunction for AsinhBackward {
 
         // d/dx(asinh(x)) = grad_output / sqrt(1 + x^2)
         let square = arithmetic::mul(&self.input, &self.input)?;
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::add(&square, &ones)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::add(&square, &one)?;
         let sqrt = denom.sqrt()?;
         let grad = arithmetic::div(grad_output, &sqrt)?;
         gradients.insert(self.input_id, grad);
@@ -762,14 +735,9 @@ impl GradientFunction for AcoshBackward {
         gradients.reserve(1);
 
         // d/dx(acosh(x)) = grad_output / sqrt((x - 1)(x + 1))
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let x_minus_one = arithmetic::sub(&self.input, &ones)?;
-        let x_plus_one = arithmetic::add(&self.input, &ones)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let x_minus_one = arithmetic::sub(&self.input, &one)?;
+        let x_plus_one = arithmetic::add(&self.input, &one)?;
         let product = arithmetic::mul(&x_minus_one, &x_plus_one)?;
         let sqrt = product.sqrt()?;
         let grad = arithmetic::div(grad_output, &sqrt)?;
@@ -796,13 +764,8 @@ impl GradientFunction for AtanhBackward {
 
         // d/dx(atanh(x)) = grad_output / (1 - x^2)
         let square = arithmetic::mul(&self.input, &self.input)?;
-        let ones = Tensor::ones(
-            self.input.shape().clone(),
-            self.input.dtype(),
-            self.input.device(),
-            false,
-        );
-        let denom = arithmetic::sub(&ones, &square)?;
+        let one = create_scalar_tensor(1.0, self.input.dtype(), self.input.device())?;
+        let denom = arithmetic::sub(&one, &square)?;
         let grad = arithmetic::div(grad_output, &denom)?;
         gradients.insert(self.input_id, grad);
 

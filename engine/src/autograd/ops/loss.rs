@@ -476,12 +476,7 @@ impl GradientFunction for BCELossBackward {
         gradients.reserve(1);
 
         // BCE gradient: (predictions - targets) / (predictions * (1 - predictions))
-        let one = Tensor::ones(
-            Shape::new(self.predictions_shape.clone()),
-            self.predictions.dtype(),
-            self.predictions.device(),
-            false,
-        );
+        let one = create_scalar_tensor(1.0, self.predictions.dtype(), self.predictions.device())?;
         let one_minus_pred = arithmetic::sub(&one, &self.predictions)?;
         let numerator = arithmetic::sub(&self.predictions, &self.targets)?;
         // The denominator is clamped to EPSILON (1e-12) in
@@ -669,12 +664,7 @@ impl GradientFunction for KLDivLossBackward {
             let log_targets = activation::log(&self.targets)?;
             let log_preds = activation::log(&self.predictions)?;
             let diff = arithmetic::sub(&log_targets, &log_preds)?;
-            let one = Tensor::ones(
-                self.targets.shape().clone(),
-                self.targets.dtype(),
-                self.targets.device(),
-                false,
-            );
+            let one = create_scalar_tensor(1.0, self.targets.dtype(), self.targets.device())?;
             let mut target_grad = arithmetic::add(&diff, &one)?;
             if let Some(n) = self.reduction_divisor() {
                 let scale =
