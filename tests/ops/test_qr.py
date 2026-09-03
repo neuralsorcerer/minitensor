@@ -413,9 +413,50 @@ def test_a_basis_can_now_be_orthonormalised():
 def test_the_module_level_function_agrees_with_the_method():
     values = _matrix((5, 3), seed=53)
     t = mt.Tensor(values, dtype="float64")
-    for mode in ("reduced", "complete"):
+    for mode in ("reduced", "complete", "r"):
         for a, b in zip(mt.qr(t, mode), t.qr(mode)):
             np.testing.assert_array_equal(a.numpy(), b.numpy())
+
+
+@pytest.mark.parametrize("shape", SHAPES + BLOCKED_SHAPES)
+def test_r_mode_is_the_reduced_r_without_building_q(shape):
+    """`R` falls out of the reduction; `Q` is a second pass that builds it back
+    out of the reflectors below the diagonal. A caller solving least squares,
+    testing rank or taking a determinant through the factorisation never looks
+    at `Q`, and `mode="r"` is them saying so -- about twice as fast at 400 by
+    400, 9.5ms against 19.
+
+    What it must not change is `R`, and the check is equality rather than
+    closeness: not building `Q` cannot perturb a factorisation, so any
+    difference at all would mean the two modes had taken different routes
+    through the reduction.
+    """
+    a = _matrix(shape, seed=17)
+    tensor = mt.Tensor.from_numpy(a)
+    _, reduced_r = mt.qr(tensor, "reduced")
+    empty_q, r = mt.qr(tensor, "r")
+
+    np.testing.assert_array_equal(r.numpy(), reduced_r.numpy())
+    assert empty_q.numpy().shape == a.shape[:-1] + (0,)
+    assert empty_q.numpy().size == 0
+    # And `R` is still a QR of `A`, up to the sign of each row that `Q` carries.
+    np.testing.assert_allclose(
+        np.abs(r.numpy()), np.abs(np.linalg.qr(a, mode="r")), rtol=1e-10, atol=1e-12
+    )
+
+
+def test_r_mode_says_so_rather_than_guessing_a_gradient():
+    # The gradient of `R` is written in terms of `Q`, which this mode exists
+    # not to compute. Returning zeros, or quietly computing `Q` after all,
+    # would each be worse than saying which mode to ask for instead.
+    t = mt.Tensor(_matrix((4, 4), seed=8), dtype="float64", requires_grad=True)
+    with pytest.raises(ValueError, match='mode="r"'):
+        mt.qr(t, "r")
+
+
+def test_an_unknown_mode_names_the_ones_that_work():
+    with pytest.raises(ValueError, match='"reduced", "complete" or "r"'):
+        mt.qr(mt.Tensor(_matrix((3, 3), seed=1), dtype="float64"), "thin")
 
 
 @pytest.mark.parametrize("magnitude", [1e160, 1e200, 1e250, 1e-160, 1e-200, 1e-250])

@@ -1718,7 +1718,7 @@ pub fn cholesky(input: &Bound<PyAny>, upper: bool) -> PyResult<PyTensor> {
     borrow_tensor(input)?.cholesky(upper)
 }
 
-/// `(Q, R)` for each matrix in the stack, with `A = Q @ R`. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`.
+/// `(Q, R)` for each matrix in the stack, with `A = Q @ R`. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`, and `mode="r"` skips building `Q` entirely -- roughly twice as fast, with an `[m, 0]` `Q` returned in its place.
 #[pyfunction]
 #[pyo3(signature = (input, mode="reduced"))]
 pub fn qr(input: &Bound<PyAny>, mode: &str) -> PyResult<(PyTensor, PyTensor)> {

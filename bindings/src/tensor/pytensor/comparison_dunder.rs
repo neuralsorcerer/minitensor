@@ -79,7 +79,7 @@ impl PyTensor {
         ))
     }
 
-    /// `(Q, R)` with `A = Q @ R`, `Q` orthonormal and `R` upper triangular. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`.
+    /// `(Q, R)` with `A = Q @ R`, `Q` orthonormal and `R` upper triangular. `mode="reduced"` gives the thin factors, `mode="complete"` a full square `Q`, and `mode="r"` skips building `Q` entirely -- roughly twice as fast, with an `[m, 0]` `Q` returned in its place.
     #[pyo3(signature = (mode="reduced"))]
     pub fn qr(&self, mode: &str) -> PyResult<(Self, Self)> {
         let parsed = engine::ops::linalg::QrMode::from_name(mode).map_err(_convert_error)?;

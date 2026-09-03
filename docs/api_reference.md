@@ -887,7 +887,11 @@ factors every matrix in it. All of them are `float32` or `float64` only.
 - `qr(input, mode="reduced")` — `A = Q @ R` with `Q` orthonormal and `R` upper
   triangular. `mode="complete"` returns a square `Q`; that shape is not
   differentiable when there are more rows than columns, because the extra
-  columns are an arbitrary completion of the basis.
+  columns are an arbitrary completion of the basis. `mode="r"` returns `R`
+  alone with an `[m, 0]` `Q` beside it: `R` falls out of the reduction while
+  `Q` has to be built back out of the reflectors afterwards, so skipping it is
+  about twice as fast. It is not differentiable either, since the gradient of
+  `R` is written in terms of the `Q` it does not compute.
 - `eigh(input)` — `(w, V)` for a symmetric matrix, with `w` **ascending** and
   `A @ V == V @ diag(w)`. Reads only the lower triangle.
   `eigvalsh(input)` returns the eigenvalues alone and skips accumulating the

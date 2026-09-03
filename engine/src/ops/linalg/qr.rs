@@ -31,7 +31,7 @@ use crate::{
     error::{MinitensorError, Result},
     ops::{
         linalg::{Factorable, reflector},
-        map::{PAR_THRESHOLD, try_par_out_chunks_pair},
+        map::{PAR_THRESHOLD, try_par_out_chunks, try_par_out_chunks_pair},
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -49,6 +49,16 @@ pub enum QrMode {
     /// that complete it, which is why the gradient refuses this shape when
     /// there are extra columns to choose.
     Complete,
+    /// `R` alone, `[k, n]`, with `Q` returned empty.
+    ///
+    /// `R` falls out of the reduction; `Q` has to be built from the reflectors
+    /// afterwards, and that is a second pass over the whole matrix. A caller
+    /// solving a least-squares problem, testing rank, or taking a determinant
+    /// through the factorisation never looks at `Q`, and this is roughly twice
+    /// as fast for them. NumPy spells it `mode="r"` and returns `R` on its own;
+    /// this returns the pair either way, with an `[m, 0]` `Q`, so that the
+    /// shape of the answer does not depend on the value of an argument.
+    R,
 }
 
 impl QrMode {
@@ -57,8 +67,9 @@ impl QrMode {
         match name {
             "reduced" => Ok(QrMode::Reduced),
             "complete" => Ok(QrMode::Complete),
+            "r" => Ok(QrMode::R),
             other => Err(MinitensorError::invalid_argument(format!(
-                "unknown qr mode {other:?}; expected \"reduced\" or \"complete\""
+                "unknown qr mode {other:?}; expected \"reduced\", \"complete\" or \"r\""
             ))),
         }
     }
@@ -179,6 +190,13 @@ fn qr_one<T: Factorable>(
         &mut scratch.blocks,
     );
     extract_r(&scratch.work, n, r, r_rows);
+    // `R` is already here -- the reduction wrote it into the upper triangle of
+    // `work`. `Q` is not: it has to be built back out of the reflectors below
+    // that triangle, which is a second pass of the same order as the first, and
+    // `mode="r"` is the caller saying not to.
+    if q_cols == 0 {
+        return;
+    }
     reflector::accumulate(
         &scratch.work,
         m,
@@ -231,6 +249,32 @@ fn qr_batched<T: Factorable>(
     let a_stride = m * n;
     let q_stride = m * q_cols;
     let r_stride = r_rows * n;
+    let per_task = (PAR_THRESHOLD / (m * n * n).max(1)).clamp(1, batch);
+
+    // `mode="r"` asks for no `Q` at all, which leaves the pair helper with a
+    // stride of zero to cut one of its slices by. There is only one output to
+    // spread across the tasks then, so there is no pairing to do.
+    if q_cols == 0 {
+        let _: Result<()> = try_par_out_chunks(r, per_task * r_stride, &|offset, r_group| {
+            let mut scratch = Scratch::new();
+            let first = offset / r_stride;
+            for local in 0..r_group.len() / r_stride {
+                let a_offset = (first + local) * a_stride;
+                qr_one(
+                    &input[a_offset..a_offset + a_stride],
+                    m,
+                    n,
+                    &mut [],
+                    0,
+                    &mut r_group[local * r_stride..(local + 1) * r_stride],
+                    r_rows,
+                    &mut scratch,
+                );
+            }
+            Ok(())
+        });
+        return;
+    }
 
     // `Result` only so the pair helper can be shared with routines that fail;
     // a factorisation has nothing to reject.
@@ -242,7 +286,7 @@ fn qr_batched<T: Factorable>(
         r,
         r_stride,
         batch,
-        (PAR_THRESHOLD / (m * n * n).max(1)).clamp(1, batch),
+        per_task,
         &|first, q_group, r_group| {
             let mut scratch = Scratch::new();
             for local in 0..q_group.len() / q_stride {
@@ -285,6 +329,7 @@ pub fn qr(tensor: &Tensor, mode: QrMode) -> Result<(Tensor, Tensor)> {
     let (q_cols, r_rows) = match mode {
         QrMode::Reduced => (k, k),
         QrMode::Complete => (m, m),
+        QrMode::R => (0, k),
     };
 
     let mut q_dims = batch_dims.clone();
@@ -342,6 +387,15 @@ pub fn qr(tensor: &Tensor, mode: QrMode) -> Result<(Tensor, Tensor)> {
         if mode == QrMode::Complete && m > n {
             return Err(MinitensorError::invalid_operation(
                 "qr is not differentiable in complete mode when there are more rows than columns; \
+                 use mode=\"reduced\"",
+            ));
+        }
+        // The gradient of `R` is written in terms of `Q`, which `mode="r"`
+        // exists precisely not to compute. Asking for it back would be asking
+        // for the work the mode was chosen to skip.
+        if mode == QrMode::R {
+            return Err(MinitensorError::invalid_operation(
+                "qr is not differentiable in mode=\"r\", which does not compute Q; \
                  use mode=\"reduced\"",
             ));
         }
