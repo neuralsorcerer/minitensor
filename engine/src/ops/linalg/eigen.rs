@@ -188,8 +188,13 @@ fn diagonalize<T: Float + Send + Sync>(
     let two = T::one() + T::one();
     let epsilon = T::epsilon();
 
+    // One budget for the whole matrix rather than one per eigenvalue, for the
+    // reason `rotation::check_sweeps` gives. The shift here is never discarded,
+    // so this band converges cubically throughout and stays a long way inside
+    // it -- but a guard sized in sweeps per value is the honest shape either
+    // way, and it is the same guard the other factorisation needs.
+    let mut iterations = 0usize;
     for l in 0..n {
-        let mut iterations = 0usize;
         loop {
             // The first negligible off-diagonal at or after `l` splits the
             // problem; if it is `l` itself, this eigenvalue has converged.
@@ -205,7 +210,7 @@ fn diagonalize<T: Float + Send + Sync>(
                 break;
             }
             iterations += 1;
-            rotation::check_sweeps(iterations, "eigh")?;
+            rotation::check_sweeps(iterations, n, "eigh")?;
 
             // Wilkinson's shift, as the eigenvalue of the trailing 2x2 nearer
             // to its corner -- written so the subtraction never cancels.

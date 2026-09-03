@@ -110,23 +110,54 @@ fn bidiagonalize<T: Factorable>(scratch: &mut Scratch<T>, rows: usize, cols: usi
     }
 }
 
+/// The Wilkinson shift for the band `l..=bottom`.
+///
+/// It is the eigenvalue of the trailing two-by-two of `B^T B` nearer to that
+/// matrix's corner, which is the shift that makes the sweep converge cubically
+/// once it is close. `B^T B` is formed only for those four entries, and only to
+/// choose the shift: the band itself is never squared, and the caller has
+/// already scaled it so that the four squares cannot overflow. The subtraction
+/// is written so that it never cancels.
+fn wilkinson_shift<T: Float>(d: &[T], e: &[T], l: usize, bottom: usize) -> T {
+    let two = T::one() + T::one();
+    let above = if bottom > l + 1 {
+        e[bottom - 2]
+    } else {
+        T::zero()
+    };
+    let corner = d[bottom - 1] * d[bottom - 1] + above * above;
+    let cross = d[bottom - 1] * e[bottom - 1];
+    let last = d[bottom] * d[bottom] + e[bottom - 1] * e[bottom - 1];
+    if cross == T::zero() {
+        return last;
+    }
+    let half = (corner - last) / two;
+    let root = rotation::hypotenuse(half, cross);
+    let denominator = if half < T::zero() {
+        half - root
+    } else {
+        half + root
+    };
+    last - cross * cross / denominator
+}
+
 /// One implicitly shifted QR sweep over the band `l..=bottom`.
 ///
-/// The shift is Wilkinson's, taken from the trailing two-by-two of `B^T B`, and
-/// implicit means it is never subtracted from anything: it is folded into the
-/// first rotation of a chain, and the rest of the chain chases the bulge that
-/// rotation creates off the end of the band. Alternating sides -- a rotation on
-/// the right, then one on the left -- is what keeps the band bidiagonal
-/// throughout, with exactly one entry out of place at any moment.
-///
-/// `B^T B` is formed only for the two-by-two, and only to choose the shift. The
-/// band itself is never squared, and the caller has already scaled it so that
-/// those four squares cannot overflow.
+/// Implicit means the shift is never subtracted from anything: it is folded
+/// into the first rotation of a chain, and the rest of the chain chases the
+/// bulge that rotation creates off the end of the band. Alternating sides -- a
+/// rotation on the right, then one on the left -- is what keeps the band
+/// bidiagonal throughout, with exactly one entry out of place at any moment.
 ///
 /// The first pair is `(d_l^2 - mu, d_l e_l)` divided through by `d_l`, which a
 /// rotation does not notice and which keeps the pair away from the squares. The
 /// split loop guarantees `d_l` is not negligible whenever there is a sweep to
 /// do, so the division is safe exactly when it is reached.
+///
+/// A shift below the rounding of `d_l^2` cannot survive that division:
+/// `d_l - mu/d_l` *is* `d_l`, so the sweep that would actually run is the
+/// unshifted one, and the unshifted one is worth writing differently. See
+/// [`zero_shift_chase`].
 #[allow(clippy::too_many_arguments)]
 fn sweep<T: Float + Send + Sync>(
     d: &mut [T],
@@ -141,43 +172,29 @@ fn sweep<T: Float + Send + Sync>(
     left: &mut rotation::Chain<T>,
     right: &mut rotation::Chain<T>,
 ) {
-    let two = T::one() + T::one();
     left.start(l, rotation::Order::Rising);
     right.start(l, rotation::Order::Rising);
-    let above = if bottom > l + 1 {
-        e[bottom - 2]
+    let shift = wilkinson_shift(d, e, l, bottom);
+    if shift.abs() <= T::epsilon() * d[l] * d[l] {
+        zero_shift_chase(d, e, l, bottom, left, right);
     } else {
-        T::zero()
-    };
-    let corner = d[bottom - 1] * d[bottom - 1] + above * above;
-    let cross = d[bottom - 1] * e[bottom - 1];
-    let last = d[bottom] * d[bottom] + e[bottom - 1] * e[bottom - 1];
+        shifted_chase(d, e, l, bottom, shift, left, right);
+    }
+    left.apply(u, u_rows, u_cols);
+    right.apply(v, n, n);
+}
 
-    // The eigenvalue of [[corner, cross], [cross, last]] nearer to `last`,
-    // written so the subtraction never cancels.
-    let shift = if cross == T::zero() {
-        last
-    } else {
-        let half = (corner - last) / two;
-        let root = rotation::hypotenuse(half, cross);
-        let denominator = if half < T::zero() {
-            half - root
-        } else {
-            half + root
-        };
-        last - cross * cross / denominator
-    };
-
-    // A shift far below the local scale is worse than none: it perturbs the
-    // rotation without moving it anywhere useful, while a shift of exactly zero
-    // makes the sweep preserve the *relative* accuracy of the small singular
-    // values rather than only their absolute accuracy.
-    let (mut f, mut g) = if shift.abs() <= T::epsilon() * d[l] * d[l] {
-        (d[l], e[l])
-    } else {
-        (d[l] - shift / d[l], e[l])
-    };
-
+/// The chase with a shift, carrying the bulge from one rotation to the next.
+fn shifted_chase<T: Float + Send + Sync>(
+    d: &mut [T],
+    e: &mut [T],
+    l: usize,
+    bottom: usize,
+    shift: T,
+    left: &mut rotation::Chain<T>,
+    right: &mut rotation::Chain<T>,
+) {
+    let (mut f, mut g) = (d[l] - shift / d[l], e[l]);
     for i in l..bottom {
         // From the right, against columns i and i+1: clears the bulge left
         // above the band and pushes a new one below it.
@@ -204,8 +221,62 @@ fn sweep<T: Float + Send + Sync>(
         left.push(c, s);
     }
     e[bottom - 1] = f;
-    left.apply(u, u_rows, u_cols);
-    right.apply(v, n, n);
+}
+
+/// The same sweep with no shift, in the arrangement that does the work.
+///
+/// [`shifted_chase`] carries the bulge along as an explicit value, and with no
+/// shift to seed it that value starts at `e_l` and is multiplied by a sine at
+/// every step. Down a band whose entries span twelve orders of magnitude it
+/// arrives at the far end many orders below the rounding of what is there, so
+/// the rotations at the bottom are the identity to working precision and the
+/// sweep moves nothing at all: measured on a 128-wide band with a condition
+/// number of `1e12`, sixty-five consecutive sweeps left the last superdiagonal
+/// entry unchanged in every digit it has. The band came apart in the end, but
+/// because some *other* entry of it eventually went negligible -- the sweeps
+/// aimed at the bottom were spent and bought nothing.
+///
+/// Demmel and Kahan's arrangement never forms that value. Each rotation is
+/// generated from the band entry it acts on times a running cosine, so it has
+/// the magnitude the entries *there* deserve however small the ones above it
+/// became, and the sweep does the same work at the bottom of the band as at the
+/// top. These are the same rotations the explicit chase describes -- on a band
+/// with nothing small in it the two agree to a part in `1e15` -- so this is not
+/// a different algorithm, only the spelling of it that a graded band does not
+/// flatten. It is worth the second spelling for what it saves: across graded
+/// bands from 64 to 512 wide it never costs more sweeps and often costs half as
+/// many, 272 against 579 on the worst measured.
+///
+/// `d[i]` and `e[i]` are read before either is written, which is what lets each
+/// rotation come from the entries the *previous* sweep left rather than from
+/// the ones this sweep has already touched.
+fn zero_shift_chase<T: Float + Send + Sync>(
+    d: &mut [T],
+    e: &mut [T],
+    l: usize,
+    bottom: usize,
+    left: &mut rotation::Chain<T>,
+    right: &mut rotation::Chain<T>,
+) {
+    // The running cosine of the rotation applied from the right, and the pair
+    // of the one applied from the left, both carried into the next step.
+    let mut carried = T::one();
+    let mut held = (T::one(), T::zero());
+    for i in l..bottom {
+        let (c, s, r) = rotation::plane(d[i] * carried, e[i]);
+        if i > l {
+            e[i - 1] = -held.1 * r;
+        }
+        let (hc, hs, hr) = rotation::plane(held.0 * r, -s * d[i + 1]);
+        d[i] = hr;
+        right.push(c, s);
+        left.push(hc, hs);
+        carried = c;
+        held = (hc, hs);
+    }
+    let tail = d[bottom] * carried;
+    d[bottom] = tail * held.0;
+    e[bottom - 1] = -held.1 * tail;
 }
 
 /// Rotate a negligible diagonal entry's row out of the band.
@@ -303,10 +374,14 @@ fn diagonalize<T: Float + Send + Sync>(
     let norm = norm / scale;
     let epsilon = T::epsilon();
 
+    // One budget for the whole band rather than one per value: the sweeps a
+    // graded band needs land almost entirely on the first value it deflates,
+    // so a per-value cap has to be set for that one and is then far looser
+    // than it needs to be for all the rest. See `rotation::check_sweeps`.
+    let mut sweeps = 0usize;
     let mut k = n;
     while k > 0 {
         let bottom = k - 1;
-        let mut sweeps = 0usize;
         loop {
             // Walk up from the bottom for the first entry that ends the band.
             let mut l = bottom;
@@ -337,7 +412,7 @@ fn diagonalize<T: Float + Send + Sync>(
                 break;
             }
             sweeps += 1;
-            rotation::check_sweeps(sweeps, "svd")?;
+            rotation::check_sweeps(sweeps, n, "svd")?;
             sweep(d, e, l, bottom, u, u_rows, u_cols, v, n, left, right);
         }
         k = bottom;
@@ -744,4 +819,266 @@ pub fn svdvals(tensor: &Tensor) -> Result<Tensor> {
         return Ok(svd(tensor, false)?.1);
     }
     Ok(decompose(tensor, false, false, "svdvals")?.1)
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    /// A dense `n x n` copy of the bidiagonal band `(d, e)`.
+    fn dense(d: &[f64], e: &[f64], n: usize) -> Vec<f64> {
+        let mut b = vec![0.0; n * n];
+        for i in 0..n {
+            b[i * n + i] = d[i];
+            if i + 1 < n {
+                b[i * n + i + 1] = e[i];
+            }
+        }
+        b
+    }
+
+    fn identity(n: usize) -> Vec<f64> {
+        let mut m = vec![0.0; n * n];
+        for i in 0..n {
+            m[i * n + i] = 1.0;
+        }
+        m
+    }
+
+    fn multiply(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+        let mut out = vec![0.0; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                let left = a[i * n + k];
+                if left == 0.0 {
+                    continue;
+                }
+                for j in 0..n {
+                    out[i * n + j] += left * b[k * n + j];
+                }
+            }
+        }
+        out
+    }
+
+    fn transposed(a: &[f64], n: usize) -> Vec<f64> {
+        let mut out = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                out[j * n + i] = a[i * n + j];
+            }
+        }
+        out
+    }
+
+    fn largest(a: &[f64]) -> f64 {
+        a.iter().fold(0.0f64, |acc, x| acc.max(x.abs()))
+    }
+
+    fn difference(a: &[f64], b: &[f64]) -> f64 {
+        a.iter()
+            .zip(b)
+            .fold(0.0f64, |acc, (x, y)| acc.max((x - y).abs()))
+    }
+
+    /// Run the iteration over a whole band, returning `(values, U, V)`.
+    fn factor(d: &[f64], e: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let (mut d, mut e) = (d.to_vec(), e.to_vec());
+        let (mut u, mut v) = (identity(n), identity(n));
+        let mut left = rotation::Chain::new();
+        let mut right = rotation::Chain::new();
+        diagonalize(
+            &mut d, &mut e, n, &mut u, n, n, &mut v, &mut left, &mut right,
+        )?;
+        Ok((d, u, v))
+    }
+
+    /// A band graded geometrically from one down to `smallest`.
+    fn graded(n: usize, smallest: f64, ratio: f64) -> (Vec<f64>, Vec<f64>) {
+        let step = smallest.ln() / (n - 1) as f64;
+        let d: Vec<f64> = (0..n).map(|i| (step * i as f64).exp()).collect();
+        let mut e: Vec<f64> = d.iter().map(|x| x * ratio).collect();
+        e[n - 1] = 0.0;
+        (d, e)
+    }
+
+    /// `U diag(s) V^T == B`, with `U` and `V` orthogonal.
+    ///
+    /// This is the whole correctness statement and not an approximation of one:
+    /// an orthogonal `U` and `V` that reconstruct `B` from a non-negative
+    /// diagonal *is* a singular value decomposition, so `s` are the singular
+    /// values of `B` to whatever the reconstruction holds to. It needs no
+    /// reference implementation to compare against, which matters here because
+    /// the interesting bands are exactly the ones where a reference is hard to
+    /// come by.
+    fn assert_is_a_decomposition(b: &[f64], values: &[f64], u: &[f64], v: &[f64], n: usize) {
+        let scale = largest(b);
+        let tolerance = 64.0 * f64::EPSILON * scale * (n as f64).sqrt();
+
+        for (i, s) in values.iter().enumerate() {
+            assert!(s.is_finite() && *s >= 0.0, "value {i} is {s}");
+        }
+        let eye = identity(n);
+        assert!(
+            difference(&multiply(&transposed(u, n), u, n), &eye) < 1e-12,
+            "U is not orthogonal"
+        );
+        assert!(
+            difference(&multiply(&transposed(v, n), v, n), &eye) < 1e-12,
+            "V is not orthogonal"
+        );
+
+        let mut diagonal = vec![0.0; n * n];
+        for i in 0..n {
+            diagonal[i * n + i] = values[i];
+        }
+        let rebuilt = multiply(&multiply(u, &diagonal, n), &transposed(v, n), n);
+        let residual = difference(&rebuilt, b);
+        assert!(
+            residual < tolerance,
+            "U diag(s) V^T is {residual} away from B, tolerance {tolerance}"
+        );
+    }
+
+    #[test]
+    fn a_graded_band_converges() {
+        // The regression, and it is the budget that fixes it: this band needs
+        // more than fifty sweeps to deflate its first value, so a cap of fifty
+        // per value made the factorisation report a matrix that "may contain
+        // NaN or infinity" instead of the answer. Twelve orders of magnitude
+        // over 128 values is an ordinary ill-conditioned matrix, and the values
+        // wanted from one are the small ones.
+        let n = 128;
+        let (d, e) = graded(n, 1e-12, 0.3);
+        let b = dense(&d, &e, n);
+        let (values, u, v) = factor(&d, &e, n).expect("a finite band must converge");
+        assert_is_a_decomposition(&b, &values, &u, &v, n);
+    }
+
+    #[test]
+    fn a_graded_band_keeps_its_small_values() {
+        // Reconstruction is an absolute statement, so it would be satisfied by
+        // a factorisation that got the small end wrong. The product of the
+        // singular values is `|det B|`, which for a bidiagonal band is the
+        // product of its diagonal exactly -- a quantity dominated by the
+        // *small* values, and one the iteration has no way to fake.
+        let n = 96;
+        let (d, e) = graded(n, 1e-10, 0.25);
+        let (values, _, _) = factor(&d, &e, n).expect("a finite band must converge");
+
+        let logarithm = |v: &[f64]| v.iter().map(|x| x.abs().ln()).sum::<f64>();
+        let expected = logarithm(&d);
+        let got = logarithm(&values);
+        assert!(
+            (got - expected).abs() < 1e-9 * expected.abs(),
+            "log|det| is {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn the_unshifted_sweep_moves_the_bottom_of_a_graded_band() {
+        // What the second spelling is for. A sweep is supposed to shrink the
+        // superdiagonal entry above the value it is trying to deflate; on a
+        // band graded over twelve orders of magnitude the explicit chase does
+        // not move it at all, because the bulge it carries has been multiplied
+        // by a sine at every one of 127 steps before it gets there. Thirty
+        // sweeps leave that entry bit for bit where it started. The same thirty
+        // sweeps of this form take four orders of magnitude off it.
+        let n = 128;
+        let (d, e) = graded(n, 1e-12, 0.3);
+
+        let after_thirty = |zero_shift: bool| {
+            let (mut d, mut e) = (d.clone(), e.clone());
+            let (mut left, mut right) = (rotation::Chain::new(), rotation::Chain::new());
+            let (mut u, mut v) = (identity(n), identity(n));
+            for _ in 0..30 {
+                left.start(0, rotation::Order::Rising);
+                right.start(0, rotation::Order::Rising);
+                if zero_shift {
+                    zero_shift_chase(&mut d, &mut e, 0, n - 1, &mut left, &mut right);
+                } else {
+                    shifted_chase(&mut d, &mut e, 0, n - 1, 0.0, &mut left, &mut right);
+                }
+                left.apply(&mut u, n, n);
+                right.apply(&mut v, n, n);
+            }
+            e[n - 2].abs()
+        };
+
+        let start = e[n - 2].abs();
+        let explicit = after_thirty(false);
+        let kahan = after_thirty(true);
+        assert!(
+            explicit > 0.99 * start,
+            "the explicit chase moved it after all: {start} -> {explicit}"
+        );
+        assert!(
+            kahan < 1e-4 * start,
+            "this form did not converge the bottom: {start} -> {kahan}"
+        );
+    }
+
+    #[test]
+    fn the_two_chases_agree_where_both_work() {
+        // The unshifted chase is written a second way because the first way
+        // stops working on a graded band, not because it is a different
+        // iteration. On a band with nothing small in it -- where the explicit
+        // bulge still carries -- the two forms must produce the same band, and
+        // they do to a part in `1e15`. They are not required to produce it
+        // bit for bit: they are two spellings of the same rotations, and their
+        // rounding differs. The superdiagonal comes out with opposite signs,
+        // which no singular value can see and the next sweep does not care
+        // about either.
+        let n = 128;
+        let d: Vec<f64> = (0..n).map(|i| 1.0 + 0.5 * (i as f64 * 0.7).sin()).collect();
+        let mut e: Vec<f64> = (0..n).map(|i| 0.3 + 0.2 * (i as f64 * 1.1).cos()).collect();
+        e[n - 1] = 0.0;
+
+        let run = |zero_shift: bool| {
+            let (mut d, mut e) = (d.clone(), e.clone());
+            let (mut left, mut right) = (rotation::Chain::new(), rotation::Chain::new());
+            let (mut u, mut v) = (identity(n), identity(n));
+            left.start(0, rotation::Order::Rising);
+            right.start(0, rotation::Order::Rising);
+            if zero_shift {
+                zero_shift_chase(&mut d, &mut e, 0, n - 1, &mut left, &mut right);
+            } else {
+                shifted_chase(&mut d, &mut e, 0, n - 1, 0.0, &mut left, &mut right);
+            }
+            left.apply(&mut u, n, n);
+            right.apply(&mut v, n, n);
+            (d, e, u, v)
+        };
+
+        let b = dense(&d, &e, n);
+        let (explicit_d, explicit_e, explicit_u, explicit_v) = run(false);
+        let (kahan_d, kahan_e, kahan_u, kahan_v) = run(true);
+
+        let tolerance = 1e-13 * largest(&b);
+        assert!(
+            difference(&explicit_d, &kahan_d) < tolerance,
+            "diagonals differ by {}",
+            difference(&explicit_d, &kahan_d)
+        );
+        let magnitude = |v: &[f64]| v.iter().map(|x| x.abs()).collect::<Vec<_>>();
+        assert!(
+            difference(&magnitude(&explicit_e), &magnitude(&kahan_e)) < tolerance,
+            "superdiagonals differ in magnitude"
+        );
+
+        // And each on its own is exactly what a sweep is supposed to be: one
+        // orthogonal change of basis carrying `B` to the band it reports. That
+        // part *is* held to rounding, and it is what makes either form usable.
+        for (u, v, d, e) in [
+            (&explicit_u, &explicit_v, &explicit_d, &explicit_e),
+            (&kahan_u, &kahan_v, &kahan_d, &kahan_e),
+        ] {
+            let swept = multiply(&multiply(&transposed(u, n), &b, n), v, n);
+            let residual = difference(&swept, &dense(d, e, n));
+            assert!(
+                residual < 1e-14 * largest(&b),
+                "U^T B V is {residual} away from the swept band"
+            );
+        }
+    }
 }

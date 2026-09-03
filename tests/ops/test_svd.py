@@ -209,6 +209,45 @@ def test_small_singular_values_survive():
     assert s[-1] > 0.5 * expected[-1]
 
 
+def test_a_large_ill_conditioned_matrix_converges():
+    """The one the sweep budget used to refuse.
+
+    A band graded over many orders of magnitude deflates its first singular
+    value slowly -- the shift is below the rounding of the largest diagonal
+    entry, so there is no shift, and what is left converges linearly at a rate
+    set by how finely the values are spaced. The number of sweeps that needs
+    therefore grows with the size of the matrix, and a cap of fifty per value
+    is a limit on matrix size wearing a convergence failure's error message:
+    every matrix here of 128 rows or more raised ``svd did not converge; the
+    matrix may contain NaN or infinity`` on a matrix that contains neither and
+    that NumPy factors without complaint.
+
+    Small and ill-conditioned was fine, and large and well-conditioned was
+    fine, which is why the shape of the gap went unnoticed. Ill-conditioned is
+    also exactly the case the decomposition exists for -- ``pinv``,
+    ``matrix_rank``, ``cond`` and ``lstsq`` all come through here.
+    """
+    rng = np.random.default_rng(0)
+    for n, condition in [(128, 1e10), (128, 1e12), (200, 1e14)]:
+        left = np.linalg.qr(rng.standard_normal((n, n)))[0]
+        right = np.linalg.qr(rng.standard_normal((n, n)))[0]
+        expected = np.geomspace(1.0, 1.0 / condition, n)
+        a = left @ np.diag(expected) @ right.T
+
+        u, s, vt = _call(a, full_matrices=False)
+        reference = np.linalg.svd(a, compute_uv=False)
+
+        # Reconstruction and orthogonality, which together say `s` really are
+        # the singular values and not merely a plausible descending list.
+        assert np.allclose(u @ np.diag(s) @ vt, a, atol=1e-13)
+        assert np.allclose(u.T @ u, np.eye(n), atol=1e-12)
+        assert np.allclose(vt @ vt.T, np.eye(n), atol=1e-12)
+        # And no worse than LAPACK, which is the best answer available: both
+        # are bound by the bidiagonal reduction's absolute accuracy, so the
+        # comparison is against `||A||` rather than against each value.
+        assert np.abs(s - reference).max() < 1e-14 * reference[0]
+
+
 def test_rank_deficient_matrix():
     """An exact zero singular value is not an error; it is the answer."""
     rng = np.random.default_rng(7)

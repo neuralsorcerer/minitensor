@@ -320,14 +320,38 @@ pub(crate) fn sort_carrying_columns<T: Copy + PartialOrd>(
     }
 }
 
+/// How many sweeps each value in the band is allowed to cost, on average.
+///
+/// The budget is a total for the whole band rather than a cap on any one value,
+/// because the work is not spread evenly across the values and a per-value cap
+/// has to be set for the worst one. A band graded over many orders of magnitude
+/// spends most of its sweeps deflating the *first* value and then takes two or
+/// three for each of the rest: on a 400-wide band the first cost 157 sweeps of
+/// a total of 205. A cap that lets the first value have what it needs is far
+/// looser than it has to be for everything after it, while a total is tight
+/// against the thing that actually matters, which is how much work the whole
+/// factorisation is allowed to do.
+///
+/// Thirty is a shade over ten times the worst total measured across graded,
+/// clustered, repeated and random bands from 32 to 400 wide, all of which
+/// finished inside `3n`. It also bounds the pathological case: a band that
+/// never converges costs `30n` sweeps of `O(n^2)` rotation replay, which is ten
+/// times the reduction that produced it rather than the `6n^2` sweeps -- `n`
+/// times more again -- that LAPACK allows itself.
+const SWEEP_BUDGET_PER_VALUE: usize = 30;
+
 /// Stop a band that will not converge, rather than letting it spin.
 ///
-/// The cap exists only for a matrix carrying a NaN, where every comparison is
-/// false and no off-diagonal ever looks negligible. A real matrix converges one
-/// value cubically once the shift is close, and even the unshifted sweep is
-/// linear and finishes a long way inside fifty.
-pub(crate) fn check_sweeps(count: usize, op: &str) -> Result<()> {
-    if count > 50 {
+/// The guard exists for a matrix carrying a NaN, where every comparison is
+/// false and no off-diagonal ever looks negligible. A finite band converges:
+/// cubically once the shift is close, and linearly at a rate set by the ratio
+/// of neighbouring values when there is no usable shift. That rate is what ties
+/// the budget to `order` -- the linear phase needs a number of sweeps that
+/// grows with how finely the band is graded, which is to say with how many
+/// values it holds, so a constant cap is a limit on matrix size wearing a
+/// convergence failure's error message.
+pub(crate) fn check_sweeps(count: usize, order: usize, op: &str) -> Result<()> {
+    if count > SWEEP_BUDGET_PER_VALUE * order.max(1) {
         return Err(MinitensorError::invalid_operation(format!(
             "{op} did not converge; the matrix may contain NaN or infinity"
         )));
@@ -551,9 +575,19 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_cap_reports_rather_than_spinning() {
-        assert!(check_sweeps(50, "svd").is_ok());
-        let message = check_sweeps(51, "svd").unwrap_err().to_string();
+    fn the_sweep_budget_reports_rather_than_spinning() {
+        assert!(check_sweeps(300, 10, "svd").is_ok());
+        let message = check_sweeps(301, 10, "svd").unwrap_err().to_string();
         assert!(message.contains("svd") && message.contains("converge"));
+    }
+
+    #[test]
+    fn the_sweep_budget_grows_with_the_band() {
+        // The point of the change: a band twice as wide is allowed twice the
+        // work, so the guard is not a limit on matrix size.
+        assert!(check_sweeps(600, 20, "svd").is_ok());
+        assert!(check_sweeps(600, 10, "svd").is_err());
+        // And a one-value band still gets a budget rather than zero.
+        assert!(check_sweeps(1, 0, "eigh").is_ok());
     }
 }
