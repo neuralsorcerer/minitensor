@@ -916,3 +916,73 @@ def test_orthogonal_procrustes():
     nearest = u @ vt
     assert np.allclose(nearest @ nearest.T, np.eye(4), atol=1e-12)
     assert np.linalg.norm(nearest - rotation) < np.linalg.norm(noisy - rotation)
+
+
+def test_a_singular_value_near_the_top_of_the_range():
+    """A representable answer must come back, however close to the ceiling.
+
+    The band is scaled to a power of two before the iteration, because the
+    shift squares four of its entries and a matrix whose entries reach `1e154`
+    would overflow those squares while every singular value it has is perfectly
+    representable. The scale was taken from the largest *sum* of neighbouring
+    entries, and that sum overflows in its own right: a band holding `4e307`
+    beside `1.5e308` describes a largest singular value of `1.6e308`, which is
+    a double, but `4e307 + 1.5e308` is not. The scale then came out infinite,
+    was read as "no usable scale", and the band went into the iteration
+    unscaled -- the one case the scaling exists for. A 16x16 matrix of `1e307`
+    came back three percent low.
+
+    A rank-one matrix of equal entries is the case to test because its largest
+    singular value is exactly `n` times the entry, with no reference
+    implementation needed to say what the answer is.
+    """
+    for n in (2, 6, 16, 64):
+        for magnitude in (1.0, 1e150, 1e300, 1e307):
+            expected = n * magnitude
+            if not np.isfinite(expected):
+                continue
+            a = np.full((n, n), magnitude)
+            s = mt.svdvals(mt.Tensor.from_numpy(a)).numpy()
+            assert np.isfinite(s).all()
+            assert abs(s[0] / expected - 1) < 1e-14, (n, magnitude, s[0], expected)
+            # Rank one: everything after the first is rounding, not a value.
+            assert s[1] < 1e-14 * expected
+
+
+@pytest.mark.parametrize("bad", [np.inf, -np.inf, np.nan])
+@pytest.mark.parametrize("position", [(0, 0), (0, 1), (1, 0), (2, 2)])
+def test_a_non_finite_entry_is_never_answered_with_a_finite_factorisation(
+    bad, position
+):
+    """The worst way to fail is to look like it worked.
+
+    There is no reflector that sends an infinity onto an axis, and the one
+    built from a run containing one used to be reported as the identity -- the
+    run was declared already reduced, the infinity stayed where it was, and
+    every later step was told that column had been dealt with. `qr` of
+    `[[1, 2], [inf, 4]]` returned `R = [[1, 2], [0, 4]]` with `Q = I`: finite,
+    plausible, and a factorisation of nothing. `svd` was worse, because a
+    rotation whose length came back as zero drops what it was carrying, so a
+    matrix with an infinite singular value was reported as the *zero* matrix.
+
+    What comes back now is what the rest of this library and LAPACK both do
+    with a matrix that has no answer: not a number.
+    """
+    n = 4
+    a = np.ascontiguousarray(np.random.default_rng(11).standard_normal((n, n)))
+    a[position] = bad
+    symmetric = np.ascontiguousarray(a + a.T)
+
+    def refused_or_not_a_number(call):
+        try:
+            out = call()
+        except ValueError as error:
+            # Saying so is also not answering wrongly, and it is what NumPy
+            # does with a NaN here.
+            assert "converge" in str(error)
+            return
+        assert not np.isfinite(out.numpy()).all()
+
+    refused_or_not_a_number(lambda: mt.qr(mt.Tensor.from_numpy(a))[1])
+    refused_or_not_a_number(lambda: mt.svdvals(mt.Tensor.from_numpy(a)))
+    refused_or_not_a_number(lambda: mt.eigvalsh(mt.Tensor.from_numpy(symmetric)))

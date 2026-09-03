@@ -358,9 +358,19 @@ fn diagonalize<T: Float + Send + Sync>(
     if n == 0 {
         return Ok(());
     }
+    // The largest entry, and not the largest *sum* of neighbouring entries: a
+    // band holding `4e307` beside `1.5e308` has a perfectly representable
+    // largest singular value of `1.6e308`, and adding those two overflows. The
+    // scale then came out infinite, the guard below read that as "no usable
+    // scale" and left the band alone -- which is the one case the scaling
+    // exists for -- and an infinite `norm` made the test for a negligible
+    // diagonal entry true of every entry there is. A 16x16 matrix of `1e307`
+    // came back three percent low. The two differ by at most a factor of two
+    // and the scale is rounded to a power of two anyway, so nothing else here
+    // can tell them apart.
     let mut norm = T::zero();
     for j in 0..n {
-        norm = norm.max(d[j].abs() + e[j].abs());
+        norm = norm.max(d[j].abs()).max(e[j].abs());
     }
     if norm == T::zero() {
         return Ok(());

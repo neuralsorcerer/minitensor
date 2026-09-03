@@ -48,12 +48,21 @@ use num_traits::{Float, One, Zero};
 /// Only `beta` has to be scaled back. Every other quantity here is invariant:
 /// `tau` is a ratio of two lengths, and each stored component is divided by a
 /// third, so the factor cancels in all of them.
+///
+/// A run whose largest magnitude is not finite is not "already reduced" and
+/// must not be treated as such. There is no reflector that sends an infinity
+/// onto an axis, so returning the identity leaves the infinity sitting in the
+/// band and tells every later step that the column was dealt with. `qr` of
+/// `[[1, 2], [inf, 4]]` came back with `R = [[1, 2], [0, 4]]` and `Q = I` --
+/// finite, plausible, and not a factorisation of anything. The arithmetic
+/// below carries a non-finite run to `NaN` on its own, which is what the rest
+/// of this library does with one and what LAPACK does with one.
 pub(crate) fn make<T: Factorable>(work: &mut [T], head: usize, step: usize, count: usize) -> T {
     let mut largest = T::Acc::zero();
     for i in 0..count {
         largest = largest.max(work[head + i * step].widen().abs());
     }
-    if largest == T::Acc::zero() || !largest.is_finite() {
+    if largest == T::Acc::zero() {
         return T::zero();
     }
 

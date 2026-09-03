@@ -40,6 +40,16 @@ use rayon::prelude::*;
 /// the representable range -- around `1e19` for `f32`, which a covariance
 /// entry can reach without anything being wrong. Factoring the larger argument
 /// out first means the only square formed is of a ratio no greater than one.
+///
+/// The last arm is `a + b` rather than zero because it is reached by two very
+/// different pairs. For ordinary arguments neither comparison holds only when
+/// both are zero, and `a + b` is zero. But a NaN fails every comparison it is
+/// in, so it arrives here too, and answering zero for it is how a matrix
+/// carrying an infinity came back as a decomposition of the zero matrix: the
+/// rotation built from `(-inf, NaN)` had a length of zero, so the value it was
+/// supposed to carry was dropped and `svd` reported two singular values of
+/// exactly zero for a matrix with an infinite one. `a + b` is zero for the pair
+/// that means zero and NaN for the pair that means nothing.
 pub(crate) fn hypotenuse<T: Float>(a: T, b: T) -> T {
     let (a, b) = (a.abs(), b.abs());
     if a > b {
@@ -49,7 +59,7 @@ pub(crate) fn hypotenuse<T: Float>(a: T, b: T) -> T {
         let ratio = a / b;
         b * (T::one() + ratio * ratio).sqrt()
     } else {
-        T::zero()
+        a + b
     }
 }
 
@@ -426,6 +436,26 @@ mod tests {
         assert!((hypotenuse(3e200, 4e200) - 5e200).abs() < 1e188);
         assert!((hypotenuse(3e-200, 4e-200) - 5e-200).abs() < 1e-212);
         assert_eq!(hypotenuse(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn hypotenuse_never_calls_a_length_it_cannot_measure_zero() {
+        // Zero is the length of a pair that is genuinely zero, and answering it
+        // for a pair that is merely unmeasurable drops whatever the rotation
+        // was carrying -- which is how an infinite matrix came back from `svd`
+        // as the zero matrix.
+        for &(a, b) in &[
+            (f64::NAN, 0.0),
+            (0.0, f64::NAN),
+            (3.0, f64::NAN),
+            (f64::NAN, 3.0),
+            (f64::INFINITY, f64::NAN),
+            (f64::NAN, f64::NAN),
+        ] {
+            assert!(hypotenuse(a, b).is_nan(), "hypotenuse({a}, {b})");
+        }
+        assert_eq!(hypotenuse(f64::INFINITY, 3.0), f64::INFINITY);
+        assert_eq!(hypotenuse(3.0, f64::NEG_INFINITY), f64::INFINITY);
     }
 
     #[test]
