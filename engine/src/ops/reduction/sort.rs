@@ -611,7 +611,7 @@ fn var_fused_single_axis(
     let mut result_data = TensorData::zeros_on_device(out_numel, tensor.dtype(), tensor.device());
 
     macro_rules! fill {
-        ($accessor:ident, $accessor_mut:ident, $ty:ty) => {{
+        ($accessor:ident, $accessor_mut:ident, $ty:ty, $sum_by:ident) => {{
             let input = tensor
                 .data()
                 .$accessor()
@@ -643,20 +643,27 @@ fn var_fused_single_axis(
                 // `var` answer differently depending on whether it was being
                 // trained through -- and the untrained answer was the worse
                 // one, by 38000x at a 4M-element axis (3.8e-3 against 1.2e-7).
+                //
+                // Each run is reduced by the same lane-and-tree sum `sum`
+                // itself uses, and not by a scalar `iter().sum()`. Blocking
+                // alone was not enough: a naive total over one eight-thousand
+                // element block still takes a rounding per element against a
+                // magnitude that grows with the run, which left `var` four
+                // orders worse than the `mean` it subtracts on data with a
+                // large offset -- 3.4e-6 against 2.5e-10 at an offset of 1e12,
+                // where the second figure is the floor set by the mean's own
+                // rounding and is what NumPy reaches.
                 let run = |first: usize, chunk: &mut [$ty]| {
                     for (i, slot) in chunk.iter_mut().enumerate() {
                         let base = (first + i) * dim_size;
                         let row = &input[base..base + dim_size];
-                        let total =
-                            accurate_run_sum(row, |part: &[$ty]| part.iter().copied().sum::<$ty>());
+                        let total = accurate_run_sum(row, |part: &[$ty]| $sum_by(part, |v| v));
                         let mean = total / n;
                         let acc = accurate_run_sum(row, |part: &[$ty]| {
-                            part.iter()
-                                .map(|&v| {
-                                    let d = v - mean;
-                                    d * d
-                                })
-                                .sum::<$ty>()
+                            $sum_by(part, |v| {
+                                let d = v - mean;
+                                d * d
+                            })
                         });
                         *slot = acc / divisor;
                     }
@@ -706,8 +713,8 @@ fn var_fused_single_axis(
     }
 
     match tensor.dtype() {
-        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32),
-        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64),
+        DataType::Float32 => fill!(as_f32_slice, as_f32_slice_mut, f32, simd_sum_f32_by),
+        DataType::Float64 => fill!(as_f64_slice, as_f64_slice_mut, f64, simd_sum_f64_by),
         _ => unreachable!("variance is only defined for floating point tensors"),
     }
 
@@ -1167,6 +1174,90 @@ mod var_layout_tests {
 
     fn values(t: &Tensor) -> Vec<f32> {
         t.data().as_f32_slice().unwrap().to_vec()
+    }
+
+    fn f64_tensor(data: Vec<f64>, shape: Vec<usize>) -> Tensor {
+        let shape = Shape::new(shape);
+        Tensor::new(
+            Arc::new(TensorData::from_vec::<f64>(
+                data,
+                DataType::Float64,
+                Device::cpu(),
+            )),
+            shape,
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    /// Variance does not move when the data does, and the arithmetic has to
+    /// keep that.
+    ///
+    /// This is how the one-pass and half-compensated forms are caught:
+    /// shifting the data by a constant leaves the answer alone mathematically
+    /// while everything the sum touches grows by the shift.
+    ///
+    /// The shift has to be one the data survives, or the test measures the
+    /// rounding of the shift rather than the arithmetic under it. Values that
+    /// are whole multiples of `2^-12` and offsets that are powers of two up to
+    /// `2^40` stay exactly representable together -- 52 bits from `2^40` down
+    /// to `2^-12` -- so the shifted data is the shifted data and nothing else
+    /// has changed. Below `2^40` the answer is then required to be *bitwise*
+    /// the same.
+    ///
+    /// The previous code reduced each block with a scalar `sum()` where `sum`
+    /// itself uses a lane-and-tree one, which left it four orders above the
+    /// floor -- 3.4e-6 against 2.5e-10 at an offset of 1e12, where the floor
+    /// is the square of the mean's own rounding and is what NumPy reaches.
+    #[test]
+    fn variance_does_not_move_when_the_data_does() {
+        // Deterministic, spread over the whole range, and every value a whole
+        // multiple of `2^-12`.
+        const STEP: f64 = 0.000_244_140_625; // 2^-12
+        let base: Vec<f64> = (0..4096u64)
+            .map(|i| ((i.wrapping_mul(2_654_435_761) % 16_384) as i64 - 8_192) as f64 * STEP)
+            .collect();
+
+        let variance = |data: Vec<f64>| {
+            values_f64(&var(&f64_tensor(data, vec![4096]), None, false, true).unwrap())[0]
+        };
+        let reference = variance(base.clone());
+        assert!(
+            reference > 1.0,
+            "the sample should have spread: {reference}"
+        );
+
+        // Exactly representable shifts, so the answer must not change at all.
+        for exponent in [10i32, 20, 30] {
+            let offset = (2.0f64).powi(exponent);
+            let shifted: Vec<f64> = base.iter().map(|v| v + offset).collect();
+            assert!(
+                shifted.iter().zip(&base).all(|(s, b)| s - offset == *b),
+                "2^{exponent} should shift this data exactly"
+            );
+            let got = variance(shifted);
+            assert_eq!(
+                got.to_bits(),
+                reference.to_bits(),
+                "variance moved under an exact shift of 2^{exponent}: {got} against {reference}"
+            );
+        }
+
+        // At `2^40` the sum is near `2^52` and the mean carries a rounding of
+        // its own, which squares into the answer. That floor is 1.1e-8 here,
+        // and NumPy sits on it too.
+        let shifted: Vec<f64> = base.iter().map(|v| v + (2.0f64).powi(40)).collect();
+        let got = variance(shifted);
+        let relative = ((got - reference) / reference).abs();
+        assert!(
+            relative < 1e-7,
+            "variance moved by {relative:e} under a shift of 2^40: {got} against {reference}"
+        );
+    }
+
+    fn values_f64(t: &Tensor) -> Vec<f64> {
+        t.data().as_f64_slice().unwrap().to_vec()
     }
 
     /// The fused variance takes one of two layouts depending on whether the

@@ -362,9 +362,18 @@ rounding_kernel!(
 /// mapping NaN to zero for `nansum`, which is what lets the two agree
 /// bit-for-bit on data without NaN in it.
 macro_rules! float_sum_kernel {
-    ($(#[$attr:meta])* $name:ident, $ty:ty, $lanes:expr, $keep:expr) => {
-        $(#[$attr])*
-        pub fn $name(data: &[$ty]) -> $ty {
+    ($(#[$attr:meta])* $name:ident, $by:ident, $ty:ty, $lanes:expr, $keep:expr) => {
+        /// The tree of [`
+        #[doc = stringify!($name)]
+        /// `], over a map of each element rather than the element.
+        ///
+        /// A sum of something derived from the data has to accumulate the way
+        /// a sum of the data does, or it comes out less accurate than the
+        /// quantities it was built from. `var` is the case that motivated
+        /// this: its sum of squared deviations was a plain scalar `sum()`
+        /// over an eight-thousand-element run, which made it four orders
+        /// worse than the `mean` it subtracts.
+        pub fn $by(data: &[$ty], keep: impl Fn($ty) -> $ty) -> $ty {
             const LANES: usize = $lanes;
             /// NumPy's. Long enough that the merge below is noise against the
             /// adds, short enough that a lane's run through one leaf stays a
@@ -377,7 +386,7 @@ macro_rules! float_sum_kernel {
             /// nothing else -- which is what keeps this the same hot loop it
             /// was before the leaves existed.
             #[inline(always)]
-            fn lane_sums(block: &[$ty], keep: impl Fn($ty) -> $ty) -> [$ty; LANES] {
+            fn lane_sums(block: &[$ty], keep: &impl Fn($ty) -> $ty) -> [$ty; LANES] {
                 let mut sums = [0.0 as $ty; LANES];
                 let mut chunks = block.chunks_exact(LANES);
                 for chunk in &mut chunks {
@@ -393,7 +402,6 @@ macro_rules! float_sum_kernel {
                 sums
             }
 
-            let keep = $keep;
             let mut pending = [[0.0 as $ty; LANES]; 40];
             let mut leaves: usize = 0;
             let mut blocks = data.chunks_exact(LEAF);
@@ -403,7 +411,7 @@ macro_rules! float_sum_kernel {
                 // combine and the result carries into the next size up. The
                 // merge is `LANES` adds per leaf against the leaf's `LEAF`, so
                 // it costs a few percent of the additions and nothing else.
-                let mut sums = lane_sums(block, keep);
+                let mut sums = lane_sums(block, &keep);
                 let mut level = 0;
                 while leaves & (1 << level) != 0 {
                     for lane in 0..LANES {
@@ -423,7 +431,7 @@ macro_rules! float_sum_kernel {
             // where it starts. Which side of the `+` each lands on does not
             // matter -- addition is commutative even in floating point, and it
             // is the grouping that decides the rounding.
-            let mut acc = lane_sums(blocks.remainder(), keep);
+            let mut acc = lane_sums(blocks.remainder(), &keep);
             let mut level = 0;
             let mut rest = leaves;
             while rest != 0 {
@@ -447,17 +455,22 @@ macro_rules! float_sum_kernel {
             }
             acc[0]
         }
+
+        $(#[$attr])*
+        pub fn $name(data: &[$ty]) -> $ty {
+            $by(data, $keep)
+        }
     };
 }
 
 float_sum_kernel!(
     /// Sum an f32 slice. See [`float_sum_kernel`].
-    simd_sum_f32, f32, 8, |v| v
+    simd_sum_f32, simd_sum_f32_by, f32, 8, |v| v
 );
 
 float_sum_kernel!(
     /// Sum an f64 slice. See [`float_sum_kernel`].
-    simd_sum_f64, f64, 4, |v| v
+    simd_sum_f64, simd_sum_f64_by, f64, 4, |v| v
 );
 
 float_sum_kernel!(
@@ -465,12 +478,12 @@ float_sum_kernel!(
     /// identity rather than taking a different path, so the loop still
     /// vectorizes and the result matches [`simd_sum_f32`] exactly when there is
     /// no NaN to skip.
-    simd_nansum_f32, f32, 8, |v: f32| if v.is_nan() { 0.0 } else { v }
+    simd_nansum_f32, simd_nansum_f32_by, f32, 8, |v: f32| if v.is_nan() { 0.0 } else { v }
 );
 
 float_sum_kernel!(
     /// [`simd_nansum_f32`] in double precision.
-    simd_nansum_f64, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
+    simd_nansum_f64, simd_nansum_f64_by, f64, 4, |v: f64| if v.is_nan() { 0.0 } else { v }
 );
 
 /// `simd_sum_f32` for the products of two slices, which is what a dot product
