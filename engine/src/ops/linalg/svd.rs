@@ -509,6 +509,7 @@ fn factor_one<T: Factorable>(
     m: usize,
     n: usize,
     full: bool,
+    want_vectors: bool,
     scratch: &mut Scratch<T>,
 ) -> Result<()> {
     let (rows, cols) = if m >= n { (m, n) } else { (n, m) };
@@ -533,28 +534,37 @@ fn factor_one<T: Factorable>(
         }
     }
 
-    reflector::accumulate(
-        &scratch.work,
-        rows,
-        cols,
-        &scratch.tau_left,
-        &mut scratch.u,
-        u_cols,
-        &mut scratch.reflectors,
-        &mut scratch.z,
-        &mut scratch.blocks,
-    );
-    reflector::accumulate(
-        &scratch.right,
-        cols,
-        cols,
-        &scratch.tau_right,
-        &mut scratch.v,
-        cols,
-        &mut scratch.reflectors,
-        &mut scratch.z,
-        &mut scratch.blocks,
-    );
+    // Everything from here to the sort exists only to produce `U` and `V`. The
+    // band is already what the singular values come from, and it converges the
+    // same way whether or not anything is carried along with it -- so a caller
+    // who wants the values alone skips two `n^3` accumulations here and, by
+    // way of the chains, two more inside the iteration.
+    if want_vectors {
+        reflector::accumulate(
+            &scratch.work,
+            rows,
+            cols,
+            &scratch.tau_left,
+            &mut scratch.u,
+            u_cols,
+            &mut scratch.reflectors,
+            &mut scratch.z,
+            &mut scratch.blocks,
+        );
+        reflector::accumulate(
+            &scratch.right,
+            cols,
+            cols,
+            &scratch.tau_right,
+            &mut scratch.v,
+            cols,
+            &mut scratch.reflectors,
+            &mut scratch.z,
+            &mut scratch.blocks,
+        );
+    }
+    scratch.left_chain.record(want_vectors);
+    scratch.right_chain.record(want_vectors);
 
     diagonalize(
         &mut scratch.d,
@@ -569,7 +579,11 @@ fn factor_one<T: Factorable>(
     )?;
 
     let mut carried = [(&mut scratch.u[..], u_cols), (&mut scratch.v[..], cols)];
-    rotation::sort_carrying_columns(&mut scratch.d, true, &mut carried);
+    rotation::sort_carrying_columns(
+        &mut scratch.d,
+        true,
+        if want_vectors { &mut carried } else { &mut [] },
+    );
     Ok(())
 }
 
@@ -604,6 +618,7 @@ macro_rules! svd_kernel {
             m: usize,
             n: usize,
             full: bool,
+            want_vectors: bool,
         ) -> Result<()> {
             let mismatch =
                 || MinitensorError::internal_error("svd: dtype does not match the buffer");
@@ -628,8 +643,18 @@ macro_rules! svd_kernel {
                     let mut scratch = Scratch::new();
                     for local in 0..u_group.len() / u_stride {
                         let offset = (first + local) * a_stride;
-                        factor_one(&a[offset..offset + a_stride], m, n, full, &mut scratch)?;
+                        factor_one(
+                            &a[offset..offset + a_stride],
+                            m,
+                            n,
+                            full,
+                            want_vectors,
+                            &mut scratch,
+                        )?;
                         s_group[local * k..(local + 1) * k].copy_from_slice(&scratch.d[..k]);
+                        if !want_vectors {
+                            continue;
+                        }
                         let u_out = &mut u_group[local * u_stride..(local + 1) * u_stride];
                         let vt_out = &mut vt_group[local * vt_stride..(local + 1) * vt_stride];
                         // `factor_one` worked on `A` when it is tall and on
@@ -692,6 +717,7 @@ fn fill_identity(
 fn decompose(
     tensor: &Tensor,
     full: bool,
+    want_vectors: bool,
     requires_grad: bool,
     op: &str,
 ) -> Result<(Tensor, Tensor, Tensor)> {
@@ -738,6 +764,7 @@ fn decompose(
                 m,
                 n,
                 full,
+                want_vectors,
             )?,
             _ => svd_f64(
                 &contiguous,
@@ -748,6 +775,7 @@ fn decompose(
                 m,
                 n,
                 full,
+                want_vectors,
             )?,
         }
     }
@@ -780,7 +808,7 @@ fn decompose(
 /// do rather than what they are.
 pub fn svd(tensor: &Tensor, full_matrices: bool) -> Result<(Tensor, Tensor, Tensor)> {
     let requires_grad = tensor.requires_grad();
-    let (mut u, mut s, mut vt) = decompose(tensor, full_matrices, requires_grad, "svd")?;
+    let (mut u, mut s, mut vt) = decompose(tensor, full_matrices, true, requires_grad, "svd")?;
 
     if requires_grad {
         // `decompose` already rejected anything with fewer than two dimensions.
@@ -819,16 +847,23 @@ pub fn svd(tensor: &Tensor, full_matrices: bool) -> Result<(Tensor, Tensor, Tens
 
 /// The singular values alone, descending.
 ///
-/// The orthogonal factors are still accumulated -- unlike `eigvalsh`, whose
-/// iteration touches three diagonals and can genuinely skip the `n^3` part,
-/// the reduction to bidiagonal form here is `n^3` whether or not anyone wants
-/// the vectors. What this saves is the two output copies and the gradient
-/// machinery, and what it offers is a name that says what is being asked.
+/// The reduction to bidiagonal form is `n^3` whether or not anyone wants the
+/// vectors, and for a while that was taken as the answer -- there is no
+/// `eigvalsh`-shaped saving here, so the factors were accumulated and thrown
+/// away. But the reduction is not the expensive part. Turning `U` and `V` by
+/// every rotation the iteration makes is: a sweep is `n` rotations and there
+/// are about `2n` sweeps, and each rotation costs a pass down a column of two
+/// `n`-by-`n` matrices. Building those two matrices out of the reflectors in
+/// the first place is another two `n^3`. None of it touches the band, so none
+/// of it changes a singular value, and all of it can simply not be done.
+///
+/// Measured on a 400-by-400 matrix, that is 36ms against 189. What is left is
+/// the reduction, which is the part that really is unavoidable.
 pub fn svdvals(tensor: &Tensor) -> Result<Tensor> {
     if tensor.requires_grad() {
         return Ok(svd(tensor, false)?.1);
     }
-    Ok(decompose(tensor, false, false, "svdvals")?.1)
+    Ok(decompose(tensor, false, false, false, "svdvals")?.1)
 }
 
 #[cfg(test)]

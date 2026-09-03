@@ -124,6 +124,7 @@ pub(crate) struct Chain<T> {
     first: usize,
     order: Order,
     turns: Vec<(T, T)>,
+    recording: bool,
 }
 
 impl<T: Float + Send + Sync> Chain<T> {
@@ -132,7 +133,21 @@ impl<T: Float + Send + Sync> Chain<T> {
             first: 0,
             order: Order::Rising,
             turns: Vec::new(),
+            recording: true,
         }
+    }
+
+    /// Whether the chain keeps the rotations it is handed.
+    ///
+    /// A caller that wants only the values a factorisation produces has no use
+    /// for the matrices they came out of, and every rotation those matrices
+    /// would be turned by is a pass over one of them. Switching the recording
+    /// off leaves the chain permanently empty, which makes [`Chain::apply`]
+    /// return without touching anything -- so the band still converges exactly
+    /// as it would have, and the `n^3` of carrying two `n`-by-`n` matrices
+    /// along with it is simply not done.
+    pub(crate) fn record(&mut self, recording: bool) {
+        self.recording = recording;
     }
 
     /// Begin a chain whose first rotation turns the columns `first` names.
@@ -146,7 +161,9 @@ impl<T: Float + Send + Sync> Chain<T> {
     /// identity is still pushed -- dropping it would shift every rotation after
     /// it onto the wrong pair.
     pub(crate) fn push(&mut self, c: T, s: T) {
-        self.turns.push((c, s));
+        if self.recording {
+            self.turns.push((c, s));
+        }
     }
 
     /// Replay the chain against every row of a row-major matrix.

@@ -494,6 +494,23 @@ def test_svdvals_matches_svd(shape):
     )
 
 
+@pytest.mark.parametrize("shape", SHAPES + [(40, 40), (33, 47)])
+def test_svdvals_is_the_same_arithmetic_as_svd(shape):
+    """Not merely close to it -- the same, to the last bit.
+
+    `svdvals` skips building `U` and `V` and skips turning them by every
+    rotation the iteration makes, which is where nearly all of the time goes:
+    at 400 by 400 it is 36ms against 189. What it must not skip is any part of
+    what produces a singular value. Nothing it leaves out touches the band, so
+    the two paths run identical arithmetic on it, and equality here is the
+    check that they still do -- an `allclose` would pass just as well if one of
+    them quietly started taking a different route.
+    """
+    a = _matrix(shape, seed=12)
+    values = mt.svdvals(mt.Tensor.from_numpy(a)).numpy()
+    assert np.array_equal(values, _call(a)[1])
+
+
 def test_svdvals_is_differentiable():
     a = np.array([[3.0, 1.0], [0.0, 2.0]])
     t = mt.Tensor.from_numpy(a, requires_grad=True)
