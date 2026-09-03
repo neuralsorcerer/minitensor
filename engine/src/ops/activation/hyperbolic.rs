@@ -547,7 +547,26 @@ float_unary_kernel!(acos_f32, as_f32_slice, f32, Float32, "f32", f32::acos);
 
 float_unary_kernel!(acos_f64, as_f64_slice, f64, Float64, "f64", f64::acos);
 
-float_unary_kernel!(atan_f32, as_f32_slice, f32, Float32, "f32", f32::atan);
+/// Vectorized. `f32::atan` is a `libm` call, so the scalar loop it replaces
+/// was the one arc function left running a lane at a time: `atan` measured
+/// 2.75x NumPy's while `tan` -- the harder direction -- measured 0.85x.
+pub(crate) fn atan_f32(tensor: &Tensor) -> Result<TensorData> {
+    let input_data = tensor.data().as_f32_slice().ok_or_else(|| {
+        MinitensorError::internal_error("Failed to get f32 slice from input tensor")
+    })?;
+    let kernel = crate::ops::simd::F32Kernel::select();
+    // SAFETY: `atan` writes every element of each block it is given.
+    let out = unsafe {
+        unary_map_blocks_threshold(input_data, VECTOR_F32_PAR_THRESHOLD, |src, dst| {
+            kernel.atan(src, dst)
+        })
+    };
+    Ok(TensorData::from_vec::<f32>(
+        out,
+        DataType::Float32,
+        tensor.device(),
+    ))
+}
 
 float_unary_kernel!(atan_f64, as_f64_slice, f64, Float64, "f64", f64::atan);
 

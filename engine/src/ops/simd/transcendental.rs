@@ -1106,6 +1106,89 @@ fn tan_one<const FMA: bool>(x: f32) -> f32 {
     (if q & 1 != 0 { -c / s } else { s / c }) as f32
 }
 
+// ---------------------------------------------------------------------------
+// arctangent
+// ---------------------------------------------------------------------------
+
+/// The breakpoints the reduction folds around, `tan(pi/8)` and `tan(3pi/8)`.
+///
+/// They are what makes one polynomial cover the whole line: every argument
+/// lands inside `[-tan(pi/8), tan(pi/8)]` after the fold, where a short
+/// series is enough.
+const ATAN_LO: f64 = 0.414_213_562_373_095_1;
+const ATAN_HI: f64 = 2.414_213_562_373_095;
+
+/// `atan(w)/w` for `u = w^2` in `[0, tan(pi/8)^2]`.
+///
+/// Chebyshev-fitted rather than truncated from the Taylor series: the series
+/// needs twenty-four terms for this accuracy on this interval and the fit
+/// needs eleven. Worst error over the interval is 1.3e-18, three orders below
+/// a float64 ulp, so the float32 handed back is the correctly rounded one.
+///
+/// The leading `w` stays outside, as it does in `expm1_poly`: folding it in
+/// would round it against terms it dominates as `w -> 0`.
+#[inline(always)]
+fn atan_poly<const FMA: bool>(u: f64) -> f64 {
+    let mut p = -0.017_805_397_205_419_446;
+    p = fma_or::<FMA>(p, u, 0.037_965_257_453_865_93);
+    p = fma_or::<FMA>(p, u, -0.050_351_024_566_015_52);
+    p = fma_or::<FMA>(p, u, 0.058_468_782_973_308_72);
+    p = fma_or::<FMA>(p, u, -0.066_629_518_136_291_91);
+    p = fma_or::<FMA>(p, u, 0.076_920_453_309_022_25);
+    p = fma_or::<FMA>(p, u, -0.090_908_968_090_640_27);
+    p = fma_or::<FMA>(p, u, 0.111_111_107_449_196_58);
+    p = fma_or::<FMA>(p, u, -0.142_857_142_792_502_45);
+    p = fma_or::<FMA>(p, u, 0.199_999_999_999_408_93);
+    p = fma_or::<FMA>(p, u, -0.333_333_333_333_331_2);
+    fma_or::<FMA>(p, u, 1.0)
+}
+
+/// `atan` for one float32.
+///
+/// One division for the whole reduction. The three cases each want a
+/// different quotient -- `-1/a` above `tan(3pi/8)`, `(a-1)/(a+1)` above
+/// `tan(pi/8)`, and `a` itself below -- so the numerator and denominator are
+/// selected and divided once, rather than dividing inside each branch and
+/// making the vectorized form pay for all of them.
+///
+/// No special cases. An infinity divides to a signed zero and leaves the
+/// `pi/2` the fold added; a NaN fails both comparisons and comes through the
+/// arithmetic as a NaN; and `copysign` rather than a test on the sign is what
+/// carries `-0.0` through to `-0.0`.
+#[inline(always)]
+fn atan_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let a = xd.abs();
+    let big = a > ATAN_HI;
+    let mid = a > ATAN_LO;
+
+    let numerator = if big {
+        -1.0
+    } else if mid {
+        a - 1.0
+    } else {
+        a
+    };
+    let denominator = if big {
+        a
+    } else if mid {
+        a + 1.0
+    } else {
+        1.0
+    };
+    let base = if big {
+        std::f64::consts::FRAC_PI_2
+    } else if mid {
+        std::f64::consts::FRAC_PI_4
+    } else {
+        0.0
+    };
+
+    let w = numerator / denominator;
+    let folded = fma_or::<FMA>(w, atan_poly::<FMA>(w * w), base);
+    (folded.copysign(xd)) as f32
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -1305,6 +1388,7 @@ block_kernel_param!(
     exp_shifted_block_avx2
 );
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
+block_kernel!(atan_block, atan_one, atan_block_avx512, atan_block_avx2);
 block_kernel!(
     neg_log_sigmoid_block,
     neg_log_sigmoid_one,
@@ -1545,6 +1629,19 @@ impl F32Kernel {
         )
     }
 
+    /// Write `atan(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn atan(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            atan_block,
+            atan_block_avx512,
+            atan_block_avx2
+        )
+    }
+
     /// Write `exp(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn exp(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1747,6 +1844,7 @@ mod tests {
         Sin,
         Cos,
         Tan,
+        Atan,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1768,6 +1866,7 @@ mod tests {
             Op::Sin => k.sin(input, out),
             Op::Cos => k.cos(input, out),
             Op::Tan => k.tan(input, out),
+            Op::Atan => k.atan(input, out),
         }
     }
 
@@ -2002,6 +2101,7 @@ mod tests {
             Op::Sin => xd.sin() as f32,
             Op::Cos => xd.cos() as f32,
             Op::Tan => xd.tan() as f32,
+            Op::Atan => xd.atan() as f32,
         }
     }
 
@@ -2020,7 +2120,7 @@ mod tests {
     /// even though it replaced glibc's `coshf` rather than a promoted scalar:
     /// it is exact anyway, which makes it an accuracy gain (`coshf` misrounds
     /// 22,628,918 of the 2^32 inputs).
-    fn bit_exact_ops() -> [Op; 9] {
+    fn bit_exact_ops() -> [Op; 10] {
         [
             Op::Tanh,
             Op::Exp,
@@ -2031,6 +2131,7 @@ mod tests {
             Op::Sin,
             Op::Cos,
             Op::Tan,
+            Op::Atan,
         ]
     }
 
@@ -2117,6 +2218,7 @@ mod tests {
             Op::Sin,
             Op::Cos,
             Op::Tan,
+            Op::Atan,
         ] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
@@ -2152,6 +2254,7 @@ mod tests {
             Op::Sin,
             Op::Cos,
             Op::Tan,
+            Op::Atan,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -2232,6 +2335,7 @@ mod tests {
             Op::Sin,
             Op::Cos,
             Op::Tan,
+            Op::Atan,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {
