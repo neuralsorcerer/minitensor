@@ -9,10 +9,11 @@
 `matmul`, `solve` and `svd` are the kernels. Everything here is one of those
 pointed at a rearranged operand: `mm` and `mv` are `matmul` with the ranks
 checked, `tensordot` is `matmul` with the contracted axes moved to the end and
-flattened, `inverse` is `solve` against an identity, and `pinverse` is `svd`
-with the small singular values dropped. None of them earns a kernel, so none
-gets one, and each inherits the accuracy and the gradient of the one
-underneath.
+flattened, and `inverse` and `pinverse` are the `torch` spellings of `inv` and
+`pinv`. None of them earns a kernel, so none gets one, and each inherits the
+accuracy and the gradient of the one underneath -- which is the point, and the
+reason the two named after another library are forwarded rather than written
+again here.
 
 `matrix_exp` is the one that looks like it should need a kernel and does not.
 Scaling and squaring with a Pade approximant is a real algorithm, but every
@@ -247,40 +248,33 @@ def baddbmm(
 def inverse(input: object) -> Tensor:
     """The inverse of each square matrix in the stack.
 
-    Solved against an identity rather than formed by cofactors: `solve` is the
-    factorization that a general inverse is computed from anyway, and it is
-    what carries the gradient. A caller who wants `inverse(A) @ b` should ask
-    `solve(A, b)` instead -- it is the same answer without forming the inverse,
-    and it is both faster and better conditioned.
+    The spelling `torch.inverse` uses, for `inv`. It used to be a second
+    implementation instead -- `solve` against an identity built here -- and the
+    identity was built flat, so it could not be paired with a stack of matrices
+    and every batched call raised a shape mismatch against a docstring that
+    promised a stack. `inv` solves against an identity too, and does it for
+    each matrix in the stack.
+
+    A caller who wants `inverse(A) @ b` should ask `solve(A, b)` instead -- it
+    is the same answer without forming the inverse, and it is both faster and
+    better conditioned.
     """
 
-    matrix, size = _square_matrix(input, "inverse")
-    return _F.solve(matrix, _identity_like(matrix, size))
+    matrix, _ = _square_matrix(input, "inverse")
+    return _F.inv(matrix)
 
 
 def pinverse(input: object, rcond: float = 1e-15) -> Tensor:
     """The Moore-Penrose pseudo-inverse.
 
-    `V diag(1/s) U^T` over the singular values above `rcond * s_max`. The
-    threshold is what makes it a pseudo-inverse rather than a division by
-    nearly zero: a singular value at the noise floor carries no information
-    about the matrix, and inverting it would amplify that noise without bound.
+    The spelling `torch.pinverse` uses, for `pinv`, and it keeps that name's
+    threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. It was a
+    second implementation of the same `V diag(1/s) U^T` until it was not: one
+    that took a single matrix where `pinv` takes a stack, and that agreed with
+    it to the last bit on everything both would accept.
     """
 
-    matrix = _atleast_tensor(input)
-    if matrix.ndim() != 2:
-        raise ValueError(
-            f"pinverse requires a two-dimensional tensor, got {matrix.ndim()}"
-        )
-
-    u, s, vh = _F.svd(matrix, False)
-    largest = _F.amax(s).item()
-    cutoff = rcond * largest
-    # Zero rather than a huge reciprocal for the singular values that are
-    # under the threshold; multiplying by zero drops their direction from the
-    # answer, which is what the pseudo-inverse is defined to do.
-    inverted = _F.where(s > cutoff, 1.0 / _F.clamp_min(s, cutoff), s * 0.0)
-    return _F.matmul(_F.transpose(vh, 0, 1) * inverted, _F.transpose(u, 0, 1))
+    return _F.pinv(_matrix_stack(input, "pinverse"), rcond)
 
 
 def logdet(input: object) -> Tensor:

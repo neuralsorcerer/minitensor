@@ -218,8 +218,23 @@ def test_pinverse_drops_a_direction_the_matrix_does_not_span():
 
 
 def test_pinverse_requires_a_matrix():
-    with pytest.raises(ValueError, match="two-dimensional"):
+    with pytest.raises(ValueError, match="at least two dimensions"):
         mt.pinverse(_t([1.0, 2.0]))
+
+
+def test_inverse_and_pinverse_take_a_stack():
+    # Both used to be second implementations of `inv` and `pinv` written for a
+    # single matrix. `pinverse` said so and refused a stack; `inverse` promised
+    # one in its docstring and then built its identity flat, so every batched
+    # call raised a shape mismatch instead.
+    square = RNG.standard_normal((5, 4, 4))
+    np.testing.assert_allclose(
+        mt.inverse(_t(square)).numpy(), np.linalg.inv(square), rtol=1e-12, atol=1e-14
+    )
+    tall = RNG.standard_normal((2, 3, 6, 4))
+    np.testing.assert_allclose(
+        mt.pinverse(_t(tall)).numpy(), np.linalg.pinv(tall), rtol=1e-9, atol=1e-12
+    )
 
 
 def test_logdet_matches_numpy_and_stays_finite_where_det_does_not():
