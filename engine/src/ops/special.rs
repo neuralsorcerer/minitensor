@@ -27,10 +27,7 @@ use crate::{
     tensor::Tensor,
 };
 use libm::erfc;
-use statrs::function::{
-    erf::erf_inv,
-    gamma::{digamma as digamma_scalar, ln_gamma},
-};
+use statrs::function::{erf::erf_inv, gamma::ln_gamma};
 use std::f64::consts::{LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm
@@ -291,6 +288,155 @@ fn polygamma_series(order: u32, x: f64) -> f64 {
     // `n! * |x|^-s` in the exponent rather than as a product, for the reason
     // `scaled_zeta` divides by `|x|^-s` in the first place.
     sign * (ln_gamma(s) - s * x.abs().ln()).exp() * scaled_zeta(order, x)
+}
+
+// --- digamma ---------------------------------------------------------------
+
+/// The positive root of `digamma`, in two pieces.
+///
+/// `1.4616...` is not a double, and near the root the subtraction is the whole
+/// answer: `x - 1.4616321449683622` throws away the 9.5e-17 that double
+/// misses, against a difference that may itself be of that size. Taking the
+/// missing part off separately keeps it.
+const DIGAMMA_ROOT_HI: f64 = 1.4616321449683622;
+const DIGAMMA_ROOT_LO: f64 = 9.549995429965697e-17;
+
+/// How far either side of the root the series below is used.
+///
+/// Chosen by measuring both branches at the seam rather than by rule of
+/// thumb. Inside it the series is good to 2.5e-16 whatever the radius, so the
+/// radius is set by what happens *outside*: `digamma` is small near its root
+/// and the general path computes it as a difference of quantities near 2.5,
+/// where one rounding of `ln` is 4.4e-16 -- a relative error that shrinks only
+/// as the window widens and the function grows. At 0.4 the worst just outside
+/// is 1.8e-15; at 0.2 it is 3.3e-15.
+const DIGAMMA_ROOT_RADIUS: f64 = 0.4;
+
+/// Above this the asymptotic expansion below has converged; below it the
+/// recurrence walks up to it.
+///
+/// The pair is measured against the term count. Walking further costs a
+/// rounding per step, and stopping earlier leaves the expansion to do more
+/// than an asymptotic series can -- nine terms at a threshold of six measure
+/// an order of magnitude worse than six at twelve.
+const DIGAMMA_ASYMPTOTIC_MIN: f64 = 12.0;
+
+/// `digamma` near its positive root, as a Taylor series in `d = x - root`.
+///
+/// The root is where every other route fails: `digamma` is zero there, so any
+/// method that reaches it by subtracting two quantities of size one loses
+/// every digit the answer has. The series has no such subtraction -- it is
+/// built around the zero.
+///
+/// The leading `d` stays outside the polynomial, as it does in `atan_poly`,
+/// so the relative accuracy survives as `d -> 0`.
+fn digamma_at_root(d: f64) -> f64 {
+    let mut s = -1.7008538854332607e-06;
+    s = s * d + 2.486022733129538e-06;
+    s = s * d + -3.6336507898010456e-06;
+    s = s * d + 5.3110609208898636e-06;
+    s = s * d + -7.762817668462094e-06;
+    s = s * d + 1.134638458466385e-05;
+    s = s * d + -1.6584242271854135e-05;
+    s = s * d + 2.424006611860132e-05;
+    s = s * d + -3.5430070947659604e-05;
+    s = s * d + 5.178575795222081e-05;
+    s = s * d + -7.569179582195066e-05;
+    s = s * d + 0.0001106337276874741;
+    s = s * d + -0.00016170622091974803;
+    s = s * d + 0.00023635601564027053;
+    s = s * d + -0.0003454680251063077;
+    s = s * d + 0.000504953265834602;
+    s = s * d + -0.0007380709389960052;
+    s = s * d + 0.0010788252019162967;
+    s = s * d + -0.0015769367714301972;
+    s = s * d + 0.002305126326734928;
+    s = s * d + -0.003369801655439328;
+    s = s * d + 0.004926781395729853;
+    s = s * d + -0.007204534386356869;
+    s = s * d + 0.010538791616612175;
+    s = s * d + -0.01542476590494896;
+    s = s * d + 0.022597648232218104;
+    s = s * d + -0.03316112647484736;
+    s = s * d + 0.04880428816414311;
+    s = s * d + -0.07219956125645471;
+    s = s * d + 0.10782405069126237;
+    s = s * d + -0.16394270544240652;
+    s = s * d + 0.258499760955651;
+    s = s * d + -0.4427631689835921;
+    s = s * d + 0.9676722454476212;
+    s * d
+}
+
+/// `digamma(x) - ln(x) + 1/(2x)` for `x` above [`DIGAMMA_ASYMPTOTIC_MIN`],
+/// as the Bernoulli series in `1/x^2`.
+///
+/// Six terms, which is what the threshold above asks for.
+fn digamma_asymptotic(x: f64) -> f64 {
+    let inverse_square = 1.0 / (x * x);
+    let mut s = 0.021_092_796_092_796_094;
+    s = s * inverse_square - 0.007_575_757_575_757_576;
+    s = s * inverse_square + 0.004_166_666_666_666_667;
+    s = s * inverse_square - 0.003_968_253_968_253_968;
+    s = s * inverse_square + 0.008_333_333_333_333_333;
+    s = s * inverse_square - 0.083_333_333_333_333_33;
+    x.ln() - 0.5 / x + s * inverse_square
+}
+
+/// `digamma(x)`, the logarithmic derivative of the gamma function.
+///
+/// Three routes, because no one of them holds everywhere. The negative half
+/// reflects, so a large negative argument is one step rather than a million
+/// of them, the same way [`trigamma`] handles it. The neighbourhood of the
+/// positive root gets its own series, because that is where the general route
+/// has nothing left to be accurate about. Everything else walks up by the
+/// recurrence to where the asymptotic expansion has converged.
+///
+/// The route this replaces -- `statrs`'s -- had no root case, and paid for it:
+/// 7.2e-10 relative within a thousandth of the root against the 2.5e-16 here,
+/// and 1.3e-14 on `(1.6, 6)` against 2e-16.
+fn digamma_scalar(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x == f64::NEG_INFINITY {
+        // Not a pole but an accumulation of them: `digamma` has one at every
+        // non-positive integer, so it has no limit out that way. Tested for
+        // before the pole check below, which `floor` would otherwise let
+        // through as one.
+        return f64::NAN;
+    }
+    if x <= 0.0 && x.floor() == x {
+        // Simple poles at the non-positive integers. The two sides disagree,
+        // so there is no two-sided value; `-inf` is the limit from the right
+        // and the answer this library has always given.
+        return f64::NEG_INFINITY;
+    }
+    if x < 0.0 {
+        // `digamma(1 - x) - digamma(x) = pi * cot(pi * x)`, and `1 - x` is
+        // above one for every negative `x`, so this recurses exactly once.
+        //
+        // The tangent takes `pi * x` and not `pi * fract(x)`. The two differ
+        // by a whole number of periods and are the same value, and reducing
+        // the argument first looks like it should round better -- but
+        // measured over the negative half it is twice as far out, so the
+        // reduction `tan` does for itself is the better of the two.
+        return digamma_scalar(1.0 - x) - PI / (PI * x).tan();
+    }
+
+    let d = (x - DIGAMMA_ROOT_HI) - DIGAMMA_ROOT_LO;
+    if d.abs() <= DIGAMMA_ROOT_RADIUS {
+        return digamma_at_root(d);
+    }
+
+    // `digamma(x) = digamma(x + 1) - 1/x`, applied until the expansion holds.
+    let mut walked = x;
+    let mut correction = 0.0;
+    while walked < DIGAMMA_ASYMPTOTIC_MIN {
+        correction -= 1.0 / walked;
+        walked += 1.0;
+    }
+    digamma_asymptotic(walked) + correction
 }
 
 /// `trigamma(x)`, the derivative of [`digamma`].
@@ -899,6 +1045,109 @@ mod tests {
         assert!((got[1] - (1.0 - EULER_MASCHERONI)).abs() < 1e-13);
         // psi(1/2) = -gamma - 2 log 2.
         assert!((got[2] + EULER_MASCHERONI + 2.0 * 2f64.ln()).abs() < 1e-13);
+    }
+
+    /// Values from a 40-digit evaluation, chosen to land on each of the three
+    /// routes and on both sides of each seam between them: inside the root
+    /// series and just outside it, either side of the asymptotic threshold,
+    /// far out where the expansion alone answers, and on the reflected half.
+    #[test]
+    fn digamma_matches_a_high_precision_reference_on_every_route() {
+        // Each reference is the 40-digit value *at the double the test passes*,
+        // not at the real number that rounds to it. Near the root those are
+        // different questions: a step of one ulp in the argument moves the
+        // answer by 2e-16, which against a value of 1e-6 is a relative 2e-10
+        // -- four orders larger than the error being measured.
+        const CASES: [(f64, f64); 11] = [
+            (1.4616331449683622, 9.67671802512691e-07),
+            (1.4615321449683623, -9.677165243504987e-05),
+            (1.5116321449683623, 0.04730802478190584),
+            (1.1116321449683624, -0.4072073587983321),
+            (0.5, -1.9635100260214235),
+            (3.5, 1.103156640645243),
+            (11.999, 2.442574774329119),
+            (12.001, 2.4427485780752995),
+            (100000.0, 11.512920464961896),
+            (-2.5, 1.103156640645243),
+            (-0.3, 2.113309779635399),
+        ];
+        for (x, want) in CASES {
+            let got = digamma_scalar(x);
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative < 4e-15,
+                "digamma({x}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
+    /// The first two are a thousandth and a millionth from the root, where
+    /// `digamma` is small and any route that reaches it by subtracting two
+    /// quantities of size one has nothing left. The series built around the
+    /// zero has no such subtraction; the implementation this replaced was
+    /// out by 7e-10 here, which this tolerance excludes by four orders.
+    #[test]
+    fn digamma_keeps_its_digits_next_to_the_root() {
+        const ROOT: f64 = 1.4616321449683622;
+        for (offset, want) in [
+            (1e-6, 9.67671802512691e-07),
+            (-1e-4, -9.677165243504987e-05),
+        ] {
+            let got = digamma_scalar(ROOT + offset);
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative < 1e-13,
+                "digamma(root {offset:+e}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+        // And the root itself is smaller than any value either side of it.
+        assert!(digamma_scalar(ROOT).abs() < 1e-15);
+    }
+
+    /// `psi(x + 1) = psi(x) + 1/x` has to hold across the seams as well as
+    /// inside each route, which is what would break if a branch were
+    /// misplaced by a step.
+    #[test]
+    fn digamma_obeys_its_recurrence_across_every_seam() {
+        for x in [
+            0.25,
+            0.9,
+            1.0616,
+            1.0617,
+            1.4616321449683622,
+            1.8615,
+            1.8617,
+            2.5,
+            7.0,
+            11.0,
+            11.9999,
+            12.0,
+            12.0001,
+            40.0,
+        ] {
+            let stepped = digamma_scalar(x + 1.0);
+            let expected = digamma_scalar(x) + 1.0 / x;
+            let relative = ((stepped - expected) / expected).abs();
+            assert!(
+                relative < 2e-14,
+                "psi({}) = {stepped} against psi({x}) + 1/{x} = {expected}",
+                x + 1.0
+            );
+        }
+    }
+
+    /// The poles and the values that are not numbers, which the routes above
+    /// have to answer before they divide by anything.
+    #[test]
+    fn digamma_answers_at_the_poles_and_beyond_them() {
+        for pole in [0.0, -1.0, -2.0, -50.0] {
+            assert_eq!(digamma_scalar(pole), f64::NEG_INFINITY, "at {pole}");
+        }
+        assert!(digamma_scalar(f64::NAN).is_nan());
+        assert!(digamma_scalar(f64::NEG_INFINITY).is_nan());
+        assert_eq!(digamma_scalar(f64::INFINITY), f64::INFINITY);
+        // Just above zero the pole is approached from the right, as -1/x.
+        assert!(digamma_scalar(1e-300) < -1e299);
     }
 
     #[test]
