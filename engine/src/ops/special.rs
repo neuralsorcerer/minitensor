@@ -94,7 +94,22 @@ pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
 // --- logit -----------------------------------------------------------------
 
 unit_kernel!(
-    /// `log(x / (1 - x))`, the inverse of `sigmoid`.
+    /// `log(x / (1 - x))`, the inverse of `sigmoid`, taken two ways depending
+    /// on where the input sits.
+    ///
+    /// The ratio is near one when `x` is near a half, and its logarithm then
+    /// keeps almost none of the answer: 1.1e-11 measured there against a
+    /// 40-digit reference, where the same quantity is a rounding anywhere
+    /// else. On `[1/4, 3/4]` the identity `logit(x) = 2 * atanh(2x - 1)` moves
+    /// the problem to `atanh` near zero, where it is not one -- and `2x - 1`
+    /// is exact across exactly that interval, since `2x` lands in `[1/2, 3/2]`
+    /// where subtracting one takes nothing away. Substituting the `log1p` form
+    /// of `atanh` collapses the identity to a single logarithm, so the
+    /// accurate branch costs what the inaccurate one did.
+    ///
+    /// Outside that interval the direct form is the accurate one and the
+    /// identity is not: `2x - 1` rounds to exactly -1 as `x` approaches zero,
+    /// and every digit of a small `x` goes with it.
     ///
     /// `p[0]` is the clamp: inputs are pulled into `[eps, 1 - eps]` first, so
     /// a probability that has reached 0 or 1 by rounding gives a large finite
@@ -107,7 +122,11 @@ unit_kernel!(
         } else {
             x.clamp(p[0], 1.0 - p[0])
         };
-        (z / (1.0 - z)).ln()
+        if (z - 0.5).abs() <= 0.25 {
+            ((2.0 * z - 1.0) / (1.0 - z)).ln_1p()
+        } else {
+            (z / (1.0 - z)).ln()
+        }
     }
 );
 unit_grad_kernel!(
@@ -1051,6 +1070,84 @@ mod tests {
     /// routes and on both sides of each seam between them: inside the root
     /// series and just outside it, either side of the asymptotic threshold,
     /// far out where the expansion alone answers, and on the reflected half.
+    /// Values from a 40-digit evaluation at the doubles listed, straddling the
+    /// quarter marks where the two forms meet and reaching both ends, where
+    /// the identity the middle uses would have lost everything.
+    #[test]
+    fn logit_matches_a_high_precision_reference_on_both_forms() {
+        const CASES: [(f64, f64); 12] = [
+            (1e-12, -27.63102111592755),
+            (0.001, -6.906754778648554),
+            (0.2, -1.3862943611198906),
+            (0.2499999, -1.0986128220015141),
+            (0.25, -1.0986122886681098),
+            (0.2500001, -1.0986117553348476),
+            (0.4999, -0.0004000000053332894),
+            (0.5, 0.0),
+            (0.5001, 0.0004000000053332894),
+            (0.75, 1.0986122886681098),
+            (0.9, 2.1972245773362196),
+            (0.999999, 13.815509557935018),
+        ];
+        let kernel = LOGIT.1;
+        for (x, want) in CASES {
+            let got = kernel(x, [f64::NAN, 0.0]);
+            if want == 0.0 {
+                assert_eq!(got, 0.0, "logit({x}) = {got}");
+                continue;
+            }
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative < 4e-16,
+                "logit({x}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
+    /// Near a half the ratio is near one and its logarithm keeps almost none
+    /// of the answer: the direct form was out by 1.1e-11 here, which this
+    /// tolerance excludes by five orders. The identity has no such ratio.
+    #[test]
+    fn logit_keeps_its_digits_next_to_a_half() {
+        let kernel = LOGIT.1;
+        for (x, want) in [
+            (0.4999, -0.0004000000053332894),
+            (0.5001, 0.0004000000053332894),
+            (0.49999999, -3.999999997894577e-08),
+        ] {
+            let got = kernel(x, [f64::NAN, 0.0]);
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative < 1e-14,
+                "logit({x}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
+    /// The ends, past them, and the clamp that exists to keep the ends finite.
+    #[test]
+    fn logit_answers_at_the_ends_and_under_the_clamp() {
+        let kernel = LOGIT.1;
+        assert_eq!(kernel(0.0, [f64::NAN, 0.0]), f64::NEG_INFINITY);
+        assert_eq!(kernel(1.0, [f64::NAN, 0.0]), f64::INFINITY);
+        assert!(kernel(1.5, [f64::NAN, 0.0]).is_nan());
+        assert!(kernel(-0.5, [f64::NAN, 0.0]).is_nan());
+        assert!(kernel(f64::NAN, [f64::NAN, 0.0]).is_nan());
+        // With a clamp the ends come back finite, at the logit of the clamp
+        // bounds themselves. Those are not opposite numbers and the answers
+        // are not either: `1 - 1e-6` is not a double, so `1 - (1 - 1e-6)` is
+        // 1.0000000000287557e-6 rather than the `1e-6` at the other end. Each
+        // side is checked against its own 40-digit value instead.
+        for (bound, want) in [(0.0, -13.815509557963773), (1.0, 13.815509557935018)] {
+            let got = kernel(bound, [1e-6, 0.0]);
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative < 4e-16,
+                "clamped logit({bound}) = {got}, wanted {want} (relative {relative:e})"
+            );
+        }
+    }
+
     #[test]
     fn digamma_matches_a_high_precision_reference_on_every_route() {
         // Each reference is the 40-digit value *at the double the test passes*,
