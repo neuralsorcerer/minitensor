@@ -1189,6 +1189,93 @@ fn atan_one<const FMA: bool>(x: f32) -> f32 {
     (folded.copysign(xd)) as f32
 }
 
+// ---------------------------------------------------------------------------
+// arcsine and arccosine
+// ---------------------------------------------------------------------------
+
+/// `(asin(t) - t) / t^3` for `u = t^2` in `[0, 1/4]`.
+///
+/// One polynomial serves the whole domain because both branches of the
+/// reduction land in that interval: see [`asin_half`]. Chebyshev-fitted to a
+/// worst error of 9.8e-19 over it.
+///
+/// The leading `t` stays outside, as it does in `atan_poly`: folding it in
+/// would round it against terms it dominates as `t -> 0`.
+#[inline(always)]
+fn asin_poly<const FMA: bool>(u: f64) -> f64 {
+    let mut p = 0.029_612_011_264_955_12;
+    p = fma_or::<FMA>(p, u, -0.019_241_671_746_743_04);
+    p = fma_or::<FMA>(p, u, 0.019_554_513_336_123_378);
+    p = fma_or::<FMA>(p, u, 0.003_044_879_909_455_677_3);
+    p = fma_or::<FMA>(p, u, 0.009_319_560_794_767_446);
+    p = fma_or::<FMA>(p, u, 0.009_621_842_970_100_282);
+    p = fma_or::<FMA>(p, u, 0.011_566_459_612_121_669);
+    p = fma_or::<FMA>(p, u, 0.013_963_780_012_203_57);
+    p = fma_or::<FMA>(p, u, 0.017_352_816_540_325_496);
+    p = fma_or::<FMA>(p, u, 0.022_372_157_443_507_22);
+    p = fma_or::<FMA>(p, u, 0.030_381_944_475_532_34);
+    p = fma_or::<FMA>(p, u, 0.044_642_857_142_551_895);
+    p = fma_or::<FMA>(p, u, 0.075_000_000_000_001_18);
+    fma_or::<FMA>(p, u, 0.166_666_666_666_666_66)
+}
+
+/// The reduction `asin` and `acos` share: the series value `v` and which
+/// branch produced it.
+///
+/// Below a half the series is evaluated at `|x|` itself. Above it the
+/// half-angle identity `asin(a) = pi/2 - 2*asin(sqrt((1-a)/2))` moves the
+/// argument back down -- and `(1-a)/2` is at most a quarter there, which is
+/// exactly the interval `x^2` occupies on the other branch. That is why one
+/// polynomial covers both, and why the square root is the only extra
+/// operation the fold costs.
+///
+/// An `|x|` above one makes `(1-a)/2` negative, so the square root is NaN and
+/// the NaN carries through -- which is the answer outside the domain, with no
+/// test for it.
+#[inline(always)]
+fn asin_half<const FMA: bool>(a: f64) -> (f64, bool) {
+    let big = a > 0.5;
+    let u = if big { (1.0 - a) * 0.5 } else { a * a };
+    let s = if big { u.sqrt() } else { a };
+    // `s * u` is `s^3` either way: above the fold `u` is `s^2` by
+    // construction, and below it `u` is `a^2` and `s` is `a`.
+    (fma_or::<FMA>(s * u, asin_poly::<FMA>(u), s), big)
+}
+
+#[inline(always)]
+fn asin_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let (v, big) = asin_half::<FMA>(xd.abs());
+    let r = if big {
+        std::f64::consts::FRAC_PI_2 - 2.0 * v
+    } else {
+        v
+    };
+    (r.copysign(xd)) as f32
+}
+
+/// `acos`, taken from the same reduction rather than as `pi/2 - asin(x)`.
+///
+/// That subtraction is where `acos` loses its accuracy near `x = 1`: both
+/// sides are close to `pi/2` and the difference is small, so the leading
+/// digits cancel. The half-angle branch hands back the small answer directly
+/// as `2v`, with nothing to cancel.
+#[inline(always)]
+fn acos_one<const FMA: bool>(x: f32) -> f32 {
+    let xd = x as f64;
+    let (v, big) = asin_half::<FMA>(xd.abs());
+    let r = if big {
+        if xd < 0.0 {
+            std::f64::consts::PI - 2.0 * v
+        } else {
+            2.0 * v
+        }
+    } else {
+        std::f64::consts::FRAC_PI_2 - v.copysign(xd)
+    };
+    r as f32
+}
+
 /// Generate the block loop LLVM vectorizes, plus one compilation of it per
 /// instruction set. Every kernel in this module is the same shape: a
 /// branch-free element function, wrapped in a loop, compiled several times.
@@ -1389,6 +1476,8 @@ block_kernel_param!(
 );
 block_kernel!(exp_block, exp_one, exp_block_avx512, exp_block_avx2);
 block_kernel!(atan_block, atan_one, atan_block_avx512, atan_block_avx2);
+block_kernel!(asin_block, asin_one, asin_block_avx512, asin_block_avx2);
+block_kernel!(acos_block, acos_one, acos_block_avx512, acos_block_avx2);
 block_kernel!(
     neg_log_sigmoid_block,
     neg_log_sigmoid_one,
@@ -1629,6 +1718,32 @@ impl F32Kernel {
         )
     }
 
+    /// Write `asin(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn asin(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            asin_block,
+            asin_block_avx512,
+            asin_block_avx2
+        )
+    }
+
+    /// Write `acos(input[i])` into every element of `out`.
+    #[inline]
+    pub(crate) fn acos(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
+        dispatch!(
+            self,
+            input,
+            out,
+            acos_block,
+            acos_block_avx512,
+            acos_block_avx2
+        )
+    }
+
     /// Write `atan(input[i])` into every element of `out`.
     #[inline]
     pub(crate) fn atan(self, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1845,6 +1960,8 @@ mod tests {
         Cos,
         Tan,
         Atan,
+        Asin,
+        Acos,
     }
 
     fn apply(op: Op, backend: Backend, input: &[f32], out: &mut [MaybeUninit<f32>]) {
@@ -1867,6 +1984,8 @@ mod tests {
             Op::Cos => k.cos(input, out),
             Op::Tan => k.tan(input, out),
             Op::Atan => k.atan(input, out),
+            Op::Asin => k.asin(input, out),
+            Op::Acos => k.acos(input, out),
         }
     }
 
@@ -2102,6 +2221,8 @@ mod tests {
             Op::Cos => xd.cos() as f32,
             Op::Tan => xd.tan() as f32,
             Op::Atan => xd.atan() as f32,
+            Op::Asin => xd.asin() as f32,
+            Op::Acos => xd.acos() as f32,
         }
     }
 
@@ -2219,6 +2340,8 @@ mod tests {
             Op::Cos,
             Op::Tan,
             Op::Atan,
+            Op::Asin,
+            Op::Acos,
         ] {
             for backend in available() {
                 for (&x, got) in xs.iter().zip(run(op, backend, &xs)) {
@@ -2255,6 +2378,8 @@ mod tests {
             Op::Cos,
             Op::Tan,
             Op::Atan,
+            Op::Asin,
+            Op::Acos,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[f32::NAN, -f32::NAN, 0.5]);
@@ -2271,9 +2396,10 @@ mod tests {
     fn odd_functions_stay_odd() {
         let xs: Vec<f32> = (1..5000).map(|i| i as f32 * 1e-3).collect();
         let neg: Vec<f32> = xs.iter().map(|v| -v).collect();
-        // Only the genuinely odd kernels. GELU is not odd, `cosh` is even, and
-        // `expm1` is neither.
-        for op in [Op::Tanh, Op::Erf, Op::Sinh, Op::Sin, Op::Tan] {
+        // Only the genuinely odd kernels. GELU is not odd, `cosh` is even,
+        // `expm1` is neither, and `acos` is a reflection rather than an
+        // odd function -- `acos(-x)` is `pi - acos(x)`, checked below.
+        for op in [Op::Tanh, Op::Erf, Op::Sinh, Op::Sin, Op::Tan, Op::Atan] {
             for backend in available() {
                 for (p, n) in run(op, backend, &xs)
                     .into_iter()
@@ -2283,13 +2409,48 @@ mod tests {
                 }
             }
         }
+
+        // `asin` is odd too, on the interval where it is defined at all.
+        let unit: Vec<f32> = (0..=1000).map(|i| i as f32 * 1e-3).collect();
+        let unit_neg: Vec<f32> = unit.iter().map(|v| -v).collect();
+        for backend in available() {
+            for (p, n) in
+                run(Op::Asin, backend, &unit)
+                    .into_iter()
+                    .zip(run(Op::Asin, backend, &unit_neg))
+            {
+                assert_eq!(p.to_bits(), (-n).to_bits(), "asin/{backend:?}: {p:e}");
+            }
+        }
+
+        // And `acos` reflects: the two sides must add to `pi` exactly as the
+        // float64 reference does.
+        for backend in available() {
+            for (&x, (p, n)) in unit
+                .iter()
+                .zip(run(Op::Acos, backend, &unit).into_iter().zip(run(
+                    Op::Acos,
+                    backend,
+                    &unit_neg,
+                )))
+            {
+                let want = (std::f64::consts::PI - (x as f64).acos()) as f32;
+                let apart = (n.to_bits() as i64 - want.to_bits() as i64).abs();
+                assert!(
+                    apart <= 1,
+                    "acos/{backend:?} at {x:e}: {n:e} against {want:e}"
+                );
+                assert!(p.is_finite());
+            }
+        }
     }
 
     /// Signed zero survives, which the `copysign` at the end of each core is
     /// there for -- the arithmetic loses it (`+0.0 + -0.0` is `+0.0`).
     #[test]
     fn signed_zero_survives() {
-        // `cosh(0)` is 1, not a signed zero, so it sits out.
+        // `cosh(0)` is 1, not a signed zero, so it sits out; so does `acos`,
+        // whose value at zero is `pi/2`.
         for op in [
             Op::Tanh,
             Op::Erf,
@@ -2297,6 +2458,8 @@ mod tests {
             Op::GeluTanh,
             Op::Expm1,
             Op::Sinh,
+            Op::Atan,
+            Op::Asin,
         ] {
             for backend in available() {
                 let out = run(op, backend, &[0.0, -0.0]);
@@ -2336,6 +2499,8 @@ mod tests {
             Op::Cos,
             Op::Tan,
             Op::Atan,
+            Op::Asin,
+            Op::Acos,
         ] {
             for backend in available() {
                 for len in 0..xs.len() {
