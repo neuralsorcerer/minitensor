@@ -1012,6 +1012,37 @@ pub(crate) fn sum_all_i64(tensor: &Tensor, result_data: &mut TensorData) -> Resu
     Ok(())
 }
 
+/// The count of `true`s in a mask, which is what summing one means.
+///
+/// Kept native rather than reached by widening the mask to `int64` first: the
+/// widening is an eightfold copy of the data to answer a question about it, and
+/// it dominated everything. See [`simd_count_true`].
+pub(crate) fn sum_all_bool(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
+    let data = tensor
+        .data()
+        .as_bool_slice()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get bool slice"))?;
+
+    let sum: i64 = if data.len() >= 1024 {
+        par_fold_chunks(
+            data,
+            1 << 16,
+            0i64,
+            &|_, c| simd_count_true(c),
+            &|a: i64, b| a.acc_add(b),
+        )
+    } else {
+        simd_count_true(data)
+    };
+
+    let result_slice = result_data
+        .as_i64_slice_mut()
+        .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable i64 slice"))?;
+
+    result_slice[0] = sum;
+    Ok(())
+}
+
 pub(crate) fn nansum_all_f32(tensor: &Tensor, result_data: &mut TensorData) -> Result<()> {
     let data = tensor
         .data()
@@ -1224,11 +1255,7 @@ pub fn sum_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tenso
         DataType::Float64 => sum_along_dim_f64(tensor, &mut result_data, dim)?,
         DataType::Int32 => sum_along_dim_i32(tensor, &mut result_data, dim)?,
         DataType::Int64 => sum_along_dim_i64(tensor, &mut result_data, dim)?,
-        DataType::Bool => {
-            return Err(MinitensorError::invalid_operation(
-                "Sum not supported for boolean tensors",
-            ));
-        }
+        DataType::Bool => sum_along_dim_bool(tensor, &mut result_data, dim)?,
     }
 
     Ok(Tensor::new(

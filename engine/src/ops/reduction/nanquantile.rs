@@ -310,14 +310,12 @@ pub(crate) use crate::ops::util::normalize_dim;
 /// Sum reduction along specified dimensions
 pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Tensor> {
     // Summing a mask counts its true entries, which is the most common thing
-    // anyone does with one. `bool` has no addition to accumulate in, so the
-    // count lands in `int64`, and the existing integer path takes it from
-    // there. Rejecting this outright
-    // left `mask.sum()` as the one hole in the boolean reductions: `max`,
-    // `min`, `all`, `any`, `argmax` and `sort` all already worked.
-    if tensor.dtype() == DataType::Bool {
-        return sum(&tensor.astype(DataType::Int64)?, dim, keepdim);
-    }
+    // anyone does with one: an accuracy is `(prediction == label).sum()`, and
+    // a sequence length is `mask.sum(dim=1)`. `bool` has no addition to
+    // accumulate in, so the count lands in `int64` -- but it is counted where
+    // it lies rather than widened there first, which was an eightfold copy of
+    // the input to answer a question about it: 128MB of scratch to count
+    // sixteen million bytes.
 
     // Normalise negative dimensions and deduplicate
     let dim = normalize_reduction_dims(dim, tensor.ndim())?;
@@ -340,11 +338,7 @@ pub fn sum(tensor: &Tensor, dim: Option<Vec<isize>>, keepdim: bool) -> Result<Te
                 DataType::Float64 => sum_all_f64(tensor, &mut result_data)?,
                 DataType::Int32 => sum_all_i32(tensor, &mut result_data)?,
                 DataType::Int64 => sum_all_i64(tensor, &mut result_data)?,
-                DataType::Bool => {
-                    return Err(MinitensorError::invalid_operation(
-                        "Sum not supported for boolean tensors",
-                    ));
-                }
+                DataType::Bool => sum_all_bool(tensor, &mut result_data)?,
             }
 
             Tensor::new(

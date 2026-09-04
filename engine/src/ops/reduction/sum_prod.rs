@@ -393,6 +393,20 @@ sum_along_dim_kernel!(
     simd_sum_i64
 );
 
+// Counting a mask along an axis -- how many tokens each sequence has, how many
+// of each row's predictions were right. Native for the same reason the
+// whole-tensor count is: reaching it by widening the mask to `int64` first
+// copies eight bytes per byte of question.
+sum_along_dim_kernel!(
+    sum_along_dim_bool,
+    as_bool_slice,
+    as_i64_slice_mut,
+    "bool",
+    i64,
+    0i64,
+    simd_count_true
+);
+
 #[inline]
 pub fn prod_along_dim(tensor: &Tensor, dim: usize, keepdim: bool) -> Result<Tensor> {
     check_dim(dim, tensor.ndim())?;

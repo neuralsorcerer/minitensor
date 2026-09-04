@@ -634,6 +634,41 @@ pub fn simd_sum_i32_to_i64(data: &[i32]) -> i64 {
     total
 }
 
+/// How many `true`s a mask holds, as an i64.
+///
+/// This is `sum` of a boolean tensor, and `sum` of a boolean tensor is how
+/// anyone counts anything: `(prediction == label).sum()` is an accuracy, and
+/// `count_nonzero` is this under another name. It used to be spelled by
+/// widening the mask to `int64` first and summing that, which is a correct
+/// answer bought with an eightfold copy of the data -- 128MB of scratch to
+/// count sixteen million bytes, and 24ms where summing the same count of floats
+/// takes under one.
+///
+/// A `bool` is one byte holding zero or one, so the count is a sum of bytes and
+/// the eight lanes are only here to keep the adds independent, as they are in
+/// [`simd_sum_i32_to_i64`]. Accumulating in `u32` lets the whole inner loop
+/// stay narrow: `u32` cannot overflow until four billion trues, so the lane
+/// totals are folded out to `i64` every `1 << 24` elements, which no real mask
+/// reaches between folds.
+pub fn simd_count_true(data: &[bool]) -> i64 {
+    const FOLD: usize = 1 << 24;
+    let mut total = 0i64;
+    for block in data.chunks(FOLD) {
+        let mut lanes = [0u32; 8];
+        let chunks = block.chunks_exact(8);
+        let rem = chunks.remainder();
+        for chunk in chunks {
+            for (lane, &flag) in lanes.iter_mut().zip(chunk) {
+                *lane += flag as u32;
+            }
+        }
+        let mut block_total: u32 = lanes.iter().sum();
+        block_total += rem.iter().map(|&flag| flag as u32).sum::<u32>();
+        total += block_total as i64;
+    }
+    total
+}
+
 /// Product of an i32 slice into an i64 accumulator. See
 /// [`simd_sum_i32_to_i64`]; a product overflows far sooner than a sum, which is
 /// exactly why the wider accumulator is worth having.

@@ -161,6 +161,53 @@ def test_count_nonzero_reports_int64():
     assert got.item() == 3
 
 
+@pytest.mark.parametrize("length", [0, 1, 7, 1023, 1024, 1025, 40000])
+def test_a_mask_is_counted_where_it_lies(length):
+    """Counting a mask is what summing one means, and it is now done on the
+    mask rather than on an `int64` copy of it.
+
+    The copy was correct and cost eight bytes per byte of question -- 128MB of
+    scratch to count sixteen million -- which made `(prediction == label).sum()`
+    slower than the comparison that produced it. Counting in place is 55 times
+    quicker, and the lengths here straddle the block the counter folds its lanes
+    over as well as the point where it starts using the thread pool, since those
+    are the seams a count can go wrong on.
+    """
+    rng = np.random.default_rng(length + 1)
+    mask = rng.integers(0, 2, length).astype(bool)
+    got = mt.Tensor(np.ascontiguousarray(mask), dtype="bool").sum()
+    assert got.dtype == "int64"
+    assert got.item() == int(mask.sum())
+
+
+def test_a_long_mask_counts_past_the_lane_fold():
+    """The lanes accumulate narrow and are folded out to `int64` every 2**24
+    elements. A mask longer than that, entirely true, is the one input where a
+    fold that never happened would show."""
+    length = 20_000_000
+    mask = np.ones(length, dtype=bool)
+    assert mt.Tensor(mask, dtype="bool").sum().item() == length
+    mask[::2] = False
+    assert (
+        mt.Tensor(np.ascontiguousarray(mask), dtype="bool").sum().item() == length // 2
+    )
+
+
+@pytest.mark.parametrize("shape", [(4, 5), (2, 3, 4), (1, 9), (3, 0, 2)])
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_a_mask_counted_along_an_axis_matches_numpy(shape, keepdim):
+    """`mask.sum(dim=1)` is how a padded batch reports its sequence lengths, so
+    the axis-wise count is native too -- and has to agree with NumPy on every
+    axis, on `keepdim`, and on an axis of length zero."""
+    rng = np.random.default_rng(5)
+    mask = rng.integers(0, 2, shape).astype(bool)
+    tensor = mt.Tensor(np.ascontiguousarray(mask), dtype="bool")
+    for dim in range(len(shape)):
+        got = tensor.sum(dim, keepdim)
+        assert got.dtype == "int64"
+        np.testing.assert_array_equal(got.numpy(), mask.sum(axis=dim, keepdims=keepdim))
+
+
 def test_the_count_agrees_with_the_number_of_indices():
     """Two spellings of one question: how many, and which ones."""
     values = _sparse((6, 7), seed=17)
