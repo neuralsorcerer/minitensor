@@ -7,12 +7,17 @@
 """Where each maximum came from, and putting it back there.
 
 `max_pool` had no way to report which element won its window, so `max_unpool`
-could not exist -- there was nothing to feed it. The kernel finds that position
-anyway, because the backward pass has to send the gradient to the element that
-won, so `return_indices` costs one copy of a vector that already existed and
-only when asked. The plain call still returns a bare tensor, which is checked
-here, because adding a second return value is the kind of change that breaks
-every existing caller if it is done carelessly.
+could not exist -- there was nothing to feed it. The backward pass needs the
+same position, to send the gradient to the element that won, so the two share
+one kernel. What they do not share is a forward that wants neither: carrying an
+index through a window turns a comparison the compiler can put in a vector into
+a loop-carried pair it cannot, and it is most of what the operation costs, so
+the position is found only when `return_indices` asks for it or a gradient is
+going to scatter through it. The three paths have to agree exactly, NaN and
+ties included, and that is what `test_every_path_finds_the_same_maxima` is for.
+The plain call still returns a bare tensor, which is checked here, because
+adding a second return value is the kind of change that breaks every existing
+caller if it is done carelessly.
 
 `max_unpool` is then an arrangement and needs no kernel: the planes are laid
 end to end, each one's offsets shifted by where it starts -- arithmetic on
@@ -108,6 +113,67 @@ def test_the_indices_are_where_the_maxima_are(shape, kernel, stride, padding):
         flat, indices.numpy().reshape(shape[0], shape[1], -1), axis=2
     )
     np.testing.assert_array_equal(picked.reshape(pooled.numpy().shape), pooled.numpy())
+
+
+@pytest.mark.parametrize(
+    "shape,kernel,stride,padding",
+    [
+        ((4, 3, 16, 16), (2, 2), (2, 2), (0, 0)),
+        ((2, 2, 15, 15), (3, 3), (2, 2), (1, 1)),
+        ((3, 4, 9, 11), (2, 2), (1, 1), (1, 1)),
+        ((1, 1, 8, 8), (4, 4), (4, 4), (2, 2)),
+        ((2, 3, 7, 7), (3, 3), (3, 3), (1, 1)),
+    ],
+)
+def test_every_path_finds_the_same_maxima(shape, kernel, stride, padding):
+    """Three ways in, and they must not be three answers.
+
+    Only one of them tracks an index: a plain forward on a tensor that wants no
+    gradient takes a loop that finds the maximum and nothing else, which is
+    several times quicker and is the whole reason the split exists. It would be
+    a poor trade if the quick path disagreed anywhere, and the place two
+    maximum-finding loops disagree is never the ordinary case -- it is a NaN, or
+    a tie, where which element "wins" is a convention rather than a fact. So the
+    input is seeded with NaNs and with repeated values, and the comparison is
+    for equality rather than closeness.
+    """
+    values = RNG.standard_normal(shape)
+    values.flat[::11] = np.nan
+    # Ties, so that "the first maximum wins" is actually under test.
+    values.flat[3::23] = 2.5
+    values.flat[4::23] = 2.5
+
+    plain = F.max_pool2d(_t(values), kernel, stride, padding).numpy()
+    reported, _ = F.max_pool2d(_t(values), kernel, stride, padding, return_indices=True)
+    differentiable = F.max_pool2d(
+        _t(values, requires_grad=True), kernel, stride, padding
+    ).numpy()
+
+    # NaN is not equal to itself, so compare a NaN-free stand-in alongside the
+    # pattern of NaNs -- both have to match, which `allclose` alone would not
+    # say.
+    def shape_of(a):
+        return np.isnan(a), np.where(np.isnan(a), 0.0, a)
+
+    for other in (reported.numpy(), differentiable):
+        assert np.array_equal(shape_of(plain)[0], shape_of(other)[0])
+        assert np.array_equal(shape_of(plain)[1], shape_of(other)[1])
+
+
+def test_the_gradient_still_reaches_the_element_that_won():
+    # The quick path is only reachable when no gradient is wanted, so the
+    # backward has to keep working exactly as it did -- one unit of gradient to
+    # each window's maximum and nothing anywhere else.
+    values = RNG.standard_normal((2, 3, 8, 8))
+    tensor = _t(values, requires_grad=True)
+    F.max_pool2d(tensor, (2, 2), (2, 2), (0, 0)).sum().backward()
+
+    expected = np.zeros_like(values)
+    for n, c, i, j in np.ndindex(2, 3, 4, 4):
+        window = values[n, c, 2 * i : 2 * i + 2, 2 * j : 2 * j + 2]
+        row, col = np.unravel_index(np.argmax(window), window.shape)
+        expected[n, c, 2 * i + row, 2 * j + col] += 1.0
+    assert np.array_equal(tensor.grad.numpy(), expected)
 
 
 def test_the_one_dimensional_indices_are_positions_along_the_axis():
