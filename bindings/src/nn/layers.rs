@@ -129,7 +129,9 @@ impl PyELU {
     }
 }
 
-/// GELU activation layer
+/// Gaussian Error Linear Unit, `x * Phi(x)`, from the tanh approximation --
+/// which is half again as quick and about 5e-4 away from the error function
+/// the free `gelu` uses. `approximate="none"` asks for that one instead.
 #[pyclass(name = "GELU", extends = PyModule)]
 pub struct PyGELU;
 
@@ -137,9 +139,18 @@ pub struct PyGELU;
 impl PyGELU {
     /// Create a new GELU layer
     #[new]
-    fn new() -> PyClassInitializer<Self> {
-        let gelu = GELU::new();
-        PyClassInitializer::from(PyModule::from_gelu(gelu)).add_subclass(Self)
+    #[pyo3(signature = (approximate="tanh"))]
+    fn new(approximate: &str) -> PyResult<PyClassInitializer<Self>> {
+        let gelu = match approximate {
+            "tanh" => GELU::approximate(true),
+            "none" => GELU::approximate(false),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown gelu approximation {other:?}; expected \"none\" or \"tanh\""
+                )));
+            }
+        };
+        Ok(PyClassInitializer::from(PyModule::from_gelu(gelu)).add_subclass(Self))
     }
 }
 

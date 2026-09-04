@@ -345,12 +345,30 @@ impl Layer for ELU {
 /// GELU(x) = x * theta(x)
 /// where theta(x) is the Cumulative Distribution Function for Gaussian Distribution.
 #[derive(Clone)]
-pub struct GELU;
+pub struct GELU {
+    /// Whether to use the tanh approximation rather than the error function.
+    approximate: bool,
+}
 
 impl GELU {
-    /// Create a new GELU activation layer
+    /// Create a new GELU activation layer.
+    ///
+    /// The tanh approximation, which is what this layer has always computed
+    /// and is measurably the reason to reach for a layer rather than the
+    /// function: 2.3ms against 3.4ms on four million single-precision
+    /// elements, and 16ms against 25ms in double.
     pub fn new() -> Self {
-        Self
+        Self { approximate: true }
+    }
+
+    /// The same layer with the tanh approximation instead.
+    pub fn approximate(approximate: bool) -> Self {
+        Self { approximate }
+    }
+
+    /// Whether this layer takes the approximation.
+    pub fn is_approximate(&self) -> bool {
+        self.approximate
     }
 }
 
@@ -362,16 +380,22 @@ impl Default for GELU {
 
 impl Layer for GELU {
     fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        // The tanh approximation, `0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3)))`,
-        // through the vectorised kernel that already implements it.
+        // `x * Phi(x)` through the vectorised kernel, from the tanh
+        // approximation by default and from the error function when asked.
         //
-        // This used to build it out of nine separate tensor operations -- three
-        // of them broadcasting a cached scalar -- which meant nine passes over
-        // the input and nine full-size allocations to compute one elementwise
-        // function. On a 4M-element tensor that was 39ms against the kernel's
-        // 2.5ms. The values are the same ones; only the number of passes
-        // changes.
-        gelu(input, true)
+        // The two are different functions, about five parts in ten thousand
+        // apart, and which one a layer computes is a choice rather than an
+        // accident: the approximation is half again as quick, which is the
+        // reason it exists. What the layer had no way of doing was the other
+        // one, so a model that wanted `mt.gelu`'s values could not be built
+        // out of layers at all. `approximate="none"` is that way.
+        //
+        // Either way it is one pass. This used to be built out of nine separate
+        // tensor operations -- three of them broadcasting a cached scalar --
+        // which meant nine passes over the input and nine full-size allocations
+        // to compute one elementwise function. On a 4M-element tensor that was
+        // 39ms against the kernel's 2.5ms.
+        gelu(input, self.approximate)
     }
 
     fn parameters(&self) -> Vec<&Tensor> {
@@ -495,31 +519,65 @@ mod tests {
         assert_eq!(out_slice, &[-0.2, 0.0, 2.0]);
     }
 
+    /// The layer takes the tanh approximation and the free function takes the
+    /// error function, which is a choice rather than an accident -- the
+    /// approximation is half again as quick. What is new is that the layer can
+    /// be asked for the other one, so a model wanting `mt.gelu`'s values can be
+    /// built out of layers.
     #[test]
     fn test_gelu_forward_values() {
-        let mut gelu = GELU::new();
-        let data = TensorData::from_vec_f32(vec![-1.0, 0.0, 1.0], Device::cpu());
-        let input = Tensor::new(
-            Arc::new(data),
-            Shape::new(vec![3]),
-            DataType::Float32,
-            Device::cpu(),
-            false,
-        );
-        let output = gelu.forward(&input).unwrap();
-        let out_slice = output.data().as_f32_slice().unwrap();
-        let expected: Vec<f32> = [-1.0f32, 0.0, 1.0]
+        let points = [-3.0f32, -1.0, 0.0, 0.5, 1.0, 3.0];
+        let make = || {
+            Tensor::new(
+                Arc::new(TensorData::from_vec_f32(points.to_vec(), Device::cpu())),
+                Shape::new(vec![points.len()]),
+                DataType::Float32,
+                Device::cpu(),
+                false,
+            )
+        };
+
+        let exact: Vec<f32> = points
             .iter()
             .map(|&x| {
-                let x3 = x * x * x;
-                let inner = x + 0.044_715 * x3;
-                let inner = (2.0 / std::f32::consts::PI).sqrt() * inner;
-                0.5 * x * (1.0 + inner.tanh())
+                let phi = 0.5 * (1.0 + libm::erf(x as f64 / std::f64::consts::SQRT_2));
+                (x as f64 * phi) as f32
             })
             .collect();
-        for (o, e) in out_slice.iter().zip(expected.iter()) {
-            assert!((o - e).abs() < 1e-4);
+        let approximated: Vec<f32> = points
+            .iter()
+            .map(|&x| {
+                let inner = (2.0f64 / std::f64::consts::PI).sqrt()
+                    * (x as f64 + 0.044_715 * (x as f64).powi(3));
+                (0.5 * x as f64 * (1.0 + inner.tanh())) as f32
+            })
+            .collect();
+
+        let mut gelu = GELU::new();
+        let output = gelu.forward(&make()).unwrap();
+        for (o, e) in output
+            .data()
+            .as_f32_slice()
+            .unwrap()
+            .iter()
+            .zip(&approximated)
+        {
+            assert!((o - e).abs() < 1e-6, "default gelu gave {o}, expected {e}");
         }
+
+        let mut precise = GELU::approximate(false);
+        let output = precise.forward(&make()).unwrap();
+        for (o, e) in output.data().as_f32_slice().unwrap().iter().zip(&exact) {
+            assert!((o - e).abs() < 1e-6, "exact gelu gave {o}, expected {e}");
+        }
+
+        // And they are different functions, so a test that could not tell them
+        // apart would not be testing which one ran.
+        let apart = exact
+            .iter()
+            .zip(&approximated)
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(apart > 1e-4, "the two forms differ by only {apart}");
     }
 
     #[test]

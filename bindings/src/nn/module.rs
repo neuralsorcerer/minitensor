@@ -1192,7 +1192,13 @@ impl PyModule {
                 format!("LeakyReLU(negative_slope={})", layer.negative_slope())
             }
             ModuleType::Elu(layer) => format!("ELU(alpha={})", layer.alpha()),
-            ModuleType::Gelu(_) => "GELU()".to_string(),
+            ModuleType::Gelu(layer) => {
+                if layer.is_approximate() {
+                    "GELU()".to_string()
+                } else {
+                    "GELU(approximate=\"none\")".to_string()
+                }
+            }
             ModuleType::Sequential(_) => "Sequential(...)".to_string(),
             ModuleType::Conv2d(layer) => format!(
                 "Conv2d(in_channels={}, out_channels={}, kernel_size={:?})",

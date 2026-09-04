@@ -10,7 +10,13 @@ The layer computes the tanh approximation,
 `0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3)))`, which is *not* what the
 functional `mt.gelu` computes -- that one is the exact `0.5x(1 + erf(x/sqrt2))`.
 They differ by about 5e-4, which is the point of the approximation, so the two
-cannot be swapped for one another.
+cannot be swapped for one another. The approximation is what the layer is for:
+measured on four million elements it is 2.3ms against the error function's 3.4,
+and 16ms against 25 in double precision.
+
+`approximate="none"` asks the layer for the other one anyway, which is the only
+way to build a model out of layers and still get `mt.gelu`'s values. It is
+additive -- `nn.GELU()` means what it has always meant.
 
 The layer used to build its approximation out of nine separate tensor
 operations, three of them broadcasting a cached scalar: nine passes over the
@@ -52,6 +58,56 @@ def test_gelu_layer_computes_the_tanh_approximation(dtype, tol):
     np.testing.assert_allclose(
         got, _tanh_gelu(values.astype(np.float64)), atol=tol, rtol=0
     )
+
+
+@pytest.mark.parametrize("dtype,tol", [("float32", 2e-6), ("float64", 1e-12)])
+def test_the_layer_can_be_asked_for_the_exact_form(dtype, tol):
+    """The approximation is the default and the error function is reachable.
+
+    Without this there was no way to build a model out of layers whose GELU
+    matched `mt.gelu`: the layer computed one function and the free call
+    computed the other, and only the free call took an argument.
+    """
+    rng = np.random.default_rng(12)
+    values = (rng.standard_normal(2000) * 3.0).astype(dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    exact = nn.GELU(approximate="none")(tensor).numpy()
+    np.testing.assert_allclose(
+        exact, _exact_gelu(values.astype(np.float64)), atol=tol, rtol=0
+    )
+    # Not merely close to the free function -- the same call underneath.
+    np.testing.assert_array_equal(exact, mt.gelu(tensor, approximate="none").numpy())
+
+    # And naming the default explicitly is the default.
+    np.testing.assert_array_equal(
+        nn.GELU(approximate="tanh")(tensor).numpy(), nn.GELU()(tensor).numpy()
+    )
+
+
+def test_the_layer_says_which_form_it_is():
+    assert repr(nn.GELU()) == "GELU()"
+    assert repr(nn.GELU(approximate="tanh")) == "GELU()"
+    assert repr(nn.GELU(approximate="none")) == 'GELU(approximate="none")'
+
+
+def test_an_unknown_approximation_names_the_ones_that_work():
+    with pytest.raises(ValueError, match='"none" or "tanh"'):
+        nn.GELU(approximate="erf")
+
+
+def test_the_exact_form_carries_its_own_gradient():
+    # Two forms, two derivatives; taking the approximation's would be a quiet
+    # 5e-4 error in every backward pass.
+    values = np.linspace(-3.0, 3.0, 25)
+    tensor = mt.Tensor(
+        np.ascontiguousarray(values), dtype="float64", requires_grad=True
+    )
+    nn.GELU(approximate="none")(tensor).sum().backward()
+
+    step = 1e-6
+    expected = (_exact_gelu(values + step) - _exact_gelu(values - step)) / (2 * step)
+    np.testing.assert_allclose(tensor.grad.numpy(), expected, atol=1e-8)
 
 
 def test_the_layer_and_the_functional_form_are_different_functions():

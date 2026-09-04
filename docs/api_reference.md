@@ -2378,7 +2378,10 @@ hidden = hidden + attn(norm(hidden))  # pre-norm residual block
 - `LeakyReLU`
 - `Sigmoid`
 - `Tanh`
-- `GELU`
+- `GELU(approximate="tanh")` — the tanh approximation by default, which is what
+  the layer is for: half again as quick as the error function. The free `gelu`
+  defaults the other way, and the two differ by about `5e-4`, so a model that
+  wants those values builds its layers with `approximate="none"`.
 - `ELU`
 - `Softmax`
 
