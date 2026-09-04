@@ -436,11 +436,26 @@ enum GemmSplit {
     Cols(usize),
 }
 
-/// Below this many multiply-accumulates a split costs more than it saves:
-/// rayon's fork/join measures about 9 us here, against a serial GEMM that is
-/// still around 15 us at this size.
+/// Below this many multiply-accumulates a split costs more than it saves.
+///
+/// Rayon's fork/join is about 9 us, and that is not what this number is set by
+/// -- it is set by cache. A product this size fits where the serial kernel is
+/// already running at its peak, and dividing it hands each thread a band whose
+/// packed operands no longer amortise over enough output. Measured across
+/// square products from 96 to 1024 and skewed ones from `(64, 64, 4096)` to
+/// `(2048, 128, 16)`, splitting at a million was *slower than not splitting* on
+/// seven of them and as much as four times slower on `(112, 112, 112)`; every
+/// product above these thresholds gained, from `1.4x` to `3.6x`.
+///
+/// The two numbers are one number. The serial kernel runs at about 32 G
+/// multiply-accumulates a second in single precision and half that in double,
+/// so both of these are the same 0.4 ms of serial work -- which is what the
+/// threshold is really about, and why the double-precision one is not the same
+/// count.
 #[cfg(not(feature = "blas"))]
-const GEMM_MIN_MACS_TO_SPLIT: usize = 1 << 20;
+const GEMM_MIN_MACS_F32: usize = 12 << 20;
+#[cfg(not(feature = "blas"))]
+const GEMM_MIN_MACS_F64: usize = 6 << 20;
 
 /// A task thinner than this stops giving the kernel enough to work on.
 #[cfg(not(feature = "blas"))]
@@ -454,9 +469,9 @@ const GEMM_MIN_SLICE: usize = 32;
 /// every output element still accumulates over the whole of `k` in the same
 /// order, and no task touches an element another task writes.
 #[cfg(not(feature = "blas"))]
-fn plan_gemm(m: usize, k: usize, n: usize) -> GemmSplit {
+fn plan_gemm(m: usize, k: usize, n: usize, min_macs: usize) -> GemmSplit {
     let threads = rayon::current_num_threads();
-    if threads < 2 || m.saturating_mul(k).saturating_mul(n) < GEMM_MIN_MACS_TO_SPLIT {
+    if threads < 2 || m.saturating_mul(k).saturating_mul(n) < min_macs {
         return GemmSplit::Whole;
     }
 
@@ -485,7 +500,7 @@ fn plan_gemm(m: usize, k: usize, n: usize) -> GemmSplit {
 /// address a band of the original matrices without copying anything.
 #[cfg(not(feature = "blas"))]
 macro_rules! split_gemm {
-    ($name:ident, $serial:ident, $nt:ident, $tn:ident, $ty:ty, $kernel:path) => {
+    ($name:ident, $serial:ident, $nt:ident, $tn:ident, $ty:ty, $kernel:path, $min_macs:expr) => {
         /// `c = a * b` with explicit operand strides, on the calling thread.
         ///
         /// Row/column strides are given per operand so that an operand already
@@ -555,7 +570,7 @@ macro_rules! split_gemm {
             csb: usize,
             c: *mut $ty,
         ) {
-            match plan_gemm(m, k, n) {
+            match plan_gemm(m, k, n, $min_macs) {
                 GemmSplit::Whole => unsafe { $serial(m, k, n, a, rsa, csa, b, rsb, csb, c, n) },
                 GemmSplit::Cols(tasks) => {
                     let width = n.div_ceil(tasks);
@@ -664,7 +679,8 @@ split_gemm!(
     gemm_nt_f32,
     gemm_tn_f32,
     f32,
-    matrixmultiply::sgemm
+    matrixmultiply::sgemm,
+    GEMM_MIN_MACS_F32
 );
 #[cfg(not(feature = "blas"))]
 split_gemm!(
@@ -673,7 +689,8 @@ split_gemm!(
     gemm_nt_f64,
     gemm_tn_f64,
     f64,
-    matrixmultiply::dgemm
+    matrixmultiply::dgemm,
+    GEMM_MIN_MACS_F64
 );
 
 /// `c = a * b`, everything row-major and contiguous. The common case.
@@ -1489,8 +1506,14 @@ mod split_gemm_tests {
             (1, 1, 1),
             (8, 32, 32),
             (16, 128, 128),
+            // Large enough to be worth dividing by the old count of a million
+            // multiply-accumulates and not by the real one: a product this
+            // size still fits where the serial kernel runs at its peak, and
+            // splitting it measured half as fast as leaving it alone.
+            (192, 192, 192),
+            (256, 64, 256),
             // Column split (n >= m).
-            (16, 256, 1024),
+            (16, 1024, 1024),
             (64, 1024, 1024),
             (1, 4096, 4096),
             // Row split (m > n).
@@ -1510,7 +1533,7 @@ mod split_gemm_tests {
         let mut rows = 0;
         let mut cols = 0;
         for (m, k, n) in cases() {
-            match plan_gemm(m, k, n) {
+            match plan_gemm(m, k, n, GEMM_MIN_MACS_F32) {
                 GemmSplit::Whole => whole += 1,
                 GemmSplit::Rows(tasks) => {
                     assert!(tasks >= 2, "a split into {tasks} task(s) is not a split");
@@ -1526,7 +1549,7 @@ mod split_gemm_tests {
         // splitting anything. Single-threaded machines legitimately take the
         // whole-product branch for everything, so only demand coverage where
         // there is a pool to spread across.
-        assert!(whole >= 3, "expected the small shapes to stay whole");
+        assert!(whole >= 5, "expected the small shapes to stay whole");
         if rayon::current_num_threads() >= 2 {
             assert!(rows >= 3, "expected the tall shapes to split by row");
             assert!(cols >= 3, "expected the wide shapes to split by column");
