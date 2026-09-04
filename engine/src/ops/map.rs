@@ -300,6 +300,37 @@ pub(crate) fn outputs_per_task(width: usize) -> usize {
     (TARGET / width.max(1)).max(1)
 }
 
+/// The narrowest band of columns worth handing one task.
+///
+/// A band this thin stops giving the reduction enough contiguous work to be
+/// worth the split.
+pub(crate) const REDUCTION_MIN_BAND: usize = 64;
+
+/// How wide to cut the output of a reduction whose result is `outer` by
+/// `inner`.
+///
+/// One piece per outer position is the natural decomposition, and it is the
+/// wrong one when there is a single outer position: a reduction along the first
+/// axis has exactly one however large the tensor is, so the whole thing lands
+/// on one core with the rest of the pool watching. The columns of that one
+/// position are *contiguous in the output* even though they are a stride apart
+/// in the input, so they cut apart cleanly, and this says how wide to cut them.
+///
+/// Only when there is one. A band narrower than `inner` cuts the output every
+/// `band` elements from the start, so unless it divides `inner` exactly a chunk
+/// eventually spans the end of one outer position and the start of the next --
+/// and a caller reading `start / inner` and `start % inner` off that chunk gets
+/// the first element's position and then walks past the end of its block. With
+/// several outer positions there is already work to share out, so the case that
+/// would need the alignment is the case that does not need the band.
+pub(crate) fn reduction_band(outer: usize, inner: usize) -> usize {
+    if outer != 1 || inner == 0 {
+        return inner;
+    }
+    let threads = rayon::current_num_threads().max(1);
+    inner.div_ceil(threads).max(REDUCTION_MIN_BAND).min(inner)
+}
+
 /// The type-erased body of an output-partitioned parallel loop: the index of
 /// the chunk's first output element, and the chunk itself.
 type OutWork<'a, T> = &'a (dyn Fn(usize, &mut [T]) + Sync);

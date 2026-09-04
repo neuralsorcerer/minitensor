@@ -7,6 +7,7 @@
 use super::*;
 use crate::ops::map::{
     PAR_CHUNK, outputs_per_task, par_fold_chunks, par_map_indexed, par_out_chunks, par_out_chunks2,
+    reduction_band,
 };
 use crate::ops::util::check_dim;
 use crate::{
@@ -65,10 +66,6 @@ pub(crate) fn reduction_layout(
 /// 1024 and 32768 favour blocking by 3.5x and 1.6x.
 const BLOCKED_INNER_MIN: usize = 256;
 
-/// Floor on a column band, so a narrow slab is not split into slivers whose
-/// per-task overhead exceeds the work.
-const BLOCKED_MIN_BAND: usize = 64;
-
 /// Reduce `input` along a dimension into `output`, parallelizing over output
 /// elements (one rayon task per output position, each walking its column of the
 /// reduced dimension with a running offset). `combine` folds the accumulator
@@ -106,35 +103,21 @@ fn reduce_along_dim_par<T, C, S>(
         } else {
             input.len() / outer_stride.max(1)
         };
-        if outer > 1 {
-            par_out_chunks(output, inner, &|start, row| {
-                let base = (start / inner) * outer_stride;
-                row.fill(init);
-                for step in 0..dim_size {
-                    let slab = &input[base + step * inner..][..inner];
-                    for (acc, &value) in row.iter_mut().zip(slab) {
-                        *acc = combine(*acc, value);
-                    }
+        // One outer position's columns, or a band of them when there are not
+        // enough outer positions to fill the pool. The two used to be written
+        // separately; they are the same loop, and `start % inner` is the only
+        // thing the band case adds -- zero whenever the band is the full width.
+        par_out_chunks(output, reduction_band(outer, inner), &|start, cols| {
+            let base = (start / inner) * outer_stride + start % inner;
+            let width = cols.len();
+            cols.fill(init);
+            for step in 0..dim_size {
+                let slab = &input[base + step * inner..][..width];
+                for (acc, &value) in cols.iter_mut().zip(slab) {
+                    *acc = combine(*acc, value);
                 }
-            });
-        } else {
-            // A single slab has no outer parallelism, so split the accumulator
-            // range into column bands instead; each band still streams its own
-            // columns in order.
-            let band = inner
-                .div_ceil(rayon::current_num_threads().max(1))
-                .max(BLOCKED_MIN_BAND);
-            par_out_chunks(output, band, &|start, cols| {
-                let width = cols.len();
-                cols.fill(init);
-                for step in 0..dim_size {
-                    let slab = &input[step * inner + start..][..width];
-                    for (acc, &value) in cols.iter_mut().zip(slab) {
-                        *acc = combine(*acc, value);
-                    }
-                }
-            });
-        }
+            }
+        });
         return;
     }
 
@@ -192,13 +175,7 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
         } else {
             input.len() / outer_stride.max(1)
         };
-        let band = if outer > 1 {
-            inner
-        } else {
-            inner
-                .div_ceil(rayon::current_num_threads().max(1))
-                .max(BLOCKED_MIN_BAND)
-        };
+        let band = reduction_band(outer, inner);
         par_out_chunks2(values, indices, band, &|flat, vals, idxs| {
             let o = flat / inner;
             let start = flat % inner;

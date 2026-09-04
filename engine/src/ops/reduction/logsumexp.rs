@@ -9,7 +9,7 @@ use crate::autograd::CumprodBackward;
 use crate::autograd::CumsumBackward;
 use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::{par_out_chunks, reduction_band};
 use crate::ops::util::check_dim;
 use crate::ops::util::{accumulating_dtype, accurate_slab_sum};
 use crate::ops::{activation, arithmetic, shape_ops};
@@ -152,13 +152,18 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                 .$accessor_mut()
                 .ok_or_else(|| MinitensorError::internal_error("Failed to get mutable slice"))?;
             if inner != 0 {
-                par_out_chunks(out, inner, &|start, out_chunk| {
-                    let block_base = (start / inner) * outer_stride;
+                // A band of columns rather than all of one outer position's:
+                // reducing the first axis has one outer position, so cutting
+                // only there leaves the pool idle. See `reduction_band`.
+                let band = reduction_band(outer, inner);
+                par_out_chunks(out, band, &|start, out_chunk| {
+                    let block_base = (start / inner) * outer_stride + start % inner;
+                    let width = out_chunk.len();
                     // Column max with NaN propagation (matches max_along_dim).
-                    let mut col_max = vec![<$ty>::NEG_INFINITY; inner];
+                    let mut col_max = vec![<$ty>::NEG_INFINITY; width];
                     for k in 0..dim_size {
                         let base = block_base + k * inner;
-                        let slab = &input[base..base + inner];
+                        let slab = &input[base..base + width];
                         for (m, &v) in col_max.iter_mut().zip(slab) {
                             if v.is_nan() {
                                 *m = v;
@@ -175,9 +180,9 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                     // was being trained through, and the untrained answer was
                     // the worse one by three orders of magnitude.
                     let col_sum =
-                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
                             let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
+                            let slab = &input[base..base + width];
                             for ((s, &v), &m) in acc.iter_mut().zip(slab).zip(col_max.iter()) {
                                 if m.is_finite() {
                                     *s += (v - m).exp();
