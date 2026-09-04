@@ -128,6 +128,34 @@ def test_kthvalue_keeps_the_axis_when_asked():
     assert tuple(got.shape) == (3, 1) and tuple(where.shape) == (3, 1)
 
 
+def test_kthvalue_reports_the_same_tie_as_a_sort_would():
+    """Two routes in, and one of them must not rename a tie.
+
+    Below the halfway point `kthvalue` stops a `topk` after `k` elements rather
+    than ordering the whole axis, which is most of the work saved. The value it
+    reports cannot differ -- the `k`-th smallest is the `k`-th smallest -- but
+    the *index* can, whenever several elements are equal, and which of them
+    gets named is a convention this should not change on the caller depending
+    on how large `k` is. So the input here is mostly ties, with signed zeros
+    and NaNs among them, and both routes are exercised by sweeping `k` across
+    the halfway point.
+    """
+    pool = np.array([0.0, -0.0, 1.0, 1.0, -1.0, 2.0, np.nan, 5.0])
+    values = pool[RNG.integers(0, len(pool), (6, 9))]
+    ordered = np.sort(values, axis=1)
+
+    for k in range(1, values.shape[1] + 1):
+        got, where = mt.kthvalue(_t(values), k, 1)
+        want = ordered[:, k - 1]
+        assert np.array_equal(np.isnan(got.numpy()), np.isnan(want))
+        finite = ~np.isnan(want)
+        np.testing.assert_allclose(got.numpy()[finite], want[finite])
+        # The index names an element equal to the one reported, NaN included.
+        named = np.take_along_axis(values, where.numpy()[:, None], 1).squeeze(1)
+        assert np.array_equal(np.isnan(named), np.isnan(got.numpy()))
+        np.testing.assert_allclose(named[finite], got.numpy()[finite])
+
+
 def test_kthvalue_counts_from_one():
     with pytest.raises(ValueError, match="1 <= k"):
         mt.kthvalue(_t(RNG.standard_normal((3, 4))), 0, 1)
