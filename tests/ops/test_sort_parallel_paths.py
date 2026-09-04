@@ -4,23 +4,32 @@
 # This source code is licensed under the Apache-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sorting picks one of two parallel strategies, and both must agree.
+"""Sorting picks one of three parallel strategies, and all three must agree.
 
 `sort` split its work by outer position, one rayon task per slice. A 1-D tensor
 has exactly one slice, so sorting one ran entirely on a single core. The same
 2M elements cost 134 ns each arranged as one slice and 16 ns each as 2048 --
 an 8.3x spread on four cores that was pure scheduling.
 
-A large slice is now sorted in parallel *within* itself instead. Which path
-runs depends on the slice count against the thread pool and on the slice
-length, so the tests below deliberately straddle both: shapes with one, few and
-many slices, and lengths either side of the 16384-element threshold. Every case
-is checked against NumPy, so the two strategies cannot drift apart.
+A large slice is now sorted in parallel *within* itself instead. And a tensor
+sorted along an axis that is not its last has its slices interleaved a stride
+apart, where no cut of a contiguous buffer separates them: sorting along the
+first axis has one outer position however large the tensor is, so `sort(x, 0)`
+was serial for the same reason a 1-D sort was. That case sorts into a scratch
+ordered slice-by-slice, which does cut apart, and lays the result back down the
+axis afterwards -- 400ms to 124ms on a 2048-by-2048 sorted down its columns.
 
-Stability is checked on the large-slice path specifically. `par_sort_by` is a
-different algorithm from `sort_by`, and a caller who asks for a stable sort and
-silently gets an unstable one has no way to notice until their ties come back
-reordered.
+Which path runs depends on the slice count against the thread pool, on the
+slice length, and on whether the axis is the last one, so the tests below
+deliberately straddle all three: shapes with one, few and many slices, lengths
+either side of the 16384-element threshold, and every axis of a tensor with
+more than two. Every case is checked against NumPy, so the strategies cannot
+drift apart.
+
+Stability is checked on each path specifically. `par_sort_by` is a different
+algorithm from `sort_by`, and the transposed path reaches its comparator
+through a different gather, so a caller who asks for a stable sort and silently
+gets an unstable one has no way to notice until their ties come back reordered.
 """
 
 from __future__ import annotations
@@ -46,6 +55,14 @@ LAYOUTS = [
     ((2, 3, 9000), -1),
     ((100, 100), 0),
     ((100, 100), 1),
+    # Not the last axis, and large enough to take the slice-major scratch:
+    # one outer position, many interleaved slices.
+    ((4000, 5), 0),
+    ((5, 4000, 3), 1),
+    ((300, 300), 0),
+    # Not the last axis, but too small for it -- the across-slice split still.
+    ((30, 30), 0),
+    ((6, 7, 8), 1),
 ]
 
 
@@ -103,6 +120,27 @@ def test_a_stable_sort_stays_stable_on_both_paths(length):
     np.testing.assert_array_equal(values.numpy(), np.sort(keys, kind="stable"))
     np.testing.assert_array_equal(
         indices.numpy().astype(np.int64), np.argsort(keys, kind="stable")
+    )
+
+
+@pytest.mark.parametrize(
+    "shape,dim", [((4000, 5), 0), ((5, 4000, 3), 1), ((300, 300), 0)]
+)
+def test_a_stable_sort_stays_stable_along_a_strided_axis(shape, dim):
+    """The path that rewrites the axis as the last one reaches its comparator
+    through a different gather, and lays its answer back down through a
+    different scatter. Ties are where a reordering would show, so this input is
+    almost entirely ties."""
+    size = int(np.prod(shape))
+    keys = (np.arange(size) % 4).astype(np.float32).reshape(shape)
+
+    values, indices = mt.Tensor(np.ascontiguousarray(keys)).sort(dim, stable=True)
+
+    np.testing.assert_array_equal(
+        values.numpy(), np.sort(keys, axis=dim, kind="stable")
+    )
+    np.testing.assert_array_equal(
+        indices.numpy().astype(np.int64), np.argsort(keys, axis=dim, kind="stable")
     )
 
 
