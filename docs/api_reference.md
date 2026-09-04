@@ -2350,7 +2350,11 @@ entirely.
 keeps a fixed zero embedding and receives no gradient.
 
 `MultiheadAttention` takes batch-first `(batch, seq, embed_dim)` input, where
-`embed_dim` must be divisible by `num_heads`. Calling the layer performs
+`embed_dim` must be divisible by `num_heads`. That is the other way round from
+`LSTM` and `GRU`, which are `(seq, batch, input_size)` unless constructed with
+`batch_first`. Feeding this one a sequence-first tensor is not an error -- the
+shapes fit, the output comes back the right size, and it is attention over the
+wrong axis -- so a stack that mixes the two needs a transpose between them. Calling the layer performs
 self-attention; `is_causal=True` makes it autoregressive. For cross-attention
 use:
 

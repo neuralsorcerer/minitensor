@@ -1421,6 +1421,12 @@ recurrent_class!(
 
 /// Scaled dot-product attention over `num_heads` heads.
 ///
+/// Sequences are `(batch, seq, embed_dim)` -- batch first, and the other way
+/// round from `LSTM` and `GRU`, which are `(seq, batch, input_size)` unless
+/// told otherwise. Handing this one a sequence-first tensor is not an error:
+/// the shapes fit, the answer comes back the right size, and it is attention
+/// over the wrong axis. Worth reading twice when stacking the two.
+///
 /// Called with one tensor it is self-attention; called with separate query,
 /// key and value sequences it is cross-attention. `embed_dim` must divide
 /// evenly by `num_heads`.
