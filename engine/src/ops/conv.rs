@@ -942,6 +942,13 @@ pub(crate) fn channel_sums<T: ConvScalar>(
     sums
 }
 
+/// Scratch the lowering may hold at once, in bytes.
+///
+/// Large enough that the GEMM sees a few thousand columns, which is where it
+/// runs fastest; small enough that the lowered block is still in cache when the
+/// GEMM reads it back.
+const COL_BLOCK_BYTES: usize = 8 << 20;
+
 /// im2col + GEMM forward pass, for one element type.
 ///
 /// Lower each output position's receptive field into a column of `cols`
@@ -987,7 +994,6 @@ fn conv2d_forward<T: ConvScalar>(
 
     let ohw = output_height * output_width;
     let k_dim = in_channels * kernel_h * kernel_w;
-    let n_cols = batch_size * ohw;
     let kh_kw = kernel_h * kernel_w;
     // Per-group shapes. The lowered `cols` still covers every input channel,
     // and a group's rows within it are contiguous because `k` runs
@@ -1000,47 +1006,71 @@ fn conv2d_forward<T: ConvScalar>(
     let mut output_vec = vec![T::default(); batch_size * out_channels * ohw];
 
     if !output_vec.is_empty() {
-        // Build cols row by row (one row per kernel-input index `k`), so each
-        // row is written contiguously.
-        //
-        // The output position is walked with nested loops rather than recovered
-        // from a flat counter. Decomposing the counter needed four integer
-        // divisions per element -- by `ohw` and `output_width`, both runtime
-        // values, so they stay real divisions -- across 4.7M elements for a
-        // 16x32x32x32 conv. Walking `n`, `oh`, `ow` costs none.
-        //
-        // The in-bounds range of output positions is also computed once per
-        // row instead of testing each element: padding only ever clips a prefix
-        // and a suffix, and `cols` starts zeroed, so the pad needs no writing at
-        // all. What is left is a contiguous copy per row when the horizontal
-        // stride is 1, which is the overwhelmingly common case.
-        let mut cols = vec![T::default(); k_dim * n_cols];
-        par_out_chunks(&mut cols, n_cols, &|start, row| {
-            let k = start / n_cols;
-            let ic = k / kh_kw;
-            let rem = k % kh_kw;
-            let ky = rem / kernel_w;
-            let kx = rem % kernel_w;
-            // The tap's offset into the input is `ky * dilation`, so the
-            // in-bounds range is the undilated one evaluated at that offset --
-            // `in_bounds_range` never needed to know about dilation.
-            let ky_off = ky * dilation.0;
-            let kx_off = kx * dilation.1;
-            let (oh_lo, oh_hi) =
-                in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
-            let (ow_lo, ow_hi) =
-                in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
-            if oh_lo >= oh_hi || ow_lo >= ow_hi {
-                return;
-            }
-            let span = ow_hi - ow_lo;
-            for n in 0..batch_size {
-                let dst_n = n * ohw;
-                let plane = (n * in_channels + ic) * input_height;
-                for oh in oh_lo..oh_hi {
+        // Lowering the whole image set at once means `k_dim * n_cols` elements
+        // of scratch -- 944MB for a 32x3x224x224 stem -- written once and read
+        // straight back out of main memory by the GEMM. A block of output rows
+        // is lowered, multiplied and scattered while it is still in cache
+        // instead, which bounds the scratch whatever the image is and lands the
+        // GEMM near the column count it runs fastest at (below about a thousand
+        // columns its efficiency falls off a cliff; above about eight thousand
+        // it starts paying for memory again).
+        let per_row = (k_dim * output_width).max(1);
+        let rows_total = batch_size * output_height;
+        let rows_per_block = (COL_BLOCK_BYTES / (per_row * std::mem::size_of::<T>()).max(1))
+            .clamp(1, rows_total.max(1));
+        let block_n = rows_per_block * output_width;
+
+        let mut cols = vec![T::default(); k_dim * block_n];
+        let mut gemm_out = vec![T::default(); out_channels * block_n];
+
+        let mut first_row = 0;
+        while first_row < rows_total {
+            let last_row = (first_row + rows_per_block).min(rows_total);
+            let rows = last_row - first_row;
+            let width = rows * output_width;
+
+            // Build the block row by row (one row per kernel-input index `k`),
+            // so each row is written contiguously.
+            //
+            // The output position is walked rather than recovered from a flat
+            // counter: decomposing the counter needed four integer divisions
+            // per element -- by `ohw` and `output_width`, both runtime values,
+            // so they stay real divisions -- across 4.7M elements for a
+            // 16x32x32x32 conv.
+            //
+            // The in-bounds range of output positions is computed once per row
+            // instead of testing each element: padding only ever clips a prefix
+            // and a suffix. The buffer is reused between blocks, so those have
+            // to be cleared rather than merely left alone.
+            par_out_chunks(&mut cols[..k_dim * width], width, &|start, row| {
+                row.fill(T::default());
+                let k = start / width;
+                let ic = k / kh_kw;
+                let rem = k % kh_kw;
+                let ky = rem / kernel_w;
+                let kx = rem % kernel_w;
+                // The tap's offset into the input is `ky * dilation`, so the
+                // in-bounds range is the undilated one evaluated at that offset
+                // -- `in_bounds_range` never needed to know about dilation.
+                let ky_off = ky * dilation.0;
+                let kx_off = kx * dilation.1;
+                let (oh_lo, oh_hi) =
+                    in_bounds_range(ky_off, padding.0, input_height, stride.0, output_height);
+                let (ow_lo, ow_hi) =
+                    in_bounds_range(kx_off, padding.1, input_width, stride.1, output_width);
+                if oh_lo >= oh_hi || ow_lo >= ow_hi {
+                    return;
+                }
+                let span = ow_hi - ow_lo;
+                for position in first_row..last_row {
+                    let n = position / output_height;
+                    let oh = position % output_height;
+                    if oh < oh_lo || oh >= oh_hi {
+                        continue;
+                    }
                     let ih = oh * stride.0 + ky_off - padding.0;
-                    let src = (plane + ih) * input_width;
-                    let dst = dst_n + oh * output_width + ow_lo;
+                    let src = ((n * in_channels + ic) * input_height + ih) * input_width;
+                    let dst = (position - first_row) * output_width + ow_lo;
                     // Dilation moves where the run starts, not how it is
                     // spaced: consecutive output columns are still consecutive
                     // input columns when the stride is 1, so the contiguous
@@ -1055,44 +1085,58 @@ fn conv2d_forward<T: ConvScalar>(
                         }
                     }
                 }
-            }
-        });
+            });
 
-        let mut gemm_out = vec![T::default(); out_channels * n_cols];
-        for g in 0..groups {
-            // SAFETY: within group `g`, `weight_data` offset by
-            // `g * group_out * group_k` is [group_out, group_k], `cols` offset
-            // by `g * group_k * n_cols` is [group_k, n_cols], and `gemm_out`
-            // offset by `g * group_out * n_cols` is [group_out, n_cols]. All
-            // three are row-blocks of contiguous row-major buffers whose
-            // lengths are exactly `groups` times these, so no block runs past
-            // its allocation and no two groups overlap.
-            unsafe {
-                T::gemm(
-                    group_out,
-                    group_k,
-                    n_cols,
-                    weight_data.as_ptr().add(g * group_out * group_k),
-                    cols.as_ptr().add(g * group_k * n_cols),
-                    gemm_out.as_mut_ptr().add(g * group_out * n_cols),
-                );
-            }
-        }
-
-        // Scatter [C_out, N*ohw] into [N, C_out, ohw], adding bias. For a given
-        // (n, oc) the source and destination are contiguous `ohw` slabs.
-        par_out_chunks(&mut output_vec, ohw, &|start, out_chunk| {
-            let chunk_idx = start / ohw;
-            let n = chunk_idx / out_channels;
-            let oc = chunk_idx % out_channels;
-            let base = oc * n_cols + n * ohw;
-            for (o, &v) in out_chunk.iter_mut().zip(&gemm_out[base..base + ohw]) {
-                *o = v;
-                if let Some(bd) = bias_data {
-                    *o += bd[oc];
+            for g in 0..groups {
+                // SAFETY: within group `g`, `weight_data` offset by
+                // `g * group_out * group_k` is [group_out, group_k], `cols`
+                // offset by `g * group_k * width` is [group_k, width], and
+                // `gemm_out` offset by `g * group_out * width` is
+                // [group_out, width]. All three are row-blocks of contiguous
+                // row-major buffers whose lengths are exactly `groups` times
+                // these, so no block runs past its allocation and no two groups
+                // overlap.
+                unsafe {
+                    T::gemm(
+                        group_out,
+                        group_k,
+                        width,
+                        weight_data.as_ptr().add(g * group_out * group_k),
+                        cols.as_ptr().add(g * group_k * width),
+                        gemm_out.as_mut_ptr().add(g * group_out * width),
+                    );
                 }
             }
-        });
+
+            // Scatter [C_out, width] into [N, C_out, oh, ow], adding bias. A
+            // block is a run of output rows, so within one image each channel
+            // takes a contiguous run of its plane; a block that reaches the end
+            // of an image carries on into the next one, which is why this walks
+            // images rather than assuming one.
+            let mut position = first_row;
+            while position < last_row {
+                let n = position / output_height;
+                let from = position % output_height;
+                let to = (last_row - n * output_height).min(output_height);
+                let taken = (to - from) * output_width;
+                let offset = (position - first_row) * output_width;
+                let image = &mut output_vec[n * out_channels * ohw..][..out_channels * ohw];
+                par_out_chunks(image, ohw, &|start, plane| {
+                    let oc = start / ohw;
+                    let source = &gemm_out[oc * width + offset..][..taken];
+                    let target = &mut plane[from * output_width..][..taken];
+                    for (o, &v) in target.iter_mut().zip(source) {
+                        *o = v;
+                        if let Some(bd) = bias_data {
+                            *o += bd[oc];
+                        }
+                    }
+                });
+                position += to - from;
+            }
+
+            first_row = last_row;
+        }
     }
 
     Ok(T::into_tensor_data(output_vec, input.device()))
