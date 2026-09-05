@@ -676,12 +676,28 @@ same tensor sees the write follows the rule every in-place operation here uses:
   ndarrays, or (nested) lists of bools, and selection is differentiable.
 - **Integer lists** — `t[[2, 0, -1]]` (or a 1-D int ndarray/tensor) selects
   rows along dim 0 with negative-index wrapping.
+- **One advanced index anywhere in the subscript** — `t[:, idx]`,
+  `t[1:3, idx]`, `t[..., idx]`, `t[i, 1, idx]` and `t[:, mask]` select along
+  the axis the index is written on, mixed freely with ints, slices, `None`
+  and `...`. The index may be a list, an int ndarray, an int tensor or a 1-D
+  bool mask; positions wrap negatively against *that* axis, and an index array
+  of two dimensions or more puts both of its axes where the one axis was
+  (`t[:, [[0, 2], [1, 1]]]` on a `(2, 3, 4)` tensor gives `(2, 2, 2, 4)`).
+  This is `index_select` along that axis and is differentiable, so a repeated
+  position accumulates its gradient.
+
+  Two advanced indices in one subscript are refused by name. NumPy pairs them
+  up elementwise — `t[[0, 1], [1, 2]]` reads two elements, not a 2×2 block —
+  which is [`gather`](#indexing--reordering); index one axis at a time when the
+  outer product is what was meant.
 
 `__setitem__` additionally supports `t[mask] = value` where `value` is a
 scalar or anything broadcastable to the selection shape
 `[n_true] + trailing`; values are cast to the tensor's dtype and written in
-place. Masks inside mixed index tuples (e.g. `t[0, mask]`) are not
-supported and raise.
+place. Assignment takes masks only as the whole key: an index array or a mask
+inside a tuple (`t[0, mask] = v`, `t[:, idx] = v`) raises. Read the selection,
+write it, and assign it back through a basic subscript, or use
+[`index_copy`](#indexing--reordering)/[`scatter`](#indexing--reordering).
 
 Assignment through a basic subscript broadcasts the same way, matching the
 value against the selection right-aligned: each of the value's dimensions must

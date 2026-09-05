@@ -746,6 +746,112 @@ fn select_rows(reference: &Tensor, vals: &[i64]) -> PyResult<Tensor> {
     engine::ops::shape_ops::index_select(reference, 0, &idx).map_err(_convert_error)
 }
 
+/// An integer index array from one entry of a subscript: its values, flattened,
+/// and the shape they came in.
+///
+/// `None` when the entry is not an integer array -- an `int`, a `slice`, `None`
+/// and `...` all mean something else and are handled by the basic path. A
+/// boolean array is not one either: it is a mask, and masks select a different
+/// number of elements than they contain.
+pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i64>, Vec<usize>)>> {
+    if item.is_instance_of::<pyo3::types::PyBool>() || item.extract::<i64>().is_ok() {
+        return Ok(None);
+    }
+    if let Some(pt) = extract_wrapped_pytensor(item) {
+        let t = pt.tensor();
+        if !matches!(t.dtype(), DataType::Int32 | DataType::Int64) || t.ndim() == 0 {
+            return Ok(None);
+        }
+        let shape = t.shape().dims().to_vec();
+        let t = t.contiguous().map_err(_convert_error)?;
+        let values: Vec<i64> = match t.dtype() {
+            DataType::Int32 => t
+                .data()
+                .as_i32_slice()
+                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
+                .iter()
+                .map(|&v| v as i64)
+                .collect(),
+            _ => t
+                .data()
+                .as_i64_slice()
+                .ok_or_else(|| PyRuntimeError::new_err("failed to read index tensor"))?
+                .to_vec(),
+        };
+        return Ok(Some((values, shape)));
+    }
+    if let Ok(arr) = item.cast::<PyArrayDyn<i64>>() {
+        let ro = arr.readonly();
+        if ro.ndim() == 0 {
+            return Ok(None);
+        }
+        return Ok(Some((ro.as_slice()?.to_vec(), ro.shape().to_vec())));
+    }
+    if let Ok(arr) = item.cast::<PyArrayDyn<i32>>() {
+        let ro = arr.readonly();
+        if ro.ndim() == 0 {
+            return Ok(None);
+        }
+        let values: Vec<i64> = ro.as_slice()?.iter().map(|&v| v as i64).collect();
+        return Ok(Some((values, ro.shape().to_vec())));
+    }
+    if let Ok(list) = item.cast::<PyList>() {
+        // A bool leaf means a mask, and anything that is not an integer is not
+        // a subscript this path can answer for. An empty list indexes nothing,
+        // which is a shape rather than a refusal.
+        match first_list_leaf(item)? {
+            // `[]` indexes nothing. `[[]]` has no leaf either, but it has a
+            // shape, so it goes the same way as any other nested list.
+            None if list.is_empty() => return Ok(Some((Vec::new(), vec![0]))),
+            None => {}
+            Some(leaf) => {
+                if leaf.is_instance_of::<pyo3::types::PyBool>() || leaf.extract::<i64>().is_err() {
+                    return Ok(None);
+                }
+            }
+        }
+        // A flat list is the common case and is read straight off; a nested one
+        // is an index array of two dimensions or more, and the tensor
+        // conversion already knows how to measure it.
+        let mut values = Vec::with_capacity(list.len());
+        for entry in list.iter() {
+            match entry.extract::<i64>() {
+                Ok(v) => values.push(v),
+                Err(_) => {
+                    let nested =
+                        convert_python_data_to_tensor(item, DataType::Int64, Device::cpu(), false)?;
+                    let shape = nested.shape().dims().to_vec();
+                    let values = nested
+                        .data()
+                        .as_i64_slice()
+                        .ok_or_else(|| PyRuntimeError::new_err("failed to read index list"))?
+                        .to_vec();
+                    return Ok(Some((values, shape)));
+                }
+            }
+        }
+        let len = values.len();
+        return Ok(Some((values, vec![len])));
+    }
+    Ok(None)
+}
+
+/// Wrap negative positions and bounds-check against an axis of `dim_size`.
+fn resolve_index_values(values: &[i64], axis: usize, dim_size: usize) -> PyResult<Vec<usize>> {
+    let extent = dim_size as i64;
+    let mut resolved = Vec::with_capacity(values.len());
+    for &v in values {
+        let wrapped = if v < 0 { v + extent } else { v };
+        if wrapped < 0 || wrapped >= extent {
+            return Err(PyIndexError::new_err(format!(
+                "index {v} is out of bounds for dimension {axis} with size {dim_size}"
+            )));
+        }
+        resolved.push(wrapped as usize);
+    }
+    Ok(resolved)
+}
+
 /// Extract a boolean mask tensor from a `__getitem__`/`__setitem__` key when
 /// the key is a bool tensor, a bool ndarray, or a (nested) list of bools.
 pub(crate) fn try_bool_mask_key(key: &Bound<PyAny>) -> PyResult<Option<Tensor>> {
@@ -838,6 +944,177 @@ pub(crate) fn try_fancy_index_tensor(
     }
 
     Ok(None)
+}
+
+/// One axis's worth of advanced index, as it was written.
+///
+/// A mask cannot be resolved where it is read: its length has to be checked
+/// against the axis it lands on, and that axis is only known once the entries
+/// before it have been walked.
+enum AxisIndex {
+    /// Positions, flattened, and the shape they came in.
+    Positions(Vec<i64>, Vec<usize>),
+    /// A 1-D mask, one flag per position along the axis.
+    Mask(Vec<bool>),
+}
+
+/// The advanced index in one entry of a subscript, if it is one. An `int`, a
+/// `slice`, `None` and `...` are all basic and give `None` here.
+fn axis_index(item: &Bound<PyAny>) -> PyResult<Option<AxisIndex>> {
+    if let Some((values, shape)) = integer_index_array(item)? {
+        return Ok(Some(AxisIndex::Positions(values, shape)));
+    }
+    // A 1-D mask picks positions along one axis, so it is the same job as a
+    // list of those positions. Masks of higher rank span several axes at once
+    // and are left to the whole-key path.
+    if let Some(mask) = try_bool_mask_key(item)?
+        && mask.ndim() == 1
+    {
+        let mask = mask.contiguous().map_err(_convert_error)?;
+        let flags = mask
+            .data()
+            .as_bool_slice()
+            .ok_or_else(|| PyRuntimeError::new_err("failed to read index mask"))?
+            .to_vec();
+        return Ok(Some(AxisIndex::Mask(flags)));
+    }
+    Ok(None)
+}
+
+/// A subscript holding one advanced index among otherwise basic entries, as
+/// `x[:, idx]`, `x[1:3, idx]`, `x[..., idx]` or `x[:, mask]`.
+///
+/// The whole-key forms -- a bare mask, or a bare index array standing for the
+/// leading axis -- are handled before this. What is left is the far commoner
+/// shape of the same idea: an index array somewhere other than the front, which
+/// used to be a bare `TypeError: Invalid index type` even though `index_select`
+/// does exactly this and was one call away.
+///
+/// With exactly one index array the answer does not depend on the order the two
+/// kinds are applied in, and the array's axes stay where the array was --
+/// NumPy's rule about advanced indices moving to the front needs two of them,
+/// separated. So this applies the basic subscript with a full slice in the
+/// array's place and selects along the axis that leaves. Two or more index
+/// arrays are still refused, and say what to reach for instead.
+pub(crate) fn try_single_array_index(
+    reference: &Tensor,
+    key: &Bound<PyAny>,
+) -> PyResult<Option<Tensor>> {
+    // A bare key is a subscript of one entry. The 1-D leading case never
+    // reaches here -- `try_fancy_index_tensor` takes it -- so what a bare key
+    // means at this point is an index array of two dimensions or more, which
+    // that path does not handle and this one does.
+    let items: Vec<Bound<PyAny>> = match key.cast::<PyTuple>() {
+        Ok(tuple) => tuple.iter().collect(),
+        Err(_) => vec![key.clone()],
+    };
+
+    let mut found: Option<(usize, AxisIndex)> = None;
+    for (position, item) in items.iter().enumerate() {
+        if let Some(index) = axis_index(item)? {
+            if found.is_some() {
+                return Err(PyIndexError::new_err(
+                    "only one index array is supported in a subscript; index one axis at a \
+                     time, or use `gather` when the arrays are meant to pair up",
+                ));
+            }
+            found = Some((position, index));
+        }
+    }
+    let Some((position, index)) = found else {
+        return Ok(None);
+    };
+
+    let dims = reference.shape().dims();
+    // Where the array sits among the input axes, and where that axis lands in
+    // the output: an integer entry drops its axis, `None` adds one, `...`
+    // stands for every axis the explicit entries do not consume.
+    let explicit = items
+        .iter()
+        .filter(|it| !it.is_none() && !is_ellipsis(it))
+        .count();
+    if explicit > dims.len() {
+        return Err(PyIndexError::new_err(format!(
+            "too many indices for tensor: it has {} dimension(s) but {explicit} were indexed",
+            dims.len()
+        )));
+    }
+    let filled = dims.len() - explicit;
+    let (mut input_axis, mut output_axis) = (0usize, 0usize);
+    for item in &items[..position] {
+        if item.is_none() {
+            output_axis += 1;
+        } else if is_ellipsis(item) {
+            input_axis += filled;
+            output_axis += filled;
+        } else if item.extract::<i64>().is_ok() && !item.is_instance_of::<pyo3::types::PyBool>() {
+            input_axis += 1;
+        } else {
+            input_axis += 1;
+            output_axis += 1;
+        }
+    }
+    if input_axis >= dims.len() {
+        return Err(PyIndexError::new_err(format!(
+            "too many indices for tensor: it has {} dimension(s)",
+            dims.len()
+        )));
+    }
+    let dim_size = dims[input_axis];
+    let (selected, index_shape) = match index {
+        AxisIndex::Positions(values, shape) => {
+            (resolve_index_values(&values, input_axis, dim_size)?, shape)
+        }
+        AxisIndex::Mask(flags) => {
+            if flags.len() != dim_size {
+                return Err(PyIndexError::new_err(format!(
+                    "boolean index has {} element(s) but dimension {input_axis} has size \
+                     {dim_size}",
+                    flags.len()
+                )));
+            }
+            let taken: Vec<usize> = flags
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &on)| on.then_some(i))
+                .collect();
+            let count = taken.len();
+            (taken, vec![count])
+        }
+    };
+
+    // The same subscript with a full slice where the array was, so the basic
+    // path can take everything else.
+    let basic: Vec<Bound<PyAny>> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if i == position {
+                PySlice::full(key.py()).into_any()
+            } else {
+                item.clone()
+            }
+        })
+        .collect();
+    let basic_key = PyTuple::new(key.py(), basic)?;
+    let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
+    let mut base = reference.index(&indices).map_err(_convert_error)?;
+    for &pos in &newaxis_positions {
+        base = base.unsqueeze(pos as isize).map_err(_convert_error)?;
+    }
+
+    let taken = engine::ops::shape_ops::index_select(&base, output_axis as isize, &selected)
+        .map_err(_convert_error)?;
+    if index_shape.len() == 1 {
+        return Ok(Some(taken));
+    }
+    // A multi-dimensional index array puts its own shape where the axis was.
+    let mut shape = taken.shape().dims().to_vec();
+    shape.splice(output_axis..output_axis + 1, index_shape);
+    taken
+        .reshape(engine::tensor::Shape::new(shape))
+        .map(Some)
+        .map_err(_convert_error)
 }
 
 fn full_slice(dim: usize) -> TensorIndex {

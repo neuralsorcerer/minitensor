@@ -107,6 +107,11 @@ impl PyTensor {
         if let Some(result) = try_fancy_index_tensor(&self.inner, key)? {
             return Ok(Self::from_tensor(result));
         }
+        // An index array somewhere other than the front, mixed with slices,
+        // integers and `...` -- `x[:, idx]` and its relatives.
+        if let Some(result) = try_single_array_index(&self.inner, key)? {
+            return Ok(Self::from_tensor(result));
+        }
         let (indices, newaxis_positions) = parse_getitem_indices(key, self.inner.shape().dims())?;
         let mut result = self.inner.index(&indices).map_err(_convert_error)?;
         for &pos in &newaxis_positions {
