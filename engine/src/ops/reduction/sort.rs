@@ -5,7 +5,9 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-use crate::ops::map::{outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2};
+use crate::ops::map::{
+    outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2, reduction_band,
+};
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
@@ -768,14 +770,20 @@ fn var_fused_single_axis(
                 // elements are `inner` apart. Accumulate whole slabs instead,
                 // which reads the input in memory order; the running means are
                 // a vector of `inner`, allocated once per outer position.
-                par_out_chunks(out, inner, &|start, out_chunk| {
-                    let block_base = (start / inner) * outer_stride;
+                let outer = out.len() / inner;
+                par_out_chunks(out, reduction_band(outer, inner), &|start, out_chunk| {
+                    // With one outer position the columns are cut into bands
+                    // instead, so a chunk is part of one block's row rather
+                    // than all of it: the block is fixed and the chunk starts
+                    // `start % inner` columns into it.
+                    let block_base = (start / inner) * outer_stride + start % inner;
+                    let width = out_chunk.len();
                     // Both passes are blocked for the same reason the
                     // contiguous-row path above uses `accurate_run_sum`.
                     let mut col_mean =
-                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
                             let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
+                            let slab = &input[base..base + width];
                             for (m, &v) in acc.iter_mut().zip(slab) {
                                 *m += v;
                             }
@@ -784,9 +792,9 @@ fn var_fused_single_axis(
                         *m /= n;
                     }
                     let squared =
-                        accurate_slab_sum(dim_size, inner, 0.0 as $ty, |k, acc: &mut [$ty]| {
+                        accurate_slab_sum(dim_size, width, 0.0 as $ty, |k, acc: &mut [$ty]| {
                             let base = block_base + k * inner;
-                            let slab = &input[base..base + inner];
+                            let slab = &input[base..base + width];
                             for ((a, &v), &m) in acc.iter_mut().zip(slab).zip(col_mean.iter()) {
                                 let d = v - m;
                                 *a += d * d;

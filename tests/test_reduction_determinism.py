@@ -121,6 +121,12 @@ _CHILD_ALONG_DIM = textwrap.dedent("""
             digests.append(clean.logsumexp(dim).numpy().tobytes())
             digests.append(clean.softmax(dim).numpy().tobytes())
             digests.append(clean.log_softmax(dim).numpy().tobytes())
+            # Banded by column when the axis is the first one: each column
+            # keeps its own accumulation, so only the cut moves.
+            digests.append(clean.var(dim).numpy().tobytes())
+            digests.append(clean.prod(dim).numpy().tobytes())
+            digests.append(clean.median(dim)[0].numpy().tobytes())
+            digests.append(clean.median(dim)[1].numpy().tobytes())
     import hashlib
     print(hashlib.sha256(b"".join(digests)).hexdigest())
     """)

@@ -6,7 +6,7 @@
 
 use crate::ops::map::{
     PAR_CHUNK, outputs_per_task, par_all_chunk, par_any_chunk, par_fold_chunks, par_map_indexed,
-    par_out_chunks,
+    par_out_chunks, reduction_band,
 };
 use crate::ops::simd::*;
 use crate::ops::util::check_dim;
@@ -472,17 +472,27 @@ macro_rules! prod_along_dim_kernel {
             // every read and write is sequential (cache-friendly) rather than
             // striding by `inner` per output element. Parallel over the outer
             // index.
-            par_out_chunks(result_slice, inner, &|start, out_chunk| {
-                out_chunk.fill($one);
-                let block_base = (start / inner) * outer_stride;
-                for k in 0..dim_size {
-                    let slab_base = block_base + k * inner;
-                    let slab = &input_data[slab_base..slab_base + inner];
-                    for (acc, &v) in out_chunk.iter_mut().zip(slab) {
-                        *acc = acc.acc_mul(v as $acc);
+            let outer = result_slice.len() / inner;
+            par_out_chunks(
+                result_slice,
+                reduction_band(outer, inner),
+                &|start, out_chunk| {
+                    out_chunk.fill($one);
+                    // A band is part of one block's row rather than all of it, so
+                    // the block is fixed and the chunk starts `start % inner`
+                    // columns into it. Each column still multiplies its own steps
+                    // in their own order, so the cut cannot move an answer.
+                    let block_base = (start / inner) * outer_stride + start % inner;
+                    let width = out_chunk.len();
+                    for k in 0..dim_size {
+                        let slab_base = block_base + k * inner;
+                        let slab = &input_data[slab_base..slab_base + width];
+                        for (acc, &v) in out_chunk.iter_mut().zip(slab) {
+                            *acc = acc.acc_mul(v as $acc);
+                        }
                     }
-                }
-            });
+                },
+            );
             Ok(())
         }
     };

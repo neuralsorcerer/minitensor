@@ -7,7 +7,7 @@
 use super::*;
 use crate::autograd::NanSumBackward;
 use crate::autograd::SumBackward;
-use crate::ops::map::par_out_chunks2;
+use crate::ops::map::{par_out_chunks2, reduction_band};
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
@@ -135,13 +135,21 @@ pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
 }
 
 /// Take the median of every 1-D slice along a dimension, parallelizing over the
-/// outer index.
+/// output.
 ///
 /// Output is `(outer, inner)`, so each outer position owns a disjoint `inner`
 /// span and `par_chunks_mut` hands them out without overlap. The selection
 /// itself is `select_nth_unstable_by`, so this stays linear per slice; only the
 /// outer loop used to be serial, which left `median` several times slower than
 /// `quantile(0.5)` computing the same thing.
+///
+/// One piece per outer position is still the wrong cut when there is a single
+/// one -- a median along the first axis has exactly one however large the
+/// tensor is -- so the columns of that position are cut up instead
+/// ([`reduction_band`]). `median(dim=0)` of a 512x4096 tensor was 53ms against
+/// `quantile(0.5, dim=0)`'s 4.5, computing the same thing by the same
+/// selection: the difference was entirely that one of them was running on one
+/// core.
 ///
 /// How a dtype represents and detects NaN: the value to emit for a slice that
 /// contains one, and the predicate that finds it. Integer dtypes have neither.
@@ -164,13 +172,21 @@ fn median_along_dim_par<T>(
 ) where
     T: Copy + Send + Sync,
 {
-    par_out_chunks2(values, indices, inner, &|start, vchunk, ichunk| {
-        let o = start / inner;
-        {
+    let outer = if inner == 0 { 1 } else { values.len() / inner };
+    par_out_chunks2(
+        values,
+        indices,
+        reduction_band(outer, inner),
+        &|start, vchunk, ichunk| {
+            // A band covers part of one outer position's columns, so the block
+            // it reads from is fixed and the first column is where the chunk
+            // starts inside it.
+            let block_base = (start / inner) * outer_stride + start % inner;
             let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
-            for r in 0..inner {
+            for (r, (value_out, index_out)) in vchunk.iter_mut().zip(ichunk.iter_mut()).enumerate()
+            {
                 entries.clear();
-                let base = o * outer_stride + r;
+                let base = block_base + r;
                 let mut saw_nan = false;
                 for d in 0..dim_size {
                     let value = input[base + d * inner];
@@ -184,17 +200,17 @@ fn median_along_dim_par<T>(
                 }
 
                 if let (true, Some((nan_value, _))) = (saw_nan, nan) {
-                    vchunk[r] = nan_value;
+                    *value_out = nan_value;
                     continue;
                 }
 
                 entries.select_nth_unstable_by(median_pos, compare);
                 let (index, value) = entries[median_pos];
-                vchunk[r] = value;
-                ichunk[r] = index as i64;
+                *value_out = value;
+                *index_out = index as i64;
             }
-        }
-    });
+        },
+    );
 }
 
 pub(crate) fn median_along_dim(

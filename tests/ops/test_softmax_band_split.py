@@ -118,7 +118,9 @@ def test_an_all_negative_infinity_column_is_still_zeros():
     values = np.array([[-np.inf, 1.0], [-np.inf, 2.0]], dtype=np.float32)
     got = mt.from_numpy(values).softmax(0).numpy()
     assert (got[:, 0] == 0.0).all()
-    np.testing.assert_allclose(got[:, 1], _softmax_reference(values[:, 1], 0), rtol=1e-6)
+    np.testing.assert_allclose(
+        got[:, 1], _softmax_reference(values[:, 1], 0), rtol=1e-6
+    )
 
     logged = mt.from_numpy(values).log_softmax(0).numpy()
     assert np.isneginf(logged[:, 0]).all()
