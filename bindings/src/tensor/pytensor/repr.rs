@@ -160,6 +160,20 @@ impl PyTensor {
             return Ok(());
         }
 
+        // An index array or a mask somewhere in the subscript
+        // (`t[:, idx] = v`): each position it names is an ordinary basic
+        // assignment, so the value is lined up with the whole selection first
+        // and each position takes its share.
+        if let Some(plan) = plan_single_array_assign(key, &in_dims)? {
+            let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
+                t.inner
+            } else {
+                convert_python_data_to_tensor(value, dtype, device, false)?
+            };
+            let mut this = slf.borrow_mut();
+            return apply_single_array_assign(&mut this.inner, &plan, &val_tensor);
+        }
+
         let indices = parse_indices(key, &in_dims)?;
         let val_tensor = if let Ok(t) = value.extract::<PyTensor>() {
             t.inner

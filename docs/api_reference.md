@@ -691,13 +691,18 @@ same tensor sees the write follows the rule every in-place operation here uses:
   which is [`gather`](#indexing--reordering); index one axis at a time when the
   outer product is what was meant.
 
-`__setitem__` additionally supports `t[mask] = value` where `value` is a
-scalar or anything broadcastable to the selection shape
-`[n_true] + trailing`; values are cast to the tensor's dtype and written in
-place. Assignment takes masks only as the whole key: an index array or a mask
-inside a tuple (`t[0, mask] = v`, `t[:, idx] = v`) raises. Read the selection,
-write it, and assign it back through a basic subscript, or use
-[`index_copy`](#indexing--reordering)/[`scatter`](#indexing--reordering).
+`__setitem__` takes the same forms. `t[mask] = value` writes `value` -- a
+scalar or anything broadcastable to the selection shape `[n_true] + trailing`
+-- into the positions the mask selects, and `t[:, idx] = value` and its
+relatives write into the positions the advanced index names. The value is
+lined up against the whole selection and each position takes its share, so a
+value that stops short of the indexed axis is repeated across it and one that
+spans it is split; a position named twice keeps the last write, as in NumPy.
+Writes go through the tensor's storage, so assigning to a parameter reaches
+the layer, and a value read from the target (`t[:, [0, 1]] = t[:, [1, 0]]`) is
+read before anything is written. Values given as Python scalars or lists are
+cast to the tensor's dtype; a tensor of another dtype is refused rather than
+promoted, and the error says which conversion to make.
 
 Assignment through a basic subscript broadcasts the same way, matching the
 value against the selection right-aligned: each of the value's dimensions must

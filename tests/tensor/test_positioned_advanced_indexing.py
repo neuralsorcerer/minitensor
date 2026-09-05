@@ -18,7 +18,8 @@ was written -- NumPy's rule about advanced indices moving to the front needs
 two of them, separated. These tests pin that against NumPy for every way the
 one index can be spelled and every basic entry it can be mixed with. Two
 advanced indices mean something else (they pair up elementwise) and are
-refused by name.
+refused by name. Assignment takes the same forms: reading ``t[:, idx]``
+and not being able to write it would be half a feature.
 """
 
 import numpy as np
@@ -171,6 +172,133 @@ def test_the_selection_matches_index_select(x):
     """Same answer as the named op, which is the operation being reached for."""
     t = mt.from_numpy(x)
     idx = mt.from_numpy(np.array([2, 0], dtype=np.int64))
-    np.testing.assert_array_equal(
-        t[:, idx].numpy(), mt.index_select(t, 1, idx).numpy()
+    np.testing.assert_array_equal(t[:, idx].numpy(), mt.index_select(t, 1, idx).numpy())
+
+
+def test_the_same_forms_can_be_written_to(x):
+    """Reading `t[:, idx]` and not being able to write it is a half-feature."""
+
+    def both(key, value, np_value=None):
+        actual = mt.from_numpy(x.copy())
+        actual[key] = value
+        expected = x.copy()
+        expected[key] = np_value if np_value is not None else value
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    both((slice(None), [0, 2]), 0.0)
+    both([0, 1], -1.0)
+    both((Ellipsis, [1, 3]), 7.0)
+    both((1, [0, 2]), 5.0)
+    both((slice(None), [-1, -3]), 2.0)
+    both((slice(None), slice(1, 3), [0, 2]), 4.0)
+    both((slice(None, None, 2), [0, 2]), 6.0)
+    both((slice(None), np.array([True, False, True])), 3.0)
+    both((slice(None), [[0, 2], [1, 1]]), 8.0)
+    both((slice(None), []), 9.0)
+
+
+def test_a_written_value_spreads_over_the_selection(x):
+    """The value lines up with the whole selection, then each position takes
+    its share -- so a value that stops short of the indexed axis is repeated
+    and one that spans it is split."""
+
+    def both(key, value):
+        actual = mt.from_numpy(x.copy())
+        actual[key] = mt.from_numpy(value)
+        expected = x.copy()
+        expected[key] = value
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    both((slice(None), [0, 2]), np.arange(4, dtype=np.float32))
+    both((slice(None), [0, 2]), np.arange(16, dtype=np.float32).reshape(2, 2, 4))
+    both((1, [0, 2]), np.arange(8, dtype=np.float32).reshape(2, 4))
+    both(
+        (slice(None), np.array([True, False, True])),
+        np.arange(16, dtype=np.float32).reshape(2, 2, 4),
     )
+    both(
+        (slice(None), [[0, 2], [1, 1]]),
+        np.arange(32, dtype=np.float32).reshape(2, 2, 2, 4),
+    )
+    both(
+        (slice(None), None, [0, 2]), np.arange(16, dtype=np.float32).reshape(2, 1, 2, 4)
+    )
+
+
+def test_a_position_written_twice_keeps_the_last_write(x):
+    actual = mt.from_numpy(x.copy())
+    value = np.arange(16, dtype=np.float32).reshape(2, 2, 4)
+    actual[:, [1, 1]] = mt.from_numpy(value)
+
+    expected = x.copy()
+    expected[:, [1, 1]] = value
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+def test_a_value_read_from_the_target_is_read_before_it_is_written(x):
+    """`t[:, [0, 1]] = t[:, [1, 0]]` is a swap, not a double copy.
+
+    The positions are written one at a time, so a value aliasing the target
+    would be read back after the first write had already changed it.
+    """
+    actual = mt.from_numpy(x.copy())
+    actual[:, [0, 1]] = actual[:, [1, 0]]
+
+    expected = x.copy()
+    expected[:, [0, 1]] = expected[:, [1, 0]]
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+def test_a_value_that_does_not_fit_names_both_shapes(x):
+    with pytest.raises(ValueError, match=r"shape \[2, 3, 4\] into the selection"):
+        mt.from_numpy(x.copy())[:, [0, 2]] = mt.from_numpy(x.copy())
+
+
+def test_writing_through_a_parameter_reaches_the_layer():
+    """The write is a basic assignment per position, so it shares the storage
+    the rest of `__setitem__` does -- a copy here would silently do nothing."""
+    from minitensor import nn
+
+    layer = nn.DenseLayer(3, 2)
+    parameter = layer.parameters()[0]
+    parameter[:, [0]] = mt.Tensor(0.0)
+
+    assert np.abs(layer.parameters()[0].numpy()[:, 0]).max() == 0.0
+
+
+def test_a_newaxis_changes_how_the_value_lines_up_not_where_it_lands(x):
+    """`None` adds an axis to the selection but names no axis to write into."""
+    actual = mt.from_numpy(x.copy())
+    actual[None] = 5.0
+    expected = x.copy()
+    expected[None] = 5.0
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+    actual = mt.from_numpy(x.copy())
+    actual[0, None] = mt.from_numpy(np.arange(12, dtype=np.float32).reshape(1, 3, 4))
+    expected = x.copy()
+    expected[0, None] = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+def test_writing_is_refused_where_reading_is(x):
+    with pytest.raises(IndexError, match="gather"):
+        mt.from_numpy(x.copy())[[0, 1], [1, 2]] = 0.0
+    with pytest.raises(IndexError):
+        mt.from_numpy(x.copy())[:, [3]] = 0.0
+    with pytest.raises(IndexError, match="boolean index has 4"):
+        mt.from_numpy(x.copy())[:, np.array([True, False, True, False])] = 0.0
+
+
+def test_a_write_a_pending_backward_still_needs_is_refused(x):
+    """The same guard the basic path has: the write goes through the storage a
+    saved tensor is holding."""
+    t = mt.from_numpy(x.copy())
+    t.requires_grad_(True)
+    kept = t * 2.0
+
+    with pytest.raises(ValueError, match="pending backward"):
+        t[:, [0]] = 0.0
+
+    kept.sum().backward()
+    mt.clear_autograd_graph()

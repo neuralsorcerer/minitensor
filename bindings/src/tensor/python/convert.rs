@@ -981,34 +981,40 @@ fn axis_index(item: &Bound<PyAny>) -> PyResult<Option<AxisIndex>> {
     Ok(None)
 }
 
-/// A subscript holding one advanced index among otherwise basic entries, as
-/// `x[:, idx]`, `x[1:3, idx]`, `x[..., idx]` or `x[:, mask]`.
-///
-/// The whole-key forms -- a bare mask, or a bare index array standing for the
-/// leading axis -- are handled before this. What is left is the far commoner
-/// shape of the same idea: an index array somewhere other than the front, which
-/// used to be a bare `TypeError: Invalid index type` even though `index_select`
-/// does exactly this and was one call away.
-///
-/// With exactly one index array the answer does not depend on the order the two
-/// kinds are applied in, and the array's axes stay where the array was --
-/// NumPy's rule about advanced indices moving to the front needs two of them,
-/// separated. So this applies the basic subscript with a full slice in the
-/// array's place and selects along the axis that leaves. Two or more index
-/// arrays are still refused, and say what to reach for instead.
-pub(crate) fn try_single_array_index(
-    reference: &Tensor,
-    key: &Bound<PyAny>,
-) -> PyResult<Option<Tensor>> {
-    // A bare key is a subscript of one entry. The 1-D leading case never
-    // reaches here -- `try_fancy_index_tensor` takes it -- so what a bare key
-    // means at this point is an index array of two dimensions or more, which
-    // that path does not handle and this one does.
-    let items: Vec<Bound<PyAny>> = match key.cast::<PyTuple>() {
+/// Where the one advanced index of a subscript lands, and which positions it
+/// names.
+struct AdvancedIndex {
+    /// Which entry of the subscript it is.
+    position: usize,
+    /// The input axis it indexes.
+    input_axis: usize,
+    /// Where that axis sits in the shape the subscript selects.
+    output_axis: usize,
+    /// The positions along it, resolved and in the order written.
+    selected: Vec<usize>,
+    /// The index's own shape, which occupies `index_shape.len()` axes of the
+    /// selection starting at `output_axis`.
+    index_shape: Vec<usize>,
+}
+
+/// The entries of a subscript. A bare key is a subscript of one entry.
+fn subscript_items<'py>(key: &Bound<'py, PyAny>) -> Vec<Bound<'py, PyAny>> {
+    match key.cast::<PyTuple>() {
         Ok(tuple) => tuple.iter().collect(),
         Err(_) => vec![key.clone()],
-    };
+    }
+}
 
+/// Find the subscript's one advanced index and resolve it against `dims`.
+///
+/// `None` when every entry is basic, so the caller can take the ordinary path.
+/// Two advanced indices are refused: NumPy pairs those up elementwise, which is
+/// a different operation, and answering with the outer product instead would be
+/// wrong quietly.
+fn locate_advanced_index(
+    items: &[Bound<PyAny>],
+    dims: &[usize],
+) -> PyResult<Option<AdvancedIndex>> {
     let mut found: Option<(usize, AxisIndex)> = None;
     for (position, item) in items.iter().enumerate() {
         if let Some(index) = axis_index(item)? {
@@ -1025,8 +1031,7 @@ pub(crate) fn try_single_array_index(
         return Ok(None);
     };
 
-    let dims = reference.shape().dims();
-    // Where the array sits among the input axes, and where that axis lands in
+    // Where the index sits among the input axes, and where that axis lands in
     // the output: an integer entry drops its axis, `None` adds one, `...`
     // stands for every axis the explicit entries do not consume.
     let explicit = items
@@ -1060,6 +1065,7 @@ pub(crate) fn try_single_array_index(
             dims.len()
         )));
     }
+
     let dim_size = dims[input_axis];
     let (selected, index_shape) = match index {
         AxisIndex::Positions(values, shape) => {
@@ -1083,8 +1089,22 @@ pub(crate) fn try_single_array_index(
         }
     };
 
-    // The same subscript with a full slice where the array was, so the basic
-    // path can take everything else.
+    Ok(Some(AdvancedIndex {
+        position,
+        input_axis,
+        output_axis,
+        selected,
+        index_shape,
+    }))
+}
+
+/// The same subscript with a full slice where the advanced index was, so the
+/// basic path can take everything else.
+fn basic_part<'py>(
+    key: &Bound<'py, PyAny>,
+    items: &[Bound<'py, PyAny>],
+    position: usize,
+) -> PyResult<Bound<'py, PyTuple>> {
     let basic: Vec<Bound<PyAny>> = items
         .iter()
         .enumerate()
@@ -1096,25 +1116,204 @@ pub(crate) fn try_single_array_index(
             }
         })
         .collect();
-    let basic_key = PyTuple::new(key.py(), basic)?;
+    PyTuple::new(key.py(), basic)
+}
+
+/// A subscript holding one advanced index among otherwise basic entries, as
+/// `x[:, idx]`, `x[1:3, idx]`, `x[..., idx]` or `x[:, mask]`.
+///
+/// The whole-key forms -- a bare mask, or a bare index array standing for the
+/// leading axis -- are handled before this. What is left is the far commoner
+/// shape of the same idea: an index array somewhere other than the front, which
+/// used to be a bare `TypeError: Invalid index type` even though `index_select`
+/// does exactly this and was one call away.
+///
+/// With exactly one index array the answer does not depend on the order the two
+/// kinds are applied in, and the array's axes stay where the array was --
+/// NumPy's rule about advanced indices moving to the front needs two of them,
+/// separated. So this applies the basic subscript with a full slice in the
+/// array's place and selects along the axis that leaves.
+pub(crate) fn try_single_array_index(
+    reference: &Tensor,
+    key: &Bound<PyAny>,
+) -> PyResult<Option<Tensor>> {
+    // A bare key reaching here is an index array of two dimensions or more:
+    // the 1-D leading case never arrives, `try_fancy_index_tensor` takes it.
+    let items = subscript_items(key);
+    let dims = reference.shape().dims();
+    let Some(found) = locate_advanced_index(&items, dims)? else {
+        return Ok(None);
+    };
+
+    let basic_key = basic_part(key, &items, found.position)?;
     let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
     let mut base = reference.index(&indices).map_err(_convert_error)?;
     for &pos in &newaxis_positions {
         base = base.unsqueeze(pos as isize).map_err(_convert_error)?;
     }
 
-    let taken = engine::ops::shape_ops::index_select(&base, output_axis as isize, &selected)
-        .map_err(_convert_error)?;
-    if index_shape.len() == 1 {
+    let taken =
+        engine::ops::shape_ops::index_select(&base, found.output_axis as isize, &found.selected)
+            .map_err(_convert_error)?;
+    if found.index_shape.len() == 1 {
         return Ok(Some(taken));
     }
     // A multi-dimensional index array puts its own shape where the axis was.
     let mut shape = taken.shape().dims().to_vec();
-    shape.splice(output_axis..output_axis + 1, index_shape);
+    shape.splice(
+        found.output_axis..found.output_axis + 1,
+        found.index_shape.iter().copied(),
+    );
     taken
         .reshape(engine::tensor::Shape::new(shape))
         .map(Some)
         .map_err(_convert_error)
+}
+
+/// An assignment through one advanced index, resolved against the tensor it
+/// will write into.
+pub(crate) struct AxisAssign {
+    /// The basic part of the subscript, one entry per input dimension, with the
+    /// indexed axis still taken in full.
+    indices: Vec<TensorIndex>,
+    /// Which of those entries the advanced index replaces.
+    input_axis: usize,
+    /// The shape the subscript selects, which is what a value is lined up
+    /// against.
+    selection: Vec<usize>,
+    /// Where the index's own axes end in that shape, so a value can be asked
+    /// whether it reaches them at all.
+    selection_span: usize,
+    /// The same shape with the axes a newaxis added dropped and the index's
+    /// axes collapsed into one: what one position's share is read from.
+    flat: Vec<usize>,
+    /// Where that one axis sits in `flat`.
+    flat_axis: usize,
+    /// The positions to write, in the order they were written.
+    selected: Vec<usize>,
+}
+
+/// Plan `t[..., idx, ...] = value` if that is what the subscript is.
+///
+/// Resolving the plan needs only the target's shape, so it happens before the
+/// mutable borrow the write itself takes -- which is also what lets
+/// `t[:, idx] = t` extract its value without hitting an already-borrowed error.
+pub(crate) fn plan_single_array_assign(
+    key: &Bound<PyAny>,
+    dims: &[usize],
+) -> PyResult<Option<AxisAssign>> {
+    let items = subscript_items(key);
+    let Some(found) = locate_advanced_index(&items, dims)? else {
+        return Ok(None);
+    };
+
+    let basic_key = basic_part(key, &items, found.position)?;
+    let (indices, newaxis_positions) = parse_getitem_indices(&basic_key, dims)?;
+    let base: Vec<usize> = indices
+        .iter()
+        .filter_map(|index| match index {
+            TensorIndex::Index(_) => None,
+            TensorIndex::Slice { start, end, step } => {
+                Some(end.saturating_sub(*start).div_ceil((*step).max(1)))
+            }
+        })
+        .collect();
+
+    // The value is lined up against the shape the subscript selects, so the
+    // axes a newaxis adds have to be in that even though they name nothing to
+    // write into. The shares are read from the same thing without them: they
+    // are extent one, so dropping them is a reshape and nothing moves.
+    let mut selection = base.clone();
+    for &position in &newaxis_positions {
+        selection.insert(position.min(selection.len()), 1);
+    }
+    selection.splice(
+        found.output_axis..found.output_axis + 1,
+        found.index_shape.iter().copied(),
+    );
+    let added_before = newaxis_positions
+        .iter()
+        .filter(|&&position| position < found.output_axis)
+        .count();
+    let flat_axis = found.output_axis - added_before;
+    let mut flat = base;
+    flat[flat_axis] = found.selected.len();
+
+    Ok(Some(AxisAssign {
+        indices,
+        input_axis: found.input_axis,
+        selection_span: found.output_axis + found.index_shape.len(),
+        selection,
+        flat,
+        flat_axis,
+        selected: found.selected,
+    }))
+}
+
+/// Write `value` into the positions a plan names, one position at a time.
+///
+/// Each position is an ordinary basic assignment, so the write goes through the
+/// same shared storage the rest of `__setitem__` uses -- assigning to a
+/// parameter still reaches the layer -- and a position named twice keeps the
+/// last write, as it does in NumPy.
+pub(crate) fn apply_single_array_assign(
+    target: &mut Tensor,
+    plan: &AxisAssign,
+    value: &Tensor,
+) -> PyResult<()> {
+    if plan.selected.is_empty() {
+        return Ok(());
+    }
+    // The value is read between writes, so `t[:, [0, 1]] = t[:, [1, 0]]` needs
+    // a copy to read from: by the second position the first is already gone.
+    let mut value = value.deep_clone().map_err(_convert_error)?;
+    // Leading axes of extent one need not be spelled out in the value, which is
+    // what the basic path allows too.
+    while value.ndim() > plan.selection.len() && value.shape().dims()[0] == 1 {
+        let rest: Vec<usize> = value.shape().dims()[1..].to_vec();
+        value = value
+            .reshape(engine::tensor::Shape::new(rest))
+            .map_err(_convert_error)?;
+    }
+
+    let mut dest = plan.indices.clone();
+    if plan.selection.len().saturating_sub(value.ndim()) >= plan.selection_span {
+        // Lined up from the right, the value stops short of the indexed axes,
+        // so every position gets all of it -- `t[:, idx] = row`, and the scalar
+        // case with it. Nothing has to be materialised for that.
+        for &position in &plan.selected {
+            dest[plan.input_axis] = TensorIndex::Index(position);
+            target.index_assign(&dest, &value).map_err(_convert_error)?;
+        }
+        return Ok(());
+    }
+
+    // Otherwise the value spans the indexed axes and each position takes its
+    // own share of it. Broadcasting to the selection first means the shares can
+    // be read straight off, and collapsing the index's axes into one makes a
+    // position one step along it whatever shape the index came in.
+    let broadcast = value
+        .expand(plan.selection.iter().map(|&dim| dim as isize).collect())
+        .and_then(|value| value.contiguous())
+        .and_then(|value| value.reshape(engine::tensor::Shape::new(plan.flat.clone())))
+        .map_err(|_| {
+            // The expansion is an implementation detail; what the caller wrote
+            // is a value and a subscript, so name those instead.
+            PyValueError::new_err(format!(
+                "cannot broadcast a value of shape {:?} into the selection of shape {:?}",
+                value.shape().dims(),
+                plan.selection
+            ))
+        })?;
+
+    let mut share: Vec<TensorIndex> = plan.flat.iter().map(|&dim| full_slice(dim)).collect();
+    for (step, &position) in plan.selected.iter().enumerate() {
+        share[plan.flat_axis] = TensorIndex::Index(step);
+        let part = broadcast.index(&share).map_err(_convert_error)?;
+        dest[plan.input_axis] = TensorIndex::Index(position);
+        target.index_assign(&dest, &part).map_err(_convert_error)?;
+    }
+    Ok(())
 }
 
 fn full_slice(dim: usize) -> TensorIndex {
@@ -1273,7 +1472,13 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
             "an index can only have a single ellipsis ('...')",
         ));
     }
-    let real_count = items.iter().filter(|it| !is_ellipsis(it)).count();
+    // `None`/`np.newaxis` adds an axis to the selection rather than naming one
+    // to write into, so it changes nothing about where the value lands and
+    // does not count against the tensor's rank.
+    let real_count = items
+        .iter()
+        .filter(|it| !it.is_none() && !is_ellipsis(it))
+        .count();
     if real_count > shape.len() {
         return Err(PyIndexError::new_err(format!(
             "too many indices for tensor: it has {} dimension(s) but {real_count} were indexed",
@@ -1284,6 +1489,9 @@ pub(crate) fn parse_indices(key: &Bound<PyAny>, shape: &[usize]) -> PyResult<Vec
     let mut result: Vec<TensorIndex> = Vec::with_capacity(shape.len());
     let mut input_dim = 0usize;
     for item in &items {
+        if item.is_none() {
+            continue;
+        }
         if is_ellipsis(item) {
             for _ in 0..shape.len() - real_count {
                 result.push(full_slice(shape[input_dim]));
