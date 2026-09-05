@@ -7,7 +7,7 @@
 use super::*;
 use crate::error::MinitensorError;
 use crate::error::Result;
-use crate::ops::map::par_out_chunks;
+use crate::ops::map::{PAR_THRESHOLD, par_map_indexed, par_out_chunks, par_out_chunks_mapped};
 use crate::ops::util::{
     accurate_indexed_sum, accurate_slab_sum, broadcast_mask_index, pairwise_fold_vectors,
     slab_blocks, stable_sigmoid_f64,
@@ -412,37 +412,44 @@ fn mask_strides_for(tensor_shape: &Shape, mask_shape: &Shape) -> Option<(Strides
     }
 }
 
-/// Column-wise softmax of a `[dim_size, after]` row-major block (`after > 1`).
+/// Column maxima of a `[dim_size, after]` row-major block.
 ///
-/// The softmax dimension is the outer (row) index. Processing the block one
-/// contiguous row at a time with `after`-sized max/sum accumulators makes every
-/// memory access sequential, unlike the naive per-column loop which strides by
-/// `after` on every element. The per-column max is order-independent, so it is
-/// exactly the strided version's; the per-column sums walk the rows in the same
-/// order but add them up in blocks (see [`slab_blocks`]), which is the only
-/// reason this is more accurate than a strided walk rather than identical to it.
-fn softmax_block_columnwise<T: Float>(
-    in_block: &[T],
-    out_block: &mut [T],
-    dim_size: usize,
-    after: usize,
-) {
-    let neg_inf = T::neg_infinity();
-    let mut col_max = vec![neg_inf; after];
-    for k in 0..dim_size {
-        let row = &in_block[k * after..k * after + after];
+/// Reading it a contiguous row at a time with `after`-sized accumulators makes
+/// every access sequential, where the naive per-column loop strides by `after`
+/// on every element. The result is the strided version's exactly: a maximum
+/// does not care what order it sees its values in, NaNs included -- they fail
+/// every comparison either way and so take no part.
+fn block_col_max<T: Float>(in_block: &[T], after: usize) -> Vec<T> {
+    let mut col_max = vec![T::neg_infinity(); after];
+    for row in in_block.chunks_exact(after) {
         for (m, &v) in col_max.iter_mut().zip(row) {
             if v > *m {
                 *m = v;
             }
         }
     }
-    // The column sums are the slab form of the same accuracy problem, and they
-    // are filled in the pass that writes the exponentials: each `exp` is
-    // computed once, stored, and added. Splitting the two apart costs the whole
-    // kernel again -- recomputing `exp` for the sum ran 64% slower on
-    // `softmax(dim=0)` of a 500000x3 tensor, and reading the stored value back
-    // in a second pass 26%.
+    col_max
+}
+
+/// Write `exp(x - col_max)` into `out_block` and return the column sums of it.
+///
+/// The sums are filled in the pass that writes the exponentials: each `exp` is
+/// computed once, stored, and added. Splitting the two apart costs the whole
+/// kernel again -- recomputing `exp` for the sum ran 64% slower on
+/// `softmax(dim=0)` of a 500000x3 tensor, and reading the stored value back in
+/// a second pass 26%.
+///
+/// The rows are walked in order but added up in blocks (see [`slab_blocks`]),
+/// which is the only reason this is more accurate than a strided walk rather
+/// than identical to it.
+fn block_exp_columns<T: Float>(
+    in_block: &[T],
+    out_block: &mut [T],
+    col_max: &[T],
+    dim_size: usize,
+    after: usize,
+) -> Vec<T> {
+    let neg_inf = T::neg_infinity();
     let mut partials: Vec<Vec<T>> = Vec::new();
     for steps in slab_blocks(dim_size) {
         let mut acc = vec![T::zero(); after];
@@ -466,17 +473,148 @@ fn softmax_block_columnwise<T: Float>(
         partials.push(acc);
     }
     if partials.is_empty() {
-        return;
+        return vec![T::zero(); after];
     }
-    let col_sum = pairwise_fold_vectors(partials, |a, b| a + b);
-    for k in 0..dim_size {
-        let out_row = &mut out_block[k * after..k * after + after];
-        for (o, &s) in out_row.iter_mut().zip(col_sum.iter()) {
-            if s > T::zero() {
+    pairwise_fold_vectors(partials, |a, b| a + b)
+}
+
+/// Column-wise softmax of a `[dim_size, after]` row-major block (`after > 1`).
+///
+/// The softmax dimension is the outer (row) index, so the block is read down
+/// its rows: maxima, then exponentials and their sums, then the division.
+fn softmax_block_columnwise<T: Float>(
+    in_block: &[T],
+    out_block: &mut [T],
+    dim_size: usize,
+    after: usize,
+) {
+    let col_max = block_col_max(in_block, after);
+    let col_sum = block_exp_columns(in_block, out_block, &col_max, dim_size, after);
+    divide_columns(out_block, &col_sum, after);
+}
+
+/// Divide every row of a `[dim_size, after]` block by the column totals.
+///
+/// A zero total means the column had nothing to normalize -- it was empty or
+/// all `-inf` -- and its zeros stay zeros. Every other total divides, a NaN
+/// one included: a column holding a NaN or a `+inf` has no answer, and leaving
+/// it undivided returns the raw exponentials instead, which look like an answer
+/// and are not. `softmax([[1, 1], [nan, 2]], dim=0)` used to come back with
+/// 1.0 in the poisoned column -- a column summing to 1 that means nothing.
+fn divide_columns<T: Float>(out_block: &mut [T], col_sum: &[T], after: usize) {
+    for out_row in out_block.chunks_exact_mut(after) {
+        for (o, &s) in out_row.iter_mut().zip(col_sum) {
+            if s != T::zero() {
                 *o = *o / s;
             }
         }
     }
+}
+
+/// Fold each column's max into `log(sum) + max`, in place.
+///
+/// A column whose max is `-inf` has nothing to take the log of and stays
+/// `-inf`, which makes every one of its outputs `-inf` in turn.
+fn log_totals<T: Float>(col_max: &mut [T], col_sum: &[T]) {
+    let neg_inf = T::neg_infinity();
+    for (m, &s) in col_max.iter_mut().zip(col_sum) {
+        if *m != neg_inf {
+            *m = s.ln() + *m;
+        }
+    }
+}
+
+/// Every row of a `[dim_size, after]` block, less its column total.
+fn subtract_columns<T: Float>(in_block: &[T], out_block: &mut [T], col_logsum: &[T], after: usize) {
+    let neg_inf = T::neg_infinity();
+    for (in_row, out_row) in in_block
+        .chunks_exact(after)
+        .zip(out_block.chunks_exact_mut(after))
+    {
+        for ((o, &v), &ls) in out_row.iter_mut().zip(in_row).zip(col_logsum) {
+            *o = if ls == neg_inf { neg_inf } else { v - ls };
+        }
+    }
+}
+
+/// How many row bands to cut a softmax block into when the block is the whole
+/// tensor.
+///
+/// The blocks of a softmax are its slices along the reduced axis, and one
+/// per task is the natural decomposition -- until the reduced axis is the
+/// first one, where there is exactly one block however large the tensor is and
+/// the whole thing lands on one core. Its rows split cleanly instead: each band
+/// reads its own rows and keeps its own column accumulators, and the bands
+/// merge at the end.
+///
+/// The boundaries come from the block's shape alone -- never from the thread
+/// count -- because here the partition decides how the column sums are grouped,
+/// and a sum whose grouping follows the pool answers differently on different
+/// machines. `SOFTMAX_PARTIAL_BUDGET` bounds what the accumulators cost: a band
+/// holds `after` of them, so a wide block gets fewer bands rather than a
+/// buffer the size of the tensor.
+fn softmax_bands(dim_size: usize, after: usize) -> usize {
+    /// Bands to aim for, so the pool stays fed on any machine.
+    const TARGET_BANDS: usize = 64;
+    /// Fewer than this is not worth the merge.
+    const MIN_BANDS: usize = 4;
+    /// Elements the per-band accumulators may take, all bands together.
+    const PARTIAL_BUDGET: usize = 1 << 20;
+
+    let numel = dim_size.saturating_mul(after);
+    if numel < PAR_THRESHOLD {
+        return 1;
+    }
+    let affordable = (PARTIAL_BUDGET / after.max(1)).max(MIN_BANDS);
+    TARGET_BANDS.min(affordable).min(dim_size).max(1)
+}
+
+/// The column maxima of a block whose rows have been split into bands.
+fn banded_col_max<T: Float + Send + Sync>(
+    in_block: &[T],
+    after: usize,
+    band_rows: usize,
+) -> Vec<T> {
+    let stride = band_rows * after;
+    let partials = par_map_indexed(in_block.len().div_ceil(stride), &|index| {
+        let start = index * stride;
+        let end = (start + stride).min(in_block.len());
+        block_col_max(&in_block[start..end], after)
+    });
+    pairwise_fold_vectors(partials, |a, b| if b > a { b } else { a })
+}
+
+/// `softmax` and `log_softmax` share everything up to the last pass: the column
+/// maxima and the column sums of `exp(x - max)`, with the exponentials left in
+/// the output.
+fn banded_columns<T: ShiftedExp + Send + Sync>(
+    in_block: &[T],
+    out_block: &mut [T],
+    after: usize,
+    band_rows: usize,
+) -> (Vec<T>, Vec<T>) {
+    let col_max = banded_col_max(in_block, after, band_rows);
+    let stride = band_rows * after;
+    let partials = par_out_chunks_mapped(out_block, stride, &|start, out_band| {
+        let in_band = &in_block[start..start + out_band.len()];
+        if after == 1 {
+            // One column, so the band is a contiguous run of it and the
+            // vectorized kernel applies.
+            let max_val = col_max[0];
+            if max_val == T::neg_infinity() {
+                out_band.fill(T::zero());
+                return vec![T::zero()];
+            }
+            T::exp_shifted_into(in_band, max_val, out_band);
+            vec![accurate_indexed_sum(out_band.len(), T::zero(), |k| {
+                out_band[k]
+            })]
+        } else {
+            block_exp_columns(in_band, out_band, &col_max, out_band.len() / after, after)
+        }
+    });
+    let col_sum = pairwise_fold_vectors(partials, |a, b| a + b);
+    (col_max, col_sum)
 }
 
 /// `softmax` along `dim`, shifted by the per-slice max for numerical stability.
@@ -490,6 +628,20 @@ fn softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     };
     let neg_inf = T::neg_infinity();
+
+    // One block is one task, and a softmax along the first axis has exactly one
+    // block however large the tensor is -- so it would run on one core with the
+    // rest of the pool watching. Cut that block's rows up instead. Only that
+    // case: with blocks to go around the split already has work for everyone,
+    // and the bands cost a set of column accumulators each.
+    let band_rows = dim_size.div_ceil(softmax_bands(dim_size, after));
+    if output_slice.len() == group && band_rows < dim_size {
+        let (_, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
+        par_out_chunks(output_slice, band_rows * after, &|_, out_band| {
+            divide_columns(out_band, &col_sum, after);
+        });
+        return Ok(());
+    }
 
     par_out_chunks(output_slice, group, &|block_offset, out_block| {
         let in_block = &input_data[block_offset..block_offset + out_block.len()];
@@ -680,6 +832,23 @@ fn log_softmax_core<T: ShiftedExp + Send + Sync>(
         return Ok(());
     };
     let neg_inf = T::neg_infinity();
+
+    // The same one-block case `softmax_core` bands, for the same reason: along
+    // the first axis the block split has nothing to hand out.
+    let band_rows = dim_size.div_ceil(softmax_bands(dim_size, after));
+    if output_slice.len() == group && band_rows < dim_size {
+        // The exponentials land in the output on the way to their sums; the
+        // final pass overwrites them from the input, so lending the buffer out
+        // costs nothing.
+        let (mut col_logsum, col_sum) = banded_columns(input_data, output_slice, after, band_rows);
+        log_totals(&mut col_logsum, &col_sum);
+        par_out_chunks(output_slice, band_rows * after, &|start, out_band| {
+            let in_band = &input_data[start..start + out_band.len()];
+            subtract_columns(in_band, out_band, &col_logsum, after);
+        });
+        return Ok(());
+    }
+
     par_out_chunks(output_slice, group, &|block_offset, out_block| {
         let in_block = &input_data[block_offset..block_offset + out_block.len()];
         if after == 1 {

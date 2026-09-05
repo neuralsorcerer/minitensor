@@ -382,6 +382,34 @@ pub(crate) fn par_out_chunks<T: Send>(out: &mut [T], chunk: usize, work: OutWork
         .for_each(|(index, out_chunk)| work(index * chunk, out_chunk));
 }
 
+/// [`par_out_chunks`] for a body that also has something to report -- a partial
+/// sum, a maximum, a count -- and returns one per chunk, in chunk order.
+///
+/// The pairing matters for accuracy as much as for speed: a kernel that writes
+/// its chunk *and* accumulates over what it wrote does both in one pass. Doing
+/// them as two calls means reading the whole output back (26% on
+/// `softmax(dim=0)`) or computing it twice (64%).
+///
+/// The results come back in chunk order however the pool ran them, so a caller
+/// folding them gets the same answer on any number of threads -- provided the
+/// chunk width itself does not come from the thread count.
+pub(crate) fn par_out_chunks_mapped<T: Send, R: Send>(
+    out: &mut [T],
+    chunk: usize,
+    work: &(dyn Fn(usize, &mut [T]) -> R + Sync),
+) -> Vec<R> {
+    if out.is_empty() {
+        return Vec::new();
+    }
+    if out.len() <= chunk || chunk == 0 {
+        return vec![work(0, out)];
+    }
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .map(|(index, out_chunk)| work(index * chunk, out_chunk))
+        .collect()
+}
+
 /// The state buffers one optimizer step writes, split to match a parameter
 /// chunk. Four is past every optimizer in the engine (Adam's widest is `m`,
 /// `v`, `v_hat`), so the split never reaches the heap.

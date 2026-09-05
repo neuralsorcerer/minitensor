@@ -97,6 +97,11 @@ _CHILD = textwrap.dedent("""
 # accumulates. Shapes below put `norm`/`max`/`logsumexp` on each kernel: a last
 # axis (contiguous), a wide leading axis as one slab, and a wide middle axis as
 # several.
+#
+# `softmax` and `log_softmax` are here for the other half of that rule. Along
+# the first axis they *do* split an accumulation -- the column sums of the
+# exponentials -- so their band count comes from the block's shape instead, and
+# this is what says it stayed that way.
 _CHILD_ALONG_DIM = textwrap.dedent("""
     import numpy as np, minitensor as mt
     rng = np.random.default_rng(3)
@@ -114,6 +119,8 @@ _CHILD_ALONG_DIM = textwrap.dedent("""
                 digests.append(tensor.argmax(dim).numpy().tobytes())
             digests.append(clean.norm(2, dim).numpy().tobytes())
             digests.append(clean.logsumexp(dim).numpy().tobytes())
+            digests.append(clean.softmax(dim).numpy().tobytes())
+            digests.append(clean.log_softmax(dim).numpy().tobytes())
     import hashlib
     print(hashlib.sha256(b"".join(digests)).hexdigest())
     """)
