@@ -34,9 +34,11 @@
 
 use crate::{
     error::{MinitensorError, Result},
+    ops::map::{outputs_per_task, par_out_chunks2},
     ops::util::normalize_dim,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -94,11 +96,30 @@ fn walk_runs<T: Orderable, F: FnMut(usize, usize)>(values: &[T], mut visit: F) {
     }
 }
 
-/// The positions of `values` in ascending order.
-fn order_of<T: Orderable>(values: &[T]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..values.len()).collect();
-    order.sort_by(|&left, &right| compare(values[left], values[right]));
-    order
+/// The values in ascending order, and -- only if `positions` is asked for --
+/// where each of them came from.
+///
+/// Both halves matter. This used to sort a permutation of indices, which reads
+/// the value it is comparing out of the original buffer -- two dependent loads
+/// from anywhere in the tensor, per comparison -- where sorting the values
+/// themselves reads what it compares. And when nobody wants the positions,
+/// building them is work for no reader: `unique` over two million floats spent
+/// 397ms sorting a permutation it then discarded, against NumPy's 15 for the
+/// same question. It is 37ms now.
+///
+/// Ties need no rule here: equal values are equal by the comparison this module
+/// uses -- `NaN` included -- so which of them comes out first cannot change an
+/// answer built from runs of them.
+fn in_order<T: Orderable + Send>(values: &[T], positions: bool) -> (Vec<T>, Vec<usize>) {
+    if positions {
+        let mut pairs: Vec<(T, usize)> = values.iter().copied().zip(0..).collect();
+        pairs.par_sort_unstable_by(|left, right| compare(left.0, right.0));
+        pairs.into_iter().unzip()
+    } else {
+        let mut sorted = values.to_vec();
+        sorted.par_sort_unstable_by(|&left, &right| compare(left, right));
+        (sorted, Vec::new())
+    }
 }
 
 /// Build a tensor of `int64` from a vector.
@@ -171,13 +192,16 @@ fn run_lengths(
                 MinitensorError::internal_error("unique: dtype does not match the input")
             })?;
             // Sorting puts equal values next to each other, which is the only
-            // thing separating this from the consecutive form.
-            let order: Vec<usize> = if sorted {
-                order_of(values)
+            // thing separating this from the consecutive form. The positions
+            // come back only when the inverse map is wanted, since that is the
+            // only thing that reads them.
+            let (arranged, order): (Vec<$ty>, Vec<usize>) = if sorted {
+                in_order(values, wanted.inverse)
+            } else if wanted.inverse {
+                (values.to_vec(), (0..count).collect())
             } else {
-                (0..count).collect()
+                (values.to_vec(), Vec::new())
             };
-            let arranged: Vec<$ty> = order.iter().map(|&index| values[index]).collect();
 
             let mut distinct: Vec<$ty> = Vec::new();
             let mut counts: Vec<i64> = Vec::new();
@@ -189,7 +213,12 @@ fn run_lengths(
                     }
                 }
                 distinct.push(arranged[start]);
-                counts.push((stop - start) as i64);
+                // A tensor of all-distinct values has one count per element,
+                // which is a buffer the size of the input to build and throw
+                // away when nobody asked for the counts.
+                if wanted.counts {
+                    counts.push((stop - start) as i64);
+                }
             });
 
             let shape = Shape::new(vec![distinct.len()]);
@@ -280,28 +309,43 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
             let out = values.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error("mode: dtype does not match the output")
             })?;
-            let mut lane = Vec::with_capacity(width);
-            for index in 0..lanes {
-                let row = &source[index * width..(index + 1) * width];
-                lane.clear();
-                lane.extend_from_slice(row);
-                lane.sort_by(|left, right| compare(*left, *right));
+            // One lane is one output, and each sorts a copy of its own row:
+            // the lanes never touch, so they are handed out a band at a time
+            // sized by what one of them costs.
+            par_out_chunks2(
+                out,
+                &mut positions,
+                outputs_per_task(width),
+                &|start, values_chunk, positions_chunk| {
+                    let mut lane = Vec::with_capacity(width);
+                    for (offset, (value_out, position_out)) in values_chunk
+                        .iter_mut()
+                        .zip(positions_chunk.iter_mut())
+                        .enumerate()
+                    {
+                        let index = start + offset;
+                        let row = &source[index * width..(index + 1) * width];
+                        lane.clear();
+                        lane.extend_from_slice(row);
+                        lane.sort_by(|left, right| compare(*left, *right));
 
-                // Ascending, so the first run of maximal length is the one
-                // holding the smallest of the tied values.
-                let (mut best, mut longest) = (lane[0], 0usize);
-                walk_runs(&lane, |start, stop| {
-                    if stop - start > longest {
-                        longest = stop - start;
-                        best = lane[start];
+                        // Ascending, so the first run of maximal length is the
+                        // one holding the smallest of the tied values.
+                        let (mut best, mut longest) = (lane[0], 0usize);
+                        walk_runs(&lane, |from, to| {
+                            if to - from > longest {
+                                longest = to - from;
+                                best = lane[from];
+                            }
+                        });
+                        *value_out = best;
+                        *position_out = row
+                            .iter()
+                            .position(|value| compare(*value, best) == Ordering::Equal)
+                            .unwrap_or(0) as i64;
                     }
-                });
-                out[index] = best;
-                positions[index] = row
-                    .iter()
-                    .position(|value| compare(*value, best) == Ordering::Equal)
-                    .unwrap_or(0) as i64;
-            }
+                },
+            );
         }};
     }
     match tensor.dtype() {

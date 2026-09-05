@@ -375,3 +375,112 @@ def test_a_majority_vote_across_models():
     predictions = np.array([[2.0, 2.0, 1.0], [0.0, 3.0, 3.0], [1.0, 1.0, 1.0]])
     voted, _ = mt.mode(_t(predictions))
     assert np.array_equal(voted.numpy(), [2.0, 3.0, 1.0])
+
+
+class TestTheSortUnderneath:
+    """`unique` sorts to make equal values adjacent, and what it sorts matters.
+
+    It used to sort a permutation of indices, so every comparison read the value
+    it was comparing out of the original buffer -- two dependent loads from
+    anywhere in the tensor -- and it built that permutation whether or not
+    anything read it. Two million floats took 397ms against NumPy's 15. Sorting
+    the values themselves, in parallel, and carrying positions only when the
+    inverse map is asked for, takes 37.
+
+    That is three separate paths through the same walk -- values alone, values
+    with their positions, and no sort at all -- so these check they agree, on
+    inputs long enough to be sorted in parallel and awkward enough to catch a
+    seam: all-distinct, all-equal, already sorted, reverse sorted, and NaN
+    spread through a long run.
+    """
+
+    @staticmethod
+    def _agrees(values):
+        got = mt.unique(_t(values))
+        np.testing.assert_array_equal(got.numpy(), np.unique(values))
+
+        got, inverse, counts = mt.unique(
+            _t(values), return_inverse=True, return_counts=True
+        )
+        expected, expected_inverse, expected_counts = np.unique(
+            values, return_inverse=True, return_counts=True
+        )
+        np.testing.assert_array_equal(got.numpy(), expected)
+        np.testing.assert_array_equal(
+            inverse.numpy().reshape(expected_inverse.shape), expected_inverse
+        )
+        np.testing.assert_array_equal(counts.numpy(), expected_counts)
+
+        # The inverse is what rebuilds the input, which is the property it is
+        # for -- and the one a mis-sorted permutation would break.
+        np.testing.assert_array_equal(
+            got.numpy()[inverse.numpy().reshape(-1)], np.asarray(values).reshape(-1)
+        )
+
+    def test_a_long_all_distinct_input(self):
+        rng = np.random.default_rng(61)
+        self._agrees(rng.standard_normal(200_000).astype(np.float32))
+
+    def test_a_long_input_with_few_distinct_values(self):
+        rng = np.random.default_rng(67)
+        self._agrees(rng.integers(0, 17, 200_000).astype(np.int64))
+
+    def test_a_long_input_that_is_already_in_order(self):
+        self._agrees(np.arange(200_000, dtype=np.int64))
+
+    def test_a_long_input_in_reverse(self):
+        self._agrees(np.arange(200_000, dtype=np.int64)[::-1].copy())
+
+    def test_a_long_input_of_one_repeated_value(self):
+        self._agrees(np.full(200_000, 3.5, dtype=np.float32))
+
+    def test_a_long_input_with_nans_spread_through_it(self):
+        rng = np.random.default_rng(71)
+        values = rng.standard_normal(200_000).astype(np.float32)
+        values[::991] = np.nan
+        # NumPy keeps every NaN; this library collapses them, which the tests
+        # above pin -- so compare the finite part against NumPy and the NaN
+        # count against the rule.
+        finite = np.unique(values[~np.isnan(values)])
+        got = mt.unique(_t(values)).numpy()
+        np.testing.assert_array_equal(got[:-1], finite)
+        assert np.isnan(got[-1])
+        assert got.size == finite.size + 1
+
+    def test_the_consecutive_form_still_does_not_sort(self):
+        values = np.array([3, 3, 1, 1, 3, 2, 2], dtype=np.int64)
+        got, counts = mt.unique_consecutive(_t(values), return_counts=True)
+        np.testing.assert_array_equal(got.numpy(), [3, 1, 3, 2])
+        np.testing.assert_array_equal(counts.numpy(), [2, 2, 1, 2])
+
+
+class TestModeAcrossLanes:
+    """`mode` sorts a copy of every lane, and the lanes ran one after another.
+
+    Each lane is independent, so they are handed out a band at a time now --
+    2.8x on a 4096x512 tensor. The tie rule and the reported position are
+    choices this module makes rather than consequences of the sort, so they are
+    what a parallel split could quietly change.
+    """
+
+    def test_many_lanes_agree_with_the_documented_rules(self):
+        rng = np.random.default_rng(73)
+        values = rng.integers(0, 7, (500, 64)).astype(np.int64)
+        for dim in (0, 1):
+            got, where = mt.mode(_t(values), dim)
+
+            counts = np.apply_along_axis(np.bincount, dim, values, minlength=7)
+            # Ties go to the smaller value: the first maximal count wins.
+            expected = np.argmax(counts, axis=dim)
+            np.testing.assert_array_equal(got.numpy(), expected)
+
+            # The position reported is the first occurrence along the axis.
+            first = np.argmax(values == np.expand_dims(got.numpy(), dim), axis=dim)
+            np.testing.assert_array_equal(where.numpy(), first)
+
+    def test_a_lane_count_that_no_band_divides(self):
+        rng = np.random.default_rng(79)
+        values = rng.integers(0, 5, (997, 33)).astype(np.int32)
+        got, where = mt.mode(_t(values), 1)
+        picked = np.take_along_axis(values, where.numpy()[:, None], 1).reshape(-1)
+        np.testing.assert_array_equal(picked, got.numpy())

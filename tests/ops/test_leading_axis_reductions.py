@@ -110,9 +110,7 @@ def test_a_median_slice_holding_a_nan_is_nan():
     values[2, ::7] = np.nan
     got, _ = mt.median(mt.from_numpy(values), 0)
     assert np.isnan(got.numpy()[::7]).all()
-    np.testing.assert_array_equal(
-        got.numpy()[1::7], np.sort(values, 0)[2][1::7]
-    )
+    np.testing.assert_array_equal(got.numpy()[1::7], np.sort(values, 0)[2][1::7])
 
 
 def test_the_banded_and_unbanded_cuts_agree():
