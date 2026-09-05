@@ -302,3 +302,30 @@ def test_a_write_a_pending_backward_still_needs_is_refused(x):
 
     kept.sum().backward()
     mt.clear_autograd_graph()
+
+
+@pytest.mark.parametrize(
+    "shape,dim,count",
+    [
+        ((4096, 512), 0, 1000),
+        ((4096, 512), 1, 1000),
+        ((7, 13), 0, 1),
+        ((7, 13), 1, 40),
+        ((4, 5, 6), 1, 11),
+        ((3,), 0, 7),
+        ((2, 3, 4, 5), 2, 9),
+    ],
+)
+def test_selecting_many_rows_agrees_with_take(shape, dim, count):
+    """`index_select` copies one row per selected index, and the rows are
+    handed out in bands rather than one band per outer position -- which for a
+    selection along the first axis was the whole copy on one core (167ms for
+    204MB, against NumPy's 71). A band that starts mid-row, or a row count no
+    band divides, is what that split could get wrong.
+    """
+    rng = np.random.default_rng(83)
+    values = rng.standard_normal(shape).astype(np.float32)
+    picks = rng.integers(0, shape[dim], count).astype(np.int64)
+
+    got = mt.index_select(mt.from_numpy(values), dim, mt.from_numpy(picks))
+    np.testing.assert_array_equal(got.numpy(), np.take(values, picks, axis=dim))

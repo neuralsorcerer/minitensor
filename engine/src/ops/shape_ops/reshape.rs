@@ -11,7 +11,7 @@ use crate::{
     },
     device::Device,
     error::{MinitensorError, Result},
-    ops::map::{PAR_THRESHOLD, build_vec, par_out_chunks},
+    ops::map::{PAR_THRESHOLD, build_vec, outputs_per_task, par_out_chunks},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rayon::prelude::*;
@@ -620,7 +620,6 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
     // Compute output shape
     let mut output_shape = tensor.shape().dims().to_vec();
     output_shape[dim] = indices.len();
-    let output_shape_vec = output_shape.clone();
     let output_shape_obj = Shape::new(output_shape);
 
     let dtype = tensor.dtype();
@@ -633,7 +632,13 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
 
     let dims = tensor.shape().dims();
     let inner: usize = dims[dim + 1..].iter().product();
-    let _outer: usize = dims[..dim].iter().product();
+    // One output row is one selected index's `inner` elements, and rows are
+    // independent of each other. Cutting by outer position instead meant a
+    // selection along the first axis -- which has one -- copied its whole
+    // output on a single core: 100000 rows of 512 floats took 167ms against
+    // NumPy's 71 for the same 204MB.
+    let rows_per_task = outputs_per_task(inner);
+    let selected = indices.len();
 
     macro_rules! index_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
@@ -644,14 +649,17 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
             // run of `inner` per selected index, so every element is written.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    let span = output_shape_vec[dim] * inner;
-                    par_out_chunks(spare, span, &|start, out_chunk| {
-                        let o = start / span;
-                        for (i, &idx) in indices.iter().enumerate() {
-                            let src_start = o * dims[dim] * inner + idx * inner;
-                            let dst_start = i * inner;
-                            out_chunk[dst_start..dst_start + inner]
-                                .write_copy_of_slice(&src[src_start..src_start + inner]);
+                    par_out_chunks(spare, rows_per_task * inner, &|start, out_chunk| {
+                        // A chunk starts on a row boundary because its width is
+                        // a whole number of rows; row `r` of the output is
+                        // outer position `r / selected` and selected index
+                        // `r % selected`.
+                        let mut row = start / inner;
+                        for piece in out_chunk.chunks_mut(inner) {
+                            let source = (row / selected) * dims[dim] * inner
+                                + indices[row % selected] * inner;
+                            piece.write_copy_of_slice(&src[source..source + inner]);
+                            row += 1;
                         }
                     });
                 })
