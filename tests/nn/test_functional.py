@@ -1465,3 +1465,40 @@ def test_cross_entropy_rejects_an_out_of_range_class_index():
     logits = mt.from_numpy(np.zeros((2, 3), dtype=np.float32))
     with pytest.raises(Exception):
         mt.nn.cross_entropy(logits, mt.from_numpy(np.array([0, 5], dtype=np.int64)))
+
+
+def test_bincount_agrees_with_numpy_over_long_inputs():
+    """The count is banded across threads now, with a private tally per band.
+
+    It used to collect the input into a `Vec<i64>` and then map that into a
+    `Vec<usize>` -- two copies of the whole tensor before any counting -- and
+    then count on one core. Two million labels took 10.2ms against NumPy's 3.0;
+    they take 1.6 now. What a banded count can get wrong is the merge, which
+    shows up as a total that is short by a band.
+    """
+    rng = np.random.default_rng(211)
+    for labels, minlength in [
+        (rng.integers(0, 1000, 200_000).astype(np.int64), 0),
+        (rng.integers(0, 1000, 200_000).astype(np.int64), 4000),
+        (rng.integers(0, 7, 200_003).astype(np.int32), 0),
+        (rng.integers(0, 2, 200_000).astype(bool), 5),
+        # More bins than the private-tally limit, which takes the serial path.
+        (rng.integers(0, 200_000, 200_000).astype(np.int64), 0),
+    ]:
+        counts = mt.bincount(mt.from_numpy(labels), minlength=minlength).numpy()
+        expected = np.bincount(labels.astype(np.int64), minlength=minlength)
+        np.testing.assert_array_equal(counts, expected)
+        assert counts.sum() == labels.size
+
+
+def test_bincount_weighted_totals_match_numpy():
+    """A weighted count adds floats, so the band boundaries have to come from
+    the label count rather than the thread pool -- otherwise the same call
+    answers differently on different machines."""
+    rng = np.random.default_rng(223)
+    labels = rng.integers(0, 500, 200_000).astype(np.int64)
+    weights = rng.standard_normal(200_000)
+
+    totals = mt.bincount(mt.from_numpy(labels), weights=mt.from_numpy(weights)).numpy()
+    expected = np.bincount(labels, weights=weights)
+    np.testing.assert_allclose(totals, expected, rtol=1e-12, atol=1e-12)

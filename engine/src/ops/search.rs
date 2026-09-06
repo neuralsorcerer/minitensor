@@ -12,6 +12,10 @@
 //! when the sequence is a fixed set of boundaries; `histogram` is the search
 //! followed by a count; and `histc` is `histogram` with the edges chosen for you.
 //!
+//! `bincount` is the degenerate case of the same thing -- the value *is* the
+//! bin, so there is no search left, only the count -- and it shares the
+//! counting.
+//!
 //! It cannot be composed out of what the library has. A comparison against every
 //! boundary would be `O(values * boundaries)` and would still leave the counting
 //! to do; the whole point of a sorted sequence is that the answer is `log`
@@ -25,8 +29,11 @@
 
 use crate::{
     error::{MinitensorError, Result},
+    ops::map::par_map_indexed,
+    ops::util::pairwise_fold_vectors,
     tensor::{DataType, Shape, Tensor, TensorData},
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Where `value` belongs in an already-sorted `sequence`.
@@ -283,6 +290,232 @@ fn doubles_to_tensor(values: Vec<f64>, device: crate::device::Device) -> Result<
 ///
 /// `density` divides each count by the total and by its bin's width, so the
 /// result integrates to one and is comparable across binnings.
+/// Bins beyond which a private tally per task costs more than the contention it
+/// saves: each task allocates one, and a wide one is a page fault per task.
+const TALLY_PRIVATE_BINS: usize = 1 << 16;
+
+/// The smallest run worth handing a task, and how many to aim for.
+///
+/// Both come from the value count alone -- never from the thread pool --
+/// because a weighted tally adds floats, and a sum whose grouping follows the
+/// pool answers differently on different machines.
+const TALLY_MIN_BAND: usize = 1 << 14;
+const TALLY_BANDS: usize = 64;
+
+/// Add one contribution per value into `bins` slots.
+///
+/// `contribution(index)` says which slot a value lands in and what it adds
+/// there, or `None` for a value that lands nowhere. That closure is the only
+/// difference between a histogram, a weighted histogram and a `bincount`, so
+/// the counting itself is written once.
+///
+/// Each band keeps a private tally and they merge pairwise afterwards, which is
+/// what makes this parallel at all: the slots a band touches are scattered, so
+/// bands cannot be given disjoint pieces of one output.
+pub(crate) fn tally<T, F>(count: usize, bins: usize, zero: T, contribution: F) -> Vec<T>
+where
+    T: Copy + Send + Sync + std::ops::Add<Output = T>,
+    F: Fn(usize) -> Option<(usize, T)> + Sync,
+{
+    if bins == 0 || count == 0 {
+        return vec![zero; bins];
+    }
+    let band = count.div_ceil(TALLY_BANDS).max(TALLY_MIN_BAND);
+    let bands = count.div_ceil(band);
+    if bands < 2 || bins > TALLY_PRIVATE_BINS {
+        let mut slots = vec![zero; bins];
+        for index in 0..count {
+            if let Some((slot, value)) = contribution(index) {
+                slots[slot] = slots[slot] + value;
+            }
+        }
+        return slots;
+    }
+    let partials = par_map_indexed(bands, &|index| {
+        let first = index * band;
+        let last = (first + band).min(count);
+        let mut slots = vec![zero; bins];
+        for position in first..last {
+            if let Some((slot, value)) = contribution(position) {
+                slots[slot] = slots[slot] + value;
+            }
+        }
+        slots
+    });
+    pairwise_fold_vectors(partials, |a, b| a + b)
+}
+
+/// The labels of a [`bincount`], borrowed rather than copied.
+///
+/// This op used to collect its input into a `Vec<i64>` and then map that into a
+/// `Vec<usize>` -- two copies of the whole tensor, 32MB for two million labels,
+/// before any counting started. A three-way match per element is cheaper than
+/// either of them.
+enum Labels<'a> {
+    I64(&'a [i64]),
+    I32(&'a [i32]),
+    Bool(&'a [bool]),
+}
+
+impl Labels<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Labels::I64(values) => values.len(),
+            Labels::I32(values) => values.len(),
+            Labels::Bool(values) => values.len(),
+        }
+    }
+
+    #[inline]
+    fn at(&self, index: usize) -> i64 {
+        match self {
+            Labels::I64(values) => values[index],
+            Labels::I32(values) => i64::from(values[index]),
+            Labels::Bool(values) => i64::from(values[index]),
+        }
+    }
+
+    /// The smallest and largest label, or `(0, -1)` when there are none.
+    fn bounds(&self) -> (i64, i64) {
+        match self {
+            Labels::I64(values) => (
+                values.par_iter().copied().min().unwrap_or(0),
+                values.par_iter().copied().max().unwrap_or(-1),
+            ),
+            Labels::I32(values) => (
+                values.par_iter().copied().min().unwrap_or(0).into(),
+                values.par_iter().copied().max().unwrap_or(-1).into(),
+            ),
+            Labels::Bool(values) => (
+                0,
+                if values.par_iter().copied().any(|flag| flag) {
+                    1
+                } else {
+                    0
+                },
+            ),
+        }
+    }
+}
+
+/// How many times each non-negative integer occurs in `labels`, or -- with
+/// `weights` -- the total weight sitting on it.
+///
+/// The output is as long as the largest label needs, or `minlength`, whichever
+/// is more. Weighted counts take the weights' dtype, unweighted ones are
+/// `int64`. Neither is differentiable: a count moves in jumps as a label
+/// changes, so both detach.
+pub fn bincount(labels: &Tensor, weights: Option<&Tensor>, minlength: usize) -> Result<Tensor> {
+    if labels.ndim() != 1 {
+        return Err(MinitensorError::invalid_operation(
+            "bincount input must be 1-D",
+        ));
+    }
+    let labels_contiguous = labels.contiguous()?;
+    let data = labels_contiguous.data();
+    let borrowed = match labels.dtype() {
+        DataType::Int64 => Labels::I64(
+            data.as_i64_slice()
+                .ok_or_else(|| MinitensorError::internal_error("bincount: input is not int64"))?,
+        ),
+        DataType::Int32 => Labels::I32(
+            data.as_i32_slice()
+                .ok_or_else(|| MinitensorError::internal_error("bincount: input is not int32"))?,
+        ),
+        DataType::Bool => Labels::Bool(
+            data.as_bool_slice()
+                .ok_or_else(|| MinitensorError::internal_error("bincount: input is not bool"))?,
+        ),
+        dtype => {
+            return Err(MinitensorError::type_mismatch(
+                "an integer or bool dtype",
+                format!("{dtype:?}"),
+            ));
+        }
+    };
+
+    let count = borrowed.len();
+    let (lowest, highest) = borrowed.bounds();
+    if lowest < 0 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "bincount input values must be non-negative, got {lowest}"
+        )));
+    }
+    let reached = if count == 0 {
+        0
+    } else {
+        usize::try_from(highest)
+            .ok()
+            .and_then(|top| top.checked_add(1))
+            .ok_or_else(|| MinitensorError::invalid_operation("bincount output size overflow"))?
+    };
+    let bins = reached.max(minlength);
+    let device = labels.device();
+
+    let Some(weights) = weights else {
+        let counts = tally(count, bins, 0i64, |index| {
+            Some((borrowed.at(index) as usize, 1i64))
+        });
+        return Ok(counted_tensor(
+            TensorData::from_vec_i64(counts, device),
+            DataType::Int64,
+            bins,
+            device,
+        ));
+    };
+
+    if weights.shape().dims() != labels.shape().dims() {
+        return Err(MinitensorError::invalid_operation(
+            "weights must have the same shape as input",
+        ));
+    }
+    let weights_contiguous = weights.contiguous()?;
+    match weights.dtype() {
+        DataType::Float32 => {
+            let values = weights_contiguous.data().as_f32_slice().ok_or_else(|| {
+                MinitensorError::internal_error("bincount: weights are not float32")
+            })?;
+            let totals = tally(count, bins, 0f32, |index| {
+                Some((borrowed.at(index) as usize, values[index]))
+            });
+            Ok(counted_tensor(
+                TensorData::from_vec_f32(totals, device),
+                DataType::Float32,
+                bins,
+                device,
+            ))
+        }
+        DataType::Float64 => {
+            let values = weights_contiguous.data().as_f64_slice().ok_or_else(|| {
+                MinitensorError::internal_error("bincount: weights are not float64")
+            })?;
+            let totals = tally(count, bins, 0f64, |index| {
+                Some((borrowed.at(index) as usize, values[index]))
+            });
+            Ok(counted_tensor(
+                TensorData::from_vec_f64(totals, device),
+                DataType::Float64,
+                bins,
+                device,
+            ))
+        }
+        dtype => Err(MinitensorError::type_mismatch(
+            "a floating-point dtype",
+            format!("{dtype:?}"),
+        )),
+    }
+}
+
+/// A one-dimensional, non-differentiable result of `bins` counts.
+fn counted_tensor(
+    data: TensorData,
+    dtype: DataType,
+    bins: usize,
+    device: crate::device::Device,
+) -> Tensor {
+    Tensor::new(Arc::new(data), Shape::new(vec![bins]), dtype, device, false)
+}
+
 pub fn histogram(
     input: &Tensor,
     bins: Bins<'_>,
@@ -365,19 +598,22 @@ pub fn histogram(
     };
 
     let bin_count = edges.len() - 1;
-    let mut counts = vec![0.0f64; bin_count];
-    for (index, value) in values.iter().enumerate() {
-        if !value.is_finite() || *value < edges[0] || *value > edges[bin_count] {
-            continue;
+    let mut counts = tally(values.len(), bin_count, 0.0f64, |index| {
+        let value = values[index];
+        if !value.is_finite() || value < edges[0] || value > edges[bin_count] {
+            return None;
         }
-        let slot = locate(&edges, value, true)
+        let slot = locate(&edges, &value, true)
             .saturating_sub(1)
             .min(bin_count - 1);
-        counts[slot] += match &weights {
-            Some(weights) => weights[index],
-            None => 1.0,
-        };
-    }
+        Some((
+            slot,
+            match &weights {
+                Some(weights) => weights[index],
+                None => 1.0,
+            },
+        ))
+    });
 
     if density {
         let total: f64 = counts.iter().sum();
