@@ -6,7 +6,8 @@
 
 use super::*;
 use crate::ops::map::{
-    outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2, reduction_band,
+    SIMD_PAR_CHUNK, build_vec, outputs_per_task, par_fold_chunks, par_out_chunks, par_out_chunks2,
+    reduction_band,
 };
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
@@ -33,17 +34,101 @@ use std::sync::Arc;
 /// a training loop.
 const PAR_SORT_MIN_LEN: usize = 1 << 14;
 
+/// One element to be sorted: its order key above its position in the slice.
+///
+/// The comparison is what a sort spends itself on -- forty million of them for
+/// two million elements -- so the ordering rule is moved *out* of it. Every
+/// dtype maps to an unsigned integer whose ascending order is that dtype's
+/// ascending order (see [`float_key32`] and its neighbours), the position goes
+/// in the low bits, and the sort is then a plain integer comparison with no
+/// branches, no NaN test and no tie-break to fall through to.
+///
+/// It is also what makes the answer deterministic: the position makes every
+/// entry distinct, so the total order has no ties for an unstable sort to
+/// resolve differently on a different day. `sort(stable=true)` and
+/// `sort(stable=false)` therefore give the same answer, and both get the
+/// faster sort.
+///
+/// The branchy three-way comparator this replaced cost 62ms where the integer
+/// one costs 18ms on the same two million float32.
+trait Entry: Ord + Copy + Send + Sync {
+    /// Where this element sat in the slice before sorting.
+    fn position(self) -> usize;
+}
+
+impl Entry for u64 {
+    #[inline(always)]
+    fn position(self) -> usize {
+        (self & u32::MAX as u64) as usize
+    }
+}
+
+impl Entry for u128 {
+    #[inline(always)]
+    fn position(self) -> usize {
+        (self & u64::MAX as u128) as usize
+    }
+}
+
+/// The order-preserving unsigned key of a float, as its own width.
+///
+/// The usual bit trick: flipping the sign bit of a non-negative and every bit
+/// of a negative turns IEEE-754's sign-magnitude layout into an unsigned
+/// integer that compares the same way. Two families need folding first, or the
+/// integer order would say things the float order does not:
+///
+/// * NaN compares with nothing, and this library sorts it after every number.
+///   Its bit patterns straddle the range -- a negative NaN would land below
+///   negative infinity -- so all of them are folded to the maximum key.
+/// * `-0.0` and `0.0` are equal as floats and have different bit patterns, so
+///   `-0.0` is folded to `0.0` and the two keep their input order as any other
+///   pair of equals does.
+macro_rules! float_key {
+    ($name:ident, $float:ty, $unsigned:ty, $signed:ty, $shift:expr) => {
+        #[inline(always)]
+        fn $name(value: $float) -> $unsigned {
+            if value.is_nan() {
+                return <$unsigned>::MAX;
+            }
+            let folded = if value == 0.0 { 0.0 } else { value };
+            let bits = folded.to_bits();
+            bits ^ (((bits as $signed) >> $shift) as $unsigned | (1 << $shift))
+        }
+    };
+}
+
+float_key!(float_key32, f32, u32, i32, 31);
+float_key!(float_key64, f64, u64, i64, 63);
+
+/// The order-preserving unsigned key of a signed integer: shift the range so
+/// the most negative value becomes zero.
+#[inline(always)]
+fn int_key32(value: i32) -> u32 {
+    (value as u32) ^ (1 << 31)
+}
+
+#[inline(always)]
+fn int_key64(value: i64) -> u64 {
+    (value as u64) ^ (1 << 63)
+}
+
+#[inline(always)]
+fn bool_key(value: bool) -> u32 {
+    value as u32
+}
+
 /// Sort each 1-D slice along a dimension, parallelizing over the outer index.
 ///
 /// `values`/`indices` are partitioned into one disjoint chunk per outer
 /// position (`par_chunks_mut`), so the parallel writes never overlap and this
-/// stays safe. Each slice gathers `(original_index, value)` pairs, sorts them
-/// with `cmp` (so `indices` becomes the argsort), and scatters the result back.
+/// stays safe. Each slice packs its elements into [`Entry`] keys, sorts them,
+/// and reads the values back out of `input` by the position each key carries
+/// (so `indices` becomes the argsort).
 ///
 /// Only worth calling when there are enough slices to fill the thread pool --
 /// see [`sort_rows_with_parallel_sort`] for the other case.
 #[allow(clippy::too_many_arguments)]
-fn sort_along_dim_par<T, C>(
+fn sort_along_dim_par<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -51,38 +136,113 @@ fn sort_along_dim_par<T, C>(
     inner: usize,
     dim_size: usize,
     outer_stride: usize,
-    stable: bool,
-    cmp: C,
+    make: M,
 ) where
     T: Copy + Send + Sync,
-    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
     debug_assert_eq!(values.len(), outer * outer_stride);
     debug_assert_eq!(indices.len(), outer * outer_stride);
-    // Erased at the chunk boundary only: `cmp` stays a concrete type inside the
-    // body, so the sort still monomorphizes against it. Erasing the comparator
-    // itself would put an indirect call on every comparison.
+    // Erased at the chunk boundary only: `make` stays a concrete type inside
+    // the body, so the packing still monomorphizes against it.
     par_out_chunks2(values, indices, outer_stride, &|start, vchunk, ichunk| {
         let o = start / outer_stride;
-        let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+        let mut entries: Vec<E> = Vec::with_capacity(dim_size);
         for r in 0..inner {
             entries.clear();
             let base = o * outer_stride + r;
             for d in 0..dim_size {
-                entries.push((d, input[base + d * inner]));
+                entries.push(make(d, input[base + d * inner]));
             }
-            if stable {
-                entries.sort_by(cmp);
-            } else {
-                entries.sort_unstable_by(cmp);
-            }
-            for (j, (index, value)) in entries.iter().enumerate() {
+            entries.sort_unstable();
+            for (j, entry) in entries.iter().enumerate() {
+                let position = entry.position();
                 let off = r + j * inner;
-                vchunk[off] = *value;
-                ichunk[off] = *index as i64;
+                vchunk[off] = input[base + position * inner];
+                ichunk[off] = position as i64;
             }
         }
     });
+}
+
+/// Pack one slice into sort keys, spread across the pool.
+///
+/// A two-million-element slice asks for 16MB of keys -- a fresh mapping, at
+/// glibc's largest dynamic mmap threshold, whose pages fault in on first
+/// write. Filling it on one core paid every one of those faults serially and
+/// cost as much as half the sort that follows.
+fn packed_entries<T, E, M>(
+    input: &[T],
+    base: usize,
+    inner: usize,
+    dim_size: usize,
+    make: M,
+) -> Vec<E>
+where
+    T: Copy + Send + Sync,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
+{
+    // SAFETY: `par_out_chunks` hands out a partition of the spare slice, and
+    // the body writes every element of the chunk it is given.
+    unsafe {
+        build_vec(dim_size, |spare| {
+            par_out_chunks(spare, SIMD_PAR_CHUNK, &|start, chunk| {
+                for (offset, slot) in chunk.iter_mut().enumerate() {
+                    let d = start + offset;
+                    slot.write(make(d, input[base + d * inner]));
+                }
+            });
+        })
+    }
+}
+
+/// Lay a sorted slice back down the axis, spread across the pool.
+///
+/// Only when the destination is contiguous, which is the case this exists for:
+/// the caller runs when there are fewer slices than threads, and a slice with
+/// `inner > 1` is interleaved with its neighbours, so no cut of the output
+/// separates the writes. That case is a handful of elements anyway -- `inner`
+/// is below the thread count there -- and stays sequential.
+fn scatter_entries<T, E>(
+    entries: &[E],
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    base: usize,
+    inner: usize,
+    dim_size: usize,
+) where
+    T: Copy + Send + Sync,
+    E: Entry,
+{
+    if inner == 1 {
+        let end = base + dim_size;
+        par_out_chunks2(
+            &mut values[base..end],
+            &mut indices[base..end],
+            SIMD_PAR_CHUNK,
+            &|start, value_chunk, index_chunk| {
+                for (offset, (value, index)) in value_chunk
+                    .iter_mut()
+                    .zip(index_chunk.iter_mut())
+                    .enumerate()
+                {
+                    let position = entries[start + offset].position();
+                    *value = input[base + position];
+                    *index = position as i64;
+                }
+            },
+        );
+        return;
+    }
+    for (j, entry) in entries.iter().enumerate() {
+        let position = entry.position();
+        let off = base + j * inner;
+        values[off] = input[base + position * inner];
+        indices[off] = position as i64;
+    }
 }
 
 /// The same sort, but parallel *within* each slice rather than across them.
@@ -93,7 +253,7 @@ fn sort_along_dim_par<T, C>(
 /// same 2M elements cost 134 ns each as one slice and 16 ns each as 2048 of
 /// them, a 8.3x spread on four cores that was pure scheduling.
 #[allow(clippy::too_many_arguments)]
-fn sort_rows_with_parallel_sort<T, C>(
+fn sort_rows_with_parallel_sort<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -101,30 +261,18 @@ fn sort_rows_with_parallel_sort<T, C>(
     inner: usize,
     dim_size: usize,
     outer_stride: usize,
-    stable: bool,
-    cmp: C,
+    make: M,
 ) where
     T: Copy + Send + Sync,
-    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
-    let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
     for o in 0..outer {
         for r in 0..inner {
-            entries.clear();
             let base = o * outer_stride + r;
-            for d in 0..dim_size {
-                entries.push((d, input[base + d * inner]));
-            }
-            if stable {
-                entries.par_sort_by(cmp);
-            } else {
-                entries.par_sort_unstable_by(cmp);
-            }
-            for (j, (index, value)) in entries.iter().enumerate() {
-                let off = base + j * inner;
-                values[off] = *value;
-                indices[off] = *index as i64;
-            }
+            let mut entries: Vec<E> = packed_entries(input, base, inner, dim_size, make);
+            entries.par_sort_unstable();
+            scatter_entries(&entries, input, values, indices, base, inner, dim_size);
         }
     }
 }
@@ -145,7 +293,7 @@ fn sort_rows_with_parallel_sort<T, C>(
 /// it buys the whole pool: 400ms to 117ms on a 2048-by-2048 sorted down its
 /// columns, which is quicker than NumPy doing the same thing.
 #[allow(clippy::too_many_arguments)]
-fn sort_along_dim_transposed<T, C>(
+fn sort_along_dim_transposed<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -153,60 +301,52 @@ fn sort_along_dim_transposed<T, C>(
     inner: usize,
     dim_size: usize,
     outer_stride: usize,
-    stable: bool,
-    cmp: C,
+    make: M,
 ) where
     T: Copy + Send + Sync,
-    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
-    // Slice-major: `[outer][inner][dim_size]`, so one slice is one run. Seeded
-    // from an element of the input rather than a zero, because the dtypes this
-    // sorts have no zero in common; every entry is overwritten below.
-    let mut packed_values = vec![input[0]; outer * outer_stride];
-    let mut packed_indices = vec![0i64; outer * outer_stride];
-
-    par_out_chunks2(
-        &mut packed_values,
-        &mut packed_indices,
-        dim_size,
-        &|start, vrun, irun| {
-            let slice = start / dim_size;
-            let base = (slice / inner) * outer_stride + slice % inner;
-            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
-            for d in 0..dim_size {
-                entries.push((d, input[base + d * inner]));
-            }
-            if stable {
-                entries.sort_by(cmp);
-            } else {
-                entries.sort_unstable_by(cmp);
-            }
-            for (j, (index, value)) in entries.iter().enumerate() {
-                vrun[j] = *value;
-                irun[j] = *index as i64;
-            }
-        },
-    );
+    // Slice-major: `[outer][inner][dim_size]`, so one slice is one run.
+    // Written before it is sorted rather than into a scratch that is then
+    // copied: the packing pass is what faults the pages in, and it is parallel.
+    //
+    // SAFETY: `par_out_chunks` partitions the spare slice into whole runs and
+    // each body writes every element of its run.
+    let mut packed: Vec<E> = unsafe {
+        build_vec(outer * outer_stride, |spare| {
+            par_out_chunks(spare, dim_size, &|start, run| {
+                let slice = start / dim_size;
+                let base = (slice / inner) * outer_stride + slice % inner;
+                for (d, slot) in run.iter_mut().enumerate() {
+                    slot.write(make(d, input[base + d * inner]));
+                }
+            });
+        })
+    };
+    par_out_chunks(&mut packed, dim_size, &|_, run| run.sort_unstable());
 
     // Back down the axis. One output row -- every slice's `j`th element -- is
     // contiguous, which is the cut that makes this pass safe and parallel too.
     par_out_chunks2(values, indices, inner, &|start, vrow, irow| {
         let row = start / inner;
-        let base = (row / dim_size) * outer_stride + row % dim_size;
+        let o = row / dim_size;
+        let base = o * outer_stride + row % dim_size;
         for (r, (value, index)) in vrow.iter_mut().zip(irow.iter_mut()).enumerate() {
-            *value = packed_values[base + r * dim_size];
-            *index = packed_indices[base + r * dim_size];
+            let position = packed[base + r * dim_size].position();
+            *value = input[o * outer_stride + r + position * inner];
+            *index = position as i64;
         }
     });
 }
 
-/// Pick whichever of the two has parallelism to exploit.
+/// Pick whichever of the three has parallelism to exploit.
 ///
 /// Splitting across slices is cheaper per element when there are enough of
 /// them, because each sort stays on one core with no merge step. It only wins
 /// when the pool is actually filled, which is what this decides.
 #[allow(clippy::too_many_arguments)]
-fn sort_along_dim<T, C>(
+fn sort_along_dim<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -214,11 +354,11 @@ fn sort_along_dim<T, C>(
     inner: usize,
     dim_size: usize,
     outer_stride: usize,
-    stable: bool,
-    cmp: C,
+    make: M,
 ) where
     T: Copy + Send + Sync,
-    C: Fn(&(usize, T), &(usize, T)) -> std::cmp::Ordering + Sync + Copy,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
     let slices = outer.saturating_mul(inner);
     let threads = rayon::current_num_threads();
@@ -235,8 +375,7 @@ fn sort_along_dim<T, C>(
             inner,
             dim_size,
             outer_stride,
-            stable,
-            cmp,
+            make,
         );
     } else if slices < threads && dim_size >= PAR_SORT_MIN_LEN {
         sort_rows_with_parallel_sort(
@@ -247,8 +386,7 @@ fn sort_along_dim<T, C>(
             inner,
             dim_size,
             outer_stride,
-            stable,
-            cmp,
+            make,
         );
     } else {
         sort_along_dim_par(
@@ -259,18 +397,115 @@ fn sort_along_dim<T, C>(
             inner,
             dim_size,
             outer_stride,
-            stable,
-            cmp,
+            make,
         );
     }
 }
 
+/// Sort a dtype whose key fits in 32 bits.
+///
+/// The key and the position share one `u64` -- 8 bytes an element where the
+/// value-and-index pair this replaced took 16 -- unless the axis is longer than
+/// `u32::MAX`, which has nowhere to put the position and takes the wide form
+/// instead. `descending` complements the key rather than reversing the
+/// comparison, so ties still fall back to the *ascending* position and the
+/// answer stays the mirror of the ascending one rather than its reverse.
+#[allow(clippy::too_many_arguments)]
+fn sort_by_key32<T, K>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    outer: usize,
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    descending: bool,
+    key: K,
+) where
+    T: Copy + Send + Sync,
+    K: Fn(T) -> u32 + Copy + Sync,
+{
+    macro_rules! run {
+        ($make:expr) => {
+            sort_along_dim(
+                input,
+                values,
+                indices,
+                outer,
+                inner,
+                dim_size,
+                outer_stride,
+                $make,
+            )
+        };
+    }
+    if dim_size <= u32::MAX as usize {
+        match descending {
+            true => run!(move |d: usize, v: T| ((!key(v) as u64) << 32) | d as u64),
+            false => run!(move |d: usize, v: T| ((key(v) as u64) << 32) | d as u64),
+        }
+    } else {
+        match descending {
+            true => run!(move |d: usize, v: T| ((!key(v) as u128) << 64) | d as u128),
+            false => run!(move |d: usize, v: T| ((key(v) as u128) << 64) | d as u128),
+        }
+    }
+}
+
+/// Sort a dtype whose key fills 64 bits, which leaves only the wide entry.
+#[allow(clippy::too_many_arguments)]
+fn sort_by_key64<T, K>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    outer: usize,
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    descending: bool,
+    key: K,
+) where
+    T: Copy + Send + Sync,
+    K: Fn(T) -> u64 + Copy + Sync,
+{
+    macro_rules! run {
+        ($make:expr) => {
+            sort_along_dim(
+                input,
+                values,
+                indices,
+                outer,
+                inner,
+                dim_size,
+                outer_stride,
+                $make,
+            )
+        };
+    }
+    match descending {
+        true => run!(move |d: usize, v: T| ((!key(v) as u128) << 64) | d as u128),
+        false => run!(move |d: usize, v: T| ((key(v) as u128) << 64) | d as u128),
+    }
+}
+
+/// Sort each slice along `dim`, returning the values and the argsort.
+///
+/// `stable` is accepted for the shape of the API and changes nothing: this
+/// sort is *always* stable. Every element's position goes into its sort key
+/// (see [`Entry`]), so no two entries compare equal, there is no tie for an
+/// unstable sort to resolve differently, and equal values always come back in
+/// the order they went in -- on any number of threads. `stable = false`
+/// therefore costs nothing and buys nothing, which is the honest answer to a
+/// caller who did not need the guarantee.
 pub fn sort(
     tensor: &Tensor,
     dim: Option<isize>,
     descending: bool,
     stable: bool,
 ) -> Result<(Tensor, Tensor)> {
+    // Named in the signature above, and deliberately unread. See the doc
+    // comment: the ordering is total, so both settings are the same sort.
+    let _ = stable;
     let ndim = tensor.ndim();
 
     let axis = if ndim == 0 {
@@ -414,38 +649,23 @@ pub fn sort(
     };
     let outer_stride = dim_size * inner;
 
-    // Dispatch to the parallel kernel with the *ascending* or *descending*
-    // comparator passed as a function item (not through an `if`, which would
-    // coerce to a non-inlinable function pointer and slow the sort's inner
-    // comparisons). Passing the item lets the generic kernel monomorphize and
-    // inline the comparator.
+    // The key function goes in as a function item rather than through an `if`,
+    // which would coerce it to a non-inlinable function pointer and put an
+    // indirect call on every element.
+    //
     macro_rules! run_sort {
-        ($input:expr, $values:expr, $indices:expr, $asc:expr, $desc:expr) => {
-            if descending {
-                sort_along_dim(
-                    $input,
-                    $values,
-                    $indices,
-                    outer,
-                    inner,
-                    dim_size,
-                    outer_stride,
-                    stable,
-                    $desc,
-                );
-            } else {
-                sort_along_dim(
-                    $input,
-                    $values,
-                    $indices,
-                    outer,
-                    inner,
-                    dim_size,
-                    outer_stride,
-                    stable,
-                    $asc,
-                );
-            }
+        ($width:ident, $input:expr, $values:expr, $indices:expr, $key:expr) => {
+            $width(
+                $input,
+                $values,
+                $indices,
+                outer,
+                inner,
+                dim_size,
+                outer_stride,
+                descending,
+                $key,
+            )
         };
     }
 
@@ -462,7 +682,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            run_sort!(input, values, indices, cmp_f32_asc, cmp_f32_desc);
+            run_sort!(sort_by_key32, input, values, indices, float_key32);
         }
         DataType::Float64 => {
             let input = tensor
@@ -476,7 +696,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            run_sort!(input, values, indices, cmp_f64_asc, cmp_f64_desc);
+            run_sort!(sort_by_key64, input, values, indices, float_key64);
         }
         DataType::Int32 => {
             let input = tensor
@@ -490,7 +710,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            run_sort!(input, values, indices, cmp_i32_asc, cmp_i32_desc);
+            run_sort!(sort_by_key32, input, values, indices, int_key32);
         }
         DataType::Int64 => {
             let input = tensor
@@ -504,7 +724,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            run_sort!(input, values, indices, cmp_i64_asc, cmp_i64_desc);
+            run_sort!(sort_by_key64, input, values, indices, int_key64);
         }
         DataType::Bool => {
             let input = tensor
@@ -518,7 +738,7 @@ pub fn sort(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            run_sort!(input, values, indices, cmp_bool_asc, cmp_bool_desc);
+            run_sort!(sort_by_key32, input, values, indices, bool_key);
         }
     }
 
@@ -1471,5 +1691,184 @@ mod var_layout_tests {
         )
         .unwrap();
         assert_eq!(values(&biased), vec![0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod sort_key_tests {
+    use super::*;
+
+    /// One of the three sort kernels, as the three share a signature: input,
+    /// the two outputs, the axis geometry, and the packing.
+    type Kernel =
+        fn(&[f32], &mut [f32], &mut [i64], usize, usize, usize, usize, fn(usize, f32) -> u64);
+
+    /// The keys have to reproduce the float order exactly, including the two
+    /// places the bit pattern and the numeric order disagree.
+    #[test]
+    fn float_keys_reproduce_the_float_order() {
+        let ladder = [
+            f32::NEG_INFINITY,
+            -3.5,
+            -1.0,
+            -f32::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+            1.0,
+            3.5,
+            f32::INFINITY,
+        ];
+        for pair in ladder.windows(2) {
+            let (low, high) = (float_key32(pair[0]), float_key32(pair[1]));
+            if pair[0] == pair[1] {
+                // The two zeros: equal as floats, so equal as keys, so their
+                // input order decides and nothing else can.
+                assert_eq!(low, high, "{} and {} keyed apart", pair[0], pair[1]);
+            } else {
+                assert!(low < high, "{} keyed at or above {}", pair[0], pair[1]);
+            }
+        }
+
+        // Every NaN, of either sign and any payload, is the one key above
+        // every number -- which is where this library sorts them.
+        for nan in [
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7fc0_1234),
+            f32::from_bits(0xffff_ffff),
+        ] {
+            assert_eq!(float_key32(nan), u32::MAX);
+        }
+        assert!(float_key32(f32::INFINITY) < u32::MAX);
+
+        // The same at double width.
+        for pair in [
+            (f64::NEG_INFINITY, -1.0f64),
+            (-1.0, -0.0),
+            (0.0, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert!(float_key64(pair.0) < float_key64(pair.1));
+        }
+        assert_eq!(float_key64(-0.0), float_key64(0.0));
+        assert_eq!(float_key64(f64::NAN), u64::MAX);
+        assert_eq!(float_key64(-f64::NAN), u64::MAX);
+    }
+
+    #[test]
+    fn integer_keys_reproduce_the_integer_order() {
+        let ladder = [i32::MIN, -7, -1, 0, 1, 7, i32::MAX];
+        for pair in ladder.windows(2) {
+            assert!(int_key32(pair[0]) < int_key32(pair[1]));
+        }
+        assert_eq!(int_key32(i32::MIN), 0);
+        assert_eq!(int_key32(i32::MAX), u32::MAX);
+
+        let wide = [i64::MIN, -7, 0, 7, i64::MAX];
+        for pair in wide.windows(2) {
+            assert!(int_key64(pair[0]) < int_key64(pair[1]));
+        }
+        assert!(bool_key(false) < bool_key(true));
+    }
+
+    /// Both entry widths carry the same position back out.
+    #[test]
+    fn entries_give_their_position_back() {
+        for position in [0usize, 1, 12345, u32::MAX as usize - 1] {
+            let narrow = ((float_key32(1.5) as u64) << 32) | position as u64;
+            assert_eq!(Entry::position(narrow), position);
+        }
+        for position in [0usize, 1, 12345, u32::MAX as usize + 1] {
+            let wide = ((float_key64(1.5) as u128) << 64) | position as u128;
+            assert_eq!(Entry::position(wide), position);
+        }
+    }
+
+    /// The wide entry is only reached by an axis longer than `u32::MAX`, which
+    /// no test can allocate -- so drive the kernels with it directly and check
+    /// it against the narrow one on the same data.
+    #[test]
+    fn the_wide_entry_sorts_the_same_as_the_narrow_one() {
+        let dim_size = 1000usize;
+        let input: Vec<f32> = (0..dim_size)
+            .map(|i| ((i * 7919) % 1000) as f32 - 500.0)
+            .collect();
+
+        let mut narrow_values = vec![0.0f32; dim_size];
+        let mut narrow_indices = vec![0i64; dim_size];
+        sort_along_dim(
+            &input,
+            &mut narrow_values,
+            &mut narrow_indices,
+            1,
+            1,
+            dim_size,
+            dim_size,
+            |d: usize, v: f32| ((float_key32(v) as u64) << 32) | d as u64,
+        );
+
+        let mut wide_values = vec![0.0f32; dim_size];
+        let mut wide_indices = vec![0i64; dim_size];
+        sort_along_dim(
+            &input,
+            &mut wide_values,
+            &mut wide_indices,
+            1,
+            1,
+            dim_size,
+            dim_size,
+            |d: usize, v: f32| ((float_key32(v) as u128) << 64) | d as u128,
+        );
+
+        assert_eq!(narrow_values, wide_values);
+        assert_eq!(narrow_indices, wide_indices);
+        assert!(narrow_values.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// All three kernels sort the same tensor, and the choice between them is
+    /// a scheduling decision that must not change the answer. Driving them
+    /// directly is the only way to compare them on one shape.
+    #[test]
+    fn the_three_kernels_agree() {
+        let (outer, inner, dim_size) = (3usize, 5usize, 40usize);
+        let outer_stride = dim_size * inner;
+        let total = outer * outer_stride;
+        let input: Vec<f32> = (0..total)
+            .map(|i| (((i * 31) % 97) as f32) - 48.0)
+            .collect();
+        let make = |d: usize, v: f32| ((float_key32(v) as u64) << 32) | d as u64;
+
+        let run = |kernel: Kernel| {
+            let mut values = vec![0.0f32; total];
+            let mut indices = vec![0i64; total];
+            kernel(
+                &input,
+                &mut values,
+                &mut indices,
+                outer,
+                inner,
+                dim_size,
+                outer_stride,
+                make,
+            );
+            (values, indices)
+        };
+
+        let by_slice = run(sort_along_dim_par);
+        let by_row = run(sort_rows_with_parallel_sort);
+        let transposed = run(sort_along_dim_transposed);
+        assert_eq!(by_slice, by_row);
+        assert_eq!(by_slice, transposed);
+
+        // And the answer is actually sorted along the axis.
+        for o in 0..outer {
+            for r in 0..inner {
+                let base = o * outer_stride + r;
+                for d in 1..dim_size {
+                    assert!(by_slice.0[base + d * inner] >= by_slice.0[base + (d - 1) * inner]);
+                }
+            }
+        }
     }
 }

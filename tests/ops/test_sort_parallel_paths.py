@@ -26,10 +26,12 @@ either side of the 16384-element threshold, and every axis of a tensor with
 more than two. Every case is checked against NumPy, so the strategies cannot
 drift apart.
 
-Stability is checked on each path specifically. `par_sort_by` is a different
-algorithm from `sort_by`, and the transposed path reaches its comparator
-through a different gather, so a caller who asks for a stable sort and silently
-gets an unstable one has no way to notice until their ties come back reordered.
+Stability is checked on each path specifically. The sort is stable by
+construction -- each element's position rides in the low bits of its sort key,
+so no two entries compare equal and there is no tie for an unstable sort to
+resolve -- but the three paths build and read those keys through different
+gathers, so a caller whose ties come back reordered would have no other way to
+notice.
 """
 
 from __future__ import annotations
@@ -192,3 +194,100 @@ def test_a_reversed_slice_is_fully_reordered():
     np.testing.assert_array_equal(
         indices.numpy().astype(np.int64), np.arange(20000)[::-1]
     )
+
+
+# The ordering is now carried by an integer key rather than by a three-way
+# comparison, so the places where the *bit pattern* and the numeric order
+# disagree are the ones a mistake would land in. There are exactly three: the
+# two zeros, which are equal but differ in a bit; NaN, whose patterns straddle
+# the whole range; and the descending direction, which mirrors the values but
+# must not mirror the tie-break.
+LENGTHS = [7, 20000]
+
+
+@pytest.mark.parametrize("length", LENGTHS)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_the_two_zeros_are_equal_and_keep_their_order(length, dtype):
+    # -0.0 sorts *below* 0.0 by bit pattern and *equal* to it by value. Equal
+    # is the answer, so the two come back in the order they went in -- and
+    # each keeps its own sign, which a sort that rebuilt values from the key
+    # could not promise.
+    pattern = np.array([-0.0, 0.0], dtype=dtype)
+    values = np.resize(pattern, length)
+
+    got, indices = mt.Tensor(values, dtype=dtype).sort(0)
+
+    np.testing.assert_array_equal(indices.numpy().astype(np.int64), np.arange(length))
+    np.testing.assert_array_equal(np.signbit(got.numpy()), np.signbit(values))
+
+
+@pytest.mark.parametrize("length", LENGTHS)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_descending_puts_nan_first_and_still_breaks_ties_by_position(length, dtype):
+    values = np.resize(np.array([np.nan, 2.0, 1.0, 2.0, np.nan], dtype=dtype), length)
+
+    got, indices = mt.Tensor(values, dtype=dtype).sort(0, descending=True)
+
+    order = indices.numpy().astype(np.int64)
+    nans = int(np.isnan(values).sum())
+    assert np.isnan(got.numpy()[:nans]).all(), "NaN does not lead a descending sort"
+    assert not np.isnan(got.numpy()[nans:]).any()
+    # Within the NaNs, and within each run of equal numbers, the positions rise:
+    # descending mirrors the values, never the tie-break.
+    for start, stop in ((0, nans), (nans, length)):
+        block = order[start:stop]
+        equal = np.concatenate(
+            [[True], np.isnan(values[block[1:]]) & np.isnan(values[block[:-1]])]
+        ) | np.concatenate([[True], values[block[1:]] == values[block[:-1]]])
+        for i in range(1, len(block)):
+            if equal[i]:
+                assert block[i] > block[i - 1]
+
+
+@pytest.mark.parametrize("length", LENGTHS)
+@pytest.mark.parametrize("descending", [False, True])
+def test_a_negative_nan_survives_the_sort(length, descending):
+    # A negative NaN keys the same as every other NaN, so the values cannot be
+    # rebuilt from the keys -- they are re-read from the input, which is what
+    # keeps the sign and the payload intact.
+    payload = np.array([-np.nan, np.nan, 1.0, -1.0], dtype=np.float32)
+    values = np.resize(payload, length)
+
+    got, _ = mt.Tensor(values, dtype="float32").sort(0, descending=descending)
+
+    signs = np.signbit(got.numpy()[np.isnan(got.numpy())])
+    assert signs.any() and not signs.all(), "the NaNs lost their signs"
+
+
+@pytest.mark.parametrize("length", LENGTHS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("descending", [False, True])
+def test_both_stability_settings_give_the_same_answer(length, dtype, descending):
+    # The key carries each element's position, so the ordering is total and
+    # `stable=False` has no tie left to resolve. Both settings are the same
+    # sort, which is what lets the faster one always run.
+    values = np.resize(np.array([3, 1, 2, 1, 3, 2], dtype=dtype), length)
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    loose, loose_index = tensor.sort(0, descending=descending, stable=False)
+    tight, tight_index = tensor.sort(0, descending=descending, stable=True)
+
+    np.testing.assert_array_equal(loose.numpy(), tight.numpy())
+    np.testing.assert_array_equal(loose_index.numpy(), tight_index.numpy())
+    # And it really is the stable answer: equal values keep their input order.
+    order = tight_index.numpy().astype(np.int64)
+    for i in range(1, length):
+        if values[order[i]] == values[order[i - 1]]:
+            assert order[i] > order[i - 1]
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_the_extreme_integers_sort_where_they_belong(dtype):
+    # The integer key shifts the range so the most negative value becomes zero;
+    # an implementation that negated instead would overflow on exactly this.
+    info = np.iinfo(dtype)
+    values = np.array([0, info.max, -1, info.min, 1], dtype=dtype)
+
+    got, _ = mt.Tensor(values, dtype=dtype).sort(0)
+
+    np.testing.assert_array_equal(got.numpy(), np.sort(values))
