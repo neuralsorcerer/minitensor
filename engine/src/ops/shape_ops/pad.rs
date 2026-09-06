@@ -137,48 +137,171 @@ fn pad_layout(tensor: &Tensor, pads: &[(usize, usize)], mode: PadMode) -> Result
     Ok(out_dims)
 }
 
-/// Map every output position to its source, once, so the forward and the
-/// backward walk the same correspondence rather than deriving it twice.
+/// The correspondence between an output position and its source, walked rather
+/// than written down.
 ///
-/// `None` means the position is outside the input; only `Constant` produces it.
-pub(crate) fn pad_source_map(
-    in_dims: &[usize],
-    out_dims: &[usize],
-    pads: &[(usize, usize)],
+/// It used to be written down: a `Vec<Option<usize>>` with one entry per output
+/// element, built in one serial pass and then kept alive in the graph for the
+/// backward to read. On four million float32 that was 64MB of `Option<usize>`
+/// -- sixteen times the tensor -- and 68ms against NumPy's 3.8 for a job that
+/// is mostly a copy.
+///
+/// The walk is over *rows* instead: everything but the last axis is decomposed
+/// once per row, and the last axis is three runs -- the margin before, the
+/// input itself, the margin after. The middle run is a `copy_from_slice`, which
+/// is what padding actually is, and the divisions that dominated now happen
+/// once per row rather than once per element.
+pub struct PadPlan {
+    in_dims: Vec<usize>,
+    out_dims: Vec<usize>,
+    pads: Vec<(usize, usize)>,
     mode: PadMode,
-) -> Vec<Option<usize>> {
-    let numel: usize = out_dims.iter().product();
-    let mut map = vec![None; numel];
-    if numel == 0 {
-        return map;
+    /// Row-major strides of the *input*, which is what a mapped coordinate
+    /// tuple has to be recombined against.
+    in_strides: Vec<usize>,
+    out_last: usize,
+    in_last: usize,
+    before_last: usize,
+}
+
+impl PadPlan {
+    pub fn new(
+        in_dims: Vec<usize>,
+        out_dims: Vec<usize>,
+        pads: Vec<(usize, usize)>,
+        mode: PadMode,
+    ) -> Self {
+        let ndim = out_dims.len();
+        let mut in_strides = vec![1usize; in_dims.len()];
+        for axis in (0..in_dims.len().saturating_sub(1)).rev() {
+            in_strides[axis] = in_strides[axis + 1] * in_dims[axis + 1];
+        }
+        // A scalar has no last axis to run along, so it is treated as one row
+        // of one element and every loop below degenerates correctly.
+        let (out_last, in_last, before_last) = if ndim == 0 {
+            (1, 1, 0)
+        } else {
+            (out_dims[ndim - 1], in_dims[ndim - 1], pads[ndim - 1].0)
+        };
+        Self {
+            in_dims,
+            out_dims,
+            pads,
+            mode,
+            in_strides,
+            out_last,
+            in_last,
+            before_last,
+        }
     }
 
-    // Row-major strides of the *input*, which is what a mapped coordinate
-    // tuple has to be recombined against.
-    let mut in_strides = vec![1usize; in_dims.len()];
-    for axis in (0..in_dims.len().saturating_sub(1)).rev() {
-        in_strides[axis] = in_strides[axis + 1] * in_dims[axis + 1];
-    }
-
-    for (linear, slot) in map.iter_mut().enumerate() {
-        let mut rest = linear;
-        let mut source = 0usize;
-        let mut inside = true;
+    /// Where output row `row` begins in the input, or `None` when the row lies
+    /// outside it entirely -- which only constant padding produces.
+    #[inline]
+    fn source_row(&self, row: usize) -> Option<usize> {
+        let mut rest = row;
+        let mut base = 0usize;
         // Right to left, the order row-major strides divide in.
-        for axis in (0..out_dims.len()).rev() {
-            let coord = rest % out_dims[axis];
-            rest /= out_dims[axis];
-            match source_coord(coord, pads[axis].0, in_dims[axis], mode) {
-                Some(c) => source += c * in_strides[axis],
-                None => {
-                    inside = false;
-                    break;
-                }
+        for axis in (0..self.out_dims.len().saturating_sub(1)).rev() {
+            let coord = rest % self.out_dims[axis];
+            rest /= self.out_dims[axis];
+            let source = source_coord(coord, self.pads[axis].0, self.in_dims[axis], self.mode)?;
+            base += source * self.in_strides[axis];
+        }
+        Some(base)
+    }
+
+    /// Where output column `col` of a row reads from, or `None` for the fill.
+    #[inline]
+    fn source_column(&self, col: usize) -> Option<usize> {
+        source_coord(col, self.before_last, self.in_last, self.mode)
+    }
+
+    /// Write one output row: the margin before, the input's own run, the margin
+    /// after.
+    #[inline]
+    fn write_row<T: Copy>(&self, out: &mut [T], input: &[T], row: usize, filler: T) {
+        let Some(base) = self.source_row(row) else {
+            out.fill(filler);
+            return;
+        };
+        let interior = &input[base..base + self.in_last];
+        let after = self.before_last + self.in_last;
+        out[self.before_last..after].copy_from_slice(interior);
+        for (col, slot) in out[..self.before_last].iter_mut().enumerate() {
+            *slot = match self.source_column(col) {
+                Some(c) => interior[c],
+                None => filler,
+            };
+        }
+        for (offset, slot) in out[after..].iter_mut().enumerate() {
+            *slot = match self.source_column(after + offset) {
+                Some(c) => interior[c],
+                None => filler,
+            };
+        }
+    }
+
+    /// Add one output row's gradient back onto the input positions it read.
+    ///
+    /// Many-to-one for reflect and replicate -- an edge element is read by
+    /// several output positions -- which is why this accumulates and why the
+    /// walk over rows stays sequential.
+    #[inline]
+    fn accumulate_row<T>(&self, out: &[T], input: &mut [T], row: usize)
+    where
+        T: Copy + std::ops::AddAssign,
+    {
+        let Some(base) = self.source_row(row) else {
+            return;
+        };
+        let after = self.before_last + self.in_last;
+        for (slot, value) in input[base..base + self.in_last]
+            .iter_mut()
+            .zip(&out[self.before_last..after])
+        {
+            *slot += *value;
+        }
+        for (col, value) in out[..self.before_last].iter().enumerate() {
+            if let Some(c) = self.source_column(col) {
+                input[base + c] += *value;
             }
         }
-        *slot = inside.then_some(source);
+        for (offset, value) in out[after..].iter().enumerate() {
+            if let Some(c) = self.source_column(after + offset) {
+                input[base + c] += *value;
+            }
+        }
     }
-    map
+
+    /// Fill a padded output from `input`, a band of rows at a time.
+    pub fn scatter<T: Copy + Send + Sync>(&self, out: &mut [T], input: &[T], filler: T) {
+        if self.out_last == 0 || out.is_empty() {
+            return;
+        }
+        // Whole rows per task, so no chunk ever straddles one and the
+        // per-row decomposition happens once.
+        let rows_per_task = (crate::ops::map::PAR_CHUNK / self.out_last).max(1);
+        par_out_chunks(out, rows_per_task * self.out_last, &|start, chunk| {
+            let first = start / self.out_last;
+            for (offset, row) in chunk.chunks_mut(self.out_last).enumerate() {
+                self.write_row(row, input, first + offset, filler);
+            }
+        });
+    }
+
+    /// Add a padded gradient back onto the input's shape.
+    pub fn gather<T>(&self, out: &[T], input: &mut [T])
+    where
+        T: Copy + std::ops::AddAssign,
+    {
+        if self.out_last == 0 {
+            return;
+        }
+        for (row, chunk) in out.chunks(self.out_last).enumerate() {
+            self.accumulate_row(chunk, input, row);
+        }
+    }
 }
 
 /// Pad `tensor`, adding `padding` before and after each axis.
@@ -193,7 +316,7 @@ pub fn pad(tensor: &Tensor, padding: &[usize], mode: PadMode, value: f64) -> Res
 
     let in_dims = tensor.shape().dims().to_vec();
     let contiguous = tensor.contiguous()?;
-    let map = pad_source_map(&in_dims, &out_dims, &pads, mode);
+    let plan = PadPlan::new(in_dims.clone(), out_dims, pads, mode);
 
     let mut output_data =
         TensorData::zeros_on_device(out_shape.numel(), tensor.dtype(), tensor.device());
@@ -206,15 +329,7 @@ pub fn pad(tensor: &Tensor, padding: &[usize], mode: PadMode, value: f64) -> Res
             let dst = output_data.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error("pad: dtype does not match the output slice")
             })?;
-            let filler: $ty = $fill;
-            par_out_chunks(dst, crate::ops::map::PAR_CHUNK, &|start, chunk| {
-                for (offset, slot) in chunk.iter_mut().enumerate() {
-                    *slot = match map[start + offset] {
-                        Some(source) => src[source],
-                        None => filler,
-                    };
-                }
-            });
+            plan.scatter(dst, src, $fill);
         }};
     }
 
@@ -237,7 +352,7 @@ pub fn pad(tensor: &Tensor, padding: &[usize], mode: PadMode, value: f64) -> Res
     if output.requires_grad() {
         let grad_fn = Arc::new(PadBackward {
             input_shape: in_dims,
-            map,
+            plan,
             input_id: tensor.id(),
             ids: [tensor.id()],
         });

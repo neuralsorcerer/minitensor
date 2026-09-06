@@ -241,3 +241,64 @@ def test_padding_then_slicing_recovers_the_input():
     for mode in MODES:
         padded = mt.Tensor(values, dtype="float64").pad([2, 3, 1, 1], mode).numpy()
         np.testing.assert_array_equal(padded[1:-1, 2:-3], values)
+
+
+# The correspondence between an output position and its source is walked a row
+# at a time rather than written down as a position per element. That map used to
+# be sixteen bytes an output element, built in one serial pass and then kept
+# alive in the graph for the backward -- 64MB on a padded four-million-element
+# tensor, for a job that is mostly a copy. The tests below cover what a row walk
+# can get wrong that an element map could not: the boundaries between the three
+# runs a row is made of, and the rows that fall outside the input entirely.
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    "before,after", [(0, 0), (0, 1), (1, 0), (1, 1), (2, 1), (1, 2), (2, 2)]
+)
+def test_the_last_axis_is_three_runs_and_every_boundary_lands(mode, before, after):
+    """The middle run is a straight copy and the margins are index arithmetic;
+    a boundary that is off by one shows here and almost nowhere else."""
+    values = np.arange(1.0, 6.0).reshape(1, 5)
+    got = mt.Tensor(values, dtype="float64").pad([before, after], mode).numpy()
+    np.testing.assert_array_equal(got, _numpy_pad(values, [before, after], mode))
+    # The input is still in there, contiguous, exactly once.
+    np.testing.assert_array_equal(got[0, before : before + 5], values[0])
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_row_outside_the_input_is_still_filled(mode):
+    """Padding a leading axis makes whole rows that have no source. Constant
+    fills them; the other two read a row back."""
+    values = np.arange(6.0).reshape(2, 3)
+    got = mt.Tensor(values, dtype="float64").pad([0, 0, 1, 1], mode).numpy()
+    np.testing.assert_array_equal(got, _numpy_pad(values, [0, 0, 1, 1], mode))
+    assert got.shape == (4, 3)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_padding_leading_and_trailing_axes_together(mode):
+    """Both halves of the walk at once: the row decomposition and the run
+    within it, on a rank the loop indices could confuse."""
+    values = np.arange(24.0).reshape(2, 3, 4)
+    padding = [1, 2, 2, 1, 1, 1]
+    got = mt.Tensor(values, dtype="float64").pad(padding, mode).numpy()
+    np.testing.assert_array_equal(got, _numpy_pad(values, padding, mode))
+
+
+def test_a_padded_tensor_does_not_hold_a_map_of_itself():
+    """The graph keeps the walk, which is a handful of small vectors, rather
+    than one position per output element. Nothing here reads a byte count --
+    the check is that a large padded tensor can be built and backpropagated
+    without the graph growing with the *output*."""
+    values = np.zeros((256, 1024), dtype=np.float64)
+    tensor = mt.Tensor(values, dtype="float64", requires_grad=True)
+    padded = tensor.pad([1, 1, 1, 1], "replicate")
+    assert tuple(padded.shape) == (258, 1026)
+    padded.sum().backward()
+    # A corner is read by itself and by the one padded row and column on each
+    # side of it: two by two.
+    np.testing.assert_array_equal(tensor.grad.numpy()[0, 0], 4.0)
+    np.testing.assert_array_equal(tensor.grad.numpy()[0, 1], 2.0)
+    np.testing.assert_array_equal(tensor.grad.numpy()[1, 1], 1.0)
+    mt.clear_autograd_graph()

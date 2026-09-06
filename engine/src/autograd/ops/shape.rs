@@ -691,7 +691,11 @@ impl GradientFunction for ExpandBackward {
 /// the two cannot disagree about where anything came from.
 pub struct PadBackward {
     pub input_shape: Vec<usize>,
-    pub map: Vec<Option<usize>>,
+    /// The same walk the forward used, kept rather than a position-per-element
+    /// map: the map was sixteen bytes an *output* element and stayed alive in
+    /// the graph, which on a padded four-million-element tensor was 64MB held
+    /// for the length of a backward pass.
+    pub plan: crate::ops::shape_ops::PadPlan,
     pub input_id: TensorId,
     pub ids: [TensorId; 1],
 }
@@ -717,11 +721,7 @@ impl GradientFunction for PadBackward {
                 let dst = data.$accessor_mut().ok_or_else(|| {
                     MinitensorError::internal_error("pad backward: unexpected output dtype")
                 })?;
-                for (out, source) in self.map.iter().enumerate() {
-                    if let Some(index) = source {
-                        dst[*index] += src[out];
-                    }
-                }
+                self.plan.gather(src, dst);
             }};
         }
 
