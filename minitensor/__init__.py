@@ -89,32 +89,44 @@ from ._indexing import (
 )
 from ._sampling import bernoulli, multinomial, normal
 from ._shape import (
+    append,
     argpartition,
+    array_split,
     atleast_1d,
     atleast_2d,
     atleast_3d,
+    block,
+    broadcast_arrays,
     broadcast_shapes,
     broadcast_tensors,
     broadcast_to,
     can_broadcast,
     column_stack,
     combinations,
+    cumulative_sum,
+    delete,
     dsplit,
     dstack,
+    expand_dims,
     fliplr,
     flipud,
     hsplit,
     hstack,
+    insert,
     kthvalue,
     lexsort,
+    matrix_transpose,
     meshgrid,
     msort,
     partition,
+    permute_dims,
+    resize,
     rot90,
     tensor_split,
     tile,
     unbind,
     unflatten,
+    unstack,
     vsplit,
     vstack,
 )
@@ -183,6 +195,14 @@ randint = Tensor.randint
 randint_like = Tensor.randint_like
 randperm = Tensor.randperm
 eye = Tensor.eye
+
+
+def identity(n, dtype=None, device=None, requires_grad=False):
+    """The `n` by `n` identity matrix -- NumPy's name for a square `eye`."""
+
+    return Tensor.eye(n, n, dtype=dtype, device=device, requires_grad=requires_grad)
+
+
 full = Tensor.full
 full_like = Tensor.full_like
 uniform = Tensor.uniform
@@ -444,6 +464,19 @@ _BASE_EXPORTS = (
     "setdiff1d",
     "setxor1d",
     "trim_zeros",
+    "expand_dims",
+    "permute_dims",
+    "matrix_transpose",
+    "unstack",
+    "array_split",
+    "append",
+    "delete",
+    "insert",
+    "resize",
+    "block",
+    "cumulative_sum",
+    "identity",
+    "broadcast_arrays",
     "unique_all",
     "unique_counts",
     "unique_inverse",

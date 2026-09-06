@@ -852,3 +852,315 @@ def lexsort(keys: object, dim: int = -1) -> Tensor:
             order, axis, _C.functional.argsort(ranked, axis, False, True)
         )
     return order
+
+
+def expand_dims(input: object, dim: object) -> Tensor:
+    """A view with a length-1 axis inserted at each position in `dim`.
+
+    `unsqueeze` for one axis; this takes several at once, and the positions
+    refer to the *result*, so `expand_dims(x, (0, 2))` puts new axes at 0 and 2
+    of the four-dimensional answer rather than at 0 and 2 of the original.
+    """
+
+    tensor = _atleast_tensor(input)
+    positions = (
+        [_operator.index(dim)]
+        if isinstance(dim, (int, _np.integer))
+        else [_operator.index(value) for value in dim]
+    )
+    rank = tensor.ndim() + len(positions)
+    resolved = sorted(
+        _normalize_axis(position, rank, "expand_dims") for position in positions
+    )
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(
+            f"expand_dims was given the same axis twice: {tuple(positions)}"
+        )
+    for position in resolved:
+        tensor = tensor.unsqueeze(position)
+    return tensor
+
+
+def permute_dims(input: object, axes: object) -> Tensor:
+    """The array API's spelling of `permute`."""
+
+    tensor = _atleast_tensor(input)
+    order = [_operator.index(axis) for axis in axes]
+    return tensor.permute(order)
+
+
+def matrix_transpose(input: object) -> Tensor:
+    """The last two axes swapped, leaving any batch axes alone.
+
+    What `transpose(-2, -1)` says, under the array API's name for it. A tensor
+    with fewer than two axes has no matrix to transpose and is refused rather
+    than returned unchanged.
+    """
+
+    tensor = _atleast_tensor(input)
+    if tensor.ndim() < 2:
+        raise ValueError(
+            f"matrix_transpose requires at least two dimensions, got {tensor.ndim()}"
+        )
+    return tensor.transpose(-2, -1)
+
+
+def unstack(input: object, dim: int = 0) -> tuple[Tensor, ...]:
+    """The array API's spelling of `unbind`: the slices along `dim`, as a tuple."""
+
+    return unbind(input, dim)
+
+
+def array_split(
+    input: object, indices_or_sections: object, dim: int = 0
+) -> tuple[Tensor, ...]:
+    """NumPy's name for `tensor_split`: split into pieces that need not divide
+    the axis evenly."""
+
+    return tensor_split(input, indices_or_sections, dim)
+
+
+def append(input: object, values: object, dim: int | None = None) -> Tensor:
+    """`values` joined onto the end of `input` along `dim`.
+
+    With no `dim` both are flattened first, which is what makes
+    `append(x, 1.0)` mean what it looks like whatever shape `x` has. Every
+    call copies -- there is no room at the end of a tensor to grow into, which
+    is why this is a poor way to build one up element by element.
+    """
+
+    tensor = _atleast_tensor(input)
+    extra = _atleast_tensor(values)
+    if str(extra.dtype) != str(tensor.dtype):
+        extra = extra.astype(str(tensor.dtype))
+    if dim is None:
+        return _C.functional.cat([tensor.reshape(-1), extra.reshape(-1)], 0)
+    axis = _normalize_axis(dim, tensor.ndim(), "append")
+    return _C.functional.cat([tensor, extra], axis)
+
+
+def _positions_along(
+    obj: object, length: int, name: str, past_the_end: bool = False
+) -> list[int]:
+    """`obj` as a list of positions along an axis of `length`.
+
+    `past_the_end` allows `length` itself, which `insert` needs and `delete`
+    must not have: inserting *before* the end is a real place to insert, and
+    deleting the element after the last one is not a real place to delete.
+    Negative positions always wrap against `length`, so `-1` is the last
+    element either way.
+    """
+
+    if isinstance(obj, slice):
+        return list(range(*obj.indices(length)))
+    if isinstance(obj, Tensor):
+        obj = obj.numpy()
+    if isinstance(obj, _np.ndarray):
+        if obj.dtype == bool:
+            if obj.size != length:
+                raise ValueError(
+                    f"{name} was given a {obj.size}-element mask for an axis of {length}"
+                )
+            return [int(position) for position in _np.flatnonzero(obj)]
+        obj = obj.reshape(-1).tolist()
+    raw = (
+        [_operator.index(obj)]
+        if isinstance(obj, (int, _np.integer))
+        else [_operator.index(value) for value in obj]
+    )
+    limit = length + 1 if past_the_end else length
+    resolved = []
+    for position in raw:
+        wrapped = position + length if position < 0 else position
+        if not 0 <= wrapped < limit:
+            raise IndexError(
+                f"{name} position {position} is out of bounds for an axis of {length}"
+            )
+        resolved.append(wrapped)
+    return resolved
+
+
+def delete(input: object, obj: object, dim: int | None = None) -> Tensor:
+    """`input` without the positions `obj` names along `dim`.
+
+    `obj` may be one position, several, a slice or a boolean mask. With no
+    `dim` the tensor is flattened first. The result is a new tensor: nothing is
+    removed in place, because the remaining elements have to move.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        tensor = tensor.reshape(-1)
+        axis = 0
+    else:
+        axis = _normalize_axis(dim, tensor.ndim(), "delete")
+
+    length = tensor.shape[axis]
+    dropped = set(_positions_along(obj, length, "delete"))
+    kept = [position for position in range(length) if position not in dropped]
+    return _C.functional.index_select(
+        tensor, axis, _index_tensor(_np.asarray(kept, dtype=_np.int64), tensor)
+    )
+
+
+def insert(
+    input: object, obj: object, values: object, dim: int | None = None
+) -> Tensor:
+    """`values` placed *before* the positions `obj` names along `dim`.
+
+    The positions refer to the original tensor, so `insert(x, [1, 1], [a, b])`
+    puts both before the element that was at 1, in that order. Several
+    positions are filled in position order, with each value following the
+    position it was paired with.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        tensor = tensor.reshape(-1)
+        axis = 0
+    else:
+        axis = _normalize_axis(dim, tensor.ndim(), "insert")
+
+    length = tensor.shape[axis]
+    at = _positions_along(obj, length, "insert", past_the_end=True)
+    if not at:
+        return tensor
+
+    extra = _atleast_tensor(values)
+    if str(extra.dtype) != str(tensor.dtype):
+        extra = extra.astype(str(tensor.dtype))
+    # One value per position, shaped like a slice of the axis.
+    slice_shape = list(tensor.shape)
+    slice_shape[axis] = 1
+    if extra.ndim() == 0 or extra.numel() == 1:
+        pieces = [broadcast_to(extra.reshape([1] * tensor.ndim()), slice_shape)] * len(
+            at
+        )
+    else:
+        spread = list(tensor.shape)
+        spread[axis] = len(at)
+        if list(extra.shape) != spread:
+            extra = broadcast_to(
+                extra.reshape([1] * (tensor.ndim() - extra.ndim()) + list(extra.shape)),
+                spread,
+            )
+        pieces = list(unbind(extra, axis))
+        pieces = [piece.unsqueeze(axis) for piece in pieces]
+
+    order = sorted(range(len(at)), key=lambda index: at[index])
+    parts: list[Tensor] = []
+    previous = 0
+    for index in order:
+        position = at[index]
+        if position > previous:
+            parts.append(
+                _C.functional.narrow(tensor, axis, previous, position - previous)
+            )
+        parts.append(pieces[index])
+        previous = position
+    if previous < length:
+        parts.append(_C.functional.narrow(tensor, axis, previous, length - previous))
+    return _C.functional.cat(parts, axis)
+
+
+def resize(input: object, shape: object) -> Tensor:
+    """`input`'s elements laid out in `shape`, repeating them to fill it.
+
+    NumPy's `resize` rather than PyTorch's: the free function that returns a
+    new tensor and *repeats* rather than zero-filling when the new shape is
+    larger. An empty input has nothing to repeat, so it fills with zeros.
+    """
+
+    tensor = _atleast_tensor(input)
+    sizes = _normalize_shape_argument(shape, "resize")
+    total = _element_count(sizes)
+    flat = tensor.reshape(-1)
+    if flat.shape[0] == 0:
+        return Tensor.zeros(list(sizes), dtype=str(tensor.dtype))
+    if total == 0:
+        return _C.functional.narrow(flat, 0, 0, 0).reshape(list(sizes))
+    repeats = -(-total // flat.shape[0])
+    filled = tile(flat, (repeats,)) if repeats > 1 else flat
+    return _C.functional.narrow(filled, 0, 0, total).reshape(list(sizes))
+
+
+def block(arrays: object) -> Tensor:
+    """Assemble a tensor from nested lists of blocks.
+
+    The innermost list is joined along the last axis, the one outside it along
+    the second-to-last, and so on -- so a list of lists builds a matrix out of
+    its blocks the way it is written on the page. Blocks are promoted to the
+    depth of the nesting first, which is what lets a row vector sit next to a
+    matrix.
+    """
+
+    def depth_of(item: object) -> int:
+        if isinstance(item, (list, tuple)):
+            if not item:
+                raise ValueError("block was given an empty list")
+            depths = {depth_of(entry) for entry in item}
+            if len(depths) != 1:
+                raise ValueError("block needs every list at a level to nest equally")
+            return depths.pop() + 1
+        return 0
+
+    def build(item: object, depth: int) -> Tensor:
+        if not isinstance(item, (list, tuple)):
+            tensor = _atleast_tensor(item)
+            missing = depth - tensor.ndim()
+            if missing > 0:
+                tensor = tensor.reshape([1] * missing + list(tensor.shape))
+            return tensor
+        parts = [build(entry, depth - 1) for entry in item]
+        rank = max(part.ndim() for part in parts)
+        parts = [
+            (
+                part.reshape([1] * (rank - part.ndim()) + list(part.shape))
+                if part.ndim() < rank
+                else part
+            )
+            for part in parts
+        ]
+        return _C.functional.cat(parts, -depth)
+
+    nesting = depth_of(arrays)
+    if nesting == 0:
+        return _atleast_tensor(arrays)
+    return build(arrays, nesting)
+
+
+def cumulative_sum(
+    input: object, dim: int | None = None, include_initial: bool = False
+) -> Tensor:
+    """The array API's `cumsum`, with the option of an initial zero.
+
+    `include_initial` prepends the empty sum, so the result is one longer than
+    the axis and `out[i]` is the total of everything *before* `i` -- which is
+    the form an exclusive scan wants and the one `cumsum` cannot give.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        if tensor.ndim() > 1:
+            raise ValueError(
+                "cumulative_sum needs a dim for a tensor with more than one axis"
+            )
+        tensor = tensor.reshape(-1)
+        axis = 0
+    else:
+        axis = _normalize_axis(dim, tensor.ndim(), "cumulative_sum")
+
+    running = _C.functional.cumsum(tensor, axis)
+    if not include_initial:
+        return running
+    lead = list(tensor.shape)
+    lead[axis] = 1
+    return _C.functional.cat(
+        [Tensor.zeros(lead, dtype=str(running.dtype)), running], axis
+    )
+
+
+def broadcast_arrays(*inputs: object) -> tuple[Tensor, ...]:
+    """NumPy's name for `broadcast_tensors`: every input at their common shape."""
+
+    return broadcast_tensors(*inputs)

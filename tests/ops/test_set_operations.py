@@ -47,9 +47,7 @@ def test_the_four_set_operations_match_numpy(pair):
     np.testing.assert_array_equal(
         mt.intersect1d(a, b).numpy(), np.intersect1d(left, right)
     )
-    np.testing.assert_array_equal(
-        mt.setdiff1d(a, b).numpy(), np.setdiff1d(left, right)
-    )
+    np.testing.assert_array_equal(mt.setdiff1d(a, b).numpy(), np.setdiff1d(left, right))
     np.testing.assert_array_equal(mt.setxor1d(a, b).numpy(), np.setxor1d(left, right))
 
 
