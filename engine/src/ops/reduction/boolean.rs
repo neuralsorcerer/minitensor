@@ -903,7 +903,8 @@ fn topk_along_dim_par<T>(
     outer_stride: usize,
     k: usize,
     sorted: bool,
-    compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+    scan_compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+    select_compare: fn(&(usize, T), &(usize, T)) -> Ordering,
 ) where
     T: Copy + Send + Sync,
 {
@@ -922,11 +923,13 @@ fn topk_along_dim_par<T>(
         for r in 0..inner {
             let base = o * outer_stride + r;
             if scan {
+                // One comparison per element against a settled heap root, so
+                // the cheap-when-predictable comparator.
                 bounded_topk(
                     dim_size,
                     |d| input[base + d * inner],
                     k,
-                    compare,
+                    scan_compare,
                     &mut entries,
                 );
             } else {
@@ -934,7 +937,8 @@ fn topk_along_dim_par<T>(
                 for d in 0..dim_size {
                     entries.push((d, input[base + d * inner]));
                 }
-                select_topk_entries(&mut entries, k, sorted, compare);
+                // A selection's comparisons never predict, so the key form.
+                select_topk_entries(&mut entries, k, sorted, select_compare);
             }
 
             // Output shape is (outer, k, inner); write row-major so a
@@ -1283,10 +1287,16 @@ pub fn topk(
     };
     let outer_stride = dim_size * inner;
 
-    // One arm per dtype, and the nine arguments written once: only the
-    // accessors and the comparator pair differ.
+    // One arm per dtype, and the arguments written once: only the accessors
+    // and the comparators differ. Two pairs of those: a bounded scan and a
+    // selection want opposite things from a comparison (see
+    // [`scan_cmp_f32_asc`]), and the integer dtypes hand the same pair to both
+    // because their comparison is already a single instruction.
     macro_rules! topk_arm {
-        ($read:ident, $write:ident, $name:literal, $desc:expr, $asc:expr) => {{
+        ($read:ident, $write:ident, $name:literal, $desc:expr, $asc:expr) => {
+            topk_arm!($read, $write, $name, $desc, $asc, $desc, $asc)
+        };
+        ($read:ident, $write:ident, $name:literal, $scan_desc:expr, $scan_asc:expr, $desc:expr, $asc:expr) => {{
             let input = tensor.data().$read().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
             })?;
@@ -1306,6 +1316,7 @@ pub fn topk(
                 outer_stride,
                 k,
                 sorted,
+                if largest { $scan_desc } else { $scan_asc },
                 if largest { $desc } else { $asc },
             );
         }};
@@ -1316,6 +1327,8 @@ pub fn topk(
             as_f32_slice,
             as_f32_slice_mut,
             "f32",
+            scan_cmp_f32_desc,
+            scan_cmp_f32_asc,
             cmp_f32_desc,
             cmp_f32_asc
         ),
@@ -1323,6 +1336,8 @@ pub fn topk(
             as_f64_slice,
             as_f64_slice_mut,
             "f64",
+            scan_cmp_f64_desc,
+            scan_cmp_f64_asc,
             cmp_f64_desc,
             cmp_f64_asc
         ),

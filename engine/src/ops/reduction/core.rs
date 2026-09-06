@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::autograd::with_grad_fn;
+use crate::ops::order::{float_key32, float_key64};
 
 use crate::{
     autograd::{MedianBackward, QuantileBackward},
@@ -104,75 +105,98 @@ pub(crate) fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
+/// Ascending and descending order over `(position, value)` pairs, for the
+/// selections that carry an index alongside each value.
+///
+/// The comparison is by [`float_key32`] rather than by the three-way float
+/// comparison it reads like: the key's integer order *is* the float order,
+/// with every NaN folded above the numbers and the two zeros folded together,
+/// so the branches and the NaN test come out of the inner loop and go into
+/// three arithmetic instructions. `select_nth_unstable_by` over two million
+/// float32 costs 31ms with the branching form and 10 with this one.
+///
+/// The tie-break by position is still there and still ascending in both
+/// directions, so equal values keep their input order and the descending
+/// answer is the mirror of the ascending one rather than its reverse.
 pub(crate) fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
-    if a.1 > b.1 {
-        Ordering::Less
-    } else if a.1 < b.1 {
-        Ordering::Greater
-    } else if a.1 == b.1 {
-        a.0.cmp(&b.0)
-    } else {
-        // Descending puts NaN first, mirroring where ascending puts it last.
-        match (a.1.is_nan(), b.1.is_nan()) {
-            (true, true) => a.0.cmp(&b.0),
-            (true, false) => Ordering::Less,
-            _ => Ordering::Greater,
-        }
-    }
+    // Descending puts NaN first, mirroring where ascending puts it last, and
+    // ties still fall back to the *ascending* index: the answer is the mirror
+    // of the ascending one, not its reverse.
+    float_key32(b.1)
+        .cmp(&float_key32(a.1))
+        .then_with(|| a.0.cmp(&b.0))
 }
 
 pub(crate) fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
+    float_key32(a.1)
+        .cmp(&float_key32(b.1))
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+pub(crate) fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+    float_key64(b.1)
+        .cmp(&float_key64(a.1))
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+pub(crate) fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+    float_key64(a.1)
+        .cmp(&float_key64(b.1))
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+/// The same order, for a scan that asks about it once per element.
+///
+/// A bounded top-`k` compares every element against a heap root that is
+/// already better than nearly all of them, so the answer is the same almost
+/// every time and the branch predicts. One float comparison costs less there
+/// than building two keys, and the key form measured 11.3ms against 6.4 on the
+/// top hundred of two million float32 -- the mirror of the selection result,
+/// where the branches never predict and the keys win threefold.
+///
+/// Not a second definition of the order: two floats that are neither equal nor
+/// NaN compare the same way as their keys do, by construction, and every other
+/// case falls through to [`cmp_f32_asc`], which *is* the definition.
+pub(crate) fn scan_cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     if a.1 < b.1 {
         Ordering::Less
     } else if a.1 > b.1 {
         Ordering::Greater
-    } else if a.1 == b.1 {
-        a.0.cmp(&b.0)
     } else {
-        // At least one is NaN, which sorts after every number and equal to
-        // another NaN -- so two of them fall back to the index as any other
-        // tie does.
-        match (a.1.is_nan(), b.1.is_nan()) {
-            (true, true) => a.0.cmp(&b.0),
-            (true, false) => Ordering::Greater,
-            _ => Ordering::Less,
-        }
+        cmp_f32_asc(a, b)
     }
 }
 
-pub(crate) fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+/// [`scan_cmp_f32_asc`] the other way round.
+pub(crate) fn scan_cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
     if a.1 > b.1 {
         Ordering::Less
     } else if a.1 < b.1 {
         Ordering::Greater
-    } else if a.1 == b.1 {
-        a.0.cmp(&b.0)
     } else {
-        // Descending puts NaN first, mirroring where ascending puts it last.
-        match (a.1.is_nan(), b.1.is_nan()) {
-            (true, true) => a.0.cmp(&b.0),
-            (true, false) => Ordering::Less,
-            _ => Ordering::Greater,
-        }
+        cmp_f32_desc(a, b)
     }
 }
 
-pub(crate) fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+/// [`scan_cmp_f32_asc`] for double precision.
+pub(crate) fn scan_cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
     if a.1 < b.1 {
         Ordering::Less
     } else if a.1 > b.1 {
         Ordering::Greater
-    } else if a.1 == b.1 {
-        a.0.cmp(&b.0)
     } else {
-        // At least one is NaN, which sorts after every number and equal to
-        // another NaN -- so two of them fall back to the index as any other
-        // tie does.
-        match (a.1.is_nan(), b.1.is_nan()) {
-            (true, true) => a.0.cmp(&b.0),
-            (true, false) => Ordering::Greater,
-            _ => Ordering::Less,
-        }
+        cmp_f64_asc(a, b)
+    }
+}
+
+/// [`scan_cmp_f32_desc`] for double precision.
+pub(crate) fn scan_cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
+    if a.1 > b.1 {
+        Ordering::Less
+    } else if a.1 < b.1 {
+        Ordering::Greater
+    } else {
+        cmp_f64_desc(a, b)
     }
 }
 
@@ -189,41 +213,15 @@ pub(crate) fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
 /// depend on the algorithm. Where only the values are being moved -- a
 /// partition that was not asked for indices -- there is no tie to break and no
 /// index to carry, and the pair is four times the memory of the value.
+///
+/// By key for the same reason they are: see [`cmp_f32_desc`].
 pub(crate) fn value_cmp_f32(a: &f32, b: &f32) -> Ordering {
-    if a < b {
-        Ordering::Less
-    } else if a > b {
-        Ordering::Greater
-    } else if a == b {
-        Ordering::Equal
-    } else if a.is_nan() {
-        if b.is_nan() {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
-        }
-    } else {
-        Ordering::Less
-    }
+    float_key32(*a).cmp(&float_key32(*b))
 }
 
 /// [`value_cmp_f32`] for double precision.
 pub(crate) fn value_cmp_f64(a: &f64, b: &f64) -> Ordering {
-    if a < b {
-        Ordering::Less
-    } else if a > b {
-        Ordering::Greater
-    } else if a == b {
-        Ordering::Equal
-    } else if a.is_nan() {
-        if b.is_nan() {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
-        }
-    } else {
-        Ordering::Less
-    }
+    float_key64(*a).cmp(&float_key64(*b))
 }
 
 pub(crate) fn cmp_i32_asc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
@@ -1077,5 +1075,99 @@ mod core_tests {
     fn test_ensure_non_empty_guard() {
         assert!(ensure_non_empty(0, "median").is_err());
         assert!(ensure_non_empty(1, "median").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod comparator_tests {
+    use super::*;
+
+    /// Every interesting float32 bit pattern, and a few ordinary values: the
+    /// two zeros, both infinities, the subnormal boundary, quiet and signalling
+    /// NaN of both signs.
+    fn f32_corners() -> Vec<f32> {
+        let mut values = vec![
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            3.5,
+            -3.5,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for bits in [0x7fc0_0000u32, 0xffc0_0000, 0x7f80_0001, 0xffff_ffff] {
+            values.push(f32::from_bits(bits));
+        }
+        values
+    }
+
+    fn f64_corners() -> Vec<f64> {
+        f32_corners().iter().map(|&v| v as f64).collect()
+    }
+
+    /// The scan comparators take a fast path for the ordinary case and fall
+    /// through to the key comparators for everything else, so they can only
+    /// stay in step if the fast path really does agree. Check every pair.
+    #[test]
+    fn the_scan_and_key_comparators_agree_everywhere() {
+        for (i, &left) in f32_corners().iter().enumerate() {
+            for (j, &right) in f32_corners().iter().enumerate() {
+                let a = (i, left);
+                let b = (j, right);
+                assert_eq!(
+                    scan_cmp_f32_asc(&a, &b),
+                    cmp_f32_asc(&a, &b),
+                    "ascending disagreed on {left} against {right}"
+                );
+                assert_eq!(
+                    scan_cmp_f32_desc(&a, &b),
+                    cmp_f32_desc(&a, &b),
+                    "descending disagreed on {left} against {right}"
+                );
+            }
+        }
+        for (i, &left) in f64_corners().iter().enumerate() {
+            for (j, &right) in f64_corners().iter().enumerate() {
+                let a = (i, left);
+                let b = (j, right);
+                assert_eq!(scan_cmp_f64_asc(&a, &b), cmp_f64_asc(&a, &b));
+                assert_eq!(scan_cmp_f64_desc(&a, &b), cmp_f64_desc(&a, &b));
+            }
+        }
+    }
+
+    /// The order itself, stated where it can be read: NaN last ascending and
+    /// first descending, the two zeros equal, ties by position in both
+    /// directions.
+    #[test]
+    fn the_order_is_the_documented_one() {
+        let nan = (0usize, f32::NAN);
+        let negative_nan = (1usize, -f32::NAN);
+        let number = (2usize, 5.0f32);
+        assert_eq!(cmp_f32_asc(&nan, &number), Ordering::Greater);
+        assert_eq!(cmp_f32_asc(&negative_nan, &number), Ordering::Greater);
+        assert_eq!(cmp_f32_desc(&nan, &number), Ordering::Less);
+        assert_eq!(cmp_f32_desc(&negative_nan, &number), Ordering::Less);
+
+        // Two NaNs are equal, so the position decides -- ascending, both ways.
+        assert_eq!(cmp_f32_asc(&nan, &negative_nan), Ordering::Less);
+        assert_eq!(cmp_f32_desc(&nan, &negative_nan), Ordering::Less);
+
+        let minus_zero = (3usize, -0.0f32);
+        let plus_zero = (4usize, 0.0f32);
+        assert_eq!(cmp_f32_asc(&minus_zero, &plus_zero), Ordering::Less);
+        assert_eq!(cmp_f32_desc(&minus_zero, &plus_zero), Ordering::Less);
+        assert_eq!(value_cmp_f32(&-0.0, &0.0), Ordering::Equal);
+        assert_eq!(value_cmp_f32(&f32::NAN, &-f32::NAN), Ordering::Equal);
+        assert_eq!(value_cmp_f32(&f32::NAN, &f32::INFINITY), Ordering::Greater);
+        assert_eq!(value_cmp_f64(&-0.0, &0.0), Ordering::Equal);
+        assert_eq!(value_cmp_f64(&f64::NAN, &f64::INFINITY), Ordering::Greater);
     }
 }

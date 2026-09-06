@@ -210,3 +210,87 @@ def test_choose_picks_position_by_position():
         mt.choose(mt.from_numpy(np.full((2, 2), 5)), [mt.from_numpy(np.zeros((2, 2)))])
     with pytest.raises(ValueError, match="at least one choice"):
         mt.choose(mt.from_numpy(picks), [])
+
+
+# Every selection here orders by an integer key rather than by a three-way
+# float comparison -- `select_nth_unstable_by` over two million float32 costs
+# 31ms with the branching form and 10 with the key. The key folds NaN together
+# and both zeros together, exactly as the comparison it replaced did, and the
+# tests below stand over the three places a fold could show: NaN's side of the
+# order, the two zeros being one value, and equal values keeping their input
+# order. The bounded top-`k` scan keeps the branching form, because a scan asks
+# once per element against a settled root and the branch predicts; these run
+# over both.
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_the_two_zeros_are_one_value_to_every_selection(dtype):
+    values = np.array([1.0, -0.0, 0.0, -1.0], dtype=dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    # Both zeros sit at ranks 1 and 2 whichever way round they came, and the
+    # sign of each is the caller's own -- nothing is rebuilt from a key.
+    got = mt.partition(tensor, 1).numpy()
+    assert got[1] == 0.0 and got[2] == 0.0
+    assert sorted(np.signbit(got[1:3])) == [False, True]
+
+    # `kthvalue` counts from one, so ranks two and three are the zeros.
+    for k in (2, 3):
+        value, index = mt.kthvalue(tensor, k)
+        assert value.item() == 0.0
+        assert values[int(index.item())] == 0.0
+
+
+@pytest.mark.parametrize("largest", [True, False])
+@pytest.mark.parametrize("k", [1, 3, 8])
+def test_topk_breaks_ties_by_position_at_both_ends(k, largest):
+    """Every value the same, so only the tie rule decides -- and it decides the
+    same way at both ends, which is what stops `topk(k, largest)` and
+    `topk(k, smallest)` from disagreeing about which element they named."""
+    values = np.full(8, 2.5, dtype=np.float64)
+    got, indices = mt.Tensor(values, dtype="float64").topk(k, -1, largest, True)
+    assert list(indices.numpy()) == list(range(k))
+    assert (got.numpy() == 2.5).all()
+
+
+@pytest.mark.parametrize("k", [1, 5, 40])
+@pytest.mark.parametrize("largest", [True, False])
+def test_topk_puts_nan_where_the_sort_does(k, largest):
+    """The scan path and the selection path take different comparators, so run
+    both: `k` of 1 and 5 stay under the heap's footprint cap and 40 of 60 does
+    not."""
+    rng = np.random.default_rng(4)
+    values = rng.standard_normal(60)
+    values[::7] = np.nan
+    got, indices = mt.Tensor(values, dtype="float64").topk(k, -1, largest, True)
+
+    order = sorted(
+        range(60),
+        key=lambda i: (
+            (
+                0 if np.isnan(values[i]) else 1,
+                -values[i] if not np.isnan(values[i]) else 0.0,
+                i,
+            )
+            if largest
+            else (
+                1 if np.isnan(values[i]) else 0,
+                values[i] if not np.isnan(values[i]) else 0.0,
+                i,
+            )
+        ),
+    )[:k]
+    assert list(indices.numpy()) == order
+    np.testing.assert_array_equal(
+        np.isnan(got.numpy()), np.isnan(values[np.array(order)])
+    )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_partition_reports_a_negative_nan_as_the_one_it_was_given(dtype):
+    """All NaNs share a key, so the values cannot be rebuilt from it -- they
+    are moved, not reconstructed, and a negative NaN stays negative."""
+    values = np.array([1.0, -np.nan, 2.0, np.nan], dtype=dtype)
+    got = mt.partition(mt.Tensor(values, dtype=dtype), 1).numpy()
+    assert np.isnan(got[2:]).all()
+    assert sorted(np.signbit(got[2:])) == [False, True]
