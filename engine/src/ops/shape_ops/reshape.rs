@@ -823,6 +823,14 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
+/// How much of a slice's output one task copies.
+///
+/// Pure data movement, so the block wants to be long enough that the task
+/// bookkeeping disappears against the copy and short enough that a few
+/// thousand of them still fill every core. The same length the other
+/// movement kernels use.
+const SLICE_COPY_CHUNK: usize = 8192;
+
 /// Slicing operation - select a contiguous range of elements
 pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize) -> Result<Tensor> {
     let dim = normalize_dim(dim, tensor.ndim())?;
@@ -879,41 +887,53 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
             let src = tensor.data().$slice().ok_or_else(|| {
                 MinitensorError::invalid_operation("Tensor data access failed for slice")
             })?;
-            let fill = |o: usize, out_chunk: &mut [std::mem::MaybeUninit<$ty>]| {
-                let block_start = o * outer_stride;
-                if step == 1 {
-                    // A unit step selects a run that is contiguous with
-                    // everything beneath it, so a whole block is a single copy.
-                    // Copying it as `count` runs of `inner` instead cost an
-                    // order of magnitude whenever `inner` was 1 -- which is
-                    // every slice along the last dimension, and every slice of
-                    // a 1-D tensor.
-                    let src_start = block_start + start * inner;
-                    out_chunk.write_copy_of_slice(&src[src_start..src_start + out_chunk.len()]);
-                } else {
-                    for i in 0..count {
-                        let src_start = block_start + (start + i * step) * inner;
-                        let dst_start = i * inner;
-                        out_chunk[dst_start..dst_start + inner]
-                            .write_copy_of_slice(&src[src_start..src_start + inner]);
+            // The chunk is cut wherever the split lands, not on a block
+            // boundary: the split *was* one block per task, and a slice along
+            // the first axis has exactly one block however large the tensor is,
+            // so `narrow` of a four-million-element vector copied 16MB on a
+            // single core -- 3.6ms against 1.3 for a plain clone of the same
+            // bytes. Both the block and the position within it are recoverable
+            // from the output offset, so any cut works.
+            let fill = |position: usize, out_chunk: &mut [std::mem::MaybeUninit<$ty>]| {
+                let mut written = 0usize;
+                while written < out_chunk.len() {
+                    let at = position + written;
+                    let o = at / block;
+                    let within = at % block;
+                    let take = (block - within).min(out_chunk.len() - written);
+                    if step == 1 {
+                        // A unit step selects a run that is contiguous with
+                        // everything beneath it, so the whole of what is left
+                        // of this block is a single copy. Copying it as `count`
+                        // runs of `inner` instead cost an order of magnitude
+                        // whenever `inner` was 1 -- which is every slice along
+                        // the last dimension, and every slice of a 1-D tensor.
+                        let src_start = o * outer_stride + start * inner + within;
+                        out_chunk[written..written + take]
+                            .write_copy_of_slice(&src[src_start..src_start + take]);
+                    } else {
+                        // A strided step selects runs of `inner`, and a cut may
+                        // land inside one.
+                        let mut done = 0usize;
+                        while done < take {
+                            let offset = within + done;
+                            let i = offset / inner;
+                            let r = offset % inner;
+                            let run = (inner - r).min(take - done);
+                            let src_start = o * outer_stride + (start + i * step) * inner + r;
+                            out_chunk[written + done..written + done + run]
+                                .write_copy_of_slice(&src[src_start..src_start + run]);
+                            done += run;
+                        }
                     }
+                    written += take;
                 }
             };
-            // SAFETY: the chunks tile the output, and `fill` covers a whole
-            // chunk either as one run (unit step) or as `count` runs of `inner`.
+            // SAFETY: the chunks tile the output, and `fill` walks its chunk to
+            // the end, writing every element exactly once.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    if spare.len() < PAR_THRESHOLD {
-                        spare
-                            .chunks_mut(block)
-                            .enumerate()
-                            .for_each(|(o, out_chunk)| fill(o, out_chunk));
-                    } else {
-                        spare
-                            .par_chunks_mut(block)
-                            .enumerate()
-                            .for_each(|(o, out_chunk)| fill(o, out_chunk));
-                    }
+                    par_out_chunks(spare, SLICE_COPY_CHUNK, &fill);
                 })
             };
             TensorData::$from_vec(out, device)

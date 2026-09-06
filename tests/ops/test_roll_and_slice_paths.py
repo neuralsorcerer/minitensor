@@ -26,9 +26,14 @@ interleaved rounds:
     roll both dims  22.78 ms   1.27 ms   2.96 ms
     narrow, 1-D 2M  12.72 ms   0.95 ms   0.62 ms
 
-Everything but the 1-D cases now runs at or under NumPy. Those two stay a little
-over because a single row is one task: the copy is bandwidth-bound and NumPy is
-single-threaded there too.
+`slice` then had one more thing wrong with it: the split was one *block* per
+task, a block being everything the slice takes from one leading position, and a
+slice along the first axis has exactly one block however large the tensor is.
+So `narrow` of a four-million-element vector copied 16MB on a single core --
+3.6ms, against 1.3 for a plain clone of the same bytes. The output is now cut
+wherever the split falls and both the block and the position inside it are
+recovered from the output offset, which took it to 0.74ms and `diff` of the
+same vector from 11.0ms to 3.7 (NumPy 3.9).
 
 Which path runs depends on the element count against `PAR_THRESHOLD`, so the
 sizes below deliberately straddle 131072. The multi-dimensional cases matter
@@ -303,3 +308,41 @@ def test_a_narrow_of_the_whole_axis_is_an_exact_copy():
 
     for dim in (0, 1):
         np.testing.assert_array_equal(tensor.narrow(dim, 0, 400).numpy(), values)
+
+
+# A slice's output is cut into copy-sized chunks rather than into blocks, so a
+# chunk boundary can now land anywhere: partway through a block, and for a
+# strided slice partway through one of the `inner`-long runs a step selects.
+# These put a boundary in each of those places.
+
+
+@pytest.mark.parametrize("step", [1, 2, 3, 7])
+@pytest.mark.parametrize("dim", [0, 1])
+def test_a_strided_slice_matches_numpy_across_chunk_boundaries(step, dim):
+    """Large enough that the output spans many chunks, and shaped so the runs a
+    step selects are longer than one element in one direction and exactly one
+    in the other."""
+    values = np.arange(200 * 300.0).reshape(200, 300)
+    tensor = mt.Tensor(values, dtype="float64")
+    index = [slice(None), slice(None)]
+    index[dim] = slice(1, None, step)
+    got = tensor[tuple(index)].numpy()
+    np.testing.assert_array_equal(got, values[tuple(index)])
+
+
+@pytest.mark.parametrize("length", [1, 2, 8191, 8192, 8193, 16384])
+def test_a_narrow_of_any_length_lands_exactly(length):
+    """Lengths either side of the 8192-element copy chunk, where an off-by-one
+    in the walk would show as a wrong element at the seam."""
+    values = np.arange(20000.0)
+    got = mt.Tensor(values, dtype="float64").narrow(0, 3, length).numpy()
+    np.testing.assert_array_equal(got, values[3 : 3 + length])
+
+
+def test_slicing_a_middle_axis_keeps_the_rows_beneath_it_together():
+    """The block is `count * inner` with `inner` above one, so a chunk boundary
+    inside a block has to keep reading from the right leading position."""
+    values = np.arange(7 * 40 * 300.0).reshape(7, 40, 300)
+    tensor = mt.Tensor(values, dtype="float64")
+    np.testing.assert_array_equal(tensor.narrow(1, 5, 30).numpy(), values[:, 5:35, :])
+    np.testing.assert_array_equal(tensor[:, 5:35:4, :].numpy(), values[:, 5:35:4, :])
