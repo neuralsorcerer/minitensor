@@ -505,3 +505,413 @@ def corrcoef(input: object) -> Tensor:
     deviations = _F.sqrt(_F.diagonal(covariance))
     normalized = covariance / outer(deviations, deviations)
     return _F.clamp(normalized, -1.0, 1.0)
+
+
+def ptp(input: object, dim: int | None = None, keepdim: bool = False) -> Tensor:
+    """The peak-to-peak span: the largest value less the smallest.
+
+    Two reductions rather than one pass, which is what `amax` and `amin`
+    already are; the point of the name is that a span is what was wanted.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        return _F.amax(tensor) - _F.amin(tensor)
+    axis = _normalize_axis(dim, tensor.ndim(), "ptp")
+    return _F.amax(tensor, axis, keepdim) - _F.amin(tensor, axis, keepdim)
+
+
+def average(
+    input: object,
+    dim: int | None = None,
+    weights: object | None = None,
+    keepdim: bool = False,
+    returned: bool = False,
+):
+    """The mean, or the weighted mean when `weights` is given.
+
+    Without weights this is `mean`. With them it is
+    `sum(a * w) / sum(w)` over the reduced axis, which is not the same as
+    weighting after the fact: the divisor is the weight total, so weights that
+    do not sum to one still give an average rather than a scaled one.
+
+    `weights` may have the tensor's shape, or be one-dimensional and as long as
+    the reduced axis -- NumPy's rule, and the one that makes
+    `average(x, dim=0, weights=[1, 2, 3])` mean what it looks like.
+
+    With `returned=True` the weight total comes back alongside, which is what a
+    caller combining averages needs and cannot recover afterwards.
+    """
+
+    tensor = _atleast_tensor(input)
+    if weights is None:
+        result = (
+            _F.mean(tensor)
+            if dim is None
+            else _F.mean(
+                tensor, _normalize_axis(dim, tensor.ndim(), "average"), keepdim
+            )
+        )
+        if not returned:
+            return result
+        count = (
+            tensor.numel()
+            if dim is None
+            else tensor.shape[_normalize_axis(dim, tensor.ndim(), "average")]
+        )
+        return result, Tensor.full(
+            list(result.shape), float(count), dtype=str(result.dtype)
+        )
+
+    weight = _atleast_tensor(weights)
+    if dim is None:
+        if list(weight.shape) != list(tensor.shape):
+            raise ValueError(
+                "average over every axis needs weights shaped like the input, "
+                f"got {tuple(weight.shape)} for {tuple(tensor.shape)}"
+            )
+        total = _F.sum(weight)
+        return (
+            (_F.sum(tensor * weight) / total, total)
+            if returned
+            else _F.sum(tensor * weight) / total
+        )
+
+    axis = _normalize_axis(dim, tensor.ndim(), "average")
+    if weight.ndim() == 1 and tensor.ndim() != 1:
+        if weight.shape[0] != tensor.shape[axis]:
+            raise ValueError(
+                f"average needs one weight per position along dimension {axis}, "
+                f"got {weight.shape[0]} for an axis of {tensor.shape[axis]}"
+            )
+        # Line the weights up with the reduced axis and leave every other axis
+        # to broadcast.
+        spread = [1] * tensor.ndim()
+        spread[axis] = weight.shape[0]
+        weight = weight.reshape(spread)
+    elif list(weight.shape) != list(tensor.shape):
+        raise ValueError(
+            "average needs weights shaped like the input or one-dimensional "
+            f"along the reduced axis, got {tuple(weight.shape)} for "
+            f"{tuple(tensor.shape)}"
+        )
+
+    total = _F.sum(tensor * weight, axis, keepdim)
+    divisor = _F.sum(weight.expand(list(tensor.shape)), axis, keepdim)
+    return (total / divisor, divisor) if returned else total / divisor
+
+
+def percentile(
+    input: object,
+    q: object,
+    dim: int | None = None,
+    keepdim: bool = False,
+    interpolation: str = "linear",
+) -> Tensor:
+    """The `q`-th percentile, with `q` in `[0, 100]`.
+
+    `quantile` in the units people quote: the same computation with `q` divided
+    by a hundred, so the two cannot drift apart.
+    """
+
+    return _F.quantile(
+        _atleast_tensor(input),
+        _percentile_fraction(q, "percentile"),
+        dim,
+        keepdim,
+        interpolation,
+    )
+
+
+def nanpercentile(
+    input: object,
+    q: object,
+    dim: int | None = None,
+    keepdim: bool = False,
+    interpolation: str = "linear",
+) -> Tensor:
+    """`percentile` ignoring NaN, as `nanquantile` is to `quantile`."""
+
+    return _F.nanquantile(
+        _atleast_tensor(input),
+        _percentile_fraction(q, "nanpercentile"),
+        dim,
+        keepdim,
+        interpolation,
+    )
+
+
+def _percentile_fraction(q: object, name: str) -> object:
+    """`q` in percent, checked and turned into a fraction."""
+
+    if isinstance(q, (builtins.int, builtins.float)) and not isinstance(
+        q, builtins.bool
+    ):
+        if not 0.0 <= builtins.float(q) <= 100.0:
+            raise ValueError(f"{name} requires q in [0, 100], got {q}")
+        return builtins.float(q) / 100.0
+
+    fractions = _atleast_tensor(q)
+    if fractions.numel() and (
+        builtins.float(_F.amin(fractions).item()) < 0.0
+        or builtins.float(_F.amax(fractions).item()) > 100.0
+    ):
+        raise ValueError(f"{name} requires every q in [0, 100]")
+    return fractions / 100.0
+
+
+def interp(
+    x: object,
+    xp: object,
+    fp: object,
+    left: float | None = None,
+    right: float | None = None,
+    period: float | None = None,
+) -> Tensor:
+    """Piecewise linear interpolation of the samples `(xp, fp)` at `x`.
+
+    `xp` must increase. Each point is placed between two samples by binary
+    search rather than by scanning, so this is `n log m` in the sample count
+    and works on a whole tensor of query points at once.
+
+    Outside the sample range the value is held at the end point, or at `left` /
+    `right` when those are given. `period` instead wraps both the queries and
+    the samples onto one period, so the ends join up.
+    """
+
+    query = _require_float(_atleast_tensor(x).astype("float64"), "interp")
+    points = _require_float(_atleast_tensor(xp).astype("float64"), "interp").reshape(-1)
+    values = _require_float(_atleast_tensor(fp).astype("float64"), "interp").reshape(-1)
+
+    if points.shape[0] != values.shape[0]:
+        raise ValueError(
+            f"interp needs as many sample values as sample points, got "
+            f"{values.shape[0]} and {points.shape[0]}"
+        )
+    if points.shape[0] == 0:
+        raise ValueError("interp needs at least one sample point")
+
+    if period is not None:
+        span = builtins.float(period)
+        if span == 0.0:
+            raise ValueError("interp requires a non-zero period")
+        span = builtins.abs(span)
+        # Wrap both onto `[0, period)`, then repeat the first sample past the
+        # end and the last one before the start so the wrap has neighbours to
+        # interpolate between.
+        query = query - _F.floor(query / span) * span
+        points = points - _F.floor(points / span) * span
+        order = _F.argsort(points)
+        points = _F.index_select(points, 0, order)
+        values = _F.index_select(values, 0, order)
+        points = _F.cat(
+            [
+                _F.narrow(points, 0, points.shape[0] - 1, 1) - span,
+                points,
+                _F.narrow(points, 0, 0, 1) + span,
+            ]
+        )
+        values = _F.cat(
+            [
+                _F.narrow(values, 0, values.shape[0] - 1, 1),
+                values,
+                _F.narrow(values, 0, 0, 1),
+            ]
+        )
+
+    if points.shape[0] == 1:
+        # One sample is the same value everywhere -- there is no segment to
+        # interpolate along, and both ends of the range are that sample.
+        held = _F.index_select(values, 0, _atleast_tensor([0]).astype("int64"))
+        return held * Tensor.full(list(query.shape), 1.0, dtype="float64")
+
+    count = points.shape[0]
+    # `right=True` puts a query that lands exactly on a sample at that sample's
+    # own segment, so an exact hit returns its value exactly rather than to
+    # within a rounding of the slope.
+    upper = _F.clamp(
+        _F.searchsorted(points, query.reshape(-1), True).astype("int64"), 1, count - 1
+    )
+    lower = upper - 1
+    x_lo = _F.index_select(points, 0, lower)
+    x_hi = _F.index_select(points, 0, upper)
+    y_lo = _F.index_select(values, 0, lower)
+    y_hi = _F.index_select(values, 0, upper)
+    slope = (y_hi - y_lo) / (x_hi - x_lo)
+    flat = query.reshape(-1)
+    result = y_lo + slope * (flat - x_lo)
+
+    if period is None:
+        first = builtins.float(
+            _F.index_select(points, 0, _atleast_tensor([0]).astype("int64")).item()
+        )
+        last = builtins.float(
+            _F.index_select(
+                points, 0, _atleast_tensor([count - 1]).astype("int64")
+            ).item()
+        )
+        low_value = (
+            builtins.float(left)
+            if left is not None
+            else builtins.float(
+                _F.index_select(values, 0, _atleast_tensor([0]).astype("int64")).item()
+            )
+        )
+        high_value = (
+            builtins.float(right)
+            if right is not None
+            else builtins.float(
+                _F.index_select(
+                    values, 0, _atleast_tensor([count - 1]).astype("int64")
+                ).item()
+            )
+        )
+        result = _F.where(
+            flat < first,
+            Tensor.full(list(flat.shape), low_value, dtype="float64"),
+            result,
+        )
+        result = _F.where(
+            flat > last,
+            Tensor.full(list(flat.shape), high_value, dtype="float64"),
+            result,
+        )
+
+    return result.reshape(list(query.shape))
+
+
+def digitize(input: object, bins: object, right: bool = False) -> Tensor:
+    """Which bin each value falls in, as an index into `bins`.
+
+    The bins are the edges, and the answer is how many of them a value is past:
+    `0` for a value below every edge and `len(bins)` for one above them all.
+    `right` moves which side of an edge counts as inside it.
+
+    The edges may increase or decrease. A decreasing sequence is the same
+    question asked from the other end, so it is answered by searching the
+    reversed edges and counting back from the total -- which is why this is not
+    simply `searchsorted`, whose contract is an increasing sequence.
+    """
+
+    values = _atleast_tensor(input)
+    edges = _atleast_tensor(bins).reshape(-1)
+    if edges.shape[0] < 2:
+        # One edge or none is ordered either way; take it as increasing.
+        return _F.searchsorted(edges, values, not right).astype("int64")
+
+    ascending = builtins.bool(
+        _F.all(
+            _F.narrow(edges, 0, 1, edges.shape[0] - 1)
+            >= _F.narrow(edges, 0, 0, edges.shape[0] - 1)
+        ).item()
+    )
+    if ascending:
+        return _F.searchsorted(edges, values, not right).astype("int64")
+
+    # Counting back from the total flips which side of an edge is inside it,
+    # so the search takes the opposite `right` to the one asked for.
+    flipped = _F.flip(edges, [0])
+    return Tensor.full(
+        list(values.shape), edges.shape[0], dtype="int64"
+    ) - _F.searchsorted(flipped, values, not right).astype("int64")
+
+
+def histogram_bin_edges(
+    input: object,
+    bins: object = 10,
+    range: object = None,
+    weights: object | None = None,
+) -> Tensor:
+    """The edges `histogram` would use, without counting anything.
+
+    For choosing one set of edges and reusing it across several tensors, which
+    is the only way two histograms are comparable. `weights` is accepted and
+    ignored, as it is in NumPy: no edge rule here depends on them.
+    """
+
+    del weights
+    return _F.histogram(_atleast_tensor(input), bins, range, None, False)[1]
+
+
+def histogram2d(
+    x: object,
+    y: object,
+    bins: object = 10,
+    range: object = None,
+    weights: object | None = None,
+    density: bool = False,
+):
+    """The joint histogram of two sequences, and the edges it used.
+
+    `histogramdd` over the pair, which is where the counting lives; this is the
+    two-dimensional spelling of it, with the edges handed back separately
+    rather than as a list.
+    """
+
+    first = _atleast_tensor(x).reshape(-1, 1)
+    second = _atleast_tensor(y).reshape(-1, 1)
+    if first.shape[0] != second.shape[0]:
+        raise ValueError(
+            f"histogram2d needs the same number of values in each sequence, "
+            f"got {first.shape[0]} and {second.shape[0]}"
+        )
+    counts, edges = histogramdd(
+        _F.cat([first, second], 1), bins, range, weights, density
+    )
+    return counts, edges[0], edges[1]
+
+
+def nancumsum(input: object, dim: int | None = None) -> Tensor:
+    """The running sum along `dim`, treating NaN as zero.
+
+    A NaN contributes nothing and, unlike in `cumsum`, does not poison every
+    total after it. With no `dim` the tensor is flattened first, as NumPy does.
+    """
+
+    tensor = _atleast_tensor(input)
+    filled = _F.nan_to_num(tensor) if "float" in str(tensor.dtype) else tensor
+    if dim is None:
+        return _F.cumsum(filled.reshape(-1), 0)
+    return _F.cumsum(filled, _normalize_axis(dim, tensor.ndim(), "nancumsum"))
+
+
+def nancumprod(input: object, dim: int | None = None) -> Tensor:
+    """The running product along `dim`, treating NaN as one."""
+
+    tensor = _atleast_tensor(input)
+    if "float" in str(tensor.dtype):
+        ones = Tensor.full(list(tensor.shape), 1.0, dtype=str(tensor.dtype))
+        filled = _F.where(_F.isnan(tensor), ones, tensor)
+    else:
+        filled = tensor
+    if dim is None:
+        return _F.cumprod(filled.reshape(-1), 0)
+    return _F.cumprod(filled, _normalize_axis(dim, tensor.ndim(), "nancumprod"))
+
+
+def ediff1d(
+    input: object, to_end: object | None = None, to_begin: object | None = None
+) -> Tensor:
+    """The differences between consecutive elements of the flattened tensor.
+
+    `diff` along the one axis a flattened tensor has, with optional values
+    joined on at either end -- which is what makes this the one to reach for
+    when the result has to line up with something of the original length.
+    """
+
+    flat = _atleast_tensor(input).reshape(-1)
+    length = flat.shape[0]
+    pieces = []
+    if to_begin is not None:
+        pieces.append(_atleast_tensor(to_begin).reshape(-1).astype(str(flat.dtype)))
+    if length > 1:
+        pieces.append(
+            _F.narrow(flat, 0, 1, length - 1) - _F.narrow(flat, 0, 0, length - 1)
+        )
+    elif not pieces and to_end is None:
+        return _F.narrow(flat, 0, 0, 0)
+    if to_end is not None:
+        pieces.append(_atleast_tensor(to_end).reshape(-1).astype(str(flat.dtype)))
+    if not pieces:
+        return _F.narrow(flat, 0, 0, 0)
+    return pieces[0] if len(pieces) == 1 else _F.cat(pieces)
