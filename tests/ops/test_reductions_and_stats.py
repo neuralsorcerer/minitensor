@@ -1278,3 +1278,61 @@ def test_nanmedian_skips_nans_and_still_picks_a_real_element():
     got = t.nanmedian(dim=1).numpy()
     assert got[0] == 3.0  # lower middle of the surviving [1, 3, 4]
     assert np.isnan(got[1])  # nothing survives
+
+
+# Naming every axis is the same request as naming none of them, and the two used
+# to take different routes: the whole-tensor reductions are a single pass, where
+# reducing one axis at a time is a pass per axis with a full-size intermediate
+# between them. `sum([0])` of a four-million-element vector cost 0.86ms against
+# 0.33 for `sum()` of the same tensor. The tests below hold the two answers
+# together -- exactly, since they are now the same code.
+
+
+@pytest.mark.parametrize("shape", [(5,), (3, 4), (2, 3, 4), (1, 5, 1)])
+@pytest.mark.parametrize("keepdim", [False, True])
+@pytest.mark.parametrize("name", ["sum", "mean", "prod", "nansum", "nanmean"])
+def test_naming_every_axis_is_the_same_as_naming_none(shape, keepdim, name):
+    values = np.random.default_rng(4).standard_normal(shape)
+    tensor = mt.Tensor(values, dtype="float64")
+    every = getattr(F, name)(tensor, list(range(len(shape))), keepdim)
+    none = getattr(F, name)(tensor, None, keepdim)
+    assert tuple(every.shape) == tuple(none.shape)
+    np.testing.assert_array_equal(every.numpy(), none.numpy())
+
+
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_the_collapsed_reduction_still_matches_numpy(keepdim):
+    values = np.random.default_rng(5).standard_normal((3, 4, 5))
+    tensor = mt.Tensor(values, dtype="float64")
+    np.testing.assert_allclose(
+        F.sum(tensor, [0, 1, 2], keepdim).numpy(), values.sum(keepdims=keepdim)
+    )
+    np.testing.assert_allclose(
+        F.mean(tensor, [2, 0, 1], keepdim).numpy(), values.mean(keepdims=keepdim)
+    )
+    # Out of order and repeated: the same set of axes either way.
+    np.testing.assert_array_equal(
+        F.sum(tensor, [2, 0, 1, 0], keepdim).numpy(),
+        F.sum(tensor, None, keepdim).numpy(),
+    )
+
+
+def test_a_scalar_still_tells_no_axes_from_all_of_them():
+    """A rank-zero tensor has no axes, so an empty list means 'reduce nothing'
+    rather than 'reduce everything' -- the one place the two differ."""
+    scalar = mt.Tensor(np.array(3.0), dtype="float64")
+    assert F.sum(scalar, [], False).item() == 3.0
+    assert F.sum(scalar, None, False).item() == 3.0
+
+
+def test_the_gradient_survives_the_collapse():
+    values = np.arange(6.0).reshape(2, 3)
+    tensor = mt.Tensor(values, dtype="float64", requires_grad=True)
+    F.sum(tensor, [0, 1], False).backward()
+    np.testing.assert_array_equal(tensor.grad.numpy(), np.ones((2, 3)))
+    mt.clear_autograd_graph()
+
+    tensor = mt.Tensor(values, dtype="float64", requires_grad=True)
+    F.mean(tensor, [1, 0], True).backward()
+    np.testing.assert_allclose(tensor.grad.numpy(), np.full((2, 3), 1 / 6))
+    mt.clear_autograd_graph()

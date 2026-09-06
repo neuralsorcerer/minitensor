@@ -64,7 +64,21 @@ pub(crate) fn normalize_reduction_dims(
             }
             normalized.sort_unstable();
             normalized.dedup();
-            Some(normalized)
+            // Naming every axis is the same request as naming none of them,
+            // and the two took different routes: the whole-tensor reductions
+            // are a single pass, where reducing one axis at a time is a pass
+            // per axis with a full-size intermediate between them. `sum([0])`
+            // of a four-million-element vector cost 0.86ms against 0.33 for
+            // `sum()` of the same tensor, and `norm`, which always names its
+            // axes, paid it every time.
+            //
+            // A rank-zero tensor is left alone: it has no axes, so an empty
+            // list there means "reduce nothing" rather than "reduce all".
+            if ndim > 0 && normalized.len() == ndim {
+                None
+            } else {
+                Some(normalized)
+            }
         }
         None => None,
     })

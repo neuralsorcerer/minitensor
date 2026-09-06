@@ -211,3 +211,59 @@ def test_norm_over_several_dims_at_once_sees_the_infinity():
     got = mt.Tensor(array).norm(2, [1, 2]).numpy()
 
     assert np.isinf(got).all()
+
+
+# `p = 1` takes neither the scaled route nor the squared one: the sum of the
+# magnitudes *is* the answer, so there is no power that could leave the exponent
+# range where the answer does not. Taking the scaled route anyway cost a max
+# over the input, a full-size `(|x| / m)^1`, a sum and two more elementwise
+# passes -- 5.6ms on four million float32 against 0.94 for `abs(x).sum()`.
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize(
+    "values",
+    [
+        [1.0, -2.0, 3.0],
+        [0.0, 0.0],
+        [-1e20, 1e20],
+        [1e-25, -1e-25],
+        [np.inf, 1.0],
+        [np.nan, 1.0],
+        [-0.0, 0.0],
+    ],
+    ids=["mixed", "zeros", "huge", "tiny", "inf", "nan", "zeros_signed"],
+)
+def test_the_one_norm_is_the_sum_of_the_magnitudes(values, dtype):
+    tensor = mt.Tensor(np.array(values, dtype=dtype), dtype=dtype)
+    _agree(tensor.norm(1.0).item(), mt.functional.abs(tensor).sum().item())
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_the_one_norm_along_a_dim_and_with_keepdim(dtype):
+    values = np.arange(-6.0, 6.0).reshape(3, 4).astype(dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+    np.testing.assert_allclose(
+        tensor.norm(1.0, 1).numpy(), np.abs(values).sum(1), rtol=1e-6
+    )
+    kept = tensor.norm(1.0, 1, True)
+    assert tuple(kept.shape) == (3, 1)
+    np.testing.assert_allclose(
+        kept.numpy(), np.abs(values).sum(1, keepdims=True), rtol=1e-6
+    )
+
+
+def test_the_one_norm_carries_the_sign_as_its_gradient():
+    values = np.array([-2.0, 3.0, 0.5, -0.25])
+    tensor = mt.Tensor(values, dtype="float64", requires_grad=True)
+    tensor.norm(1.0).backward()
+    np.testing.assert_array_equal(tensor.grad.numpy(), np.sign(values))
+    mt.clear_autograd_graph()
+
+
+def test_the_one_norm_does_not_overflow_where_the_squared_one_would():
+    """`1e20` squared leaves float32; its magnitude does not."""
+    values = np.full(4, 1e20, dtype=np.float32)
+    got = mt.Tensor(values, dtype="float32").norm(1.0).item()
+    assert np.isfinite(got)
+    np.testing.assert_allclose(got, 4e20, rtol=1e-6)

@@ -435,6 +435,16 @@ pub fn norm(tensor: &Tensor, p: f64, dim: Option<Vec<isize>>, keepdim: bool) -> 
             reduce_extremum(&activation::abs(&input)?, &dims, false)?
         } else if p == 0.0 {
             count_nonzero_over(&input, &dims)?
+        } else if p == 1.0 {
+            // The sum of the magnitudes *is* the answer, so there is no power
+            // to take and nothing to scale: `|x|^p` can leave the exponent
+            // range where the answer does not, which is what the scaled route
+            // below exists for, and at `p == 1` it cannot. Taking that route
+            // anyway cost a max over the input, a full-size `(|x| / s)^1`, a
+            // sum and two more elementwise passes -- 5.6ms on four million
+            // float32 against 0.94 for `abs(x).sum()` spelled out.
+            let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+            reduction::sum(&activation::abs(&input)?, Some(dims_isize), true)?
         } else if let Some(fast) = euclidean_norm_unscaled(&input, p, &dims)? {
             fast
         } else {
