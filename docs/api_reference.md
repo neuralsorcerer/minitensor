@@ -97,6 +97,12 @@ of convenience aliases.
 | `trapezoid(y, x=None, dx=1.0, dim=-1)` | The trapezoidal integral along `dim`, with uneven spacing when `x` is given. `trapz` is the same function. |
 | `cov(input, correction=1, fweights=None, aweights=None)` | The covariance matrix of the *rows*: each row a variable, each column an observation. A 1-D input is one variable, so the result is its scalar variance. `fweights` counts repeated observations; `aweights` weights their reliability and shrinks the effective sample size rather than the count. |
 | `corrcoef(input)` | The Pearson correlation matrix of the rows, clamped to `[-1, 1]` -- the division is exact in theory and lands a hair outside it in floating point. |
+| `union1d(input, other)` | The distinct values in either tensor, ascending. Both are flattened first: a set has no shape. |
+| `intersect1d(input, other, assume_unique=False, return_indices=False)` | The distinct values in both, ascending -- found by a membership test against the sorted second set, so the cost is `(n + m) log m` rather than the `n * m` of comparing every pair. `return_indices` also gives where each common value first occurs in each input. `assume_unique` is accepted and changes nothing: the search does not care whether either side repeats. |
+| `setdiff1d(input, other, assume_unique=False)` | The distinct values in the first and not the second, ascending. |
+| `setxor1d(input, other, assume_unique=False)` | The distinct values in exactly one of the two, ascending -- the union less the intersection, so a value in both is in neither answer. |
+| `trim_zeros(input, trim='fb')` | A 1-D tensor with leading and/or trailing zeros removed. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. |
+| `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
 | `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 20ms partitioned against 90 sorted. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
 | `argpartition(input, kth, dim=-1)` | Where the elements `partition` would produce came from, so `take_along_dim(x, argpartition(x, k), dim)` is `partition(x, k, dim)`. |
 | `lexsort(keys, dim=-1)` | The order that sorts by several keys at once, the **last** key primary and earlier keys breaking its ties -- NumPy's convention, and the one that reads correctly when the keys are a table's columns. One stable sort per key, least significant first, so `k` passes settle `k` keys. |
@@ -749,16 +755,21 @@ substitution does not have to be worked out from the rule.
 
 ### Distinct values, runs, and the most common one
 
-- `unique(input, return_inverse=False, return_counts=False)` — the distinct
-  values, ascending. The input is flattened: this asks which values occur, not
-  where. `return_inverse` gives, in the input's shape, the position of each
-  element's value in the output, so indexing the output by it rebuilds the
-  input. `return_counts` gives how many times each value occurred. With no flags
-  the values come back on their own rather than in a one-tuple.
-- `unique_consecutive(input, return_inverse=False, return_counts=False)` — the
-  same, but collapsing only *adjacent* runs and sorting nothing, so a value that
-  recurs after something else appears again. This is run-length encoding, and it
-  is what `unique` would destroy.
+- `unique(input, return_inverse=False, return_counts=False, return_index=False)`
+  — the distinct values, ascending. The input is flattened: this asks which
+  values occur, not where. `return_inverse` gives, in the input's shape, the
+  position of each element's value in the output, so indexing the output by it
+  rebuilds the input. `return_counts` gives how many times each value occurred.
+  `return_index` gives where each distinct value *first* occurred in the input —
+  the earliest position in its run, since the sort underneath does not keep
+  equal values in their original order. With no flags the values come back on
+  their own rather than in a one-tuple; with several, the extras always arrive
+  in NumPy's order (index, inverse, counts) whichever subset was asked for.
+- `unique_consecutive(input, return_inverse=False, return_counts=False,
+  return_index=False)` — the same, but collapsing only *adjacent* runs and
+  sorting nothing, so a value that recurs after something else appears again.
+  This is run-length encoding, and it is what `unique` would destroy;
+  `return_index` here is where each run started.
 - `mode(input, dim=-1, keepdim=False)` — `(values, indices)`: the value
   occurring most often along `dim`, and where it is. A tie goes to the smaller
   value and the index is its *first* position along `dim`. Both are choices — a

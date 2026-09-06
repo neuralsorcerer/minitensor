@@ -140,9 +140,16 @@ fn indices_tensor(values: Vec<i64>, shape: Shape, device: crate::device::Device)
     ))
 }
 
+/// The distinct values, and whichever of the three extras was asked for: where
+/// each first occurred, which distinct value each input element was, and how
+/// many times each occurred -- in that order, which is NumPy's.
+pub type UniqueParts = (Tensor, Option<Tensor>, Option<Tensor>, Option<Tensor>);
+
 /// What a caller asked to be told, beyond the values themselves.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct UniqueWanted {
+    /// Where each distinct value first occurred in the input.
+    pub index: bool,
     pub inverse: bool,
     pub counts: bool,
 }
@@ -154,10 +161,7 @@ pub struct UniqueWanted {
 /// shape, the position of its value in the output -- so indexing the output by
 /// it rebuilds the input. `counts` gives how many times each distinct value
 /// occurred.
-pub fn unique(
-    tensor: &Tensor,
-    wanted: UniqueWanted,
-) -> Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
+pub fn unique(tensor: &Tensor, wanted: UniqueWanted) -> Result<UniqueParts> {
     run_lengths(tensor, wanted, true)
 }
 
@@ -168,20 +172,13 @@ pub fn unique(
 /// sequence where the order carries meaning -- run-length encoding a label
 /// sequence, for instance, where `unique` would destroy the very thing being
 /// encoded.
-pub fn unique_consecutive(
-    tensor: &Tensor,
-    wanted: UniqueWanted,
-) -> Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
+pub fn unique_consecutive(tensor: &Tensor, wanted: UniqueWanted) -> Result<UniqueParts> {
     run_lengths(tensor, wanted, false)
 }
 
 /// Both flavours of `unique`, which differ only in whether the walk is over the
 /// input or over its sorted order.
-fn run_lengths(
-    tensor: &Tensor,
-    wanted: UniqueWanted,
-    sorted: bool,
-) -> Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
+fn run_lengths(tensor: &Tensor, wanted: UniqueWanted, sorted: bool) -> Result<UniqueParts> {
     let contiguous = tensor.contiguous()?;
     let count = tensor.numel();
     let device = tensor.device();
@@ -195,9 +192,10 @@ fn run_lengths(
             // thing separating this from the consecutive form. The positions
             // come back only when the inverse map is wanted, since that is the
             // only thing that reads them.
+            let positions = wanted.inverse || wanted.index;
             let (arranged, order): (Vec<$ty>, Vec<usize>) = if sorted {
-                in_order(values, wanted.inverse)
-            } else if wanted.inverse {
+                in_order(values, positions)
+            } else if positions {
                 (values.to_vec(), (0..count).collect())
             } else {
                 (values.to_vec(), Vec::new())
@@ -205,12 +203,20 @@ fn run_lengths(
 
             let mut distinct: Vec<$ty> = Vec::new();
             let mut counts: Vec<i64> = Vec::new();
+            let mut first: Vec<i64> = Vec::new();
             let mut inverse = vec![0i64; if wanted.inverse { count } else { 0 }];
             walk_runs(&arranged, |start, stop| {
                 if wanted.inverse {
                     for position in &order[start..stop] {
                         inverse[*position] = distinct.len() as i64;
                     }
+                }
+                if wanted.index {
+                    // The sort does not keep equal values in their original
+                    // order, so "where it first occurred" is the smallest
+                    // position in the run rather than the one that landed
+                    // first in it.
+                    first.push(order[start..stop].iter().copied().min().unwrap_or(start) as i64);
                 }
                 distinct.push(arranged[start]);
                 // A tensor of all-distinct values has one count per element,
@@ -231,6 +237,12 @@ fn run_lengths(
             }
             let values_out = Tensor::new(Arc::new(data), shape, tensor.dtype(), device, false);
 
+            let index_out = if wanted.index {
+                let shape = Shape::new(vec![first.len()]);
+                Some(indices_tensor(first, shape, device)?)
+            } else {
+                None
+            };
             let inverse_out = if wanted.inverse {
                 Some(indices_tensor(inverse, tensor.shape().clone(), device)?)
             } else {
@@ -242,7 +254,7 @@ fn run_lengths(
             } else {
                 None
             };
-            (values_out, inverse_out, counts_out)
+            (values_out, index_out, inverse_out, counts_out)
         }};
     }
 

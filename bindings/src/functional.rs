@@ -1314,17 +1314,19 @@ pub fn inv(input: &Bound<PyAny>) -> PyResult<PyTensor> {
     borrow_tensor(input)?.inv()
 }
 
-/// The distinct values of `input`, ascending, with NaN last and collapsed. Returns the values, or a tuple with the inverse and/or the counts when asked for them.
+/// The distinct values of `input`, ascending, with NaN last and collapsed. Returns the values alone, or a tuple with whichever extras were asked for -- always in NumPy's order: where each first occurred, the inverse map, the counts.
 #[pyfunction]
-#[pyo3(signature = (input, return_inverse=false, return_counts=false))]
+#[pyo3(signature = (input, return_inverse=false, return_counts=false, return_index=false))]
 pub fn unique(
     py: Python<'_>,
     input: &Bound<PyAny>,
     return_inverse: bool,
     return_counts: bool,
+    return_index: bool,
 ) -> PyResult<Py<PyAny>> {
     let values = PyTensor::from_python_value(input)?;
     let wanted = engine::ops::UniqueWanted {
+        index: return_index,
         inverse: return_inverse,
         counts: return_counts,
     };
@@ -1332,17 +1334,19 @@ pub fn unique(
     unique_result(py, found)
 }
 
-/// The distinct values of *adjacent* runs, in the order they appear. Nothing is sorted, so a value that recurs after something else appears again.
+/// The distinct values of *adjacent* runs, in the order they appear. Nothing is sorted, so a value that recurs after something else appears again. Extras come back in NumPy's order: where each first occurred, the inverse map, the counts.
 #[pyfunction]
-#[pyo3(signature = (input, return_inverse=false, return_counts=false))]
+#[pyo3(signature = (input, return_inverse=false, return_counts=false, return_index=false))]
 pub fn unique_consecutive(
     py: Python<'_>,
     input: &Bound<PyAny>,
     return_inverse: bool,
     return_counts: bool,
+    return_index: bool,
 ) -> PyResult<Py<PyAny>> {
     let values = PyTensor::from_python_value(input)?;
     let wanted = engine::ops::UniqueWanted {
+        index: return_index,
         inverse: return_inverse,
         counts: return_counts,
     };
@@ -1354,13 +1358,13 @@ pub fn unique_consecutive(
 ///
 /// NumPy and PyTorch both vary their arity with the flags, so this does too:
 /// asking for nothing extra should not force a caller to unpack a one-tuple.
-fn unique_result(
-    py: Python<'_>,
-    found: (Tensor, Option<Tensor>, Option<Tensor>),
-) -> PyResult<Py<PyAny>> {
-    let (values, inverse, counts) = found;
+fn unique_result(py: Python<'_>, found: engine::ops::UniqueParts) -> PyResult<Py<PyAny>> {
+    let (values, index, inverse, counts) = found;
     let mut parts: Vec<Py<PyAny>> = vec![Py::new(py, PyTensor::from_tensor(values))?.into()];
-    for extra in [inverse, counts].into_iter().flatten() {
+    // Values, then where each first occurred, then the inverse map, then the
+    // counts -- NumPy's order, so a caller asking for two of them can unpack
+    // them positionally.
+    for extra in [index, inverse, counts].into_iter().flatten() {
         parts.push(Py::new(py, PyTensor::from_tensor(extra))?.into());
     }
     if parts.len() == 1 {

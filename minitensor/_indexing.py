@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import builtins
 import operator as _operator
+from typing import NamedTuple as _NamedTuple
 
 import numpy as _np
 
@@ -944,3 +945,173 @@ def choose(input: object, choices: object) -> Tensor:
                 f"{highest if highest >= len(options) else lowest}"
             )
     return _F.gather(stacked, 0, picks.reshape([1] + target)).reshape(target)
+
+
+def union1d(input: object, other: object) -> Tensor:
+    """The distinct values in either tensor, ascending.
+
+    Both are flattened first: a set has no shape.
+    """
+
+    left = _atleast_tensor(input).reshape(-1)
+    right = _atleast_tensor(other).reshape(-1)
+    if str(left.dtype) != str(right.dtype):
+        right = right.astype(str(left.dtype))
+    return _F.unique(_F.cat([left, right]))
+
+
+def intersect1d(
+    input: object,
+    other: object,
+    assume_unique: bool = False,
+    return_indices: bool = False,
+):
+    """The distinct values in both tensors, ascending.
+
+    Found by a membership test against the sorted second set rather than by
+    comparing every pair, so the cost is `(n + m) log m`.
+
+    `assume_unique` is accepted and changes nothing: the membership test does
+    not care whether either side repeats itself, and the result is made
+    distinct either way. `return_indices` also gives, for each common value,
+    where it first occurs in each input.
+    """
+
+    del assume_unique
+    left = _atleast_tensor(input).reshape(-1)
+    right = _atleast_tensor(other).reshape(-1)
+
+    if return_indices:
+        left_values, left_first = _F.unique(left, return_index=True)
+        right_values, right_first = _F.unique(right, return_index=True)
+        keep = isin(left_values, right_values)
+        common = _F.masked_select(left_values, keep)
+        # Where the common values sit in each side's distinct list, which is
+        # sorted -- so a search finds them without comparing every pair.
+        in_left = _F.masked_select(left_first, keep)
+        in_right = _F.index_select(
+            right_first, 0, _F.searchsorted(right_values, common, False)
+        )
+        return common, in_left, in_right
+
+    left_values = _F.unique(left)
+    right_values = _F.unique(right)
+    return _F.masked_select(left_values, isin(left_values, right_values))
+
+
+def setdiff1d(input: object, other: object, assume_unique: bool = False) -> Tensor:
+    """The distinct values in the first tensor and not the second, ascending."""
+
+    del assume_unique
+    left = _F.unique(_atleast_tensor(input).reshape(-1))
+    right = _atleast_tensor(other).reshape(-1)
+    return _F.masked_select(left, isin(left, right, invert=True))
+
+
+def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tensor:
+    """The distinct values in exactly one of the two tensors, ascending.
+
+    The union less the intersection, which is what the name means and what
+    makes it the odd one out of this family: a value in both sides is in
+    neither answer.
+    """
+
+    del assume_unique
+    left = _F.unique(_atleast_tensor(input).reshape(-1))
+    right = _F.unique(_atleast_tensor(other).reshape(-1))
+    if str(left.dtype) != str(right.dtype):
+        right = right.astype(str(left.dtype))
+    only_left = _F.masked_select(left, isin(left, right, invert=True))
+    only_right = _F.masked_select(right, isin(right, left, invert=True))
+    return _F.unique(_F.cat([only_left, only_right]))
+
+
+def trim_zeros(input: object, trim: str = "fb") -> Tensor:
+    """A 1-D tensor with leading and trailing zeros removed.
+
+    `trim` says which ends to trim: `'f'` for the front, `'b'` for the back,
+    `'fb'` for both. Only the ends -- a zero between two non-zeros stays, which
+    is the difference between this and a mask.
+    """
+
+    tensor = _atleast_tensor(input).reshape(-1)
+    wanted = trim.lower()
+    if any(letter not in "fb" for letter in wanted):
+        raise ValueError(f"trim_zeros takes 'f', 'b' or 'fb', got {trim!r}")
+
+    length = tensor.shape[0]
+    start, stop = 0, length
+    if length:
+        nonzero = flatnonzero(tensor != 0)
+        if nonzero.shape[0] == 0:
+            start, stop = 0, 0
+        else:
+            if "f" in wanted:
+                start = builtins.int(nonzero.numpy()[0])
+            if "b" in wanted:
+                stop = builtins.int(nonzero.numpy()[-1]) + 1
+    return _F.narrow(tensor, 0, start, max(stop - start, 0))
+
+
+class UniqueAllResult(_NamedTuple):
+    """Everything `unique` can say about a tensor, named."""
+
+    values: Tensor
+    indices: Tensor
+    inverse_indices: Tensor
+    counts: Tensor
+
+
+class UniqueCountsResult(_NamedTuple):
+    """The distinct values and how often each occurred."""
+
+    values: Tensor
+    counts: Tensor
+
+
+class UniqueInverseResult(_NamedTuple):
+    """The distinct values and the map that rebuilds the input from them."""
+
+    values: Tensor
+    inverse_indices: Tensor
+
+
+def unique_values(input: object) -> Tensor:
+    """The distinct values, ascending -- the array API's spelling of `unique`.
+
+    The four `unique_*` functions are that standard's way of asking for one
+    thing at a time, with each answer named rather than positional. They are
+    the same computation underneath.
+
+    The standard leaves the order unspecified and NumPy returns them unsorted
+    here; these come back ascending, which is the stronger promise and the one
+    `unique` itself already makes.
+    """
+
+    return _F.unique(_atleast_tensor(input))
+
+
+def unique_counts(input: object) -> UniqueCountsResult:
+    """The distinct values and how often each occurred."""
+
+    values, counts = _F.unique(_atleast_tensor(input), return_counts=True)
+    return UniqueCountsResult(values, counts)
+
+
+def unique_inverse(input: object) -> UniqueInverseResult:
+    """The distinct values and, for each element, which of them it was."""
+
+    values, inverse = _F.unique(_atleast_tensor(input), return_inverse=True)
+    return UniqueInverseResult(values, inverse)
+
+
+def unique_all(input: object) -> UniqueAllResult:
+    """Everything `unique` can report, each answer named rather than positional."""
+
+    values, indices, inverse, counts = _F.unique(
+        _atleast_tensor(input),
+        return_inverse=True,
+        return_counts=True,
+        return_index=True,
+    )
+    return UniqueAllResult(values, indices, inverse, counts)

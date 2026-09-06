@@ -86,15 +86,18 @@ def test_argpartition_names_the_positions_partition_moved():
     for axis in [0, 1]:
         where = mt.argpartition(mt.from_numpy(values), 3, axis)
         picked = mt.take_along_axis(mt.from_numpy(values), where, axis).numpy()
-        np.testing.assert_array_equal(picked, mt.partition(mt.from_numpy(values), 3, axis).numpy())
+        np.testing.assert_array_equal(
+            picked, mt.partition(mt.from_numpy(values), 3, axis).numpy()
+        )
         # And it is a permutation of the axis, not a selection with repeats.
         np.testing.assert_array_equal(
-            np.sort(where.numpy(), axis), np.broadcast_to(
+            np.sort(where.numpy(), axis),
+            np.broadcast_to(
                 np.arange(values.shape[axis]).reshape(
                     [-1 if d == axis else 1 for d in range(2)]
                 ),
                 values.shape,
-            )
+            ),
         )
 
 
