@@ -254,6 +254,42 @@ def test_both_gradients_match_a_numerical_one(
     mt.clear_autograd_graph()
 
 
+@pytest.mark.parametrize("batch", [1, 2, 5, 8])
+def test_the_backward_agrees_however_the_images_are_blocked(batch):
+    """The gradients take images a block at a time, and the block is chosen by
+    what the lowering costs -- so the same convolution over a different batch
+    takes a different number of blocks. Per-image gradients must not depend on
+    which block an image landed in, and the weight gradient's sum over blocks
+    must come out the same as a sum over images.
+    """
+    rng = np.random.default_rng(109)
+    image = rng.standard_normal((batch, 4, 9, 9))
+    weight = rng.standard_normal((6, 4, 3, 3))
+    seed = rng.standard_normal((batch, 6, 9, 9))
+
+    def gradients(rows):
+        inputs = mt.from_numpy(image[rows].copy())
+        inputs.requires_grad_(True)
+        kernels = mt.from_numpy(weight.copy())
+        kernels.requires_grad_(True)
+        out = nn.conv2d(inputs, kernels, None, padding=1)
+        (out * mt.from_numpy(seed[rows])).sum().backward()
+        got = (mt.get_gradient(inputs).numpy(), mt.get_gradient(kernels).numpy())
+        mt.clear_autograd_graph()
+        return got
+
+    whole_input, whole_weight = gradients(slice(None))
+    # The same answer built one image at a time: the input gradient image by
+    # image, the weight gradient as the sum of theirs.
+    by_image = [gradients(slice(n, n + 1)) for n in range(batch)]
+    np.testing.assert_allclose(
+        whole_input, np.concatenate([g[0] for g in by_image]), rtol=1e-9, atol=1e-9
+    )
+    np.testing.assert_allclose(
+        whole_weight, sum(g[1] for g in by_image), rtol=1e-9, atol=1e-9
+    )
+
+
 def test_a_single_image_backward_still_uses_the_pool():
     """The scatter used to be parallel over the batch, so a batch of one ran on
     one core. It is parallel over channel planes now, which are disjoint within
