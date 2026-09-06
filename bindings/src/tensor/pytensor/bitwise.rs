@@ -192,6 +192,12 @@ impl PyTensor {
         self.__invert__()
     }
 
+    /// The number of set bits in the absolute value of each element, as int32. The absolute value is what makes the answer a property of the number rather than of its storage width.
+    pub fn bitwise_count(&self) -> PyResult<Self> {
+        let result = bitwise::bitwise_count(&self.inner).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     /// Element-wise logical AND over truth values, giving a boolean tensor.
     pub fn logical_and(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         logical_binary(&self.inner, other, bitwise::logical_and)

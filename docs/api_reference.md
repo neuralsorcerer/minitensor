@@ -114,6 +114,8 @@ of convenience aliases.
 | `intersect1d(input, other, assume_unique=False, return_indices=False)` | The distinct values in both, ascending -- found by a membership test against the sorted second set, so the cost is `(n + m) log m` rather than the `n * m` of comparing every pair. `return_indices` also gives where each common value first occurs in each input. `assume_unique` is accepted and changes nothing: the search does not care whether either side repeats. |
 | `setdiff1d(input, other, assume_unique=False)` | The distinct values in the first and not the second, ascending. |
 | `setxor1d(input, other, assume_unique=False)` | The distinct values in exactly one of the two, ascending -- the union less the intersection, so a value in both is in neither answer. |
+| `packbits(input, dim=None, bitorder='big')` | Pack groups of eight truth values along `dim` into one integer each. NumPy answers in `uint8`; this library has no unsigned byte, so the values come back as **int32** -- the same numbers in a wider box, and `.numpy().astype(numpy.uint8)` recovers NumPy's array exactly. The axis is zero-padded up to a multiple of eight at its end, which is why `unpackbits` is the inverse only when told the original length. `bitorder` decides whether the first element of each group is the high bit or the low one. |
+| `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. NumPy pads an *empty* input by reading uninitialised memory; this answers zeros. |
 | `trim_zeros(input, trim='fb')` | A 1-D tensor with leading and/or trailing zeros removed. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. |
 | `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
 | `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 20ms partitioned against 90 sorted. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
@@ -1452,7 +1454,15 @@ assert row_std.shape == (2, 3)
   different one for several of these, and code moving between them writes
   whichever it learned.
 - `bitwise_and`, `bitwise_or`, `bitwise_xor`, `bitwise_not`,
-  `bitwise_left_shift`, `bitwise_right_shift`
+  `bitwise_left_shift`, `bitwise_right_shift`, and NumPy's names for the last
+  three: `invert`, `left_shift`, `right_shift`
+- `bitwise_count(input)` — the number of set bits in the *absolute value* of
+  each element, as int32; `popcount` is the same object. The absolute value is
+  NumPy's choice and the right one: the popcount of a negative in two's
+  complement describes the storage rather than the number, and would answer
+  differently for the same value at int32 and int64. The most negative value of
+  a width is counted correctly too, where an implementation built on `abs`
+  would overflow -- its magnitude is one past what the signed type holds.
 - `logical_and`, `logical_or`, `logical_xor`, `logical_not`
 - `softsign`, `rsqrt`, `reciprocal`, `sign`
 - `leaky_relu(input, negative_slope=0.01)` — the gradient at exactly `0` is
@@ -1781,9 +1791,9 @@ sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, asinh, acosh, atanh,
 # Comparison, bitwise and logic
 eq, ne, lt, le, gt, ge, isclose, allclose, array_equal, cosine_similarity,
 isnan, isinf, isfinite, isposinf, isneginf, isreal,
-nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not,
-bitwise_left_shift, bitwise_right_shift, logical_and, logical_or, logical_xor,
-logical_not, gcd, lcm,
+nan_to_num, bitwise_and, bitwise_or, bitwise_xor, bitwise_not, bitwise_count,
+bitwise_left_shift, bitwise_right_shift, invert, popcount, left_shift,
+right_shift, logical_and, logical_or, logical_xor, logical_not, gcd, lcm,
 
 # Activations and normalization
 relu, relu6, leaky_relu, hardtanh, hardshrink, softshrink, tanhshrink,

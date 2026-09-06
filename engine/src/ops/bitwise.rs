@@ -137,6 +137,57 @@ pub fn bitwise_not(tensor: &Tensor) -> Result<Tensor> {
     ))
 }
 
+/// The number of set bits in the *absolute value* of each element, as int32.
+///
+/// The absolute value is NumPy's choice, and the right one: the popcount of a
+/// negative in two's complement is the width of the dtype less the count of its
+/// magnitude minus one, which describes the storage rather than the number, and
+/// would answer differently for the same value at int32 and int64.
+///
+/// `unsigned_abs` is what makes the most negative value answerable at all --
+/// its magnitude is one past what the signed type can hold, so `abs` would
+/// overflow on exactly the input a caller is least likely to have tried.
+///
+/// The count never exceeds 64, so the result is int32 whatever went in rather
+/// than a small number carried at the input's width.
+pub fn bitwise_count(tensor: &Tensor) -> Result<Tensor> {
+    /// Counts one dtype into a fresh int32 buffer, parallel above
+    /// `PAR_THRESHOLD`.
+    macro_rules! count_arm {
+        ($accessor:ident, $tyname:literal, $op:expr) => {{
+            let input = tensor.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from tensor"
+                ))
+            })?;
+            TensorData::from_vec(unary_map(input, $op), DataType::Int32, tensor.device())
+        }};
+    }
+
+    let output_data = match tensor.dtype() {
+        DataType::Bool => count_arm!(as_bool_slice, "bool", |v: bool| i32::from(v)),
+        DataType::Int32 => count_arm!(as_i32_slice, "i32", |v: i32| v.unsigned_abs().count_ones()
+            as i32),
+        DataType::Int64 => count_arm!(as_i64_slice, "i64", |v: i64| v.unsigned_abs().count_ones()
+            as i32),
+        DataType::Float32 | DataType::Float64 => {
+            return Err(MinitensorError::invalid_operation(
+                "bitwise_count only supported for boolean and integer tensors",
+            ));
+        }
+    };
+
+    Ok(Tensor::new(
+        Arc::new(output_data),
+        tensor.shape().clone(),
+        DataType::Int32,
+        tensor.device(),
+        false,
+    ))
+}
+
 /// Generates the shift pair for one integer width.
 ///
 /// Rust's `<<`/`>>` are undefined past the operand's width -- a panic in a
@@ -749,6 +800,50 @@ mod tests {
         // Two truth values have no divisors, the same reason they have no bits
         // to shift.
         assert!(gcd(&booleans, &booleans).is_err());
+    }
+
+    #[test]
+    fn bitwise_count_counts_the_magnitude_not_the_representation() {
+        // The same value at two widths has to give the same answer, which is
+        // only true because the count is taken of the absolute value: the
+        // two's complement of -3 has 31 set bits at int32 and 63 at int64.
+        assert_eq!(
+            i32s(&bitwise_count(&i32_tensor(vec![-8, -3, -1, 0, 1, 2, 7, 255])).unwrap()),
+            vec![1, 2, 1, 0, 1, 1, 3, 8]
+        );
+        assert_eq!(
+            i32s(&bitwise_count(&i64_tensor(vec![-8, -3, -1, 0, 1, 2, 7, 255])).unwrap()),
+            vec![1, 2, 1, 0, 1, 1, 3, 8]
+        );
+
+        // The most negative value of each width: its magnitude is one past
+        // what the signed type holds, so `abs` would overflow here and only
+        // here. It is a single set bit.
+        assert_eq!(
+            i32s(&bitwise_count(&i32_tensor(vec![i32::MIN])).unwrap()),
+            vec![1]
+        );
+        assert_eq!(
+            i32s(&bitwise_count(&i64_tensor(vec![i64::MIN])).unwrap()),
+            vec![1]
+        );
+
+        // A truth value is one bit, and floats have no bits to count.
+        assert_eq!(
+            i32s(&bitwise_count(&bool_tensor(vec![true, false], vec![2])).unwrap()),
+            vec![1, 0]
+        );
+        assert!(bitwise_count(&f32_tensor(vec![1.0])).is_err());
+    }
+
+    #[test]
+    fn bitwise_count_answers_int32_whatever_went_in() {
+        // The count is at most 64, so carrying it at the input's width would
+        // cost eight bytes an element to say nothing more.
+        let counted = bitwise_count(&i64_tensor(vec![7, 15])).unwrap();
+        assert_eq!(counted.dtype(), DataType::Int32);
+        assert_eq!(counted.shape().dims(), &[2]);
+        assert!(!counted.requires_grad());
     }
 
     #[test]

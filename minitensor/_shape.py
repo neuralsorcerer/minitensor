@@ -1309,3 +1309,154 @@ def fromfunction(function: object, shape: object, dtype: object = None) -> Tenso
     if dtype is not None and str(result.dtype) != str(dtype):
         result = result.astype(str(dtype))
     return result
+
+
+def _bit_axis(rank: int, dim: object, name: str) -> int:
+    """The axis `dim` names, wrapped against `rank` and checked."""
+
+    axis = _operator.index(dim)
+    if axis < 0:
+        axis += rank
+    if not 0 <= axis < rank:
+        raise IndexError(f"{name} got dim {dim} for a tensor of rank {rank}")
+    return axis
+
+
+#: The eight bit weights, most significant first. `packbits` multiplies by
+#: these and `unpackbits` shifts by their exponents, so the two orders are
+#: described in one place and cannot drift apart.
+_BIT_WEIGHTS = (128, 64, 32, 16, 8, 4, 2, 1)
+
+
+def packbits(input: object, dim: object = None, bitorder: str = "big") -> Tensor:
+    """Pack groups of eight truth values along `dim` into one integer each.
+
+    NumPy answers in `uint8`; this library has no unsigned byte, so the values
+    come back as `int32` -- the same numbers in a wider box. `.numpy()` then
+    `.astype(numpy.uint8)` recovers NumPy's array exactly, and that cast is the
+    only place the difference shows.
+
+    The axis is zero-padded up to a multiple of eight at its *end*, which is
+    what makes `unpackbits` the inverse only when it is told the original
+    length. `bitorder` decides whether the first element of each group is the
+    high bit (`'big'`, the default) or the low one (`'little'`).
+    """
+
+    if bitorder not in ("big", "little"):
+        raise ValueError(f"packbits takes bitorder 'big' or 'little', got {bitorder!r}")
+    tensor = _atleast_tensor(input)
+    dtype = str(tensor.dtype)
+    if "int" not in dtype and "bool" not in dtype:
+        raise TypeError(
+            f"packbits takes boolean or integer tensors, got {tensor.dtype}"
+        )
+
+    bits = (tensor != 0).astype("int32")
+    if dim is None:
+        bits = bits.reshape([-1])
+        axis = 0
+    else:
+        axis = _bit_axis(len(bits.shape), dim, "packbits")
+        bits = _C.functional.movedim(bits, axis, -1)
+
+    length = bits.shape[-1]
+    remainder = length % 8
+    if remainder:
+        padding = list(bits.shape)
+        padding[-1] = 8 - remainder
+        bits = _C.functional.cat(
+            [
+                bits,
+                Tensor.zeros(padding, dtype="int32", device=_C.Device(bits.device)),
+            ],
+            -1,
+        )
+
+    grouped = bits.reshape(list(bits.shape[:-1]) + [bits.shape[-1] // 8, 8])
+    order = _BIT_WEIGHTS if bitorder == "big" else _BIT_WEIGHTS[::-1]
+    weights = _constant_like(_np.asarray(order), bits)
+    # The reduction widens to int64; the values are bytes, so it comes back.
+    packed = (grouped * weights).sum(dim=-1).astype("int32")
+    if dim is None:
+        return packed
+    return _C.functional.movedim(packed, -1, axis)
+
+
+def unpackbits(
+    input: object,
+    dim: object = None,
+    count: object = None,
+    bitorder: str = "big",
+) -> Tensor:
+    """Expand each element along `dim` into its eight bits.
+
+    The inverse of `packbits`, and its input is what `packbits` produced: an
+    `int32` tensor of byte values rather than NumPy's `uint8`. A value outside
+    `0..255` is refused rather than truncated -- there is no eight-bit answer
+    for it, and quietly giving the low byte would make the round trip lie.
+
+    `count` cuts the result to length: a non-negative count keeps that many
+    bits, a negative one trims that many from the end, which is how the padding
+    `packbits` added is undone.
+    """
+
+    if bitorder not in ("big", "little"):
+        raise ValueError(
+            f"unpackbits takes bitorder 'big' or 'little', got {bitorder!r}"
+        )
+    tensor = _atleast_tensor(input)
+    dtype = str(tensor.dtype)
+    if "int" not in dtype and "bool" not in dtype:
+        raise TypeError(
+            f"unpackbits takes boolean or integer tensors, got {tensor.dtype}"
+        )
+    bytes_ = tensor.astype("int32")
+    if bytes_.numel():
+        low, high = int(bytes_.min().item()), int(bytes_.max().item())
+        if low < 0 or high > 255:
+            raise ValueError(
+                f"unpackbits takes byte values in 0..255, got {low} to {high}"
+            )
+
+    if dim is None:
+        bytes_ = bytes_.reshape([-1])
+        axis = 0
+    else:
+        axis = _bit_axis(len(bytes_.shape), dim, "unpackbits")
+        bytes_ = _C.functional.movedim(bytes_, axis, -1)
+
+    shifts = [7, 6, 5, 4, 3, 2, 1, 0] if bitorder == "big" else [0, 1, 2, 3, 4, 5, 6, 7]
+    offsets = _constant_like(_np.asarray(shifts), bytes_)
+    one = _constant_like(_np.asarray([1]), bytes_)
+    spread = bytes_.reshape(list(bytes_.shape) + [1])
+    planes = _C.functional.bitwise_and(
+        _C.functional.bitwise_right_shift(spread, offsets), one
+    )
+    bits = planes.reshape(list(bytes_.shape[:-1]) + [bytes_.shape[-1] * 8])
+
+    if count is not None:
+        wanted = _operator.index(count)
+        length = bits.shape[-1]
+        keep = length + wanted if wanted < 0 else wanted
+        if keep < 0:
+            raise ValueError(
+                f"unpackbits cannot trim {-wanted} bits from an axis of {length}"
+            )
+        if keep < length:
+            bits = _C.functional.narrow(bits, -1, 0, keep)
+        elif keep > length:
+            # NumPy pads rather than refuses, and the zeros are the bits a
+            # longer byte string would have held.
+            padding = list(bits.shape)
+            padding[-1] = keep - length
+            bits = _C.functional.cat(
+                [
+                    bits,
+                    Tensor.zeros(padding, dtype="int32", device=_C.Device(bits.device)),
+                ],
+                -1,
+            )
+
+    if dim is None:
+        return bits
+    return _C.functional.movedim(bits, -1, axis)

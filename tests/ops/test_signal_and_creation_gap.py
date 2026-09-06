@@ -105,21 +105,32 @@ def test_convolve_is_correlate_with_one_signal_reversed():
     second = rng.standard_normal(4)
     np.testing.assert_allclose(
         mt.convolve(mt.from_numpy(first), mt.from_numpy(second), "full").numpy(),
-        mt.correlate(mt.from_numpy(first), mt.from_numpy(second[::-1].copy()), "full").numpy(),
+        mt.correlate(
+            mt.from_numpy(first), mt.from_numpy(second[::-1].copy()), "full"
+        ).numpy(),
         atol=1e-10,
     )
 
 
 def test_the_sliding_products_refuse_nothing_to_slide():
     with pytest.raises(ValueError, match="non-empty"):
-        mt.convolve(mt.from_numpy(np.array([], dtype=np.float64)), mt.from_numpy(np.ones(3)))
+        mt.convolve(
+            mt.from_numpy(np.array([], dtype=np.float64)), mt.from_numpy(np.ones(3))
+        )
     with pytest.raises(ValueError, match="'full', 'same' or 'valid'"):
         mt.convolve(mt.from_numpy(np.ones(3)), mt.from_numpy(np.ones(2)), "most")
 
 
 @pytest.mark.parametrize(
     "args",
-    [(1, 1000, 4), (-1, -1000, 4), (0.5, 8, 5), (3, 9, 1), (1, 256, 9), (1e-5, 1e5, 11)],
+    [
+        (1, 1000, 4),
+        (-1, -1000, 4),
+        (0.5, 8, 5),
+        (3, 9, 1),
+        (1, 256, 9),
+        (1e-5, 1e5, 11),
+    ],
     ids=str,
 )
 def test_geomspace_matches_numpy(args):
@@ -167,9 +178,7 @@ def test_ix_selects_an_open_mesh():
     columns = np.array([1, 3])
     grids = mt.ix_(mt.from_numpy(rows), mt.from_numpy(columns))
     expected = np.ix_(rows, columns)
-    assert [tuple(grid.shape) for grid in grids] == [
-        grid.shape for grid in expected
-    ]
+    assert [tuple(grid.shape) for grid in grids] == [grid.shape for grid in expected]
     # A boolean sequence becomes the positions it selects.
     mask = np.array([True, False, True, False])
     np.testing.assert_array_equal(
@@ -205,7 +214,20 @@ def test_the_array_api_products_contract_the_axis_they_name():
 
 def test_frexp_and_ldexp_are_inverses():
     values = np.array(
-        [0.0, -0.0, 1.0, 2.0, 0.5, -3.75, 1e300, -1e-300, np.inf, -np.inf, np.nan, 1024.0]
+        [
+            0.0,
+            -0.0,
+            1.0,
+            2.0,
+            0.5,
+            -3.75,
+            1e300,
+            -1e-300,
+            np.inf,
+            -np.inf,
+            np.nan,
+            1024.0,
+        ]
     )
     mantissa, exponent = mt.frexp(mt.from_numpy(values))
     expected_mantissa, expected_exponent = np.frexp(values)

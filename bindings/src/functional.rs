@@ -378,6 +378,7 @@ unary_forwarders!(
     atan => "Element-wise inverse tangent, returning radians in `(-pi/2, pi/2)`.",
     atanh => "Element-wise inverse hyperbolic tangent. Inputs outside `(-1, 1)` give NaN or infinity.",
     bitwise_not => "Element-wise bitwise complement, and logical NOT for booleans.",
+    bitwise_count => "The number of set bits in the absolute value of each element, as int32. The absolute value is what makes the answer a property of the number rather than of its storage width.",
     ceil => "Round towards positive infinity.",
     cos => "Element-wise cosine, taking radians.",
     cosh => "Element-wise hyperbolic cosine.",
@@ -2047,6 +2048,7 @@ pub fn register_functional_module(_py: Python, parent: &Bound<PyModule>) -> PyRe
     parent.add_function(wrap_pyfunction!(bitwise_and, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_left_shift, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_not, parent)?)?;
+    parent.add_function(wrap_pyfunction!(bitwise_count, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_or, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_right_shift, parent)?)?;
     parent.add_function(wrap_pyfunction!(bitwise_xor, parent)?)?;
