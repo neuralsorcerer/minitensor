@@ -589,14 +589,8 @@ impl ConvTranspose2dBackward {
                 // The image is the gradient of the grid that was written, and
                 // the signal is the input that was scattered -- the convolution
                 // weight gradient with the roles the forward gave them.
-                let signal = crate::ops::conv::to_channel_major(
-                    input,
-                    geometry.batch_size,
-                    geometry.out_channels,
-                    geometry.output_height * geometry.output_width,
-                );
                 let grad_weight =
-                    crate::ops::conv::column_weight_gradient::<T>(go, &signal, &geometry);
+                    crate::ops::conv::column_weight_gradient::<T>(go, input, &geometry);
                 let grad = Tensor::new(
                     Arc::new(T::into_tensor_data(grad_weight, device)),
                     self.weight.shape().clone(),
@@ -734,24 +728,10 @@ impl Conv2dBackward {
         let dtype = T::DTYPE;
         let plane = geometry.output_height * geometry.output_width;
 
-        // Both gradient GEMMs contract against `grad_output` with the channel
-        // outermost, so it is rearranged once rather than once each.
-        let needs_gemm = self.input_requires_grad || self.weight_requires_grad;
-        let go_mat = if needs_gemm {
-            crate::ops::conv::to_channel_major(
-                go,
-                geometry.batch_size,
-                geometry.out_channels,
-                plane,
-            )
-        } else {
-            Vec::new()
-        };
-
         // The input gradient scatters the signal back through the kernel, which
         // is the operation `conv_transpose2d` performs forwards.
         if self.input_requires_grad {
-            let grad_input = crate::ops::conv::scatter_columns::<T>(&go_mat, weight, &geometry);
+            let grad_input = crate::ops::conv::scatter_columns::<T>(go, weight, &geometry);
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_input, device)),
                 self.input.shape().clone(),
@@ -763,8 +743,7 @@ impl Conv2dBackward {
         }
 
         if self.weight_requires_grad {
-            let grad_weight =
-                crate::ops::conv::column_weight_gradient::<T>(input, &go_mat, &geometry);
+            let grad_weight = crate::ops::conv::column_weight_gradient::<T>(input, go, &geometry);
             let grad = Tensor::new(
                 Arc::new(T::into_tensor_data(grad_weight, device)),
                 self.weight.shape().clone(),

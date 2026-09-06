@@ -516,13 +516,7 @@ pub fn conv_transpose2d(
             let kernel = <$ty as ConvScalar>::slice(weight_view.data()).ok_or_else(|| {
                 MinitensorError::internal_error("conv_transpose2d: weight dtype does not match")
             })?;
-            let channel_major = to_channel_major::<$ty>(
-                signal,
-                batch_size,
-                in_channels,
-                input_height * input_width,
-            );
-            let mut values = scatter_columns::<$ty>(&channel_major, kernel, &geometry);
+            let mut values = scatter_columns::<$ty>(signal, kernel, &geometry);
             if let Some(b) = bias {
                 let bias_view = b.contiguous()?;
                 let added = <$ty as ConvScalar>::slice(bias_view.data()).ok_or_else(|| {
@@ -702,33 +696,6 @@ pub(crate) fn in_bounds_range(
     (lo, hi.max(lo))
 }
 
-/// Rearrange a `[N, C, H, W]` signal into the `[C, N*H*W]` layout both GEMM
-/// paths below contract against.
-///
-/// The channel has to be the outer axis for a group to be a contiguous
-/// row-block that a GEMM can be pointed at, and it is the batch that has to
-/// move to make room.
-pub(crate) fn to_channel_major<T: ConvScalar>(
-    source: &[T],
-    batch: usize,
-    channels: usize,
-    plane: usize,
-) -> Vec<T> {
-    let span = batch * plane;
-    let mut out = vec![T::default(); channels * span];
-    if span == 0 {
-        return out;
-    }
-    par_out_chunks(&mut out, span, &|start, row| {
-        let channel = start / span;
-        for n in 0..batch {
-            let src = (n * channels + channel) * plane;
-            row[n * plane..n * plane + plane].copy_from_slice(&source[src..src + plane]);
-        }
-    });
-    out
-}
-
 /// `col2im(weight^T @ source)` -- scatter a signal back through a kernel onto
 /// the larger grid it was gathered from.
 ///
@@ -743,8 +710,9 @@ pub(crate) fn to_channel_major<T: ConvScalar>(
 /// kept so that a caller coming from either direction reads the same struct.
 /// `weight` is `[out_channels, in_channels / groups, kH, kW]`.
 ///
-/// Parallel over the batch, whose destinations are disjoint; the scatter-add
-/// within one batch element is serial, so nothing races.
+/// The signal arrives in its natural `[N, C, H, W]` layout and is taken one
+/// image at a time; within an image the scatter-add runs one channel plane per
+/// task, whose destinations are disjoint, so nothing races.
 pub(crate) fn scatter_columns<T: ConvScalar>(
     source: &[T],
     weight: &[T],
@@ -770,10 +738,9 @@ pub(crate) fn scatter_columns<T: ConvScalar>(
     let mut destination = vec![T::default(); batch * in_stride];
 
     let ohw = out_h * out_w;
-    let n_ohw = batch * ohw;
     let kh_kw = kernel_h * kernel_w;
     let k_dim = in_channels * kh_kw;
-    if n_ohw == 0 || in_stride == 0 {
+    if ohw == 0 || in_stride == 0 {
         return destination;
     }
 
@@ -781,52 +748,67 @@ pub(crate) fn scatter_columns<T: ConvScalar>(
     // `[k_dim, ...]` buffer here and the weight owns one of `[C_out, group_k]`.
     let group_out = out_channels / groups;
     let group_k = (in_channels / groups) * kh_kw;
+    let plane = in_h * in_w;
 
-    let mut columns = vec![T::default(); k_dim * n_ohw];
-    for g in 0..groups {
-        // SAFETY: group `g` reads `weight` rows `[g*group_out, (g+1)*group_out)`
-        // -- stored `[group_out, group_k]` and read transposed by stride, which
-        // is why this never materialises the transpose -- against `source` rows
-        // `[g*group_out, ..)`, writing `columns` rows `[g*group_k, ..)`. Each is
-        // a row-block of a contiguous buffer exactly `groups` times its size.
-        unsafe {
-            T::gemm_tn(
-                group_k,
-                group_out,
-                n_ohw,
-                weight.as_ptr().add(g * group_out * group_k),
-                source.as_ptr().add(g * group_out * n_ohw),
-                columns.as_mut_ptr().add(g * group_k * n_ohw),
-            );
-        }
-    }
-
-    // Output positions are walked as nested loops with their in-bounds range
-    // hoisted, for the reason the forward's im2col does the same: recovering
-    // `(oh, ow)` from a flat `p` cost two runtime-divisor divisions per
-    // element, over 4.7M elements for a 16x32x32x32 convolution.
-    par_out_chunks(&mut destination, in_stride, &|start, image| {
-        let n = start / in_stride;
-        for k in 0..k_dim {
-            let channel = k / kh_kw;
-            let rem = k % kh_kw;
-            let ky_off = (rem / kernel_w) * dilation.0;
-            let kx_off = (rem % kernel_w) * dilation.1;
-            let row_base = k * n_ohw + n * ohw;
-            let plane = channel * in_h * in_w;
-            let (oh_lo, oh_hi) = in_bounds_range(ky_off, padding.0, in_h, stride.0, out_h);
-            let (ow_lo, ow_hi) = in_bounds_range(kx_off, padding.1, in_w, stride.1, out_w);
-            for oh in oh_lo..oh_hi {
-                let ih = oh * stride.0 + ky_off - padding.0;
-                let dst = plane + ih * in_w;
-                let src = row_base + oh * out_w;
-                for ow in ow_lo..ow_hi {
-                    let iw = ow * stride.1 + kx_off - padding.1;
-                    image[dst + iw] += columns[src + ow];
-                }
+    // One image at a time. Taking the whole batch at once meant a `[k_dim,
+    // N*OH*OW]` intermediate -- 944MB for a 32x3x224x224 stem -- and it needed
+    // the signal rearranged channel-major first, because a slice of one image
+    // out of `[C, N*OH*OW]` is not contiguous. Per image it already is: the
+    // signal arrives as `[N, C, OH, OW]`, so image `n` is the `[C, OH*OW]` the
+    // GEMM wants, with no rearranging and no copy.
+    let mut columns = vec![T::default(); k_dim * ohw];
+    for n in 0..batch {
+        let signal = &source[n * out_channels * ohw..][..out_channels * ohw];
+        for g in 0..groups {
+            // SAFETY: group `g` reads `weight` rows `[g*group_out,
+            // (g+1)*group_out)` -- stored `[group_out, group_k]` and read
+            // transposed by stride, which is why this never materialises the
+            // transpose -- against `signal` rows `[g*group_out, ..)`, writing
+            // `columns` rows `[g*group_k, ..)`. Each is a row-block of a
+            // contiguous buffer exactly `groups` times its size.
+            unsafe {
+                T::gemm_tn(
+                    group_k,
+                    group_out,
+                    ohw,
+                    weight.as_ptr().add(g * group_out * group_k),
+                    signal.as_ptr().add(g * group_out * ohw),
+                    columns.as_mut_ptr().add(g * group_k * ohw),
+                );
             }
         }
-    });
+
+        // Scatter the image's columns back onto its grid, one channel plane per
+        // task: a channel's taps write only its own plane, so the adds never
+        // race. Parallelising over the batch instead left a single-image
+        // backward pass -- and every batch smaller than the pool -- on one core.
+        //
+        // Output positions are walked as nested loops with their in-bounds
+        // range hoisted, for the reason the forward's im2col does the same:
+        // recovering `(oh, ow)` from a flat `p` cost two runtime-divisor
+        // divisions per element, over 4.7M elements for a 16x32x32x32
+        // convolution.
+        let image = &mut destination[n * in_stride..][..in_stride];
+        par_out_chunks(image, plane, &|start, target| {
+            let channel = start / plane;
+            for tap in 0..kh_kw {
+                let ky_off = (tap / kernel_w) * dilation.0;
+                let kx_off = (tap % kernel_w) * dilation.1;
+                let (oh_lo, oh_hi) = in_bounds_range(ky_off, padding.0, in_h, stride.0, out_h);
+                let (ow_lo, ow_hi) = in_bounds_range(kx_off, padding.1, in_w, stride.1, out_w);
+                let row = (channel * kh_kw + tap) * ohw;
+                for oh in oh_lo..oh_hi {
+                    let ih = oh * stride.0 + ky_off - padding.0;
+                    let dst = ih * in_w;
+                    let src = row + oh * out_w;
+                    for ow in ow_lo..ow_hi {
+                        let iw = ow * stride.1 + kx_off - padding.1;
+                        target[dst + iw] += columns[src + ow];
+                    }
+                }
+            }
+        });
+    }
     destination
 }
 
@@ -858,63 +840,78 @@ pub(crate) fn column_weight_gradient<T: ConvScalar>(
     } = *geometry;
 
     let ohw = out_h * out_w;
-    let n_ohw = batch * ohw;
     let kh_kw = kernel_h * kernel_w;
     let group_in = in_channels / groups;
     let group_out = out_channels / groups;
     let group_k = group_in * kh_kw;
 
     let mut gradient = vec![T::default(); out_channels * group_k];
-    if n_ohw == 0 {
+    if ohw == 0 || batch == 0 {
         return gradient;
     }
 
-    // This lowering is transposed relative to the forward's -- `[N*OH*OW, K]`,
-    // one row per output position -- so a group's `k` values are a column-block
-    // rather than a row-block and cannot be handed to a GEMM by pointer offset.
-    // It is rebuilt per group into a buffer sized for one group instead of all
-    // of them, so the memory is `1/groups` of what it was.
-    let mut columns = vec![T::default(); n_ohw * group_k];
-    for g in 0..groups {
-        columns.fill(T::default());
-        // `k` is walked as nested `(ic, ky, kx)` loops rather than decomposed:
-        // three divisions per element, over the same millions of them.
-        par_out_chunks(&mut columns, group_k, &|start, row| {
-            let r = start / group_k;
-            let n = r / ohw;
-            let p = r % ohw;
-            let oh = p / out_w;
-            let ow = p % out_w;
-            let mut k = 0usize;
-            for ic in g * group_in..(g + 1) * group_in {
-                let plane = (n * in_channels + ic) * in_h * in_w;
-                for ky in 0..kernel_h {
-                    let ih = oh * stride.0 + ky * dilation.0;
-                    let row_ok = ih >= padding.0 && ih < in_h + padding.0;
-                    let ih = ih.wrapping_sub(padding.0);
-                    for kx in 0..kernel_w {
-                        let iw = ow * stride.1 + kx * dilation.1;
-                        if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
-                            row[k] = image[plane + ih * in_w + (iw - padding.1)];
+    // This lowering is transposed relative to the forward's -- one row per
+    // output position -- so a group's `k` values are a column-block rather than
+    // a row-block and cannot be handed to a GEMM by pointer offset. It is built
+    // per group, and per image: `[OH*OW, group_k]` rather than
+    // `[N*OH*OW, group_k]`, which for a 32x3x224x224 stem is 29MB of scratch
+    // instead of 944MB. Per image the signal needs no rearranging either -- it
+    // arrives as `[N, C, OH, OW]`, so image `n` is already the `[C, OH*OW]` the
+    // GEMM contracts against.
+    //
+    // The sum over images is the reduction the single GEMM used to do inside
+    // itself; it runs in image order, so the answer does not move with the
+    // thread count.
+    let mut columns = vec![T::default(); ohw * group_k];
+    let mut partial = vec![T::default(); group_out * group_k];
+    for n in 0..batch {
+        for g in 0..groups {
+            // `k` is walked as nested `(ic, ky, kx)` loops rather than
+            // decomposed: three divisions per element, over millions of them.
+            // The buffer is reused, so the taps that fall in the padding have
+            // to be cleared rather than left as the last image's.
+            par_out_chunks(&mut columns, group_k, &|start, row| {
+                row.fill(T::default());
+                let p = start / group_k;
+                let oh = p / out_w;
+                let ow = p % out_w;
+                let mut k = 0usize;
+                for ic in g * group_in..(g + 1) * group_in {
+                    let plane = (n * in_channels + ic) * in_h * in_w;
+                    for ky in 0..kernel_h {
+                        let ih = oh * stride.0 + ky * dilation.0;
+                        let row_ok = ih >= padding.0 && ih < in_h + padding.0;
+                        let ih = ih.wrapping_sub(padding.0);
+                        for kx in 0..kernel_w {
+                            let iw = ow * stride.1 + kx * dilation.1;
+                            if row_ok && iw >= padding.1 && iw < in_w + padding.1 {
+                                row[k] = image[plane + ih * in_w + (iw - padding.1)];
+                            }
+                            k += 1;
                         }
-                        k += 1;
                     }
                 }
+            });
+            // SAFETY: image `n` of `source` is `[C_out, OH*OW]`, so its rows
+            // `[g*group_out, ..)` form a `[group_out, OH*OW]` block; `columns`
+            // is `[OH*OW, group_k]` in full and `partial` is
+            // `[group_out, group_k]`. All contiguous row-major.
+            unsafe {
+                T::gemm(
+                    group_out,
+                    ohw,
+                    group_k,
+                    source
+                        .as_ptr()
+                        .add((n * out_channels + g * group_out) * ohw),
+                    columns.as_ptr(),
+                    partial.as_mut_ptr(),
+                );
             }
-        });
-        // SAFETY: `source` rows `[g*group_out, ..)` form a
-        // `[group_out, N*OH*OW]` block, `columns` is `[N*OH*OW, group_k]` in
-        // full, and `gradient` rows `[g*group_out, ..)` form a
-        // `[group_out, group_k]` block. All contiguous row-major.
-        unsafe {
-            T::gemm(
-                group_out,
-                n_ohw,
-                group_k,
-                source.as_ptr().add(g * group_out * n_ohw),
-                columns.as_ptr(),
-                gradient.as_mut_ptr().add(g * group_out * group_k),
-            );
+            let block = &mut gradient[g * group_out * group_k..][..group_out * group_k];
+            for (slot, &value) in block.iter_mut().zip(partial.iter()) {
+                *slot += value;
+            }
         }
     }
     gradient
