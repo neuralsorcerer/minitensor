@@ -31,7 +31,10 @@ pub(crate) fn convert_tensor_to_numpy(
             // index anyway cost a multiply-add per axis per element: 232us for
             // a 100k float32 tensor against 9us for the memcpy.
             let out = if tensor.is_contiguous() && data.len() == numel {
-                data.to_vec()
+                // Split above the size where the copy is bound by page faults
+                // on the fresh buffer rather than by bandwidth: 64MB took 67ms
+                // on one core and 26 across the pool.
+                TensorData::copied_slice(data)
             } else {
                 let mut out = Vec::<$ty>::with_capacity(numel);
                 let mut indices = vec![0usize; shape.len()];

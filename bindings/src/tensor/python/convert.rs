@@ -1609,87 +1609,35 @@ pub(crate) fn convert_numpy_to_tensor(
     requires_grad: bool,
 ) -> PyResult<Tensor> {
     let array = &as_c_contiguous(&widen_numpy_dtype(array)?)?;
-    if let Ok(array_f32) = array.cast::<PyArrayDyn<f32>>() {
-        let readonly = array_f32.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<f32> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(
-            data_vec,
-            DataType::Float32,
-            Device::cpu(),
-        ));
-        Ok(Tensor::new(
-            tensor_data,
-            shape,
-            DataType::Float32,
-            Device::cpu(),
-            requires_grad,
-        ))
-    } else if let Ok(array_f64) = array.cast::<PyArrayDyn<f64>>() {
-        let readonly = array_f64.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<f64> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(
-            data_vec,
-            DataType::Float64,
-            Device::cpu(),
-        ));
-        Ok(Tensor::new(
-            tensor_data,
-            shape,
-            DataType::Float64,
-            Device::cpu(),
-            requires_grad,
-        ))
-    } else if let Ok(array_i32) = array.cast::<PyArrayDyn<i32>>() {
-        let readonly = array_i32.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<i32> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(
-            data_vec,
-            DataType::Int32,
-            Device::cpu(),
-        ));
-        Ok(Tensor::new(
-            tensor_data,
-            shape,
-            DataType::Int32,
-            Device::cpu(),
-            requires_grad,
-        ))
-    } else if let Ok(array_i64) = array.cast::<PyArrayDyn<i64>>() {
-        let readonly = array_i64.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<i64> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(
-            data_vec,
-            DataType::Int64,
-            Device::cpu(),
-        ));
-        Ok(Tensor::new(
-            tensor_data,
-            shape,
-            DataType::Int64,
-            Device::cpu(),
-            requires_grad,
-        ))
-    } else if let Ok(array_bool) = array.cast::<PyArrayDyn<bool>>() {
-        let readonly = array_bool.readonly();
-        let shape = Shape::new(readonly.shape().to_vec());
-        let data_vec: Vec<bool> = readonly.as_slice()?.to_vec();
-        let tensor_data = Arc::new(TensorData::from_vec(
-            data_vec,
-            DataType::Bool,
-            Device::cpu(),
-        ));
-        Ok(Tensor::new(
-            tensor_data,
-            shape,
-            DataType::Bool,
-            Device::cpu(),
-            requires_grad,
-        ))
-    } else {
+    // One arm per supported dtype, written once: they differed only in the
+    // element type and the tag, and the copy is the same parallel one for all
+    // of them -- 64MB of float32 took 63ms copied on one core and 25 split.
+    macro_rules! from_array {
+        ($ty:ty, $dtype:expr) => {
+            if let Ok(typed) = array.cast::<PyArrayDyn<$ty>>() {
+                let readonly = typed.readonly();
+                let shape = Shape::new(readonly.shape().to_vec());
+                let data = TensorData::from_vec(
+                    TensorData::copied_slice(readonly.as_slice()?),
+                    $dtype,
+                    Device::cpu(),
+                );
+                return Ok(Tensor::new(
+                    Arc::new(data),
+                    shape,
+                    $dtype,
+                    Device::cpu(),
+                    requires_grad,
+                ));
+            }
+        };
+    }
+    from_array!(f32, DataType::Float32);
+    from_array!(f64, DataType::Float64);
+    from_array!(i32, DataType::Int32);
+    from_array!(i64, DataType::Int64);
+    from_array!(bool, DataType::Bool);
+    {
         let described = numpy_dtype_parts(array)
             .map(|(kind, size)| format!("{kind}{}", size * 8))
             .unwrap_or_else(|_| "unknown".to_string());

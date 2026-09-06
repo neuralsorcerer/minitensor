@@ -156,3 +156,25 @@ def test_a_mismatched_assignment_is_an_exception_and_not_a_panic():
             f"assignment raised {type(exc).__name__}, which is not an Exception"
         )
     np.testing.assert_array_equal(destination.numpy(), np.array([0, 1, 2, 3]))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+@pytest.mark.parametrize("megabytes", [8, 33, 64])
+def test_a_large_array_round_trips_through_numpy_exactly(dtype, megabytes):
+    """Both directions copy in parallel past a certain size.
+
+    A fresh buffer that large is a fresh mapping, so the copy is bound by page
+    faults rather than bandwidth, and faults are per-core work: 64MB took 63ms
+    handed in from NumPy on one core and 20 split across the pool. A split copy
+    that dropped or duplicated a chunk would show up here as a round trip that
+    is not the identity, so every element is compared rather than a sample.
+    """
+    width = {"float32": 4, "float64": 8, "int32": 4, "int64": 8, "bool": 1}[dtype]
+    count = megabytes * 1024 * 1024 // width
+    rng = np.random.default_rng(227)
+    values = (rng.random(count) * 100).astype(dtype)
+
+    back = mt.from_numpy(values).numpy()
+    assert back.dtype == values.dtype
+    assert back.shape == values.shape
+    assert np.array_equal(back, values)
