@@ -126,6 +126,22 @@ pub fn repeat_interleave(
         return Ok(result);
     }
 
+    // The running total of the repeats, so an output row can be traced back to
+    // the element it came from without walking the repeats from the start.
+    let mut offsets: Vec<usize> = Vec::with_capacity(reps.len() + 1);
+    offsets.push(0);
+    let mut running = 0usize;
+    for &rep in &reps {
+        running += rep;
+        offsets.push(running);
+    }
+    let span = target_dim * inner;
+    // Whole output rows per task. The old split was one *outer* position per
+    // chunk, which is a single chunk whenever the repeated axis is the first
+    // one -- so `repeat_interleave` of a vector ran on one core however long it
+    // was.
+    let chunk_len = (crate::ops::map::PAR_CHUNK / inner).max(1) * inner;
+
     macro_rules! repeat_impl {
         ($ty:ty, $slice:ident, $from_vec:ident) => {{
             let src = tensor.data().$slice().ok_or_else(|| {
@@ -133,26 +149,53 @@ pub fn repeat_interleave(
                     "repeat_interleave: tensor data access failed".to_string(),
                 )
             })?;
-            // SAFETY: the chunks tile the output, and `target_dim` is the sum
-            // of `reps`, so each chunk's writes cover exactly `target_dim *
-            // inner` elements.
+            // SAFETY: the chunks tile the output and the loop below writes
+            // every element of the one it is given -- it advances by whole
+            // rows of `inner` until the chunk is full, and both the chunk
+            // length and `span` are multiples of `inner`.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    let span = target_dim * inner;
-                    par_out_chunks(spare, span, &|start, out_chunk| {
-                        let mut dst_offset = 0;
-                        let base = (start / span) * dim_size * inner;
-                        for (i, &rep) in reps.iter().enumerate() {
-                            if rep == 0 {
-                                continue;
+                    par_out_chunks(spare, chunk_len, &|start, out_chunk| {
+                        let mut written = 0usize;
+                        let mut outer_index = start / span;
+                        let mut row = (start % span) / inner;
+                        // Where the chunk starts is found once, by searching
+                        // the running totals; after that the walk is forwards,
+                        // so the source advances by one rather than by another
+                        // search. Searching per element made the whole
+                        // operation slower than the serial version it replaced.
+                        let mut source = offsets.partition_point(|&off| off <= row) - 1;
+                        while written < out_chunk.len() {
+                            if row == target_dim {
+                                outer_index += 1;
+                                row = 0;
+                                source = 0;
                             }
-                            let src_start = base + i * inner;
-                            let src_slice = &src[src_start..src_start + inner];
-                            for _ in 0..rep {
-                                let end = dst_offset + inner;
-                                out_chunk[dst_offset..end].write_copy_of_slice(src_slice);
-                                dst_offset = end;
+                            // Elements repeated zero times occupy no rows.
+                            while offsets[source + 1] == row {
+                                source += 1;
                             }
+                            let base = outer_index * dim_size * inner + source * inner;
+                            // How many of this element's copies land in what is
+                            // left of the chunk.
+                            let rows = (offsets[source + 1] - row)
+                                .min((out_chunk.len() - written) / inner);
+                            if inner == 1 {
+                                // One element repeated: a fill, not a run of
+                                // one-element copies.
+                                let value = src[base];
+                                for slot in out_chunk[written..written + rows].iter_mut() {
+                                    slot.write(value);
+                                }
+                            } else {
+                                let piece = &src[base..base + inner];
+                                for step in 0..rows {
+                                    let from = written + step * inner;
+                                    out_chunk[from..from + inner].write_copy_of_slice(piece);
+                                }
+                            }
+                            written += rows * inner;
+                            row += rows;
                         }
                     });
                 })

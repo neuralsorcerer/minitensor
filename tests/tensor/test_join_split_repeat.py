@@ -369,3 +369,52 @@ def test_functional_and_top_level_flip():
     r_func = F.flip(t, 0)
     r_top = mt.flip(t, 0)
     np.testing.assert_array_equal(r_func.numpy(), r_top.numpy())
+
+
+# `repeat_interleave` walks the output a band of rows at a time, tracing each
+# band back to the element it came from once and then advancing. The split used
+# to be one *outer* position per task, which is a single task whenever the
+# repeated axis is the first one -- so repeating a vector ran on one core
+# however long it was. These cover what the walk can get wrong: a band that
+# starts in the middle of an element's copies, elements repeated zero times, and
+# the wrap from one outer position to the next.
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("repeats", [1, 2, 3, 7])
+def test_a_uniform_repeat_matches_numpy_across_a_band_boundary(dim, repeats):
+    """Long enough that the output is cut into several bands, so at least one
+    of them starts partway through an element's copies."""
+    values = np.arange(4000.0).reshape(200, 20)
+    got = mt.Tensor(values, dtype="float64").repeat_interleave(repeats, dim=dim)
+    np.testing.assert_array_equal(got.numpy(), np.repeat(values, repeats, axis=dim))
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+def test_elements_repeated_zero_times_are_stepped_over(dim):
+    values = np.arange(24.0).reshape(4, 6)
+    counts = np.array([0, 3, 0, 0, 2, 0]) if dim == 1 else np.array([2, 0, 0, 5])
+    got = mt.Tensor(values, dtype="float64").repeat_interleave(
+        mt.Tensor(counts, dtype="int64"), dim=dim
+    )
+    np.testing.assert_array_equal(got.numpy(), np.repeat(values, counts, axis=dim))
+
+
+def test_an_irregular_repeat_of_a_long_vector_matches_numpy():
+    """The band walk and the running totals together, at a size where the two
+    have to stay in step across many tasks."""
+    rng = np.random.default_rng(11)
+    values = rng.standard_normal(200_000)
+    counts = rng.integers(0, 5, 200_000).astype(np.int64)
+    got = mt.Tensor(values, dtype="float64").repeat_interleave(
+        mt.Tensor(counts, dtype="int64")
+    )
+    np.testing.assert_array_equal(got.numpy(), np.repeat(values, counts))
+
+
+def test_repeating_the_last_axis_of_a_batch_wraps_between_rows():
+    """Every band but the first starts partway through a row, so the walk has
+    to carry the outer position with it."""
+    values = np.arange(3 * 5 * 7.0).reshape(3, 5, 7)
+    got = mt.Tensor(values, dtype="float64").repeat_interleave(4, dim=2)
+    np.testing.assert_array_equal(got.numpy(), np.repeat(values, 4, axis=2))
