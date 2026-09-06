@@ -717,6 +717,53 @@ def tensorinv(a: object, ind: int = 2) -> Tensor:
 
 #: Attached to the top level, to `functional` and -- where the first argument
 #: is the tensor -- to `Tensor`. See `_elementwise._ELEMENTWISE`.
+
+
+def vecdot(input: object, other: object, dim: int = -1) -> Tensor:
+    """The dot product along one axis, with the others broadcast.
+
+    `dot` and `vdot` take vectors; this takes a batch of them and contracts one
+    axis, which is what the array API means by the name and what an attention
+    score or a per-row similarity actually needs.
+    """
+
+    left = _atleast_tensor(input)
+    right = _atleast_tensor(other)
+    axis = _normalize_axis(dim, max(left.ndim(), right.ndim()), "vecdot")
+    return _F.sum(left * right, axis)
+
+
+def matvec(input: object, other: object) -> Tensor:
+    """A batch of matrices times a batch of vectors: `(..., m, n) @ (..., n)`.
+
+    `matmul` would take the vector for a matrix with one row missing and
+    broadcast it the other way; naming the operation says which of the two was
+    meant.
+    """
+
+    matrix = _atleast_tensor(input)
+    vector = _atleast_tensor(other)
+    if matrix.ndim() < 2 or vector.ndim() < 1:
+        raise ValueError(
+            f"matvec needs a matrix and a vector, got {matrix.ndim()} and "
+            f"{vector.ndim()} dimensions"
+        )
+    return _F.matmul(matrix, vector.unsqueeze(-1)).squeeze(-1)
+
+
+def vecmat(input: object, other: object) -> Tensor:
+    """A batch of vectors times a batch of matrices: `(..., m) @ (..., m, n)`."""
+
+    vector = _atleast_tensor(input)
+    matrix = _atleast_tensor(other)
+    if vector.ndim() < 1 or matrix.ndim() < 2:
+        raise ValueError(
+            f"vecmat needs a vector and a matrix, got {vector.ndim()} and "
+            f"{matrix.ndim()} dimensions"
+        )
+    return _F.matmul(vector.unsqueeze(-2), matrix).squeeze(-2)
+
+
 _MATRIX = (
     "addmm",
     "angle",
@@ -739,4 +786,7 @@ _MATRIX = (
     "tensorinv",
     "tensorsolve",
     "vander",
+    "vecdot",
+    "matvec",
+    "vecmat",
 )

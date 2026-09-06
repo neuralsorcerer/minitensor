@@ -433,6 +433,14 @@ _GRADCHECK_OPS = [
     ("diag_embed", lambda t: t.diag_embed(), _ANY),
     ("diag_embed_offset", lambda t: t.diag_embed(-1), _ANY),
     ("diag_embed_batched", lambda t: t.reshape((3, 3)).diag_embed(), _ANY),
+    # Composed from differentiable pieces rather than written as primitives, so
+    # a gradient exists whether or not one was intended -- which is exactly the
+    # case worth pinning. `cbrt` routes the sign around the fractional power,
+    # `positive` is the identity, and `frexp`'s mantissa is a scaling by a power
+    # of two that `floor` holds constant.
+    ("cbrt", lambda t: t.cbrt(), _POS),
+    ("positive", lambda t: t.positive(), _ANY),
+    ("frexp_mantissa", lambda t: t.frexp()[0], _POS),
 ]
 
 # Ops a no-arg probe reaches but this list deliberately does not gradcheck.

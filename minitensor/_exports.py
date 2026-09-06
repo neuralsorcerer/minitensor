@@ -12,6 +12,13 @@ import sys as _sys
 from collections.abc import MutableMapping
 
 _FUNCTIONAL_FORWARDERS = (
+    "cbrt",
+    "matvec",
+    "vecdot",
+    "vecmat",
+    "divmod",
+    "frexp",
+    "positive",
     "cat",
     "stack",
     "split",

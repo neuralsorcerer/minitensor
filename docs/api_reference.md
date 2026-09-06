@@ -105,6 +105,11 @@ of convenience aliases.
 | `expand_dims(input, dim)` | A length-1 axis at each position in `dim`, which may be several at once. The positions refer to the *result*, so `(0, 2)` puts new axes at 0 and 2 of the answer. |
 | `cumulative_sum(input, dim=None, include_initial=False)` | The array API's `cumsum`. `include_initial` prepends the empty sum, so the result is one longer than the axis and `out[i]` is the total of everything *before* `i` -- the exclusive scan `cumsum` cannot give. |
 | `permute_dims(input, axes)` / `matrix_transpose(input)` / `unstack(input, dim=0)` / `array_split(...)` / `broadcast_arrays(*inputs)` / `identity(n, ...)` | The array API's and NumPy's names for `permute`, `transpose(-2, -1)`, `unbind`, `tensor_split`, `broadcast_tensors` and a square `eye`. |
+| `geomspace(start, end, steps, ...)` | `steps` values spaced evenly on a *log* scale, from `start` to `end` inclusive. `logspace` takes the exponents; this takes the two ends themselves, which is the form a caller who knows them wants. Neither end may be zero -- a geometric sequence cannot reach it -- and both must share a sign. The ends are written back exactly rather than left to the rounding of `exp(log(...))`. |
+| `tri(n, m=None, k=0, ...)` | An `n` by `m` matrix of ones on and below the `k`-th diagonal: the mask `tril` applies, as a tensor to multiply by rather than a rule to select with. |
+| `indices(shape, sparse=False)` | The index grids of a tensor of `shape`, one per axis, each of that full shape -- or, with `sparse=True`, each shaped to broadcast into it, which costs `sum(shape)` elements instead of `ndim * prod(shape)`. |
+| `ix_(*sequences)` | The same sequences reshaped so that indexing with them together selects an *open mesh* -- every combination of the positions -- where passing them as they came would pair them up element by element. Boolean sequences are turned into the positions they mark first. |
+| `fromfunction(function, shape, dtype=None)` | `function` called **once** with the index grids, not once per element: it receives `ndim` tensors and is expected to answer in tensor operations, so building a tensor this way costs one pass rather than `prod(shape)` Python calls. |
 | `union1d(input, other)` | The distinct values in either tensor, ascending. Both are flattened first: a set has no shape. |
 | `intersect1d(input, other, assume_unique=False, return_indices=False)` | The distinct values in both, ascending -- found by a membership test against the sorted second set, so the cost is `(n + m) log m` rather than the `n * m` of comparing every pair. `return_indices` also gives where each common value first occurs in each input. `assume_unique` is accepted and changes nothing: the search does not care whether either side repeats. |
 | `setdiff1d(input, other, assume_unique=False)` | The distinct values in the first and not the second, ascending. |
@@ -145,6 +150,9 @@ of convenience aliases.
 | `numel(input)` | How many elements the tensor holds, as a Python int. |
 | `mm(input, mat2)` | The product of two matrices. `matmul` also broadcasts batches and promotes vectors; this rejects anything that is not two matrices, which is the point of asking by this name. |
 | `mv(input, vec)` | A matrix times a vector. |
+| `vecdot(input, other, dim=-1)` | The dot product along one axis, the rest broadcast: `dot` and `vdot` take a pair of vectors, this takes a batch of them. Contracts `dim` rather than the last axis, which is what makes it usable on a channels-first layout without a permute first. |
+| `matvec(input, other)` | `(..., m, n)` times `(..., n)`, giving `(..., m)`. `matmul` treats a trailing vector as a matrix whose last axis went missing and broadcasts the batch differently; this is the reading that is always meant when the operand really is a vector. |
+| `vecmat(input, other)` | `(..., m)` times `(..., m, n)`, giving `(..., n)` -- `matvec` from the other side. |
 | `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
 | `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
 | `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
@@ -169,6 +177,9 @@ of convenience aliases.
 | `bernoulli(input)` | A 0/1 draw per element, `input` giving each element's probability. |
 | `normal(mean=0.0, std=1.0, size=None)` | A normal draw shifted by `mean` and scaled by `std`. With `size` omitted the shape comes from whichever of the two is a tensor. |
 | `multinomial(input, num_samples, replacement=False)` | Draw indices with probability proportional to `input`, a row of weights or a batch of them; they need not sum to one. With replacement it is one `searchsorted` in the cumulative distribution; without, it is the top `k` of `log(w) + Gumbel noise`, which is exactly a weighted sample without replacement in one sort rather than a removal loop. |
+| `hann_window(length, periodic=True)`, `hamming_window(length, periodic=True, alpha=0.54, beta=0.46)`, `blackman_window(...)`, `bartlett_window(...)`, `kaiser_window(length, periodic=True, beta=12.0)` | The five classical tapers, as float tensors of `length`. `periodic=True` divides by `length` and is the one to use for a spectrum, since the window then tiles without a seam; `periodic=False` divides by `length - 1` and is symmetric, which is what a filter design wants. A length of one is a single `1.0` and a length of zero is empty, rather than either being a division by zero. |
+| `correlate(input, other, mode='valid')` | The sliding dot product of two 1-D sequences without reversing either. |
+| `convolve(input, other, mode='full')` | The convolution of two 1-D sequences: `correlate` with one of them reversed. Both are computed by the same padded `conv1d` and then narrowed to `mode`, so `'full'`, `'same'` and `'valid'` are three windows onto one result rather than three code paths -- and both inherit the blocked convolution instead of looping over lags. |
 
 ### Shape compatibility helpers
 
@@ -1409,6 +1420,19 @@ assert row_std.shape == (2, 3)
 - `ldexp(input, other)` — `input * 2**other`. Computed as the product, so an
   `other` large enough to overflow `2**other` gives infinity even where the
   product would have been finite; the exponent itself is exact.
+- `frexp(input)` — the mantissa in `[0.5, 1)` and the exponent, as a pair, so
+  that `ldexp(*frexp(x))` reproduces `x` *exactly*: the only arithmetic in
+  either direction is by powers of two. Zero, infinity and NaN come back as
+  themselves with an exponent of zero, as in C and NumPy.
+- `divmod(input, other)` — the quotient and the remainder together, as Python's
+  builtin gives them. Both round toward negative infinity, so
+  `q * other + r == input` and the remainder takes the divisor's sign.
+- `cbrt(input)` — the real cube root, element-wise. Not `input ** (1 / 3)`,
+  which is NaN for every negative value because a fractional power is undefined
+  there; the sign is taken out and put back, so every real number has one.
+- `positive(input)` — a copy, the unary `+`. It exists for the reason
+  `negative` does: code that picks an operation by name needs the identity to
+  have a name too.
 - `fmax(input, other)`, `fmin(...)` — the extrema *ignoring* NaN, where
   `maximum`/`minimum` propagate it. NaN survives only where both operands are
   NaN and there is genuinely nothing to compare.
@@ -1740,11 +1764,13 @@ abs, sqrt, exp, log, pow, rsqrt, reciprocal, sign, floor_divide, remainder,
 fmod, round, floor, ceil, trunc, frac, clip, clamp, clamp_min, clamp_max,
 maximum, minimum, log1p, log2, log10, exp2, expm1, logaddexp, logaddexp2, erf,
 erfc, hypot, copysign, xlogy, heaviside, nextafter, fmax, fmin, square,
-float_power, ldexp, lerp, addcmul, addcdiv, deg2rad, rad2deg, signbit, sgn,
+float_power, ldexp, frexp, lerp, addcmul, addcdiv, deg2rad, rad2deg, signbit,
+sgn, cbrt, divmod,
 
 # The operators as free functions, and second spellings of existing names
 add, sub, mul, div, neg, absolute, subtract, multiply, divide, true_divide,
-negative, concat, greater, greater_equal, less, less_equal, not_equal,
+negative, positive, concat, greater, greater_equal, less, less_equal,
+not_equal,
 
 # Special functions
 erfinv, erfcx, sinc, lgamma, digamma, polygamma, logit, i0, i1, i0e, i1e,
@@ -1770,7 +1796,7 @@ scaled_dot_product_attention, rope,
 matmul, solve, solve_triangular, trace, diagonal, diag, diag_embed, triu, tril,
 det, slogdet, inv, pinv, matrix_rank, matrix_power, cond, lstsq, einsum,
 cholesky, cholesky_solve, qr, svd, svdvals, eigh, eigvalsh, lu, lu_factor,
-lu_solve
+lu_solve, vecdot, matvec, vecmat
 ```
 
 ### Finite and NaN predicates

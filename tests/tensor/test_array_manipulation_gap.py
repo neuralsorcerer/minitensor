@@ -95,7 +95,13 @@ def test_delete_takes_a_mask_and_refuses_a_position_that_is_not_there(values):
 
 @pytest.mark.parametrize(
     "obj,fill,dim",
-    [(1, 9.0, 0), ([1, 3], 9.0, 1), (2, 7.0, None), (-1, 9.0, 0), (slice(0, 3), 9.0, 0)],
+    [
+        (1, 9.0, 0),
+        ([1, 3], 9.0, 1),
+        (2, 7.0, None),
+        (-1, 9.0, 0),
+        (slice(0, 3), 9.0, 0),
+    ],
     ids=["one", "several", "flat", "negative", "slice"],
 )
 def test_insert_places_values_before_the_positions_named(values, obj, fill, dim):
@@ -155,7 +161,9 @@ def test_block_assembles_the_way_it_is_written():
     )
     # A flat list joins along the last axis.
     np.testing.assert_allclose(
-        mt.block([mt.from_numpy(np.array([1.0, 2.0])), mt.from_numpy(np.array([3.0]))]).numpy(),
+        mt.block(
+            [mt.from_numpy(np.array([1.0, 2.0])), mt.from_numpy(np.array([3.0]))]
+        ).numpy(),
         np.block([np.array([1.0, 2.0]), np.array([3.0])]),
     )
     with pytest.raises(ValueError, match="empty list"):

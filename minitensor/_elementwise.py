@@ -291,7 +291,10 @@ _ELEMENTWISE = (
     "add",
     "addcdiv",
     "addcmul",
+    "cbrt",
     "deg2rad",
+    "divmod",
+    "frexp",
     "div",
     "float_power",
     "fmax",
@@ -304,6 +307,7 @@ _ELEMENTWISE = (
     "logaddexp2",
     "mul",
     "neg",
+    "positive",
     "rad2deg",
     "sgn",
     "signbit",
@@ -329,3 +333,79 @@ _ALIASES = {
     "subtract": "sub",
     "true_divide": "div",
 }
+
+
+def positive(input: object) -> Tensor:
+    """`+input`: a copy, for symmetry with `negative`.
+
+    NumPy has it and PyTorch has it, and both for the same reason -- code that
+    picks an operation by name needs the identity to have one.
+    """
+
+    return _atleast_tensor(input) * 1
+
+
+def cbrt(input: object) -> Tensor:
+    """The real cube root, element-wise.
+
+    Not `x ** (1 / 3)`, which is NaN for every negative value: a fractional
+    power is undefined there. The sign is taken out, the root taken of the
+    magnitude, and the sign put back, which is the real root that exists for
+    every real number.
+    """
+
+    tensor = _atleast_tensor(input)
+    if "float" not in str(tensor.dtype):
+        tensor = tensor.astype("float64")
+    return _F.sign(tensor) * _F.pow(_F.abs(tensor), 1.0 / 3.0)
+
+
+def divmod(input: object, other: object) -> tuple[Tensor, Tensor]:
+    """The quotient and the remainder together, as Python's `divmod` gives them.
+
+    Both round toward negative infinity, so `quotient * other + remainder` is
+    `input` exactly and the remainder takes the divisor's sign -- which is what
+    `floor_divide` and `remainder` each promise on their own.
+    """
+
+    left = _atleast_tensor(input)
+    return _F.floor_divide(left, other), _F.remainder(left, other)
+
+
+def frexp(input: object) -> tuple[Tensor, Tensor]:
+    """Split each value into a mantissa in `[0.5, 1)` and an exponent.
+
+    The inverse of `ldexp`: `ldexp(*frexp(x))` is `x` exactly, because the only
+    arithmetic is by powers of two. Zero, infinity and NaN come back as
+    themselves with an exponent of zero, as they do in C and NumPy.
+
+    The exponent is found through a logarithm and then *corrected*, because
+    `log2` of a power of two can land a hair either side of the integer; one
+    step in each direction is enough, and without it the mantissa would
+    occasionally sit outside its half-open range.
+    """
+
+    tensor = _atleast_tensor(input)
+    if "float" not in str(tensor.dtype):
+        tensor = tensor.astype("float64")
+    magnitude = _F.abs(tensor)
+    ordinary = _F.isfinite(tensor) & (magnitude > 0)
+
+    safe = _F.where(ordinary, magnitude, Tensor.ones_like(magnitude))
+    exponent = _F.floor(_F.log2(safe)) + 1
+    mantissa = tensor * _F.exp2(-exponent)
+
+    # One correction each way: a mantissa at or above 1 belongs to the next
+    # exponent up, one below a half to the one down.
+    too_big = _F.abs(mantissa) >= 1.0
+    exponent = _F.where(too_big, exponent + 1, exponent)
+    mantissa = _F.where(too_big, mantissa * 0.5, mantissa)
+    too_small = (_F.abs(mantissa) < 0.5) & (mantissa != 0)
+    exponent = _F.where(too_small, exponent - 1, exponent)
+    mantissa = _F.where(too_small, mantissa * 2.0, mantissa)
+
+    zeros = Tensor.zeros_like(exponent)
+    return (
+        _F.where(ordinary, mantissa, tensor),
+        _F.where(ordinary, exponent, zeros).astype("int64"),
+    )

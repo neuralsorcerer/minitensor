@@ -1164,3 +1164,148 @@ def broadcast_arrays(*inputs: object) -> tuple[Tensor, ...]:
     """NumPy's name for `broadcast_tensors`: every input at their common shape."""
 
     return broadcast_tensors(*inputs)
+
+
+def geomspace(
+    start: float,
+    end: float,
+    steps: int,
+    dtype: object = None,
+    device: object = None,
+    requires_grad: bool = False,
+) -> Tensor:
+    """`steps` values spaced evenly on a *log* scale, from `start` to `end`.
+
+    `logspace` takes the exponents; this takes the values themselves, which is
+    the form a caller who knows the two ends wants. Both ends must be non-zero
+    and of the same sign -- there is no geometric path from a positive number
+    to a negative one, or through zero.
+
+    The ends are set exactly rather than left to the exponential, which would
+    otherwise land a rounding away from the numbers that were asked for.
+    """
+
+    if steps < 0:
+        raise ValueError(
+            f"geomspace requires a non-negative number of steps, got {steps}"
+        )
+    first, last = float(start), float(end)
+    if first == 0.0 or last == 0.0:
+        raise ValueError("geomspace cannot start or end at zero")
+    if (first < 0.0) != (last < 0.0):
+        raise ValueError(
+            f"geomspace needs both ends to have the same sign, got {start} and {end}"
+        )
+
+    sign = -1.0 if first < 0.0 else 1.0
+    values = Tensor.logspace(
+        _math.log10(abs(first)),
+        _math.log10(abs(last)),
+        steps,
+        base=10.0,
+        dtype="float64",
+        device=device,
+    )
+    if steps:
+        # The exponential of a logarithm is not the number that went in, and
+        # the two ends are the two the caller named. One step is the *start*
+        # alone, so it must not be overwritten with the end.
+        exact = _np.asarray(values.numpy(), dtype=_np.float64)
+        exact[0] = abs(first)
+        if steps > 1:
+            exact[-1] = abs(last)
+        values = Tensor.from_numpy(exact)
+    result = values * sign
+    if dtype is not None and str(result.dtype) != str(dtype):
+        result = result.astype(str(dtype))
+    if requires_grad:
+        result.requires_grad_(True)
+    return result
+
+
+def tri(
+    n: int,
+    m: int | None = None,
+    k: int = 0,
+    dtype: object = None,
+    device: object = None,
+) -> Tensor:
+    """An `n` by `m` matrix of ones on and below the `k`-th diagonal.
+
+    The mask `tril` applies, as a tensor -- for multiplying by rather than
+    selecting with.
+    """
+
+    columns = n if m is None else m
+    ones = Tensor.ones(
+        [n, columns], dtype=str(dtype) if dtype is not None else None, device=device
+    )
+    return _C.functional.tril(ones, k)
+
+
+def indices(shape: object, sparse: bool = False):
+    """The index grids of a tensor of `shape`.
+
+    `indices((2, 3))[0]` holds each element's row and `[1]` its column, both in
+    the tensor's own shape -- which is what turns a formula over positions into
+    one tensor expression. `sparse` gives them with the other axes left at one,
+    which broadcasts to the same thing at a fraction of the memory.
+    """
+
+    sizes = _normalize_shape_argument(shape, "indices")
+    rank = len(sizes)
+    grids = []
+    for axis, size in enumerate(sizes):
+        spread = [1] * rank
+        spread[axis] = size
+        line = Tensor.arange(0, size, 1, dtype="int64").reshape(spread)
+        grids.append(line if sparse else broadcast_to(line, list(sizes)))
+    if sparse:
+        return tuple(grids)
+    if not grids:
+        return Tensor.zeros([0], dtype="int64")
+    return _C.functional.stack(grids, 0)
+
+
+def ix_(*sequences: object) -> tuple[Tensor, ...]:
+    """Index arrays shaped so that together they select an open mesh.
+
+    Each sequence gets its own axis and length one everywhere else, so
+    `x[ix_(rows, cols)]` is the sub-matrix of those rows and columns rather
+    than the elements they pair up into. Boolean sequences are turned into the
+    positions they select, as NumPy does.
+    """
+
+    grids = []
+    count = len(sequences)
+    for axis, sequence in enumerate(sequences):
+        tensor = _atleast_tensor(sequence).reshape(-1)
+        if "bool" in str(tensor.dtype):
+            tensor = _C.functional.nonzero(tensor).reshape(-1)
+        elif "int" not in str(tensor.dtype):
+            raise TypeError(
+                f"ix_ takes integer or boolean sequences, got {tensor.dtype}"
+            )
+        spread = [1] * count
+        spread[axis] = tensor.shape[0]
+        grids.append(tensor.astype("int64").reshape(spread))
+    return tuple(grids)
+
+
+def fromfunction(function: object, shape: object, dtype: object = None) -> Tensor:
+    """`function` called once with the index grids, not once per element.
+
+    The function is handed one tensor per axis, each holding that axis'
+    coordinate -- so it is written as an expression over whole tensors and
+    evaluated in one pass. A function that cannot be written that way does not
+    belong here.
+    """
+
+    sizes = _normalize_shape_argument(shape, "fromfunction")
+    grids = indices(sizes, sparse=True)
+    result = _atleast_tensor(function(*grids))
+    if list(result.shape) != list(sizes):
+        result = broadcast_to(result, list(sizes))
+    if dtype is not None and str(result.dtype) != str(dtype):
+        result = result.astype(str(dtype))
+    return result
