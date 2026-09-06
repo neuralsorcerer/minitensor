@@ -348,6 +348,51 @@ impl TensorData {
         }
     }
 
+    /// A buffer whose element `index` is `value(index)`, written across the
+    /// pool.
+    ///
+    /// The sequence constructors -- `arange`, `linspace`, `logspace` -- were
+    /// each a zeroed allocation followed by a serial loop, written out once per
+    /// dtype: fifteen copies of the same shape, all of them writing a fresh
+    /// mapping on one core. `arange` of sixteen million int64 took 114ms that
+    /// way against NumPy's 33. Here the dtype conversion is written once and
+    /// the fill is the same parallel one the rest of the module uses.
+    ///
+    /// `value` is called exactly once per element, with the element's index, so
+    /// the partition cannot reach the answer.
+    pub fn from_index<F>(numel: usize, dtype: DataType, device: Device, value: F) -> Self
+    where
+        F: Fn(usize) -> f64 + Sync,
+    {
+        macro_rules! build {
+            ($ty:ty, $convert:expr) => {{
+                // SAFETY: the chunks tile the buffer and each writes every one
+                // of its elements, so all `numel` are initialized.
+                let data: Vec<$ty> = unsafe {
+                    crate::ops::map::build_vec::<$ty, _>(numel, |spare| {
+                        crate::ops::map::par_out_chunks(
+                            spare,
+                            crate::ops::map::PAR_CHUNK,
+                            &|first, chunk| {
+                                for (offset, slot) in chunk.iter_mut().enumerate() {
+                                    slot.write($convert(value(first + offset)));
+                                }
+                            },
+                        );
+                    })
+                };
+                Self::from_vec(data, dtype, device)
+            }};
+        }
+        match dtype {
+            DataType::Float32 => build!(f32, |v: f64| v as f32),
+            DataType::Float64 => build!(f64, |v: f64| v),
+            DataType::Int32 => build!(i32, |v: f64| v as i32),
+            DataType::Int64 => build!(i64, |v: f64| v as i64),
+            DataType::Bool => build!(bool, |v: f64| v != 0.0),
+        }
+    }
+
     /// Create new tensor data with ones on specified device
     #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {

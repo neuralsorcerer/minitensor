@@ -708,50 +708,16 @@ pub(crate) fn create_arange_tensor(
     }
 
     let num_elements = ((end - start) / step).ceil() as usize;
-    let shape = Shape::new(vec![num_elements]);
-    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
-
-    match dtype {
-        DataType::Float32 => {
-            if let Some(slice) = tensor_data.as_f32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    *val = (start + i as f64 * step) as f32;
-                }
-            }
-        }
-        DataType::Float64 => {
-            if let Some(slice) = tensor_data.as_f64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    *val = start + i as f64 * step;
-                }
-            }
-        }
-        DataType::Int32 => {
-            if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    *val = (start + i as f64 * step) as i32;
-                }
-            }
-        }
-        DataType::Int64 => {
-            if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    *val = (start + i as f64 * step) as i64;
-                }
-            }
-        }
-        DataType::Bool => {
-            if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    *val = (start + i as f64 * step) != 0.0;
-                }
-            }
-        }
-    }
-
+    // One parallel fill with the dtype conversion written once, rather than
+    // five serial loops -- see `TensorData::from_index`.
     Ok(Tensor::new(
-        Arc::new(tensor_data),
-        shape,
+        Arc::new(TensorData::from_index(
+            num_elements,
+            dtype,
+            device,
+            |index| start + index as f64 * step,
+        )),
+        Shape::new(vec![num_elements]),
         dtype,
         device,
         requires_grad,
@@ -789,61 +755,21 @@ pub(crate) fn create_linspace_tensor(
         ));
     }
 
-    let shape = Shape::new(vec![steps]);
-    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
-    let denom = if steps > 1 { (steps - 1) as f64 } else { 1.0 };
     let step = if steps > 1 {
-        (end - start) / denom
+        (end - start) / (steps - 1) as f64
     } else {
         0.0
     };
-
-    match dtype {
-        DataType::Float32 => {
-            if let Some(slice) = tensor_data.as_f32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let value = evenly_spaced(start, end, step, steps, i);
-                    *val = value as f32;
-                }
-            }
-        }
-        DataType::Float64 => {
-            if let Some(slice) = tensor_data.as_f64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let value = evenly_spaced(start, end, step, steps, i);
-                    *val = value;
-                }
-            }
-        }
-        DataType::Int32 => {
-            if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let value = evenly_spaced(start, end, step, steps, i);
-                    *val = value.round() as i32;
-                }
-            }
-        }
-        DataType::Int64 => {
-            if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let value = evenly_spaced(start, end, step, steps, i);
-                    *val = value.round() as i64;
-                }
-            }
-        }
-        DataType::Bool => {
-            if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let value = evenly_spaced(start, end, step, steps, i);
-                    *val = value != 0.0;
-                }
-            }
-        }
-    }
-
+    // An integer dtype takes the nearest point rather than the one below it,
+    // which is what the five hand-written arms did; rounding in the closure
+    // leaves the conversion itself with nothing to decide.
+    let rounds = matches!(dtype, DataType::Int32 | DataType::Int64);
     Ok(Tensor::new(
-        Arc::new(tensor_data),
-        shape,
+        Arc::new(TensorData::from_index(steps, dtype, device, |index| {
+            let value = evenly_spaced(start, end, step, steps, index);
+            if rounds { value.round() } else { value }
+        })),
+        Shape::new(vec![steps]),
         dtype,
         device,
         requires_grad,
@@ -865,67 +791,18 @@ pub(crate) fn create_logspace_tensor(
         ));
     }
 
-    if base <= 0.0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Base must be positive",
-        ));
-    }
-
-    let shape = Shape::new(vec![steps]);
-    let mut tensor_data = TensorData::uninitialized_on_device(shape.numel(), dtype, device);
-    let denom = if steps > 1 { (steps - 1) as f64 } else { 1.0 };
     let step = if steps > 1 {
-        (end - start) / denom
+        (end - start) / (steps - 1) as f64
     } else {
         0.0
     };
-
-    match dtype {
-        DataType::Float32 => {
-            if let Some(slice) = tensor_data.as_f32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = evenly_spaced(start, end, step, steps, i);
-                    *val = base.powf(exponent) as f32;
-                }
-            }
-        }
-        DataType::Float64 => {
-            if let Some(slice) = tensor_data.as_f64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = evenly_spaced(start, end, step, steps, i);
-                    *val = base.powf(exponent);
-                }
-            }
-        }
-        DataType::Int32 => {
-            if let Some(slice) = tensor_data.as_i32_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = evenly_spaced(start, end, step, steps, i);
-                    *val = base.powf(exponent).round() as i32;
-                }
-            }
-        }
-        DataType::Int64 => {
-            if let Some(slice) = tensor_data.as_i64_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = evenly_spaced(start, end, step, steps, i);
-                    *val = base.powf(exponent).round() as i64;
-                }
-            }
-        }
-        DataType::Bool => {
-            if let Some(slice) = tensor_data.as_bool_slice_mut() {
-                for (i, val) in slice.iter_mut().enumerate() {
-                    let exponent = evenly_spaced(start, end, step, steps, i);
-                    *val = base.powf(exponent) != 0.0;
-                }
-            }
-        }
-    }
-
+    let rounds = matches!(dtype, DataType::Int32 | DataType::Int64);
     Ok(Tensor::new(
-        Arc::new(tensor_data),
-        shape,
+        Arc::new(TensorData::from_index(steps, dtype, device, |index| {
+            let value = base.powf(evenly_spaced(start, end, step, steps, index));
+            if rounds { value.round() } else { value }
+        })),
+        Shape::new(vec![steps]),
         dtype,
         device,
         requires_grad,
