@@ -301,6 +301,29 @@ impl TensorData {
         Self::ones_on_device(numel, dtype, Device::cpu())
     }
 
+    /// A buffer of `numel` copies of `value`, written once and across the pool.
+    ///
+    /// `vec![value; numel]` writes them on one core. Below
+    /// [`PARALLEL_COPY_THRESHOLD`] that is the right thing and this matches it
+    /// -- the chunking has a fixed cost and the pages are already faulted in.
+    /// Above it every buffer is a fresh mapping, so the fill is made of page
+    /// faults rather than stores, and faults are per-core work: 40MB of ones
+    /// cost 25ms on one core and 8 spread over four.
+    pub(crate) fn filled_buffer<T: Copy + Send + Sync>(numel: usize, value: T) -> Vec<T> {
+        if numel * std::mem::size_of::<T>() < PARALLEL_COPY_THRESHOLD {
+            return vec![value; numel];
+        }
+        // SAFETY: the chunks tile the buffer and every element of each is
+        // written, so all `numel` are initialized.
+        unsafe {
+            crate::ops::map::build_vec::<T, _>(numel, |spare| {
+                crate::ops::map::par_out_chunks(spare, crate::ops::map::PAR_CHUNK, &|_, chunk| {
+                    chunk.fill(std::mem::MaybeUninit::new(value))
+                });
+            })
+        }
+    }
+
     /// Create new tensor data with ones on specified device
     #[inline(always)]
     pub fn ones_on_device(numel: usize, dtype: DataType, device: Device) -> Self {
@@ -308,11 +331,15 @@ impl TensorData {
             // Build the filled buffer in one pass instead of zeroing and then
             // overwriting it.
             match dtype {
-                DataType::Float32 => Self::from_vec(vec![1.0f32; numel], dtype, device),
-                DataType::Float64 => Self::from_vec(vec![1.0f64; numel], dtype, device),
-                DataType::Int32 => Self::from_vec(vec![1i32; numel], dtype, device),
-                DataType::Int64 => Self::from_vec(vec![1i64; numel], dtype, device),
-                DataType::Bool => Self::from_vec(vec![true; numel], dtype, device),
+                DataType::Float32 => {
+                    Self::from_vec(Self::filled_buffer(numel, 1.0f32), dtype, device)
+                }
+                DataType::Float64 => {
+                    Self::from_vec(Self::filled_buffer(numel, 1.0f64), dtype, device)
+                }
+                DataType::Int32 => Self::from_vec(Self::filled_buffer(numel, 1i32), dtype, device),
+                DataType::Int64 => Self::from_vec(Self::filled_buffer(numel, 1i64), dtype, device),
+                DataType::Bool => Self::from_vec(Self::filled_buffer(numel, true), dtype, device),
             }
         } else {
             // For non-CPU devices, fall back to zero initialization

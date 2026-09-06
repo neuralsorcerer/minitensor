@@ -683,25 +683,12 @@ pub(crate) fn create_full_tensor(
     device: Device,
     requires_grad: bool,
 ) -> PyResult<Tensor> {
-    let shape = Shape::new(shape);
-    let numel = shape.numel();
-    // Build the filled buffer directly; the previous zero-init + fill did two
-    // passes over the allocation.
-    let tensor_data = match dtype {
-        DataType::Float32 => TensorData::from_vec(vec![fill_value as f32; numel], dtype, device),
-        DataType::Float64 => TensorData::from_vec(vec![fill_value; numel], dtype, device),
-        DataType::Int32 => TensorData::from_vec(vec![fill_value as i32; numel], dtype, device),
-        DataType::Int64 => TensorData::from_vec(vec![fill_value as i64; numel], dtype, device),
-        DataType::Bool => TensorData::from_vec(vec![fill_value != 0.0; numel], dtype, device),
-    };
-
-    Ok(Tensor::new(
-        Arc::new(tensor_data),
-        shape,
-        dtype,
-        device,
-        requires_grad,
-    ))
+    // The engine's constant initializer is this same five-arm fill, and it
+    // writes a large buffer across the pool rather than on one core -- see
+    // `TensorData::filled_buffer`. Two copies of "a tensor full of one value"
+    // is one too many.
+    engine::nn::init::init_constant(Shape::new(shape), fill_value, dtype, device, requires_grad)
+        .map_err(_convert_error)
 }
 pub(crate) fn create_arange_tensor(
     start: f64,

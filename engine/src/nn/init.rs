@@ -81,26 +81,24 @@ pub fn init_constant(
     requires_grad: bool,
 ) -> Result<Tensor> {
     let numel = shape.numel();
+    // `filled_buffer` rather than `vec![value; numel]`: past a certain size the
+    // buffer is a fresh mapping and the fill is made of page faults, which are
+    // per-core work. See [`TensorData::filled_buffer`].
     let data = match dtype {
         DataType::Float32 => {
-            let vec = vec![value as f32; numel];
-            TensorData::from_vec_f32(vec, device)
+            TensorData::from_vec_f32(TensorData::filled_buffer(numel, value as f32), device)
         }
         DataType::Float64 => {
-            let vec = vec![value; numel];
-            TensorData::from_vec_f64(vec, device)
+            TensorData::from_vec_f64(TensorData::filled_buffer(numel, value), device)
         }
         DataType::Int32 => {
-            let vec = vec![value as i32; numel];
-            TensorData::from_vec_i32(vec, device)
+            TensorData::from_vec_i32(TensorData::filled_buffer(numel, value as i32), device)
         }
         DataType::Int64 => {
-            let vec = vec![value as i64; numel];
-            TensorData::from_vec_i64(vec, device)
+            TensorData::from_vec_i64(TensorData::filled_buffer(numel, value as i64), device)
         }
         DataType::Bool => {
-            let vec = vec![value != 0.0; numel];
-            TensorData::from_vec_bool(vec, device)
+            TensorData::from_vec_bool(TensorData::filled_buffer(numel, value != 0.0), device)
         }
     };
     Ok(Tensor::new(

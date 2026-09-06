@@ -1703,3 +1703,30 @@ def test_atleast_helpers_handle_empty_and_higher_rank_inputs():
 def test_atleast_helpers_reject_missing_inputs(helper):
     with pytest.raises(TypeError, match="requires at least one input"):
         helper()
+
+
+@pytest.mark.parametrize(
+    "dtype,value",
+    [("float32", 2.5), ("float64", -1.25), ("int32", 7), ("int64", -9), ("bool", 1)],
+)
+@pytest.mark.parametrize("megabytes", [8, 31, 33, 64])
+def test_a_large_constant_tensor_is_filled_everywhere(dtype, value, megabytes):
+    """Past a certain size a fresh buffer is a fresh mapping, and filling it is
+    page faults rather than stores -- per-core work, so it is spread over the
+    pool instead of written on one core (40MB of ones cost 25ms that way and 9
+    this). The split writes each element exactly once through uninitialized
+    memory, so an element it missed would be whatever the mapping held.
+
+    The sizes straddle the threshold where that starts, so both paths are
+    covered, and every element is checked rather than a sample.
+    """
+    width = {"float32": 4, "float64": 8, "int32": 4, "int64": 8, "bool": 1}[dtype]
+    count = megabytes * 1024 * 1024 // width
+
+    filled = mt.full((count,), value, dtype=dtype).numpy()
+    assert filled.shape == (count,)
+    expected = np.full(count, value, dtype=filled.dtype)
+    assert np.array_equal(filled, expected)
+
+    ones = mt.ones((count,), dtype=dtype).numpy()
+    assert np.array_equal(ones, np.ones(count, dtype=ones.dtype))
