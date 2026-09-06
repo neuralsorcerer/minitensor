@@ -948,6 +948,271 @@ fn topk_along_dim_par<T>(
     });
 }
 
+/// Put the `kth` positions of every 1-D slice where a sort would leave them,
+/// parallelizing over the outer index.
+///
+/// Selection rather than sorting: `select_nth_unstable_by` is linear in the
+/// slice, where a sort is `n log n`, and a caller asking "what are the ten
+/// smallest" does not care what order the rest ended up in. That is the whole
+/// point of the operation, so this must not be a sort with the answer read out
+/// of it.
+///
+/// Several positions are selected left to right, each within what the previous
+/// one left to its right: once `k1` is in place everything past it is no less
+/// than it, so `k2` can only be there. `kth` must arrive sorted and without
+/// repeats for that to hold.
+#[allow(clippy::too_many_arguments)]
+fn partition_along_dim_par<T, C>(
+    input: &[T],
+    values: &mut [T],
+    indices: &mut [i64],
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    kth: &[usize],
+    compare: C,
+) where
+    T: Copy + Send + Sync,
+    C: Fn(&(usize, T), &(usize, T)) -> Ordering + Sync + Copy,
+{
+    par_out_chunks2(values, indices, outer_stride, &|start, vchunk, ichunk| {
+        let o = start / outer_stride;
+        let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+        for r in 0..inner {
+            entries.clear();
+            let base = o * outer_stride + r;
+            for d in 0..dim_size {
+                entries.push((d, input[base + d * inner]));
+            }
+            select_positions(&mut entries, kth, compare);
+            for (j, &(index, value)) in entries.iter().enumerate() {
+                let off = j * inner + r;
+                vchunk[off] = value;
+                ichunk[off] = index as i64;
+            }
+        }
+    });
+}
+
+/// Put each of `kth` where a sort would leave it, each selected within what the
+/// previous one left to its right.
+///
+/// The comparator is a generic rather than a `fn` pointer so the selection
+/// inlines it: as a pointer it is an indirect call per comparison, which on two
+/// million floats was 28ms against 7.
+#[inline]
+fn select_positions<E, C>(entries: &mut [E], kth: &[usize], compare: C)
+where
+    C: Fn(&E, &E) -> Ordering + Copy,
+{
+    let mut from = 0usize;
+    for &position in kth {
+        if position >= entries.len() {
+            break;
+        }
+        entries[from..].select_nth_unstable_by(position - from, compare);
+        from = position + 1;
+    }
+}
+
+/// [`partition_along_dim_par`] for a caller that did not ask where the values
+/// came from.
+///
+/// Carrying the positions costs four times the memory per element and a
+/// comparison that has to break ties by index; without them the values move on
+/// their own, and a contiguous slice does not even have to be gathered first.
+/// Two million floats took 41ms as pairs and 7 as values.
+fn partition_values_along_dim_par<T, C>(
+    input: &[T],
+    values: &mut [T],
+    inner: usize,
+    dim_size: usize,
+    outer_stride: usize,
+    kth: &[usize],
+    compare: C,
+) where
+    T: Copy + Send + Sync,
+    C: Fn(&T, &T) -> Ordering + Sync + Copy,
+{
+    par_out_chunks(values, outer_stride, &|start, vchunk| {
+        let o = start / outer_stride;
+        if inner == 1 {
+            // The slice is the chunk: copy it and select in place.
+            let base = o * outer_stride;
+            vchunk.copy_from_slice(&input[base..base + dim_size]);
+            select_positions(vchunk, kth, compare);
+            return;
+        }
+        let mut slice: Vec<T> = Vec::with_capacity(dim_size);
+        for r in 0..inner {
+            slice.clear();
+            let base = o * outer_stride + r;
+            for d in 0..dim_size {
+                slice.push(input[base + d * inner]);
+            }
+            select_positions(&mut slice, kth, compare);
+            for (j, &value) in slice.iter().enumerate() {
+                vchunk[j * inner + r] = value;
+            }
+        }
+    });
+}
+
+/// Every 1-D slice along `dim` rearranged so each of the `kth` positions holds
+/// the value a sort would put there, with everything before it no greater and
+/// everything after no less.
+///
+/// The rest of the order is unspecified -- that is what buys the linear time --
+/// so this is not `sort` with fewer guarantees advertised: it does genuinely
+/// less work. `want_indices` gives the positions the values came from, which is
+/// what `argpartition` needs and what `partition` would otherwise allocate and
+/// throw away.
+///
+/// NaN sorts after every number, as it does for `sort` and `topk`, so a slice
+/// holding one puts it at the end rather than anywhere the comparison happened
+/// to leave it.
+pub fn partition(
+    tensor: &Tensor,
+    kth: &[i64],
+    dim: Option<isize>,
+    want_indices: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let ndim = tensor.ndim();
+    let axis = if ndim == 0 {
+        match dim {
+            Some(d) if d == 0 || d == -1 => 0,
+            Some(d) => return Err(MinitensorError::dim_out_of_range(d, 1)),
+            None => 0,
+        }
+    } else {
+        normalize_dim(dim.unwrap_or(-1), ndim)?
+    };
+
+    let dims = tensor.shape().dims();
+    let dim_size = if dims.is_empty() { 1 } else { dims[axis] };
+
+    // Resolve the positions once: negatives count from the end, and the kernel
+    // needs them ascending and distinct to select each within the last one's
+    // remainder.
+    let mut positions: Vec<usize> = Vec::with_capacity(kth.len());
+    for &position in kth {
+        let resolved = if position < 0 {
+            position + dim_size as i64
+        } else {
+            position
+        };
+        if resolved < 0 || resolved >= dim_size as i64 {
+            return Err(MinitensorError::index_error(position as isize, 0, dim_size));
+        }
+        positions.push(resolved as usize);
+    }
+    positions.sort_unstable();
+    positions.dedup();
+
+    let numel = tensor.numel();
+    let mut values_data = TensorData::zeros_on_device(numel, tensor.dtype(), tensor.device());
+    let mut indices_data = TensorData::zeros_on_device(
+        if want_indices { numel } else { 0 },
+        DataType::Int64,
+        tensor.device(),
+    );
+
+    if numel != 0 && dim_size != 0 {
+        let inner = if dims.is_empty() || axis + 1 >= dims.len() {
+            1
+        } else {
+            dims[axis + 1..].iter().product()
+        };
+        let outer_stride = dim_size * inner;
+
+        macro_rules! partition_arm {
+            ($read:ident, $write:ident, $name:literal, $cmp:expr, $value_cmp:expr) => {{
+                let input = tensor.data().$read().ok_or_else(|| {
+                    MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
+                })?;
+                let values = values_data.$write().ok_or_else(|| {
+                    MinitensorError::internal_error(concat!(
+                        "Failed to get mutable ",
+                        $name,
+                        " slice"
+                    ))
+                })?;
+                if want_indices {
+                    let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
+                        MinitensorError::internal_error("Failed to get mutable i64 slice")
+                    })?;
+                    partition_along_dim_par(
+                        input,
+                        values,
+                        indices,
+                        inner,
+                        dim_size,
+                        outer_stride,
+                        &positions,
+                        $cmp,
+                    );
+                } else {
+                    partition_values_along_dim_par(
+                        input,
+                        values,
+                        inner,
+                        dim_size,
+                        outer_stride,
+                        &positions,
+                        $value_cmp,
+                    );
+                }
+            }};
+        }
+
+        match tensor.dtype() {
+            DataType::Float32 => partition_arm!(
+                as_f32_slice,
+                as_f32_slice_mut,
+                "f32",
+                cmp_f32_asc,
+                value_cmp_f32
+            ),
+            DataType::Float64 => partition_arm!(
+                as_f64_slice,
+                as_f64_slice_mut,
+                "f64",
+                cmp_f64_asc,
+                value_cmp_f64
+            ),
+            DataType::Int32 => {
+                partition_arm!(as_i32_slice, as_i32_slice_mut, "i32", cmp_i32_asc, Ord::cmp)
+            }
+            DataType::Int64 => {
+                partition_arm!(as_i64_slice, as_i64_slice_mut, "i64", cmp_i64_asc, Ord::cmp)
+            }
+            DataType::Bool => {
+                return Err(MinitensorError::invalid_operation(
+                    "partition is not defined for boolean tensors; there is nothing to order",
+                ));
+            }
+        }
+    }
+
+    let values = Tensor::new(
+        Arc::new(values_data),
+        tensor.shape().clone(),
+        tensor.dtype(),
+        tensor.device(),
+        false,
+    );
+    let indices = want_indices.then(|| {
+        Tensor::new(
+            Arc::new(indices_data),
+            tensor.shape().clone(),
+            DataType::Int64,
+            tensor.device(),
+            false,
+        )
+    });
+    Ok((values, indices))
+}
+
 /// Return the top-``k`` values and their indices along ``dim``
 pub fn topk(
     tensor: &Tensor,

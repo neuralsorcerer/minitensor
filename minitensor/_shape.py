@@ -736,3 +736,119 @@ def combinations(input: object, r: int = 2, with_replacement: bool = False) -> T
     flat = _np.asarray(rows, dtype=_np.int64).reshape(-1)
     picked = _C.functional.index_select(tensor, 0, as_tensor(flat))
     return picked.reshape(len(rows), count)
+
+
+def _partition_positions(kth: object, length: int, name: str) -> list[int]:
+    """The `kth` argument as a list of positions, checked against the axis."""
+
+    if isinstance(kth, (Tensor, _np.ndarray, list, tuple)):
+        raw = (
+            [
+                int(v)
+                for v in _np.asarray(
+                    kth.numpy() if isinstance(kth, Tensor) else kth
+                ).reshape(-1)
+            ]
+            if not isinstance(kth, (list, tuple))
+            else [_operator.index(v) for v in kth]
+        )
+    else:
+        raw = [_operator.index(kth)]
+    if not raw:
+        raise ValueError(f"{name} needs at least one position to partition around")
+    for position in raw:
+        wrapped = position + length if position < 0 else position
+        if not 0 <= wrapped < length:
+            raise IndexError(
+                f"{name} position {position} is out of bounds for an axis of {length}"
+            )
+    return raw
+
+
+def partition(input: object, kth: object, dim: int = -1) -> Tensor:
+    """Each slice along `dim` rearranged so position `kth` holds what a sort
+    would put there, with everything before it no greater and everything after
+    no less.
+
+    The rest of the order is unspecified, and that is the point: the selection
+    is linear in the slice where a sort is `n log n`, so asking "what are the
+    ten smallest" costs a pass rather than an ordering. Reach for `sort` when
+    the order of the rest matters.
+
+    `kth` may be several positions, each of which lands where a sort would put
+    it, and may count from the end. `dim=None` partitions the flattened tensor.
+    NaN sorts after every number, as it does for `sort`.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        flat = tensor.reshape(-1)
+        positions = _partition_positions(kth, flat.shape[0], "partition")
+        return _C.functional.partition(flat, positions, 0, False)[0]
+    axis = _normalize_axis(dim, max(tensor.ndim(), 1), "partition")
+    length = tensor.shape[axis] if tensor.ndim() else 1
+    positions = _partition_positions(kth, length, "partition")
+    return _C.functional.partition(tensor, positions, axis, False)[0]
+
+
+def argpartition(input: object, kth: object, dim: int = -1) -> Tensor:
+    """Where the elements `partition` would produce came from.
+
+    The same selection, reporting positions instead of values -- so
+    `take_along_dim(x, argpartition(x, k), dim)` is `partition(x, k, dim)`.
+    """
+
+    tensor = _atleast_tensor(input)
+    if dim is None:
+        flat = tensor.reshape(-1)
+        positions = _partition_positions(kth, flat.shape[0], "argpartition")
+        return _C.functional.partition(flat, positions, 0, True)[1]
+    axis = _normalize_axis(dim, max(tensor.ndim(), 1), "argpartition")
+    length = tensor.shape[axis] if tensor.ndim() else 1
+    positions = _partition_positions(kth, length, "argpartition")
+    return _C.functional.partition(tensor, positions, axis, True)[1]
+
+
+def lexsort(keys: object, dim: int = -1) -> Tensor:
+    """The order that sorts by several keys at once, last key first.
+
+    The last key is the primary one and earlier keys break its ties, which is
+    NumPy's convention and the one that reads correctly when the keys are
+    written in the order a table's columns are.
+
+    Done as one stable sort per key, least significant first: a stable sort
+    leaves the order the previous keys established wherever the current one
+    ties, so `k` passes settle `k` keys. Sorting by a composite key instead
+    would need the keys to be commensurable, which they are not.
+    """
+
+    if isinstance(keys, Tensor):
+        columns = [keys] if keys.ndim() == 1 else list(unbind(keys, 0))
+    else:
+        columns = [_atleast_tensor(key) for key in keys]
+    if not columns:
+        raise ValueError("lexsort needs at least one key")
+
+    shape = list(columns[0].shape)
+    for key in columns[1:]:
+        if list(key.shape) != shape:
+            raise ValueError(
+                f"lexsort needs every key to have the same shape, got "
+                f"{tuple(key.shape)} and {tuple(shape)}"
+            )
+    if not shape:
+        raise ValueError("lexsort requires keys with at least one dimension")
+
+    axis = _normalize_axis(dim, len(shape), "lexsort")
+    length = shape[axis]
+    spread = [1] * len(shape)
+    spread[axis] = length
+    order = broadcast_to(
+        Tensor.arange(0, length, 1, dtype="int64").reshape(spread), shape
+    )
+    for key in columns:
+        ranked = _C.functional.gather(key, axis, order)
+        order = _C.functional.gather(
+            order, axis, _C.functional.argsort(ranked, axis, False, True)
+        )
+    return order

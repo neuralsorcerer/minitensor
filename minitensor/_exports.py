@@ -310,6 +310,9 @@ _FUNCTIONAL_FORWARDERS = (
 # `functional`; a name *added* to `functional` and forgotten here would simply
 # never show up as `mt.<name>`, with nothing to notice.
 _FUNCTIONAL_ONLY = (
+    # The raw selection kernel: `partition` and `argpartition` at the top level
+    # are the two halves of it that callers actually want.
+    "partition",
     "adaptive_avg_pool1d",
     "adaptive_avg_pool2d",
     "adaptive_max_pool1d",

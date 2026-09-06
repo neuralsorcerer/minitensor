@@ -42,7 +42,9 @@ def values():
 
 def test_ptp_is_the_span_of_the_values(values):
     np.testing.assert_allclose(mt.ptp(mt.from_numpy(values)).numpy(), np.ptp(values))
-    np.testing.assert_allclose(mt.ptp(mt.from_numpy(values), 0).numpy(), np.ptp(values, 0))
+    np.testing.assert_allclose(
+        mt.ptp(mt.from_numpy(values), 0).numpy(), np.ptp(values, 0)
+    )
     np.testing.assert_allclose(
         mt.ptp(mt.from_numpy(values), 1, True).numpy(), np.ptp(values, 1, keepdims=True)
     )
@@ -76,7 +78,9 @@ def test_average_weights_the_mean(values):
         np.average(values, None, everywhere),
     )
 
-    mean, total = mt.average(mt.from_numpy(values), 0, mt.from_numpy(along), returned=True)
+    mean, total = mt.average(
+        mt.from_numpy(values), 0, mt.from_numpy(along), returned=True
+    )
     expected, expected_total = np.average(values, 0, along, returned=True)
     np.testing.assert_allclose(mean.numpy(), expected)
     np.testing.assert_allclose(total.numpy(), expected_total)
@@ -137,7 +141,9 @@ def test_interp_holds_or_substitutes_outside_the_range():
         np.interp(queries, SAMPLES, CURVE),
     )
     np.testing.assert_allclose(
-        mt.interp(mt.from_numpy(queries), SAMPLES, CURVE, left=-99.0, right=99.0).numpy(),
+        mt.interp(
+            mt.from_numpy(queries), SAMPLES, CURVE, left=-99.0, right=99.0
+        ).numpy(),
         np.interp(queries, SAMPLES, CURVE, left=-99.0, right=99.0),
     )
     # `left` applies below the first sample, not on it.
@@ -236,7 +242,9 @@ def test_the_nan_aware_scans_skip_rather_than_poison(values):
 
 
 def test_ediff1d_flattens_and_can_be_bracketed(values):
-    np.testing.assert_allclose(mt.ediff1d(mt.from_numpy(values)).numpy(), np.ediff1d(values))
+    np.testing.assert_allclose(
+        mt.ediff1d(mt.from_numpy(values)).numpy(), np.ediff1d(values)
+    )
     np.testing.assert_allclose(
         mt.ediff1d(mt.from_numpy(values), to_end=[9.0], to_begin=[-9.0]).numpy(),
         np.ediff1d(values, to_end=[9.0], to_begin=[-9.0]),

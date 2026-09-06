@@ -105,50 +105,74 @@ pub(crate) fn non_nan_mask(tensor: &Tensor) -> Result<Tensor> {
 }
 
 pub(crate) fn cmp_f32_desc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
-    match (a.1.is_nan(), b.1.is_nan()) {
-        (true, true) => a.0.cmp(&b.0),
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => match b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => a.0.cmp(&b.0),
-            order => order,
-        },
+    if a.1 > b.1 {
+        Ordering::Less
+    } else if a.1 < b.1 {
+        Ordering::Greater
+    } else if a.1 == b.1 {
+        a.0.cmp(&b.0)
+    } else {
+        // Descending puts NaN first, mirroring where ascending puts it last.
+        match (a.1.is_nan(), b.1.is_nan()) {
+            (true, true) => a.0.cmp(&b.0),
+            (true, false) => Ordering::Less,
+            _ => Ordering::Greater,
+        }
     }
 }
 
 pub(crate) fn cmp_f32_asc(a: &(usize, f32), b: &(usize, f32)) -> Ordering {
-    match (a.1.is_nan(), b.1.is_nan()) {
-        (true, true) => a.0.cmp(&b.0),
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => match a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => a.0.cmp(&b.0),
-            order => order,
-        },
+    if a.1 < b.1 {
+        Ordering::Less
+    } else if a.1 > b.1 {
+        Ordering::Greater
+    } else if a.1 == b.1 {
+        a.0.cmp(&b.0)
+    } else {
+        // At least one is NaN, which sorts after every number and equal to
+        // another NaN -- so two of them fall back to the index as any other
+        // tie does.
+        match (a.1.is_nan(), b.1.is_nan()) {
+            (true, true) => a.0.cmp(&b.0),
+            (true, false) => Ordering::Greater,
+            _ => Ordering::Less,
+        }
     }
 }
 
 pub(crate) fn cmp_f64_desc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
-    match (a.1.is_nan(), b.1.is_nan()) {
-        (true, true) => a.0.cmp(&b.0),
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        (false, false) => match b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => a.0.cmp(&b.0),
-            order => order,
-        },
+    if a.1 > b.1 {
+        Ordering::Less
+    } else if a.1 < b.1 {
+        Ordering::Greater
+    } else if a.1 == b.1 {
+        a.0.cmp(&b.0)
+    } else {
+        // Descending puts NaN first, mirroring where ascending puts it last.
+        match (a.1.is_nan(), b.1.is_nan()) {
+            (true, true) => a.0.cmp(&b.0),
+            (true, false) => Ordering::Less,
+            _ => Ordering::Greater,
+        }
     }
 }
 
 pub(crate) fn cmp_f64_asc(a: &(usize, f64), b: &(usize, f64)) -> Ordering {
-    match (a.1.is_nan(), b.1.is_nan()) {
-        (true, true) => a.0.cmp(&b.0),
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => match a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => a.0.cmp(&b.0),
-            order => order,
-        },
+    if a.1 < b.1 {
+        Ordering::Less
+    } else if a.1 > b.1 {
+        Ordering::Greater
+    } else if a.1 == b.1 {
+        a.0.cmp(&b.0)
+    } else {
+        // At least one is NaN, which sorts after every number and equal to
+        // another NaN -- so two of them fall back to the index as any other
+        // tie does.
+        match (a.1.is_nan(), b.1.is_nan()) {
+            (true, true) => a.0.cmp(&b.0),
+            (true, false) => Ordering::Greater,
+            _ => Ordering::Less,
+        }
     }
 }
 
@@ -156,6 +180,49 @@ pub(crate) fn cmp_i32_desc(a: &(usize, i32), b: &(usize, i32)) -> Ordering {
     match b.1.cmp(&a.1) {
         Ordering::Equal => a.0.cmp(&b.0),
         order => order,
+    }
+}
+
+/// Ascending order over bare values, with `NaN` after every number.
+///
+/// The pair comparators above break ties by index so a sort's answer does not
+/// depend on the algorithm. Where only the values are being moved -- a
+/// partition that was not asked for indices -- there is no tie to break and no
+/// index to carry, and the pair is four times the memory of the value.
+pub(crate) fn value_cmp_f32(a: &f32, b: &f32) -> Ordering {
+    if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else if a == b {
+        Ordering::Equal
+    } else if a.is_nan() {
+        if b.is_nan() {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        }
+    } else {
+        Ordering::Less
+    }
+}
+
+/// [`value_cmp_f32`] for double precision.
+pub(crate) fn value_cmp_f64(a: &f64, b: &f64) -> Ordering {
+    if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else if a == b {
+        Ordering::Equal
+    } else if a.is_nan() {
+        if b.is_nan() {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        }
+    } else {
+        Ordering::Less
     }
 }
 

@@ -23,6 +23,7 @@ to stay on and no gradient to carry, and NumPy already computes the answer.
 
 from __future__ import annotations
 
+import builtins
 import operator as _operator
 
 import numpy as _np
@@ -35,6 +36,7 @@ from ._shape import (
     _index_tensor,
     _normalize_axis,
     _normalize_shape_argument,
+    broadcast_tensors,
     broadcast_to,
 )
 from ._shape import meshgrid as _meshgrid
@@ -819,3 +821,126 @@ def ravel_multi_index(multi_index: object, dims: object) -> Tensor:
         term = coordinate if stride == 1 and not single else coordinate * int(stride)
         position = term if position is None else position + term
     return position
+
+
+def take_along_axis(input: object, indices: object, axis: int | None = -1) -> Tensor:
+    """`take_along_dim` under NumPy's name for the same operation.
+
+    One element per position, its `axis` coordinate coming from `indices`, with
+    the index broadcast against the input's other axes. `axis=None` flattens
+    both first.
+    """
+
+    return take_along_dim(input, indices, axis)
+
+
+def put_along_axis(
+    input: object, indices: object, values: object, axis: int | None = -1
+) -> Tensor:
+    """The write direction of `take_along_axis`: `input` with `values` placed
+    at the positions `indices` names along `axis`.
+
+    Returns a new tensor rather than writing into `input`, which is how every
+    write in this library is spelled -- NumPy's version of this mutates and
+    returns nothing, so a caller porting code has to keep the result.
+
+    A position named twice keeps whichever write landed last, as `scatter`
+    does.
+    """
+
+    tensor = _atleast_tensor(input)
+    index = _as_index(indices, "put_along_axis")
+
+    if axis is None:
+        flat = tensor.reshape(-1)
+        positions = _wrap_negative(index.reshape(-1), flat.shape[0])
+        return put(flat, positions, values).reshape(list(tensor.shape))
+
+    dim = _normalize_axis(axis, tensor.ndim(), "put_along_axis")
+    if index.ndim() != tensor.ndim():
+        raise ValueError(
+            f"put_along_axis needs an index of the same rank as the input, "
+            f"got {index.ndim()} and {tensor.ndim()}"
+        )
+    target = list(tensor.shape)
+    target[dim] = index.shape[dim]
+    spread = broadcast_to(index, target)
+    written = _as_written_values(values, tensor)
+    if list(written.shape) != target:
+        written = broadcast_to(written, target)
+    return _F.scatter(tensor, dim, _wrap_negative(spread, tensor.shape[dim]), written)
+
+
+def compress(condition: object, input: object, dim: int | None = None) -> Tensor:
+    """The slices along `dim` that `condition` keeps.
+
+    `condition` is one flag per position along the axis and may be shorter than
+    it, in which case the positions it does not reach are dropped -- NumPy's
+    rule, and the reason this is not simply a boolean mask.
+    """
+
+    tensor = _atleast_tensor(input)
+    flags = _atleast_tensor(condition).reshape(-1)
+    if "bool" not in str(flags.dtype):
+        flags = flags != 0
+
+    if dim is None:
+        tensor = tensor.reshape(-1)
+        axis = 0
+    else:
+        axis = _normalize_axis(dim, tensor.ndim(), "compress")
+
+    length = tensor.shape[axis]
+    if flags.shape[0] > length:
+        raise ValueError(f"compress has {flags.shape[0]} flags for an axis of {length}")
+    kept = flatnonzero(flags)
+    return _F.index_select(tensor, axis, kept)
+
+
+def extract(condition: object, input: object) -> Tensor:
+    """The elements of `input` where `condition` is true, flattened.
+
+    The 1-D reading of a mask: both are flattened, so this is `masked_select`
+    over the whole tensor whatever its shape.
+    """
+
+    tensor = _atleast_tensor(input).reshape(-1)
+    flags = _atleast_tensor(condition).reshape(-1)
+    if "bool" not in str(flags.dtype):
+        flags = flags != 0
+    if flags.shape[0] != tensor.shape[0]:
+        raise ValueError(
+            f"extract needs one flag per element, got {flags.shape[0]} for "
+            f"{tensor.shape[0]}"
+        )
+    return _F.masked_select(tensor, flags)
+
+
+def choose(input: object, choices: object) -> Tensor:
+    """Pick from several tensors position by position, `input` saying which.
+
+    `choices` is a sequence of tensors that broadcast together; the result
+    takes each position's value from the choice `input` names there. Built as a
+    stack and a gather rather than a loop over choices, so the cost does not
+    grow with how many there are.
+    """
+
+    picks = _as_index(input, "choose")
+    options = [_atleast_tensor(choice) for choice in choices]
+    if not options:
+        raise ValueError("choose needs at least one choice")
+
+    spread = broadcast_tensors(*options) if len(options) > 1 else options
+    stacked = _F.stack(list(spread), 0)
+    target = list(stacked.shape)[1:]
+    if list(picks.shape) != target:
+        picks = broadcast_to(picks, target)
+    if picks.numel():
+        highest = builtins.int(_F.amax(picks).item())
+        lowest = builtins.int(_F.amin(picks).item())
+        if lowest < 0 or highest >= len(options):
+            raise IndexError(
+                f"choose has {len(options)} choices, but was asked for index "
+                f"{highest if highest >= len(options) else lowest}"
+            )
+    return _F.gather(stacked, 0, picks.reshape([1] + target)).reshape(target)
