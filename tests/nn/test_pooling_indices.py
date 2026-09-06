@@ -343,10 +343,27 @@ def test_the_rank_each_one_takes_is_stated(name, rank):
 
 
 def test_an_output_size_of_the_wrong_rank_is_refused():
-    with pytest.raises(ValueError, match="one entry per spatial axis"):
+    with pytest.raises(ValueError, match="one output_size per spatial axis"):
         F.max_unpool2d(
             _t(np.zeros((1, 1, 2, 2))),
             mt.Tensor.from_numpy(np.zeros((1, 1, 2, 2), dtype=np.int64)),
             2,
             output_size=(4, 4, 4),
         )
+
+
+def test_one_output_size_means_that_size_on_every_axis():
+    """Read the way `kernel_size` and `stride` are, which for a 1-D unpool is
+    the only spelling there is any reason to write."""
+    plane = np.arange(16, dtype=np.float64).reshape(1, 1, 4, 4)
+    pooled, indices = F.max_pool2d(_t(plane), 2, return_indices=True)
+    square = F.max_unpool2d(pooled, indices, 2, output_size=4)
+    listed = F.max_unpool2d(pooled, indices, 2, output_size=(4, 4))
+    np.testing.assert_array_equal(square.numpy(), listed.numpy())
+
+    line = np.arange(8, dtype=np.float64).reshape(1, 1, 8)
+    pooled, indices = F.max_pool1d(_t(line), 2, return_indices=True)
+    scalar = F.max_unpool1d(pooled, indices, 2, output_size=8)
+    sequence = F.max_unpool1d(pooled, indices, 2, output_size=[8])
+    np.testing.assert_array_equal(scalar.numpy(), sequence.numpy())
+    assert tuple(scalar.shape) == (1, 1, 8)

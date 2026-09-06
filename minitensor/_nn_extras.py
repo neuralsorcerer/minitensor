@@ -361,16 +361,14 @@ def _unpool_size(
     and the inverse is not determined -- `output_size` is how a caller says
     which one they had. Without it the smallest is assumed, which is what
     `torch` does too.
+
+    Read the same way as `kernel_size` and `stride`: one integer means that
+    size on every spatial axis, which is the only spelling a 1-D unpool has
+    reason to write.
     """
 
     if output_size is not None:
-        spatial = tuple(_operator.index(size) for size in output_size)
-        if len(spatial) != len(kernel):
-            raise ValueError(
-                f"{op} expects an output size with one entry per spatial axis "
-                f"({len(kernel)}), got {len(spatial)}"
-            )
-        return spatial
+        return _sliding_argument(output_size, "output_size", len(kernel), 0, op)
     return tuple(
         (count - 1) * s + k - 2 * pad
         for count, k, s, pad in zip(pooled, kernel, step, margin)
