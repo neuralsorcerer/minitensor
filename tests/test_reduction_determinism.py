@@ -132,6 +132,43 @@ _CHILD_ALONG_DIM = textwrap.dedent("""
     """)
 
 
+# Ordering is not an accumulation, so none of the rule above applies to it --
+# but `sort` and `mode` both *choose a kernel* from `rayon::current_num_threads`
+# (a lone long lane is sorted inside itself, several short ones are handed out
+# one per task), and an unstable sort is free to place equal elements however
+# the split fell. Neither may show through.
+#
+# The data is built to make it show if it can: every value repeats, so ties are
+# everywhere, and NaNs are spread through it, so the one part of the order that
+# is a convention rather than a comparison is exercised too. Shapes straddle the
+# 16384-element threshold that picks the within-lane sort, on the first axis and
+# the last.
+_CHILD_ORDERING = textwrap.dedent("""
+    import numpy as np, minitensor as mt
+    rng = np.random.default_rng(5)
+    digests = []
+    for shape in [(40000,), (3, 20000), (20000, 3), (64, 512), (7, 11, 13)]:
+        values = rng.integers(0, 17, shape).astype(np.float32)
+        values.reshape(-1)[::661] = np.nan
+        values.reshape(-1)[::991] = -0.0
+        tensor = mt.from_numpy(values)
+        for dim in range(len(shape)):
+            for descending in (False, True):
+                sorted_values, order = tensor.sort(dim, descending)
+                digests.append(sorted_values.numpy().tobytes())
+                digests.append(order.numpy().tobytes())
+                digests.append(tensor.argsort(dim, descending).numpy().tobytes())
+            picked, where = mt.mode(tensor, dim)
+            digests.append(picked.numpy().tobytes())
+            digests.append(where.numpy().tobytes())
+        flat = mt.from_numpy(values.reshape(-1))
+        digests.append(mt.unique(flat).numpy().tobytes())
+        digests.append(mt.unique(flat, True, True)[1].numpy().tobytes())
+    import hashlib
+    print(hashlib.sha256(b"".join(digests)).hexdigest())
+    """)
+
+
 def _run_at(program, n):
     env = dict(os.environ, RAYON_NUM_THREADS=n)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -166,3 +203,11 @@ def test_reductions_along_a_dim_are_invariant_across_thread_counts(threads):
     would first show.
     """
     assert _run_at(_CHILD_ALONG_DIM, threads) == _run_at(_CHILD_ALONG_DIM, "1")
+
+
+@pytest.mark.parametrize("threads", ["1", "2", "3", "4", "8"])
+def test_ordering_is_invariant_across_thread_counts(threads):
+    """`sort`, `argsort`, `mode` and `unique` all pick their kernel from the
+    size of the thread pool, and all four sort unstably. The answer may not
+    depend on either."""
+    assert _run_at(_CHILD_ORDERING, threads) == _run_at(_CHILD_ORDERING, "1")

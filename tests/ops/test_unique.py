@@ -484,3 +484,58 @@ class TestModeAcrossLanes:
         got, where = mt.mode(_t(values), 1)
         picked = np.take_along_axis(values, where.numpy()[:, None], 1).reshape(-1)
         np.testing.assert_array_equal(picked, got.numpy())
+
+
+# `mode` orders each lane by an integer key rather than by a branching value
+# comparison, and sorts a long lane *inside* itself when there are fewer lanes
+# than threads -- `mode` of a two-million-element vector is one output, so the
+# band split hands the whole sort to a single core otherwise. The tests below
+# pin what that changed: the places where the key folds values together, and
+# the answer being the same however many threads ran it.
+
+
+def test_the_two_zeros_are_one_value_and_the_answer_is_the_one_in_the_row():
+    """A key cannot tell `-0.0` from `0.0` -- they are equal as floats, so they
+    are one value with two occurrences. The reported value is then read back
+    out of the row at the reported index, so the sign is the caller's own and
+    the two outputs cannot disagree about it."""
+    data = np.array([1.0, -0.0, 0.0, 2.0])
+    values, indices = mt.mode(_t(data))
+    assert indices.item() == 1
+    assert values.item() == 0.0
+    assert np.signbit(values.numpy()) == np.signbit(data[1])
+
+    flipped = np.array([1.0, 0.0, -0.0, 2.0])
+    values, indices = mt.mode(_t(flipped))
+    assert indices.item() == 1
+    assert not np.signbit(values.numpy())
+
+
+def test_a_nan_run_reports_the_nan_that_is_actually_at_the_index():
+    data = np.array([1.0, np.nan, 2.0, np.nan, 3.0])
+    values, indices = mt.mode(_t(data))
+    assert indices.item() == 1
+    assert np.isnan(values.item())
+
+
+def test_nan_loses_a_tie_to_every_number():
+    """NaN keys above every number, and the tie rule takes the smallest -- so a
+    number ties with NaN only by being reported instead of it."""
+    values, indices = mt.mode(_t(np.array([np.nan, np.nan, 5.0, 5.0, 9.0])))
+    assert values.item() == 5.0
+    assert indices.item() == 2
+
+
+@pytest.mark.parametrize("length", [64, 20000])
+def test_a_long_lane_gives_the_same_answer_as_a_short_one(length):
+    """Above 16384 elements a lone lane is sorted in parallel rather than on
+    one core, which is a different code path for the same question."""
+    rng = np.random.default_rng(17)
+    data = rng.integers(0, 5, length).astype(np.float64)
+    data[0] = 4.0  # make the winner unambiguous by seeding one extra
+    data[1:9] = 4.0
+    values, indices = mt.mode(_t(data))
+    counts = np.bincount(data.astype(np.int64), minlength=5)
+    winner = counts.argmax()
+    assert values.item() == float(winner)
+    assert indices.item() == int(np.argmax(data == winner))

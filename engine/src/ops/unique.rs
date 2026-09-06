@@ -32,6 +32,9 @@
 //! value that jumps to another as counts cross. There is no derivative to hand
 //! back, so they detach.
 
+use crate::ops::order::{
+    PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64,
+};
 use crate::{
     error::{MinitensorError, Result},
     ops::map::{outputs_per_task, par_out_chunks2},
@@ -63,6 +66,12 @@ impl Orderable for f64 {
 impl Orderable for i32 {}
 impl Orderable for i64 {}
 impl Orderable for bool {}
+// The keys themselves, so [`walk_runs`] can find runs of equal values in a
+// lane that was ordered by key rather than by value -- equal keys and equal
+// values are the same runs, since the key folds `NaN` together and both zeros
+// together exactly as [`compare`] does.
+impl Orderable for u32 {}
+impl Orderable for u64 {}
 
 /// The total order the sorting and the run detection both use.
 ///
@@ -313,14 +322,21 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
     let mut values = TensorData::zeros_on_device(lanes, tensor.dtype(), device);
     let mut positions = vec![0i64; lanes];
 
+    // One long lane has nothing to spread across lanes, so it is sorted inside
+    // itself instead -- the same choice the tensor sort makes, and for the same
+    // reason: `mode` of a two-million-element vector is one output, so the band
+    // split below hands the whole sort to a single core. That took 248ms.
+    let within = lanes < rayon::current_num_threads() && width >= PAR_SORT_MIN_LEN;
+
     macro_rules! reduce {
-        ($accessor:ident, $accessor_mut:ident) => {{
+        ($accessor:ident, $accessor_mut:ident, $key:expr) => {{
             let source = arranged.data().$accessor().ok_or_else(|| {
                 MinitensorError::internal_error("mode: dtype does not match the input")
             })?;
             let out = values.$accessor_mut().ok_or_else(|| {
                 MinitensorError::internal_error("mode: dtype does not match the output")
             })?;
+            let key = $key;
             // One lane is one output, and each sorts a copy of its own row:
             // the lanes never touch, so they are handed out a band at a time
             // sized by what one of them costs.
@@ -337,9 +353,16 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
                     {
                         let index = start + offset;
                         let row = &source[index * width..(index + 1) * width];
+                        // Ordered by key rather than by value: the runs are the
+                        // same ones, and an integer comparison has none of the
+                        // branches the value comparison needs.
                         lane.clear();
-                        lane.extend_from_slice(row);
-                        lane.sort_by(|left, right| compare(*left, *right));
+                        lane.extend(row.iter().copied().map(key));
+                        if within {
+                            lane.par_sort_unstable();
+                        } else {
+                            lane.sort_unstable();
+                        }
 
                         // Ascending, so the first run of maximal length is the
                         // one holding the smallest of the tied values.
@@ -350,22 +373,27 @@ pub fn mode(tensor: &Tensor, dim: isize, keepdim: bool) -> Result<(Tensor, Tenso
                                 best = lane[from];
                             }
                         });
-                        *value_out = best;
-                        *position_out = row
+                        // Read the value back out of the row rather than
+                        // inverting the key: a key folds every `NaN` together
+                        // and both zeros together, and the caller's own bits
+                        // are the answer.
+                        let at = row
                             .iter()
-                            .position(|value| compare(*value, best) == Ordering::Equal)
-                            .unwrap_or(0) as i64;
+                            .position(|value| key(*value) == best)
+                            .unwrap_or(0);
+                        *value_out = row[at];
+                        *position_out = at as i64;
                     }
                 },
             );
         }};
     }
     match tensor.dtype() {
-        DataType::Float32 => reduce!(as_f32_slice, as_f32_slice_mut),
-        DataType::Float64 => reduce!(as_f64_slice, as_f64_slice_mut),
-        DataType::Int32 => reduce!(as_i32_slice, as_i32_slice_mut),
-        DataType::Int64 => reduce!(as_i64_slice, as_i64_slice_mut),
-        DataType::Bool => reduce!(as_bool_slice, as_bool_slice_mut),
+        DataType::Float32 => reduce!(as_f32_slice, as_f32_slice_mut, float_key32),
+        DataType::Float64 => reduce!(as_f64_slice, as_f64_slice_mut, float_key64),
+        DataType::Int32 => reduce!(as_i32_slice, as_i32_slice_mut, int_key32),
+        DataType::Int64 => reduce!(as_i64_slice, as_i64_slice_mut, int_key64),
+        DataType::Bool => reduce!(as_bool_slice, as_bool_slice_mut, bool_key),
     }
 
     Ok((

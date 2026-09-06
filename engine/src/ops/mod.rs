@@ -21,6 +21,7 @@ pub mod loss;
 pub(crate) mod map;
 pub mod minmax;
 pub mod normalization;
+pub(crate) mod order;
 pub mod pooling;
 pub mod reduction;
 pub mod search;
