@@ -210,6 +210,26 @@ pub fn unsqueeze(tensor: &Tensor, dim: isize) -> Result<Tensor> {
 /// Flatten dimensions `start_dim..=end_dim` into one. Routed through [`reshape`]
 /// so gradients flow (see [`squeeze`]).
 pub fn flatten(tensor: &Tensor, start_dim: isize, end_dim: isize) -> Result<Tensor> {
+    // A scalar has no axes to name, but flattening one still means something:
+    // the single value as a length-one vector, which is what NumPy's `ravel`
+    // and `torch.flatten` both give. Refusing it made `flatten`, `ravel` and
+    // everything built on them -- `repeat_interleave` of a scalar among them --
+    // the only shape moves that would not take a 0-d tensor, while `reshape`,
+    // `tile`, `unsqueeze` and `atleast_1d` all did.
+    //
+    // The two dims are still checked: `0` and `-1` are the only positions a
+    // 0-d tensor has, and anything else is the mistake the error is for.
+    if tensor.ndim() == 0 {
+        for (dim, name) in [
+            (start_dim, "flatten: start_dim"),
+            (end_dim, "flatten: end_dim"),
+        ] {
+            if dim != 0 && dim != -1 {
+                normalize_dim_named(dim, 0, name)?;
+            }
+        }
+        return reshape(tensor, Shape::new(vec![1]));
+    }
     let start = normalize_dim_named(start_dim, tensor.ndim(), "flatten: start_dim")?;
     let end = normalize_dim_named(end_dim, tensor.ndim(), "flatten: end_dim")?;
     if start > end {

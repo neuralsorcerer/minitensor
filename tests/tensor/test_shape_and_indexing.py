@@ -905,3 +905,44 @@ def test_index_select_wraps_from_one_outer_position_to_the_next(shape, dim):
         mt.Tensor(values, dtype="float64"), dim, mt.Tensor(positions, dtype="int64")
     ).numpy()
     np.testing.assert_array_equal(got, np.take(values, positions, axis=dim))
+
+
+# A scalar has no axes to name, but flattening one still means something: the
+# single value as a length-one vector, which is what NumPy's `ravel` and
+# `torch.flatten` both give. `flatten` refused it while `reshape`, `tile`,
+# `unsqueeze` and `atleast_1d` on the same tensor did not, and everything built
+# on `flatten` -- `ravel`, and `repeat_interleave` with no dimension named --
+# inherited the refusal.
+
+
+@pytest.mark.parametrize("start,end", [(0, -1), (0, 0), (-1, -1), (-1, 0)])
+def test_flattening_a_scalar_gives_a_one_element_vector(start, end):
+    scalar = mt.Tensor(np.array(3.5), dtype="float64")
+    got = flatten(scalar, start, end)
+    assert tuple(got.shape) == (1,)
+    np.testing.assert_array_equal(got.numpy(), np.ravel(np.float64(3.5)))
+
+
+def test_ravel_and_repeat_interleave_take_a_scalar_too():
+    scalar = mt.Tensor(np.array(2.0), dtype="float64")
+    np.testing.assert_array_equal(F.ravel(scalar).numpy(), [2.0])
+    np.testing.assert_array_equal(
+        mt.repeat_interleave(scalar, 3).numpy(), np.repeat(np.float64(2.0), 3)
+    )
+
+
+@pytest.mark.parametrize("start,end", [(1, -1), (0, 1), (-2, -1), (2, 2)])
+def test_a_scalar_still_refuses_a_dimension_it_does_not_have(start, end):
+    """`0` and `-1` are the only positions a 0-d tensor has; naming any other
+    is the mistake the error exists for."""
+    scalar = mt.Tensor(np.array(3.5), dtype="float64")
+    with pytest.raises(IndexError):
+        flatten(scalar, start, end)
+
+
+def test_the_scalar_flatten_still_carries_a_gradient_back_to_a_scalar():
+    scalar = mt.Tensor(np.array(3.5), dtype="float64", requires_grad=True)
+    flatten(scalar).sum().backward()
+    assert tuple(scalar.grad.shape) == ()
+    assert scalar.grad.item() == 1.0
+    mt.clear_autograd_graph()
