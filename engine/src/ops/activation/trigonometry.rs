@@ -356,8 +356,14 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     }
 
     let requires_grad = lhs.requires_grad() || rhs.requires_grad();
-    use crate::ops::binary::{BinaryOpKind, coerce_binary_operands};
-    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Add)?;
+    use crate::ops::binary::coerce_binary_operands;
+    // A log of a sum of exponentials is a float whatever the operands were, so
+    // the promotion is division's -- the same one `hypot`, `atan2` and the rest
+    // of the float-valued binary family take. Promoting like `+` instead left
+    // two integers landing on an integer dtype, which the kernel then had to
+    // refuse: `logaddexp` was the only one of them that would not take a pair
+    // of integers.
+    let (lhs_cast, rhs_cast, result_dtype) = coerce_binary_operands(lhs, rhs, BinaryOpKind::Div)?;
 
     let lhs_tensor = match lhs_cast {
         std::borrow::Cow::Borrowed(t) => t.clone(),
@@ -367,12 +373,6 @@ pub fn logaddexp(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
         std::borrow::Cow::Borrowed(t) => t.clone(),
         std::borrow::Cow::Owned(t) => t,
     };
-
-    if result_dtype != DataType::Float32 && result_dtype != DataType::Float64 {
-        return Err(MinitensorError::invalid_operation(
-            "logaddexp is only supported for floating point tensors",
-        ));
-    }
 
     let output_shape = lhs_tensor.shape().broadcast_with(rhs_tensor.shape())?;
     let output_data = match result_dtype {

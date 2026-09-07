@@ -197,6 +197,60 @@ def test_logaddexp2_survives_exponents_that_would_overflow():
     np.testing.assert_allclose(got, np.logaddexp2(big, other), rtol=1e-14)
 
 
+# Every one of these answers in a float whatever its operands were, so an
+# integer pair promotes the way `/` does rather than being refused. `logaddexp`
+# was promoting like `+` instead, landing two integers on an integer dtype that
+# its own kernel then had to reject.
+_FLOAT_VALUED_BINARIES = [
+    ("logaddexp", np.logaddexp),
+    ("logaddexp2", np.logaddexp2),
+    ("hypot", np.hypot),
+    ("atan2", np.arctan2),
+]
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64", "bool"])
+@pytest.mark.parametrize(
+    "name,reference", _FLOAT_VALUED_BINARIES, ids=[c[0] for c in _FLOAT_VALUED_BINARIES]
+)
+def test_a_float_valued_binary_takes_an_integer_pair(name, reference, dtype):
+    if dtype == "bool":
+        values = np.array([True, False, True])
+        other = np.array([True, True, False])
+    else:
+        values = np.array([1, 2, 3], dtype=dtype)
+        other = np.array([3, 2, 1], dtype=dtype)
+
+    result = getattr(mt, name)(
+        mt.Tensor(values, dtype=dtype), mt.Tensor(other, dtype=dtype)
+    )
+    # Two integers promote to float32, as they do for `/`; NumPy would widen
+    # further, which is the documented difference and not this one. The
+    # reference is taken in float64 for the same reason -- NumPy computes a
+    # bool pair in float16, which is coarser than the answer being checked.
+    assert result.dtype == "float32"
+    np.testing.assert_allclose(
+        result.numpy(),
+        reference(values.astype(np.float64), other.astype(np.float64)),
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "name,reference", _FLOAT_VALUED_BINARIES, ids=[c[0] for c in _FLOAT_VALUED_BINARIES]
+)
+def test_a_float_valued_binary_lets_a_float64_operand_pull_the_result_up(
+    name, reference
+):
+    integers = np.array([1, 2, 3], dtype=np.int64)
+    doubles = np.array([3.0, 2.0, 1.0])
+    result = getattr(mt, name)(
+        mt.Tensor(integers, dtype="int64"), mt.Tensor(doubles, dtype="float64")
+    )
+    assert result.dtype == "float64"
+    np.testing.assert_allclose(result.numpy(), reference(integers, doubles), rtol=1e-14)
+
+
 def test_ldexp_scales_by_an_exact_power_of_two():
     values = np.array([1.5, -0.25, 3.0])
     exponents = np.array([3.0, 10.0, -4.0])

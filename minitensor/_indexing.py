@@ -38,6 +38,7 @@ from ._shape import (
     _normalize_axis,
     _normalize_axis_tuple,
     _normalize_shape_argument,
+    _promoted_dtype,
     broadcast_tensors,
     broadcast_to,
 )
@@ -65,19 +66,6 @@ def _wrap_negative(indices: Tensor, length: int) -> Tensor:
     if length == 0:
         return indices
     return _F.where(indices < 0, indices + length, indices)
-
-
-def _promoted_dtype(left: Tensor, right: Tensor) -> str:
-    """The dtype the library's own promotion gives these two.
-
-    Asked by doing the promotion on nothing: an empty add touches no elements
-    and answers exactly what a full one would, which beats restating the
-    promotion table here where it could drift from the real one.
-    """
-
-    empty_left = _F.narrow(left.reshape(-1), 0, 0, 0)
-    empty_right = _F.narrow(right.reshape(-1), 0, 0, 0)
-    return str((empty_left + empty_right).dtype)
 
 
 def take(input: object, index: object) -> Tensor:

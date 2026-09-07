@@ -505,6 +505,25 @@ def tensor_split(
     )
 
 
+def _promoted_dtype(left: Tensor, right: Tensor, operation: object = None) -> str:
+    """The dtype the library's own promotion gives these two.
+
+    Asked by doing the promotion on nothing: an empty operation touches no
+    elements and answers exactly what a full one would, which beats restating
+    the promotion table here where it could drift from the real one.
+
+    `operation` picks which table: the default is addition's, and the
+    float-valued ops pass division, whose promotion is the one that always
+    lands on a float.
+    """
+
+    empty_left = _C.functional.narrow(left.reshape(-1), 0, 0, 0)
+    empty_right = _C.functional.narrow(right.reshape(-1), 0, 0, 0)
+    if operation is None:
+        return str((empty_left + empty_right).dtype)
+    return str(operation(empty_left, empty_right).dtype)
+
+
 def _normalize_axis(dim: object, ndim: int, name: str) -> int:
     try:
         axis = _operator.index(dim)

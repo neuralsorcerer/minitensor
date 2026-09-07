@@ -23,7 +23,7 @@ from __future__ import annotations
 import math as _math
 
 from . import _core as _C
-from ._shape import _atleast_tensor
+from ._shape import _atleast_tensor, _promoted_dtype
 
 Tensor = _C.Tensor
 _F = _C.functional
@@ -176,11 +176,15 @@ def logaddexp2(input: object, other: object) -> Tensor:
     a second stable implementation of the same shift-and-add.
     """
 
+    left, right = _atleast_tensor(input), _atleast_tensor(other)
+    # Promoted before the scaling, not by it. `scale` is a Python float, which
+    # is float32, so scaling first narrowed an `int64` beside a `float64` to
+    # float32 -- and the sum was then formed at half the precision the answer
+    # was reported in. Asking `logaddexp`'s own promotion (division's, since
+    # the answer is a float whatever went in) keeps that from happening.
+    dtype = _promoted_dtype(left, right, lambda a, b: a / b)
     scale = _math.log(2.0)
-    return (
-        _F.logaddexp(_atleast_tensor(input) * scale, _atleast_tensor(other) * scale)
-        / scale
-    )
+    return _F.logaddexp(left.astype(dtype) * scale, right.astype(dtype) * scale) / scale
 
 
 def ldexp(input: object, other: object) -> Tensor:
