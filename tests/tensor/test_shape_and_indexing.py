@@ -827,3 +827,81 @@ def test_gradients_flow_through_a_slice():
     expected = np.zeros((4, 6), dtype=np.float32)
     expected[::2, ::3] = 1.0
     assert np.array_equal(mt.get_gradient(strided).numpy(), expected)
+
+
+# `gather` and `index_select` both move one output element (or one row) per
+# source position, and both used to cut their work by *outer* position -- one
+# task for `gather`, `outputs_per_task(inner)` rows for `index_select`. A
+# gather along the first axis has one outer position however large the tensor
+# is, so gathering a million elements out of four million ran on a single core;
+# `index_select` spread its work but copied one element at a time through a
+# slice copy when the rows were one element long. Both now walk the output
+# directly, so the tests below put a chunk boundary in every place one can
+# fall.
+
+
+@pytest.mark.parametrize("length", [1, 2, 8191, 8192, 8193, 20000])
+def test_a_flat_gather_of_any_length_lands_exactly(length):
+    rng = np.random.default_rng(length)
+    values = np.arange(50000.0)
+    positions = rng.integers(0, 50000, length).astype(np.int64)
+    got = F.gather(
+        mt.Tensor(values, dtype="float64"), 0, mt.Tensor(positions, dtype="int64")
+    ).numpy()
+    np.testing.assert_array_equal(got, values[positions])
+
+
+@pytest.mark.parametrize(
+    "shape,dim", [((7, 9000), 1), ((9000, 7), 0), ((30, 40, 50), 1)]
+)
+def test_gather_along_every_axis_of_a_large_tensor(shape, dim):
+    rng = np.random.default_rng(sum(shape) + dim)
+    values = rng.standard_normal(shape)
+    positions = rng.integers(0, shape[dim], shape).astype(np.int64)
+    got = F.gather(
+        mt.Tensor(values, dtype="float64"), dim, mt.Tensor(positions, dtype="int64")
+    ).numpy()
+    np.testing.assert_array_equal(got, np.take_along_axis(values, positions, axis=dim))
+
+
+@pytest.mark.parametrize("where", [0, 1, 8192, 19999])
+def test_an_out_of_range_index_is_refused_from_anywhere_in_the_tensor(where):
+    """The check runs in parallel and stops at the first offender, so it has to
+    find one wherever it sits."""
+    values = np.arange(100.0)
+    for bad in (100, -1):
+        positions = np.zeros(20000, dtype=np.int64)
+        positions[where] = bad
+        with pytest.raises(Exception):
+            F.gather(
+                mt.Tensor(values, dtype="float64"),
+                0,
+                mt.Tensor(positions, dtype="int64"),
+            )
+
+
+@pytest.mark.parametrize("selected", [1, 2, 8191, 8192, 20001])
+def test_index_select_of_any_count_matches_numpy(selected):
+    rng = np.random.default_rng(selected)
+    values = np.arange(30000.0)
+    positions = rng.integers(0, 30000, selected).astype(np.int64)
+    got = F.index_select(
+        mt.Tensor(values, dtype="float64"), 0, mt.Tensor(positions, dtype="int64")
+    ).numpy()
+    np.testing.assert_array_equal(got, values[positions])
+
+
+@pytest.mark.parametrize(
+    "shape,dim", [((6, 5000), 1), ((5000, 6), 0), ((20, 30, 40), 1)]
+)
+def test_index_select_wraps_from_one_outer_position_to_the_next(shape, dim):
+    """A chunk covers several rows and can run past the end of one outer
+    position into the next, which is where the stepped row arithmetic has to
+    carry."""
+    rng = np.random.default_rng(sum(shape))
+    values = rng.standard_normal(shape)
+    positions = rng.integers(0, shape[dim], 777).astype(np.int64)
+    got = F.index_select(
+        mt.Tensor(values, dtype="float64"), dim, mt.Tensor(positions, dtype="int64")
+    ).numpy()
+    np.testing.assert_array_equal(got, np.take(values, positions, axis=dim))

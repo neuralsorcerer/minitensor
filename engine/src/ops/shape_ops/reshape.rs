@@ -653,13 +653,33 @@ pub fn index_select(tensor: &Tensor, dim: isize, indices: &[usize]) -> Result<Te
                         // A chunk starts on a row boundary because its width is
                         // a whole number of rows; row `r` of the output is
                         // outer position `r / selected` and selected index
-                        // `r % selected`.
-                        let mut row = start / inner;
+                        // `r % selected`. Both are found once for the chunk and
+                        // then stepped, rather than divided out per row.
+                        let row = start / inner;
+                        let mut outer = row / selected;
+                        let mut chosen = row % selected;
+                        if inner == 1 {
+                            // One element per row, so the slice copy the other
+                            // branch makes is a whole `memcpy` call to move
+                            // four bytes.
+                            for slot in out_chunk.iter_mut() {
+                                slot.write(src[outer * dims[dim] + indices[chosen]]);
+                                chosen += 1;
+                                if chosen == selected {
+                                    chosen = 0;
+                                    outer += 1;
+                                }
+                            }
+                            return;
+                        }
                         for piece in out_chunk.chunks_mut(inner) {
-                            let source = (row / selected) * dims[dim] * inner
-                                + indices[row % selected] * inner;
+                            let source = outer * dims[dim] * inner + indices[chosen] * inner;
                             piece.write_copy_of_slice(&src[source..source + inner]);
-                            row += 1;
+                            chosen += 1;
+                            if chosen == selected {
+                                chosen = 0;
+                                outer += 1;
+                            }
                         }
                     });
                 })
@@ -728,15 +748,18 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
 
     let dim_size = input_dims[dim];
 
-    // Validate indices
+    // Validate indices. `find_any` rather than a serial walk: the check reads
+    // the whole index tensor, which is the same size as the output, and it
+    // stops at the first offender either way.
     let idx_slice = index
         .data()
         .as_i64_slice()
         .ok_or_else(|| MinitensorError::invalid_operation("gather indices must be int64"))?;
-    for &v in idx_slice {
-        if v < 0 || v as usize >= dim_size {
-            return Err(MinitensorError::index_error(v as isize, 0, dim_size));
-        }
+    if let Some(&bad) = idx_slice
+        .par_iter()
+        .find_any(|&&v| v < 0 || v as usize >= dim_size)
+    {
+        return Err(MinitensorError::index_error(bad as isize, 0, dim_size));
     }
 
     if !tensor.device().is_cpu() {
@@ -770,22 +793,24 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
                     "gather output length ({output_numel}) is not divisible by chunk size ({chunk_size})"
                 )));
             }
-            // SAFETY: the chunks tile the output (the divisibility check above
-            // is what guarantees it), and each element of each chunk is written
-            // by the innermost loop.
+            // SAFETY: the chunks tile the output and the body writes every
+            // element of the one it is given.
+            //
+            // Cut wherever the split falls, not one *outer* position per task:
+            // a gather along the first axis has one of those however large the
+            // tensor is, so `gather` of a million elements out of four million
+            // ran on a single core. Every output position carries its own
+            // source -- the index at the same flat position, and the column it
+            // sits in -- so any cut works.
             let out = unsafe {
                 build_vec::<$ty, _>(output_numel, |spare| {
-                    par_out_chunks(spare, chunk_size, &|start, out_chunk| {
-                        let o = start / chunk_size;
-                        let base = o * dim_size * inner;
-                        let idx_chunk = &idx[o * chunk_size..(o + 1) * chunk_size];
-                        for i in 0..idx_dim {
-                            let idx_row = &idx_chunk[i * inner..(i + 1) * inner];
-                            let dst_row = &mut out_chunk[i * inner..(i + 1) * inner];
-                            for (j, &gather_val) in idx_row.iter().enumerate() {
-                                let gather_idx = gather_val as usize;
-                                dst_row[j].write(src[base + gather_idx * inner + j]);
-                            }
+                    par_out_chunks(spare, MOVE_CHUNK, &|start, out_chunk| {
+                        for (offset, slot) in out_chunk.iter_mut().enumerate() {
+                            let position = start + offset;
+                            let base = (position / chunk_size) * dim_size * inner;
+                            let column = position % inner;
+                            let row = idx[position] as usize;
+                            slot.write(src[base + row * inner + column]);
                         }
                     });
                 })
@@ -823,13 +848,13 @@ pub fn gather(tensor: &Tensor, dim: isize, index: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
-/// How much of a slice's output one task copies.
+/// How much of a slice's or a gather's output one task moves.
 ///
 /// Pure data movement, so the block wants to be long enough that the task
 /// bookkeeping disappears against the copy and short enough that a few
 /// thousand of them still fill every core. The same length the other
 /// movement kernels use.
-const SLICE_COPY_CHUNK: usize = 8192;
+const MOVE_CHUNK: usize = 8192;
 
 /// Slicing operation - select a contiguous range of elements
 pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize) -> Result<Tensor> {
@@ -933,7 +958,7 @@ pub fn slice(tensor: &Tensor, dim: isize, start: usize, end: usize, step: usize)
             // the end, writing every element exactly once.
             let out = unsafe {
                 build_vec::<$ty, _>(output_shape_obj.numel(), |spare| {
-                    par_out_chunks(spare, SLICE_COPY_CHUNK, &fill);
+                    par_out_chunks(spare, MOVE_CHUNK, &fill);
                 })
             };
             TensorData::$from_vec(out, device)
