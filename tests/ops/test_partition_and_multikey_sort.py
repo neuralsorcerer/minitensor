@@ -81,6 +81,9 @@ def test_partition_puts_nan_after_every_number():
 
 
 def test_argpartition_names_the_positions_partition_moved():
+    # Continuous values, so nothing ties and the arrangement is fully
+    # determined -- the two forms then agree element for element. With ties
+    # they need not; see the test below.
     rng = np.random.default_rng(67)
     values = rng.standard_normal((5, 9))
     for axis in [0, 1]:
@@ -294,3 +297,71 @@ def test_partition_reports_a_negative_nan_as_the_one_it_was_given(dtype):
     got = mt.partition(mt.Tensor(values, dtype=dtype), 1).numpy()
     assert np.isnan(got[2:]).all()
     assert sorted(np.signbit(got[2:])) == [False, True]
+
+
+# When the indices are wanted too, the selection runs over the order key packed
+# above the position -- eight bytes an element for the four-byte dtypes where a
+# `(position, value)` pair took sixteen -- and the values are read back out of
+# the input at the positions it settled on. So the two outputs cannot disagree,
+# and a value the key cannot reproduce still comes back as the caller gave it.
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64"])
+def test_argpartition_partitions_the_same_data_around_the_same_position(dtype):
+    """With values coarse enough to repeat, the two forms need not produce the
+    same *arrangement* -- the order of everything but `kth` is unspecified, and
+    they take different routes to it. What they must agree on is the element at
+    `kth` and which values fall on each side of it."""
+    rng = np.random.default_rng(15)
+    if dtype.startswith("float"):
+        values = np.round(rng.standard_normal((3, 64)) * 4).astype(dtype)
+    else:
+        values = rng.integers(-40, 40, (3, 64)).astype(dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    for kth in (0, 1, 31, 63):
+        positions = mt.argpartition(tensor, kth, 1).numpy()
+        taken = np.take_along_axis(values, positions, axis=1)
+        rearranged = mt.partition(tensor, kth, 1).numpy()
+
+        np.testing.assert_array_equal(taken[:, kth], rearranged[:, kth])
+        for row in range(3):
+            assert sorted(taken[row, :kth].tolist()) == sorted(
+                rearranged[row, :kth].tolist()
+            )
+            assert sorted(taken[row, kth + 1 :].tolist()) == sorted(
+                rearranged[row, kth + 1 :].tolist()
+            )
+            # Every position appears once: a permutation of the axis.
+            assert sorted(positions[row].tolist()) == list(range(64))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_argpartition_keeps_a_negative_nan_and_a_negative_zero(dtype):
+    values = np.array([1.0, -np.nan, -0.0, 0.0, np.nan, 2.0], dtype=dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+    positions = mt.argpartition(tensor, 3).numpy()
+    taken = values[positions]
+    rearranged = mt.partition(tensor, 3).numpy()
+
+    # NaN sorts after every number in both forms, so it lands in the same place.
+    np.testing.assert_array_equal(np.isnan(taken), np.isnan(rearranged))
+    # Both signs of NaN and both zeros come back as the caller gave them: the
+    # values are read out of the input at the positions the selection settled
+    # on, not rebuilt from the keys it compared.
+    assert sorted(np.signbit(taken[np.isnan(taken)])) == [False, True]
+    zeros = (taken == 0.0) & ~np.isnan(taken)
+    assert sorted(np.signbit(taken[zeros])) == [False, True]
+
+
+def test_argpartition_over_a_long_axis_matches_a_sort():
+    """Long enough that the packed entries are the bulk of the work, and with
+    ties everywhere so the position half of the key decides."""
+    rng = np.random.default_rng(16)
+    values = np.round(rng.standard_normal(50000) * 5)
+    tensor = mt.Tensor(values, dtype="float64")
+    kth = 25000
+    positions = mt.argpartition(tensor, kth).numpy()
+    assert values[positions[kth]] == np.sort(values)[kth]
+    assert (values[positions[:kth]] <= values[positions[kth]]).all()
+    assert (values[positions[kth + 1 :]] >= values[positions[kth]]).all()

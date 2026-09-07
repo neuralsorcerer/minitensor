@@ -8,6 +8,7 @@ use super::*;
 use crate::autograd::GatherBackward;
 use crate::autograd::MinMaxBackward;
 use crate::ops::map::{par_all_chunk, par_any_chunk, par_out_chunks, par_out_chunks2};
+use crate::ops::order::{Entry, float_key32, float_key64, int_key32, int_key64, pack32, pack64};
 use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
@@ -966,7 +967,7 @@ fn topk_along_dim_par<T>(
 /// than it, so `k2` can only be there. `kth` must arrive sorted and without
 /// repeats for that to hold.
 #[allow(clippy::too_many_arguments)]
-fn partition_along_dim_par<T, C>(
+fn partition_along_dim_par<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -974,25 +975,33 @@ fn partition_along_dim_par<T, C>(
     dim_size: usize,
     outer_stride: usize,
     kth: &[usize],
-    compare: C,
+    make: M,
 ) where
     T: Copy + Send + Sync,
-    C: Fn(&(usize, T), &(usize, T)) -> Ordering + Sync + Copy,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
     par_out_chunks2(values, indices, outer_stride, &|start, vchunk, ichunk| {
         let o = start / outer_stride;
-        let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+        // The order key packed above the position: eight bytes an element for
+        // the four-byte dtypes where a `(position, value)` pair took sixteen,
+        // and a plain integer comparison where the pair needed three float
+        // comparisons and a NaN test.
+        let mut entries: Vec<E> = Vec::with_capacity(dim_size);
         for r in 0..inner {
             entries.clear();
             let base = o * outer_stride + r;
             for d in 0..dim_size {
-                entries.push((d, input[base + d * inner]));
+                entries.push(make(d, input[base + d * inner]));
             }
-            select_positions(&mut entries, kth, compare);
-            for (j, &(index, value)) in entries.iter().enumerate() {
+            select_positions(&mut entries, kth, Ord::cmp);
+            for (j, entry) in entries.iter().enumerate() {
+                let position = entry.position();
                 let off = j * inner + r;
-                vchunk[off] = value;
-                ichunk[off] = index as i64;
+                // Read back out of the input rather than carried through the
+                // selection, so a NaN keeps its payload and a zero its sign.
+                vchunk[off] = input[base + position * inner];
+                ichunk[off] = position as i64;
             }
         }
     });
@@ -1130,7 +1139,7 @@ pub fn partition(
         let outer_stride = dim_size * inner;
 
         macro_rules! partition_arm {
-            ($read:ident, $write:ident, $name:literal, $cmp:expr, $value_cmp:expr) => {{
+            ($read:ident, $write:ident, $name:literal, $key:expr, $wide:expr, $value_cmp:expr) => {{
                 let input = tensor.data().$read().ok_or_else(|| {
                     MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
                 })?;
@@ -1145,16 +1154,32 @@ pub fn partition(
                     let indices = indices_data.as_i64_slice_mut().ok_or_else(|| {
                         MinitensorError::internal_error("Failed to get mutable i64 slice")
                     })?;
-                    partition_along_dim_par(
-                        input,
-                        values,
-                        indices,
-                        inner,
-                        dim_size,
-                        outer_stride,
-                        &positions,
-                        $cmp,
-                    );
+                    // A four-byte key and the position share one `u64` when the
+                    // axis is short enough to hold a position in half of it;
+                    // the wide form covers the rest and the eight-byte keys.
+                    if $wide || dim_size > u32::MAX as usize {
+                        partition_along_dim_par(
+                            input,
+                            values,
+                            indices,
+                            inner,
+                            dim_size,
+                            outer_stride,
+                            &positions,
+                            |d: usize, v| pack64($key(v) as u64, d),
+                        );
+                    } else {
+                        partition_along_dim_par(
+                            input,
+                            values,
+                            indices,
+                            inner,
+                            dim_size,
+                            outer_stride,
+                            &positions,
+                            |d: usize, v| pack32($key(v) as u32, d),
+                        );
+                    }
                 } else {
                     partition_values_along_dim_par(
                         input,
@@ -1174,21 +1199,37 @@ pub fn partition(
                 as_f32_slice,
                 as_f32_slice_mut,
                 "f32",
-                cmp_f32_asc,
+                float_key32,
+                false,
                 value_cmp_f32
             ),
             DataType::Float64 => partition_arm!(
                 as_f64_slice,
                 as_f64_slice_mut,
                 "f64",
-                cmp_f64_asc,
+                float_key64,
+                true,
                 value_cmp_f64
             ),
             DataType::Int32 => {
-                partition_arm!(as_i32_slice, as_i32_slice_mut, "i32", cmp_i32_asc, Ord::cmp)
+                partition_arm!(
+                    as_i32_slice,
+                    as_i32_slice_mut,
+                    "i32",
+                    int_key32,
+                    false,
+                    Ord::cmp
+                )
             }
             DataType::Int64 => {
-                partition_arm!(as_i64_slice, as_i64_slice_mut, "i64", cmp_i64_asc, Ord::cmp)
+                partition_arm!(
+                    as_i64_slice,
+                    as_i64_slice_mut,
+                    "i64",
+                    int_key64,
+                    true,
+                    Ord::cmp
+                )
             }
             DataType::Bool => {
                 return Err(MinitensorError::invalid_operation(

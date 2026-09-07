@@ -794,8 +794,17 @@ def partition(input: object, kth: object, dim: int = -1) -> Tensor:
 def argpartition(input: object, kth: object, dim: int = -1) -> Tensor:
     """Where the elements `partition` would produce came from.
 
-    The same selection, reporting positions instead of values -- so
-    `take_along_dim(x, argpartition(x, k), dim)` is `partition(x, k, dim)`.
+    The same selection, reporting positions instead of values, so
+    `take_along_dim(x, argpartition(x, k), dim)` is a partition of the same
+    data around the same `k`: position `k` holds what a sort would leave there
+    and the two sides hold the same values.
+
+    Not the *same arrangement* as `partition` when values repeat. Both are
+    valid answers -- the order of everything but `k` is unspecified, which is
+    what makes a selection cheaper than a sort -- and the two take different
+    routes to it: reporting positions means carrying them through the
+    selection, and carrying them costs enough that the value-only form does
+    without.
     """
 
     tensor = _atleast_tensor(input)
