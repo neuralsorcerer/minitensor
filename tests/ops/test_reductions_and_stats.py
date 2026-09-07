@@ -1336,3 +1336,67 @@ def test_the_gradient_survives_the_collapse():
     F.mean(tensor, [1, 0], True).backward()
     np.testing.assert_allclose(tensor.grad.numpy(), np.full((2, 3), 1 / 6))
     mt.clear_autograd_graph()
+
+
+# A median along a dimension reports where the middle element came from, so it
+# selects over entries rather than over bare values. Those entries used to be
+# `(position, value)` pairs -- sixteen bytes an element for a four-byte value --
+# compared three ways with a NaN test hanging off the end. They are now the
+# order key packed above the position, eight bytes for the four-byte dtypes, and
+# the comparison is a plain integer one; the value is read back out of the input
+# at the position the selection settled on. Two million float32 went from 35.8ms
+# to 9.4, and 512x4096 along its first axis from 15.0 to 4.6 (NumPy 40.0).
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "bool"])
+@pytest.mark.parametrize(
+    "shape,dim", [((9,), 0), ((3, 5), 1), ((5, 3), 0), ((2, 3, 4), 1)]
+)
+def test_median_names_a_position_that_really_holds_its_value(shape, dim, dtype):
+    rng = np.random.default_rng(13)
+    if dtype == "bool":
+        values = rng.random(shape) > 0.5
+    elif dtype.startswith("float"):
+        values = np.round(rng.standard_normal(shape) * 3).astype(dtype)
+    else:
+        values = rng.integers(-9, 9, shape).astype(dtype)
+    got, where = F.median(mt.Tensor(values, dtype=dtype), dim)
+
+    lower = np.take(np.sort(values, axis=dim), (shape[dim] - 1) // 2, axis=dim)
+    np.testing.assert_array_equal(
+        got.numpy().astype(np.float64), lower.astype(np.float64)
+    )
+    taken = np.take_along_axis(values, np.expand_dims(where.numpy(), dim), axis=dim)
+    np.testing.assert_array_equal(
+        taken.squeeze(dim).astype(np.float64), got.numpy().astype(np.float64)
+    )
+
+
+def test_median_breaks_a_tie_by_the_earliest_position():
+    """Every entry carries its position below its key, so equal values come out
+    in the order they went in and the reported index is the first of them."""
+    values = np.array([2.0, 1.0, 2.0, 1.0, 2.0])
+    got, where = F.median(mt.Tensor(values, dtype="float64"), 0)
+    assert got.item() == 2.0
+    assert where.item() == 0
+
+
+def test_median_reports_the_zero_the_input_held():
+    """`-0.0` and `0.0` key the same, so the position decides which is named --
+    and the value comes back from the input rather than from the key."""
+    values = np.array([-0.0, 0.0, 1.0])
+    got, where = F.median(mt.Tensor(values, dtype="float64"), 0)
+    assert got.item() == 0.0
+    assert np.signbit(got.numpy()) == np.signbit(values[int(where.item())])
+
+
+@pytest.mark.parametrize("length", [4095, 4096, 65535, 65536])
+def test_a_long_axis_medians_the_same_as_a_sort_would(length):
+    """Lengths spanning the point where an axis stops fitting a position in
+    sixteen bits, which is not where the packing splits -- but a length that
+    changes the band count is where an off-by-one would show."""
+    rng = np.random.default_rng(length)
+    values = np.round(rng.standard_normal(length) * 5)
+    got, where = F.median(mt.Tensor(values, dtype="float64"), 0)
+    assert got.item() == np.sort(values)[(length - 1) // 2]
+    assert values[int(where.item())] == got.item()

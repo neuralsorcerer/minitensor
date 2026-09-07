@@ -8,12 +8,14 @@ use super::*;
 use crate::autograd::NanSumBackward;
 use crate::autograd::SumBackward;
 use crate::ops::map::{par_out_chunks2, reduction_band};
+use crate::ops::order::{
+    Entry, bool_key, float_key32, float_key64, int_key32, int_key64, pack32, pack64,
+};
 use crate::{
     autograd::with_grad_fn,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor, TensorData},
 };
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
@@ -159,7 +161,7 @@ type NanHandling<T> = Option<(T, fn(&T) -> bool)>;
 /// makes that whole median NaN. Integer instantiations pass `None` and skip the
 /// check entirely.
 #[allow(clippy::too_many_arguments)]
-fn median_along_dim_par<T>(
+fn median_along_dim_par<T, E, M>(
     input: &[T],
     values: &mut [T],
     indices: &mut [i64],
@@ -168,9 +170,11 @@ fn median_along_dim_par<T>(
     outer_stride: usize,
     median_pos: usize,
     nan: NanHandling<T>,
-    compare: fn(&(usize, T), &(usize, T)) -> Ordering,
+    make: M,
 ) where
     T: Copy + Send + Sync,
+    E: Entry,
+    M: Fn(usize, T) -> E + Copy + Sync,
 {
     let outer = if inner == 0 { 1 } else { values.len() / inner };
     par_out_chunks2(
@@ -182,7 +186,7 @@ fn median_along_dim_par<T>(
             // it reads from is fixed and the first column is where the chunk
             // starts inside it.
             let block_base = (start / inner) * outer_stride + start % inner;
-            let mut entries: Vec<(usize, T)> = Vec::with_capacity(dim_size);
+            let mut entries: Vec<E> = Vec::with_capacity(dim_size);
             for (r, (value_out, index_out)) in vchunk.iter_mut().zip(ichunk.iter_mut()).enumerate()
             {
                 entries.clear();
@@ -196,7 +200,7 @@ fn median_along_dim_par<T>(
                         saw_nan = true;
                         break;
                     }
-                    entries.push((d, value));
+                    entries.push(make(d, value));
                 }
 
                 if let (true, Some((nan_value, _))) = (saw_nan, nan) {
@@ -204,10 +208,14 @@ fn median_along_dim_par<T>(
                     continue;
                 }
 
-                entries.select_nth_unstable_by(median_pos, compare);
-                let (index, value) = entries[median_pos];
-                *value_out = value;
-                *index_out = index as i64;
+                entries.select_nth_unstable(median_pos);
+                // The value is read back out of the input rather than carried
+                // through the selection: an entry is the order key above the
+                // position, eight bytes an element where a `(position, value)`
+                // pair took sixteen, and the comparison is a plain integer one.
+                let position = entries[median_pos].position();
+                *value_out = input[base + position * inner];
+                *index_out = position as i64;
             }
         },
     );
@@ -256,7 +264,7 @@ pub(crate) fn median_along_dim(
     // spelling the rest out five times is five chances to pass `inner` where
     // `outer_stride` belongs.
     macro_rules! median_arm {
-        ($read:ident, $write:ident, $name:literal, $nan:expr, $cmp:expr) => {{
+        ($read:ident, $write:ident, $name:literal, $nan:expr, $key:expr, $wide:expr) => {{
             let input = tensor.data().$read().ok_or_else(|| {
                 MinitensorError::internal_error(concat!("Failed to get ", $name, " slice"))
             })?;
@@ -267,17 +275,35 @@ pub(crate) fn median_along_dim(
                 MinitensorError::internal_error("Failed to get mutable i64 slice")
             })?;
 
-            median_along_dim_par(
-                input,
-                values,
-                indices,
-                inner,
-                dim_size,
-                outer_stride,
-                median_pos,
-                $nan,
-                $cmp,
-            );
+            // A four-byte key and the position share one `u64` when the axis
+            // is short enough to hold a position in half of it, which every
+            // real axis is; the wide form covers the rest and the eight-byte
+            // keys.
+            if $wide || dim_size > u32::MAX as usize {
+                median_along_dim_par(
+                    input,
+                    values,
+                    indices,
+                    inner,
+                    dim_size,
+                    outer_stride,
+                    median_pos,
+                    $nan,
+                    |d: usize, v| pack64($key(v) as u64, d),
+                );
+            } else {
+                median_along_dim_par(
+                    input,
+                    values,
+                    indices,
+                    inner,
+                    dim_size,
+                    outer_stride,
+                    median_pos,
+                    $nan,
+                    |d: usize, v| pack32($key(v) as u32, d),
+                );
+            }
         }};
     }
 
@@ -287,18 +313,36 @@ pub(crate) fn median_along_dim(
             as_f32_slice_mut,
             "f32",
             Some((f32::NAN, |v: &f32| v.is_nan())),
-            cmp_f32_asc
+            float_key32,
+            false
         ),
         DataType::Float64 => median_arm!(
             as_f64_slice,
             as_f64_slice_mut,
             "f64",
             Some((f64::NAN, |v: &f64| v.is_nan())),
-            cmp_f64_asc
+            float_key64,
+            true
         ),
-        DataType::Int32 => median_arm!(as_i32_slice, as_i32_slice_mut, "i32", None, cmp_i32_asc),
-        DataType::Int64 => median_arm!(as_i64_slice, as_i64_slice_mut, "i64", None, cmp_i64_asc),
-        DataType::Bool => median_arm!(as_bool_slice, as_bool_slice_mut, "bool", None, cmp_bool_asc),
+        DataType::Int32 => median_arm!(
+            as_i32_slice,
+            as_i32_slice_mut,
+            "i32",
+            None,
+            int_key32,
+            false
+        ),
+        DataType::Int64 => {
+            median_arm!(as_i64_slice, as_i64_slice_mut, "i64", None, int_key64, true)
+        }
+        DataType::Bool => median_arm!(
+            as_bool_slice,
+            as_bool_slice_mut,
+            "bool",
+            None,
+            bool_key,
+            false
+        ),
     }
 
     let values = Tensor::new(

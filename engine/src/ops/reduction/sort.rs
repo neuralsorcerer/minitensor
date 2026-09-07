@@ -10,7 +10,8 @@ use crate::ops::map::{
     reduction_band,
 };
 use crate::ops::order::{
-    PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64,
+    Entry, PAR_SORT_MIN_LEN, bool_key, float_key32, float_key64, int_key32, int_key64, pack32,
+    pack64,
 };
 use crate::ops::shape_ops;
 use crate::ops::simd::*;
@@ -25,42 +26,6 @@ use crate::{
 };
 use rayon::prelude::*;
 use std::sync::Arc;
-
-/// One element to be sorted: its order key above its position in the slice.
-///
-/// The comparison is what a sort spends itself on -- forty million of them for
-/// two million elements -- so the ordering rule is moved *out* of it. Every
-/// dtype maps to an unsigned integer whose ascending order is that dtype's
-/// ascending order (see [`float_key32`] and its neighbours), the position goes
-/// in the low bits, and the sort is then a plain integer comparison with no
-/// branches, no NaN test and no tie-break to fall through to.
-///
-/// It is also what makes the answer deterministic: the position makes every
-/// entry distinct, so the total order has no ties for an unstable sort to
-/// resolve differently on a different day. `sort(stable=true)` and
-/// `sort(stable=false)` therefore give the same answer, and both get the
-/// faster sort.
-///
-/// The branchy three-way comparator this replaced cost 62ms where the integer
-/// one costs 18ms on the same two million float32.
-trait Entry: Ord + Copy + Send + Sync {
-    /// Where this element sat in the slice before sorting.
-    fn position(self) -> usize;
-}
-
-impl Entry for u64 {
-    #[inline(always)]
-    fn position(self) -> usize {
-        (self & u32::MAX as u64) as usize
-    }
-}
-
-impl Entry for u128 {
-    #[inline(always)]
-    fn position(self) -> usize {
-        (self & u64::MAX as u128) as usize
-    }
-}
 
 /// Sort each 1-D slice along a dimension, parallelizing over the outer index.
 ///
@@ -386,13 +351,13 @@ fn sort_by_key32<T, K>(
     }
     if dim_size <= u32::MAX as usize {
         match descending {
-            true => run!(move |d: usize, v: T| ((!key(v) as u64) << 32) | d as u64),
-            false => run!(move |d: usize, v: T| ((key(v) as u64) << 32) | d as u64),
+            true => run!(move |d: usize, v: T| pack32(!key(v), d)),
+            false => run!(move |d: usize, v: T| pack32(key(v), d)),
         }
     } else {
         match descending {
-            true => run!(move |d: usize, v: T| ((!key(v) as u128) << 64) | d as u128),
-            false => run!(move |d: usize, v: T| ((key(v) as u128) << 64) | d as u128),
+            true => run!(move |d: usize, v: T| pack64(!key(v) as u64, d)),
+            false => run!(move |d: usize, v: T| pack64(key(v) as u64, d)),
         }
     }
 }
@@ -428,8 +393,8 @@ fn sort_by_key64<T, K>(
         };
     }
     match descending {
-        true => run!(move |d: usize, v: T| ((!key(v) as u128) << 64) | d as u128),
-        false => run!(move |d: usize, v: T| ((key(v) as u128) << 64) | d as u128),
+        true => run!(move |d: usize, v: T| pack64(!key(v), d)),
+        false => run!(move |d: usize, v: T| pack64(key(v), d)),
     }
 }
 
@@ -1647,19 +1612,6 @@ mod sort_key_tests {
     /// the two outputs, the axis geometry, and the packing.
     type Kernel =
         fn(&[f32], &mut [f32], &mut [i64], usize, usize, usize, usize, fn(usize, f32) -> u64);
-
-    /// Both entry widths carry the same position back out.
-    #[test]
-    fn entries_give_their_position_back() {
-        for position in [0usize, 1, 12345, u32::MAX as usize - 1] {
-            let narrow = ((float_key32(1.5) as u64) << 32) | position as u64;
-            assert_eq!(Entry::position(narrow), position);
-        }
-        for position in [0usize, 1, 12345, u32::MAX as usize + 1] {
-            let wide = ((float_key64(1.5) as u128) << 64) | position as u128;
-            assert_eq!(Entry::position(wide), position);
-        }
-    }
 
     /// The wide entry is only reached by an axis longer than `u32::MAX`, which
     /// no test can allocate -- so drive the kernels with it directly and check
