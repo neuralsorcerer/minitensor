@@ -40,6 +40,38 @@ fn expand_repeats(spec: RepeatInterleaveSpec<'_>, dim_size: usize) -> Result<Vec
     }
 }
 
+/// How many copies each element of the repeated axis takes.
+///
+/// A uniform repeat is a rule rather than a list, and the list is what the walk
+/// below would otherwise read on every band: `dim_size` running totals, which
+/// on a long axis is more memory than the tensor being repeated.
+enum Spread {
+    Uniform(usize),
+    Varying(Vec<usize>),
+}
+
+impl Spread {
+    /// One past the last output row that element `index` fills.
+    #[inline(always)]
+    fn end(&self, index: usize) -> usize {
+        match self {
+            Spread::Uniform(count) => (index + 1) * count,
+            Spread::Varying(offsets) => offsets[index + 1],
+        }
+    }
+
+    /// Which element output row `row` came from.
+    #[inline(always)]
+    fn source_of(&self, row: usize) -> usize {
+        match self {
+            // A count of zero leaves the output empty, and the caller returns
+            // before reaching this.
+            Spread::Uniform(count) => row / (*count).max(1),
+            Spread::Varying(offsets) => offsets.partition_point(|&off| off <= row) - 1,
+        }
+    }
+}
+
 fn build_empty_repeat_result(tensor: &Tensor, dim: usize, target: usize) -> Result<Tensor> {
     let mut out_shape = tensor.shape().dims().to_vec();
     out_shape[dim] = target;
@@ -80,8 +112,27 @@ pub fn repeat_interleave(
     let dim = normalize_dim(dim.unwrap(), tensor.ndim())?;
     let dims = tensor.shape().dims();
     let dim_size = dims[dim];
-    let reps = expand_repeats(repeats, dim_size)?;
-    let total_repeats: usize = reps.iter().sum();
+    // One count for every element is the common case and needs no list: the
+    // running total before element `i` is `i * count`, and the element an
+    // output row came from is `row / count`. Writing it out cost `dim_size`
+    // words twice over, once for the repeats and once for their running
+    // totals -- 32MB on a two-million-element axis, to say "two".
+    let uniform: Option<usize> = match repeats {
+        RepeatInterleaveSpec::Scalar(value) => Some(value),
+        RepeatInterleaveSpec::Slice(values) if values.len() == 1 => Some(values[0]),
+        _ => None,
+    };
+    // The list is still needed to route the gradient, and to validate and walk
+    // an irregular request.
+    let reps = if uniform.is_some() && !tensor.requires_grad() {
+        Vec::new()
+    } else {
+        expand_repeats(repeats, dim_size)?
+    };
+    let total_repeats: usize = match uniform {
+        Some(count) => count * dim_size,
+        None => reps.iter().sum(),
+    };
 
     if let Some(expected) = output_size
         && expected != total_repeats
@@ -127,14 +178,22 @@ pub fn repeat_interleave(
     }
 
     // The running total of the repeats, so an output row can be traced back to
-    // the element it came from without walking the repeats from the start.
-    let mut offsets: Vec<usize> = Vec::with_capacity(reps.len() + 1);
-    offsets.push(0);
-    let mut running = 0usize;
-    for &rep in &reps {
-        running += rep;
-        offsets.push(running);
-    }
+    // the element it came from without walking the repeats from the start --
+    // computed, not stored, when every element repeats the same number of
+    // times.
+    let spread = match uniform {
+        Some(count) => Spread::Uniform(count),
+        None => {
+            let mut offsets: Vec<usize> = Vec::with_capacity(reps.len() + 1);
+            offsets.push(0);
+            let mut running = 0usize;
+            for &rep in &reps {
+                running += rep;
+                offsets.push(running);
+            }
+            Spread::Varying(offsets)
+        }
+    };
     let span = target_dim * inner;
     // Whole output rows per task. The old split was one *outer* position per
     // chunk, which is a single chunk whenever the repeated axis is the first
@@ -164,7 +223,7 @@ pub fn repeat_interleave(
                         // so the source advances by one rather than by another
                         // search. Searching per element made the whole
                         // operation slower than the serial version it replaced.
-                        let mut source = offsets.partition_point(|&off| off <= row) - 1;
+                        let mut source = spread.source_of(row);
                         while written < out_chunk.len() {
                             if row == target_dim {
                                 outer_index += 1;
@@ -172,14 +231,14 @@ pub fn repeat_interleave(
                                 source = 0;
                             }
                             // Elements repeated zero times occupy no rows.
-                            while offsets[source + 1] == row {
+                            while spread.end(source) == row {
                                 source += 1;
                             }
                             let base = outer_index * dim_size * inner + source * inner;
                             // How many of this element's copies land in what is
                             // left of the chunk.
-                            let rows = (offsets[source + 1] - row)
-                                .min((out_chunk.len() - written) / inner);
+                            let rows =
+                                (spread.end(source) - row).min((out_chunk.len() - written) / inner);
                             if inner == 1 {
                                 // One element repeated: a fill, not a run of
                                 // one-element copies.

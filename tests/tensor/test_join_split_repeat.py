@@ -418,3 +418,40 @@ def test_repeating_the_last_axis_of_a_batch_wraps_between_rows():
     values = np.arange(3 * 5 * 7.0).reshape(3, 5, 7)
     got = mt.Tensor(values, dtype="float64").repeat_interleave(4, dim=2)
     np.testing.assert_array_equal(got.numpy(), np.repeat(values, 4, axis=2))
+
+
+@pytest.mark.parametrize("dim", [None, 0, 1])
+@pytest.mark.parametrize("repeats", [0, 1, 4])
+def test_one_count_for_every_element_is_the_same_as_the_count_itself(repeats, dim):
+    """A uniform repeat is carried as a rule rather than a list -- the running
+    total before element `i` is `i * count`, so `dim_size` words of repeats and
+    another `dim_size` of running totals are never written. It has to answer
+    exactly what the spelled-out list answers."""
+    values = np.arange(24.0).reshape(4, 6)
+    tensor = mt.Tensor(values, dtype="float64")
+    length = values.size if dim is None else values.shape[dim]
+    spelled = mt.Tensor(np.full(length, repeats, dtype=np.int64), dtype="int64")
+
+    rule = mt.repeat_interleave(tensor, repeats, dim).numpy()
+    listed = mt.repeat_interleave(tensor, spelled, dim).numpy()
+    np.testing.assert_array_equal(rule, listed)
+    np.testing.assert_array_equal(rule, np.repeat(values, repeats, dim))
+
+
+def test_a_single_count_in_a_list_means_it_applies_to_every_element():
+    values = np.arange(12.0).reshape(3, 4)
+    tensor = mt.Tensor(values, dtype="float64")
+    np.testing.assert_array_equal(
+        mt.repeat_interleave(tensor, [3], 1).numpy(), np.repeat(values, 3, 1)
+    )
+
+
+def test_a_uniform_repeat_still_routes_its_gradient():
+    """The list is skipped only when nothing will read it; a tensor that wants
+    a gradient still gets one."""
+    tensor = mt.Tensor(
+        np.arange(6.0).reshape(2, 3), dtype="float64", requires_grad=True
+    )
+    mt.repeat_interleave(tensor, 3, 1).sum().backward()
+    np.testing.assert_array_equal(tensor.grad.numpy(), np.full((2, 3), 3.0))
+    mt.clear_autograd_graph()
