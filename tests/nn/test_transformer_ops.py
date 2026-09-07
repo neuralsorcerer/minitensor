@@ -365,3 +365,101 @@ def test_a_row_with_nothing_to_attend_to_is_zero_not_nan():
         mt.masked_softmax(scores, all_excluded, -1).numpy(), np.zeros((1, 3))
     )
     assert np.all(np.isneginf(mt.masked_log_softmax(scores, all_excluded, -1).numpy()))
+
+
+# A boolean mask no longer reaches the scores. Filling the excluded positions
+# with `-inf` and then taking a softmax is two passes over the whole score
+# matrix and a second copy of it, where `masked_softmax` skips them in the pass
+# it was going to make anyway -- 10.6ms against 6.8 on eight by eight heads of
+# 256 by 256. The tests below hold the two spellings to the same answer,
+# including where they could differ: a row with nothing left in it, which the
+# arithmetic would make NaN.
+
+
+@pytest.mark.parametrize("length,keys", [(4, 4), (6, 3), (3, 6), (1, 5), (5, 1)])
+def test_causal_attention_matches_filling_the_scores_by_hand(length, keys):
+    """`length > keys` is the case that leaves early rows with nothing to
+    attend to, which is where the two routes could disagree."""
+    rng = np.random.default_rng(8)
+    q = rng.standard_normal((2, length, 4))
+    k = rng.standard_normal((2, keys, 4))
+    v = rng.standard_normal((2, keys, 3))
+
+    out = F.scaled_dot_product_attention(_t(q), _t(k), _t(v), is_causal=True).numpy()
+
+    # The reference, written out rather than borrowed: `_sdpa_np` subtracts the
+    # row maximum, which is `-inf - -inf` for a row with nothing in it.
+    scores = (q @ np.swapaxes(k, -1, -2)) / np.sqrt(4)
+    i = np.arange(length)[:, None]
+    j = np.arange(keys)[None, :]
+    alive = (j - i) <= (keys - length)
+    top = np.where(alive, scores, -np.inf).max(-1, keepdims=True)
+    finite = np.isfinite(top)
+    exps = np.where(
+        alive & finite,
+        np.exp(np.where(alive & finite, scores - np.where(finite, top, 0.0), 0.0)),
+        0.0,
+    )
+    total = exps.sum(-1, keepdims=True)
+    weights = np.divide(exps, total, out=np.zeros_like(exps), where=total > 0)
+    np.testing.assert_allclose(out, weights @ v, atol=1e-12)
+
+
+@pytest.mark.parametrize("shape", [(5, 5), (1, 5), (3, 5, 5), (2, 3, 5, 5)])
+def test_a_bool_mask_broadcasts_from_any_shape(shape):
+    """The mask is turned over and handed to `masked_softmax`, which walks a
+    broadcast mask a slice at a time -- so every shape a mask may broadcast
+    from has to land on the right positions."""
+    rng = np.random.default_rng(9)
+    q, k = rng.standard_normal((2, 3, 5, 4)), rng.standard_normal((2, 3, 5, 4))
+    v = rng.standard_normal((2, 3, 5, 6))
+    keep = rng.random(shape) > 0.3
+    keep[..., 0] = True  # every row keeps something
+
+    out = F.scaled_dot_product_attention(
+        _t(q), _t(k), _t(v), attn_mask=mt.from_numpy(keep)
+    ).numpy()
+
+    scores = (q @ np.swapaxes(k, -1, -2)) / np.sqrt(4)
+    additive = np.where(np.broadcast_to(keep, scores.shape), 0.0, -np.inf)
+    np.testing.assert_allclose(out, _sdpa_np(q, k, v, mask=additive), atol=1e-12)
+
+
+def test_a_float_mask_still_shifts_the_scores_rather_than_removing_them():
+    """The additive mask is the one that must still reach the scores: it moves
+    them, it does not take them out of the softmax."""
+    rng = np.random.default_rng(10)
+    q, k = rng.standard_normal((1, 4, 3)), rng.standard_normal((1, 4, 3))
+    v = rng.standard_normal((1, 4, 2))
+    bias = rng.standard_normal((4, 4))
+    out = F.scaled_dot_product_attention(
+        _t(q), _t(k), _t(v), attn_mask=_t(bias)
+    ).numpy()
+    np.testing.assert_allclose(out, _sdpa_np(q, k, v, mask=bias), atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "mask_shape", [(1, 6), (5, 6), (1, 1, 6), (4, 5, 6), (1, 5, 1)]
+)
+@pytest.mark.parametrize("dim", [0, 1, 2])
+def test_masked_softmax_walks_a_broadcast_mask_onto_the_right_positions(
+    mask_shape, dim
+):
+    """The mask index moves by a constant along the reduced axis -- zero when
+    the mask is broadcast along it -- so the decomposition happens once per
+    slice rather than twice per element. Every broadcast shape has to land on
+    the same positions the per-element walk did."""
+    rng = np.random.default_rng(11)
+    values = rng.standard_normal((4, 5, 6))
+    mask = rng.random(mask_shape) > 0.4
+    tensor = _t(values)
+
+    for fn, empty in ((mt.masked_softmax, 0.0), (mt.masked_log_softmax, -np.inf)):
+        got = fn(tensor, mt.from_numpy(mask), dim).numpy()
+        # The same call with the mask already the tensor's own shape, which
+        # takes the direct index rather than the walk.
+        want = fn(
+            tensor, mt.from_numpy(np.broadcast_to(mask, values.shape).copy()), dim
+        ).numpy()
+        np.testing.assert_array_equal(got, want)
+        assert np.all(got[np.broadcast_to(mask, values.shape)] == empty)
