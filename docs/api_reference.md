@@ -571,9 +571,19 @@ Whether an operation accepts a boolean operand is decided by that promoted
 dtype, not by the operands. `-`, `//` and `%` have no boolean result to land
 in, so they are rejected when *both* sides are `bool` — as they are in NumPy —
 and accepted for every mixed pair, where the mask promotes and the operation is
-ordinary arithmetic (`counts - mask`). The ordered comparisons `lt`, `le`, `gt`
+ordinary arithmetic (`counts - mask`). `**` is not among them: every result of
+`x ** y` on booleans is itself a boolean (`0 ** 0` is 1), so two booleans give a
+boolean where NumPy promotes to `int8`. The ordered comparisons `lt`, `le`, `gt`
 and `ge` accept booleans with `False < True`, the same ordering `minimum` and
 `maximum` apply to them.
+
+`**` raises integers to integer powers, and the answer is the true power taken
+modulo the dtype's width — a chain of wrapping multiplications, which is what
+NumPy gives. A *negative* integer exponent has no integer answer at all and is
+refused rather than rounded; cast the base to a float for that. `matmul` is the
+exception to the promotion rule: it requires both operands to already share a
+dtype, as it does in PyTorch, because a matrix product silently widened is a
+performance cliff rather than a convenience.
 
 Casting to `int32`, `int64` or `bool` returns a tensor with
 `requires_grad=False`. Those dtypes cannot carry a gradient, and reporting

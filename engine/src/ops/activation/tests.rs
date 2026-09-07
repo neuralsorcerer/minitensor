@@ -365,14 +365,79 @@ fn test_pow_shape_mismatch_error() {
 }
 
 #[test]
-fn test_pow_dtype_mismatch_error() {
+fn test_pow_promotes_a_mixed_dtype_pair() {
+    // This used to be an error. `**` is arithmetic and takes the promotion
+    // every other arithmetic op takes, so a float32 base beside a float64
+    // exponent widens rather than being refused.
     let base = create_test_tensor_f32(vec![1.0, 2.0], vec![2], false);
     let shape = Shape::new(vec![2]);
-    let data = TensorData::from_vec_f64(vec![1.0, 2.0], Device::cpu());
+    let data = TensorData::from_vec_f64(vec![1.0, 3.0], Device::cpu());
     let exp = Tensor::new(
         Arc::new(data),
         shape,
         DataType::Float64,
+        Device::cpu(),
+        false,
+    );
+    let result = pow(&base, &exp).unwrap();
+    assert_eq!(result.dtype(), DataType::Float64);
+    assert_eq!(result.data().as_f64_slice().unwrap(), &[1.0, 8.0]);
+}
+
+#[test]
+fn test_pow_raises_integers_and_wraps_like_numpy() {
+    let base = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            vec![2i64, 3, -2, 0],
+            DataType::Int64,
+            Device::cpu(),
+        )),
+        Shape::new(vec![4]),
+        DataType::Int64,
+        Device::cpu(),
+        false,
+    );
+    let exp = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            vec![1i64 << 40, 100, 65, 0],
+            DataType::Int64,
+            Device::cpu(),
+        )),
+        Shape::new(vec![4]),
+        DataType::Int64,
+        Device::cpu(),
+        false,
+    );
+    let result = pow(&base, &exp).unwrap();
+    assert_eq!(result.dtype(), DataType::Int64);
+    // The values NumPy gives: exact modulo 2^64, and `x ** 0` is 1.
+    assert_eq!(
+        result.data().as_i64_slice().unwrap(),
+        &[0, -2984622845537545263, 0, 1]
+    );
+}
+
+#[test]
+fn test_pow_refuses_a_negative_integer_exponent() {
+    let base = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            vec![2i64, 3],
+            DataType::Int64,
+            Device::cpu(),
+        )),
+        Shape::new(vec![2]),
+        DataType::Int64,
+        Device::cpu(),
+        false,
+    );
+    let exp = Tensor::new(
+        Arc::new(TensorData::from_vec(
+            vec![1i64, -1],
+            DataType::Int64,
+            Device::cpu(),
+        )),
+        Shape::new(vec![2]),
+        DataType::Int64,
         Device::cpu(),
         false,
     );

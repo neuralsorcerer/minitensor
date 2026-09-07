@@ -25,6 +25,10 @@ pub enum BinaryOpKind {
     Bitwise,
     /// `<<`, `>>`: integers only, result in the promoted dtype.
     Shift,
+    /// `**`: promotes like the other arithmetic, integers included. Unlike
+    /// subtraction and the remainders, every boolean result of `x ** y` is
+    /// itself a boolean (`0 ** 0` is 1), so two booleans need no rejection.
+    Pow,
 }
 
 /// Cast the two operands using the promotion rules for the supplied binary operation.
@@ -74,7 +78,7 @@ fn cast_tensor_to_dtype<'a>(tensor: &'a Tensor, dtype: DataType) -> Result<Cow<'
 fn result_dtype_for_binary_op(lhs: DataType, rhs: DataType, op: BinaryOpKind) -> Result<DataType> {
     use BinaryOpKind::*;
     match op {
-        Add | Mul | Maximum | Minimum => Ok(promote_arithmetic_dtype(lhs, rhs)),
+        Add | Mul | Maximum | Minimum | Pow => Ok(promote_arithmetic_dtype(lhs, rhs)),
         // These three are undefined only when the *result* would be boolean,
         // which happens exactly when both operands are. A bool paired with a
         // number promotes to that number's dtype and the operation is ordinary

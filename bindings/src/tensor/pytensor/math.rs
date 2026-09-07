@@ -48,11 +48,11 @@ impl PyTensor {
             return Ok(Self::from_tensor(result));
         }
 
-        if let Ok(exp) = exponent.extract::<f64>() {
-            let result = self.inner.powf(exp).map_err(_convert_error)?;
-            return Ok(Self::from_tensor(result));
-        }
-
+        // A Python number takes the same route it takes for `*` and `+`, which
+        // is what makes `x ** 2` and `x * 2` agree about the answer's dtype.
+        // Extracting an `f64` first looked equivalent -- but a Python `int`
+        // extracts as one, so `int_tensor ** 2` lost the fact that `2` was an
+        // integer before the promotion rules ever saw it.
         let exp_tensor = tensor_from_py_value(&self.inner, exponent)?;
         let result = self.inner.pow(&exp_tensor).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))

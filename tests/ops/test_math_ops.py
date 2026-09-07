@@ -297,11 +297,118 @@ def test_tensor_pow_shape_mismatch_error():
         _ = base**exp
 
 
-def test_tensor_pow_dtype_mismatch_error():
+def test_tensor_pow_promotes_a_mixed_pair_like_the_other_arithmetic():
+    # This used to raise. `**` is arithmetic and the documented promotion rule
+    # covers all of it, so refusing the pair made it the one operator that
+    # would not take a float32 beside a float64 -- or an integer beside a
+    # float, which is the case that actually comes up.
     base = Tensor([1.0, 2.0], dtype="float32")
     exp = Tensor([1.0, 2.0], dtype="float64")
-    with pytest.raises(TypeError):
-        _ = base**exp
+    result = base**exp
+    assert result.dtype == "float64"
+    np.testing.assert_allclose(result.numpy(), np.array([1.0, 4.0]))
+
+    integer = Tensor(np.array([2, 3], dtype=np.int64), dtype="int64")
+    mixed = integer ** Tensor([2.0, 2.0], dtype="float32")
+    assert mixed.dtype == "float32"
+    np.testing.assert_allclose(mixed.numpy(), np.array([4.0, 9.0], dtype=np.float32))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_an_integer_power_is_the_true_power_modulo_the_width(dtype):
+    # An integer power is a chain of multiplications and each one wraps, so
+    # the answer is exact modulo 2**N -- which is what NumPy gives too. The
+    # 2**40 exponent is the case a `u32` exponent would answer `1` for.
+    info = np.iinfo(dtype)
+    base = np.array([2, 3, -2, 7, 10, 0, 1, -1], dtype=dtype)
+    exponent = np.array([40, 25, 65, 11, 9, 0, 63, 63], dtype=dtype)
+    if dtype == "int64":
+        exponent = np.array([2**40, 100, 65, 30, 25, 0, 63, 63], dtype=dtype)
+    result = mt.pow(mt.Tensor(base, dtype=dtype), mt.Tensor(exponent, dtype=dtype))
+    assert result.dtype == dtype
+    np.testing.assert_array_equal(result.numpy(), base**exponent)
+    assert result.numpy().min() >= info.min
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_an_integer_cannot_be_raised_to_a_negative_power(dtype):
+    # There is no integer answer -- `2 ** -1` is a half -- so it is refused
+    # rather than rounded, which is where NumPy and PyTorch both stop.
+    base = mt.Tensor(np.array([2, 3], dtype=dtype), dtype=dtype)
+    exponent = mt.Tensor(np.array([1, -1], dtype=dtype), dtype=dtype)
+    with pytest.raises(ValueError, match="negative power"):
+        mt.pow(base, exponent)
+    # The float route is the one that has an answer for it.
+    np.testing.assert_allclose(
+        mt.pow(base.astype("float64"), exponent.astype("float64")).numpy(),
+        np.array([2.0, 1.0 / 3.0]),
+    )
+
+
+def test_two_booleans_raised_to_each_other_stay_boolean():
+    # Unlike `-`, `//` and `%`, every result of `x ** y` on booleans is itself
+    # a boolean: `0 ** 0` is 1, so the four answers are `x or not y`.
+    left = mt.Tensor(np.array([True, True, False, False]), dtype="bool")
+    right = mt.Tensor(np.array([True, False, True, False]), dtype="bool")
+    result = mt.pow(left, right)
+    assert result.dtype == "bool"
+    np.testing.assert_array_equal(result.numpy(), np.array([True, True, False, True]))
+    # Which is the same answer NumPy gives, in the int8 it promotes to.
+    np.testing.assert_array_equal(
+        result.numpy().astype(np.int8),
+        np.power(
+            np.array([True, True, False, False]), np.array([True, False, True, False])
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("bool", "int32"),
+        ("bool", "int64"),
+        ("bool", "float32"),
+        ("bool", "float64"),
+        ("int32", "bool"),
+        ("int32", "int32"),
+        ("int32", "int64"),
+        ("int32", "float64"),
+        ("int64", "bool"),
+        ("int64", "int32"),
+        ("int64", "int64"),
+        ("int64", "float64"),
+        ("float32", "bool"),
+        ("float32", "float32"),
+        ("float32", "float64"),
+        ("float64", "int32"),
+        ("float64", "int64"),
+        ("float64", "float64"),
+    ],
+)
+def test_pow_answers_for_every_dtype_pair_that_numpy_answers_for(left, right):
+    def make(dtype):
+        if dtype == "bool":
+            return np.array([True, False, True, True])
+        if dtype.startswith("int"):
+            return np.array([2, 3, 0, 1], dtype=dtype)
+        return np.array([2.0, 3.0, 0.5, 1.5], dtype=dtype)
+
+    base, exponent = make(left), make(right)
+    result = mt.pow(mt.Tensor(base, dtype=left), mt.Tensor(exponent, dtype=right))
+    np.testing.assert_allclose(
+        result.numpy().astype(np.float64), np.power(base, exponent).astype(np.float64)
+    )
+
+
+def test_a_scalar_exponent_promotes_the_way_a_scalar_factor_does():
+    # A Python int keeps an integer tensor integral; a Python float takes it to
+    # a float -- which is what `*` has always done, and what `**` did not.
+    integer = mt.Tensor(np.array([2, 3], dtype=np.int64), dtype="int64")
+    assert (integer**2).dtype == (integer * 2).dtype == "int64"
+    assert (integer**2.0).dtype == (integer * 2.0).dtype == "float32"
+    np.testing.assert_array_equal((integer**2).numpy(), np.array([4, 9]))
+    np.testing.assert_array_equal((2**integer).numpy(), np.array([4, 8]))
+    np.testing.assert_array_equal(integer.pow(3).numpy(), np.array([8, 27]))
 
 
 def test_negative_base_fractional_power_nan():

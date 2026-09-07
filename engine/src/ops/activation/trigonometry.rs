@@ -19,6 +19,7 @@ use crate::autograd::SiluBackward;
 use crate::autograd::SoftmaxBackward;
 use crate::autograd::SoftplusBackward;
 use crate::autograd::SoftsignBackward;
+use crate::ops::binary::BinaryOpKind;
 use crate::ops::util::check_dim;
 use crate::{
     autograd::with_grad_fn,
@@ -26,6 +27,40 @@ use crate::{
     tensor::{DataType, Tensor, TensorData},
 };
 use std::sync::Arc;
+
+/// `base` raised to `exponent`, modulo 2^N for the integer dtypes.
+///
+/// Exact, and the same answer NumPy gives: an integer power is a chain of
+/// multiplications and each one wraps, so the result is the true power taken
+/// modulo the width. Written as binary exponentiation over the whole exponent
+/// rather than over a truncated `u32`, which would answer `1` for `2 ** 2^40`
+/// where the true value is `0` modulo `2^64`.
+///
+/// The caller has already rejected a negative exponent, which has no integer
+/// answer at all.
+macro_rules! integer_pow {
+    ($name:ident, $ty:ty) => {
+        #[inline]
+        fn $name(base: $ty, exponent: $ty) -> $ty {
+            let mut result: $ty = 1;
+            let mut factor = base;
+            let mut remaining = exponent as u64;
+            while remaining > 0 {
+                if remaining & 1 == 1 {
+                    result = result.wrapping_mul(factor);
+                }
+                remaining >>= 1;
+                if remaining > 0 {
+                    factor = factor.wrapping_mul(factor);
+                }
+            }
+            result
+        }
+    };
+}
+
+integer_pow!(integer_pow_i32, i32);
+integer_pow!(integer_pow_i64, i64);
 
 /// Element-wise power with tensor exponent and gradient support
 pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
@@ -37,12 +72,13 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         ));
     }
 
-    if base.dtype() != exponent.dtype() {
-        return Err(MinitensorError::type_mismatch(
-            format!("{:?}", base.dtype()),
-            format!("{:?}", exponent.dtype()),
-        ));
-    }
+    // Mixed dtypes promote here as they do for `+`, `*` and the rest: `**` is
+    // arithmetic and the documented rule covers all of it. Refusing the pair
+    // instead made `x ** y` the one operator that would not take an integer
+    // beside a float.
+    let (base, exponent, _) =
+        crate::ops::binary::coerce_binary_operands(base, exponent, BinaryOpKind::Pow)?;
+    let (base, exponent) = (base.as_ref(), exponent.as_ref());
 
     let base_shape = base.shape().clone();
     let exponent_shape = exponent.shape().clone();
@@ -148,13 +184,95 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
         }};
     }
 
+    /// One integer dtype arm.
+    ///
+    /// A negative exponent is refused rather than rounded: `2 ** -1` is a half,
+    /// which no integer dtype holds, and answering `0` would be a wrong answer
+    /// rather than a missing one. NumPy and PyTorch both stop here too.
+    macro_rules! integer_pow_arm {
+        ($accessor:ident, $ty:ty, $dtype:ident, $tyname:literal, $power:ident) => {{
+            let b = base.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from base tensor"
+                ))
+            })?;
+            let e = exponent.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error(concat!(
+                    "Failed to get ",
+                    $tyname,
+                    " slice from exponent tensor"
+                ))
+            })?;
+            if e.iter().any(|&y| y < 0) {
+                return Err(MinitensorError::invalid_operation(
+                    "Integers cannot be raised to a negative power; cast the base \
+                     to a floating point dtype first",
+                ));
+            }
+            let out = match broadcast {
+                PowBroadcast::None => {
+                    crate::ops::map::binary_map(b, e, |x: $ty, y: $ty| $power(x, y))
+                }
+                PowBroadcast::BaseScalar => {
+                    let base_val = b[0];
+                    unary_map_threshold(e, EXPENSIVE_PAR_THRESHOLD, move |y: $ty| {
+                        $power(base_val, y)
+                    })
+                }
+                PowBroadcast::ExponentScalar => {
+                    let exp_val = e[0];
+                    // The same small-exponent folds the float arm takes, for
+                    // the same reason: `x * x` is one instruction where the
+                    // loop is a branch per bit of the exponent.
+                    if exp_val == 2 {
+                        unary_map(b, |x: $ty| x.wrapping_mul(x))
+                    } else if exp_val == 1 {
+                        unary_map(b, |x: $ty| x)
+                    } else if exp_val == 0 {
+                        unary_map(b, |_: $ty| 1 as $ty)
+                    } else {
+                        unary_map_threshold(b, EXPENSIVE_PAR_THRESHOLD, move |x: $ty| {
+                            $power(x, exp_val)
+                        })
+                    }
+                }
+            };
+            TensorData::from_vec::<$ty>(out, DataType::$dtype, base.device())
+        }};
+    }
+
     let output_data = match base.dtype() {
         DataType::Float32 => pow_arm!(as_f32_slice, f32, Float32, "f32"),
         DataType::Float64 => pow_arm!(as_f64_slice, f64, Float64, "f64"),
-        _ => {
-            return Err(MinitensorError::invalid_operation(
-                "Power operation only supported for floating point tensors",
-            ));
+        DataType::Int32 => {
+            integer_pow_arm!(as_i32_slice, i32, Int32, "i32", integer_pow_i32)
+        }
+        DataType::Int64 => {
+            integer_pow_arm!(as_i64_slice, i64, Int64, "i64", integer_pow_i64)
+        }
+        // `x ** y` on two booleans is `x | !y`, which is a boolean, so the
+        // only thing left is to say it in the dtype the promotion chose.
+        DataType::Bool => {
+            let b = base.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from base tensor")
+            })?;
+            let e = exponent.data().as_bool_slice().ok_or_else(|| {
+                MinitensorError::internal_error("Failed to get bool slice from exponent tensor")
+            })?;
+            let out = match broadcast {
+                PowBroadcast::None => crate::ops::map::binary_map(b, e, |x: bool, y: bool| x || !y),
+                PowBroadcast::BaseScalar => {
+                    let base_val = b[0];
+                    unary_map(e, move |y: bool| base_val || !y)
+                }
+                PowBroadcast::ExponentScalar => {
+                    let exp_val = e[0];
+                    unary_map(b, move |x: bool| x || !exp_val)
+                }
+            };
+            TensorData::from_vec::<bool>(out, DataType::Bool, base.device())
         }
     };
 
@@ -183,7 +301,11 @@ pub fn pow(base: &Tensor, exponent: &Tensor) -> Result<Tensor> {
     }
 }
 
-/// Element-wise power with scalar exponent and gradient support
+/// Element-wise power with a float scalar exponent, and gradient support.
+///
+/// A float exponent, so a float base: the width has to come from somewhere and
+/// this signature carries none. An integer base raised to an integer power goes
+/// through [`pow`], which promotes and answers in the integer dtype.
 pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
     // A single-element exponent is enough: `pow` detects the scalar operand
     // and takes its ExponentScalar broadcast path, so there is no reason to
@@ -209,7 +331,8 @@ pub fn powf(tensor: &Tensor, exponent: f64) -> Result<Tensor> {
         ),
         _ => {
             return Err(MinitensorError::invalid_operation(
-                "Power operation only supported for floating point tensors",
+                "A float exponent needs a floating point base; use `pow` with an \
+                 integer exponent to raise an integer tensor",
             ));
         }
     };
