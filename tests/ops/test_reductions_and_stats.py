@@ -732,6 +732,42 @@ def test_cumsum_cumprod():
     )
 
 
+@pytest.mark.parametrize("shape", [(6,), (2, 3), (2, 3, 4), (1,), (0,), (3, 0)])
+@pytest.mark.parametrize("name", ["cumsum", "cumprod", "nancumsum", "nancumprod"])
+def test_a_scan_with_no_dim_runs_over_the_flattened_tensor(name, shape):
+    # NumPy's rule, and the one the NaN-skipping pair already followed on their
+    # own -- `cumsum` used to be the odd one out and simply refuse.
+    values = np.arange(1, int(np.prod(shape)) + 1, dtype=np.float64).reshape(shape)
+    tensor = mt.Tensor(values, dtype="float64")
+    result = getattr(mt, name)(tensor)
+    np.testing.assert_allclose(result.numpy(), getattr(np, name)(values))
+    assert tuple(result.shape) == (values.size,)
+
+
+@pytest.mark.parametrize("name", ["cumsum", "cumprod"])
+def test_the_scan_method_takes_the_same_optional_dim(name):
+    values = np.arange(1.0, 7.0).reshape(2, 3)
+    tensor = mt.Tensor(values, dtype="float64")
+    np.testing.assert_allclose(
+        getattr(tensor, name)().numpy(), getattr(np, name)(values)
+    )
+    np.testing.assert_allclose(
+        getattr(tensor, name)(1).numpy(), getattr(np, name)(values, axis=1)
+    )
+
+
+def test_a_scan_with_no_dim_still_carries_a_gradient():
+    x = mt.Tensor(
+        np.arange(1.0, 7.0).reshape(2, 3), dtype="float64", requires_grad=True
+    )
+    x.cumsum().sum().backward()
+    # Element (i, j) of the flattened scan feeds every later prefix, so the
+    # gradient counts down from the total.
+    np.testing.assert_allclose(
+        x.grad.numpy(), np.arange(6, 0, -1, dtype=np.float64).reshape(2, 3)
+    )
+
+
 def test_cumulative_invalid_axis():
     t = Tensor.arange(1, 7, dtype="float32").reshape([2, 3])
     with pytest.raises(IndexError):

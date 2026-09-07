@@ -5,6 +5,21 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+
+impl PyTensor {
+    /// The tensor a scan runs over and the axis it runs along.
+    ///
+    /// A scan needs one axis, so an omitted `dim` means the tensor is
+    /// flattened to the single axis it then has -- NumPy's rule, and the one
+    /// `nancumsum` was already following on its own.
+    fn scan_input(&self, dim: Option<isize>) -> PyResult<(engine::Tensor, isize)> {
+        match dim {
+            Some(axis) => Ok((self.inner.clone(), axis)),
+            None => Ok((self.inner.flatten_all().map_err(_convert_error)?, 0)),
+        }
+    }
+}
+
 #[pymethods]
 impl PyTensor {
     /// Sum over `dim`, or over every element when `dim` is omitted.
@@ -153,18 +168,25 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    /// Running sum along `dim`, keeping the input's shape.
-    #[pyo3(signature = (dim))]
-    pub fn cumsum(&self, dim: isize) -> PyResult<Self> {
-        let result = self.inner.cumsum(dim).map_err(_convert_error)?;
-        Ok(Self::from_tensor(result))
+    /// Running sum along `dim`, keeping the input's shape. With no `dim` the
+    /// tensor is flattened first and the result is a line, as NumPy does and
+    /// as `nancumsum` already did.
+    #[pyo3(signature = (dim=None))]
+    pub fn cumsum(&self, dim: Option<isize>) -> PyResult<Self> {
+        let (scanned, axis) = self.scan_input(dim)?;
+        Ok(Self::from_tensor(
+            scanned.cumsum(axis).map_err(_convert_error)?,
+        ))
     }
 
-    /// Running product along `dim`, keeping the input's shape.
-    #[pyo3(signature = (dim))]
-    pub fn cumprod(&self, dim: isize) -> PyResult<Self> {
-        let result = self.inner.cumprod(dim).map_err(_convert_error)?;
-        Ok(Self::from_tensor(result))
+    /// Running product along `dim`, keeping the input's shape. With no `dim`
+    /// the tensor is flattened first, as in `cumsum`.
+    #[pyo3(signature = (dim=None))]
+    pub fn cumprod(&self, dim: Option<isize>) -> PyResult<Self> {
+        let (scanned, axis) = self.scan_input(dim)?;
+        Ok(Self::from_tensor(
+            scanned.cumprod(axis).map_err(_convert_error)?,
+        ))
     }
 
     /// Largest element over `dim`, values only.

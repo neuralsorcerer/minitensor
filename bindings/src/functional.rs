@@ -860,10 +860,10 @@ pub fn argmin(input: &Bound<PyAny>, dim: Option<isize>, keepdim: bool) -> PyResu
     tensor.argmin(dim, Some(keepdim))
 }
 
-/// Running sum along `dim`, keeping the input's shape.
+/// Running sum along `dim`, keeping the input's shape. With no `dim` the tensor is flattened first and the result is a line, as in NumPy.
 #[pyfunction]
-#[pyo3(signature = (input, dim))]
-pub fn cumsum(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+#[pyo3(signature = (input, dim=None))]
+pub fn cumsum(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.cumsum(dim)
 }
@@ -930,10 +930,10 @@ pub fn logcumsumexp(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     ))
 }
 
-/// Running product along `dim`, keeping the input's shape.
+/// Running product along `dim`, keeping the input's shape. With no `dim` the tensor is flattened first, as in `cumsum`.
 #[pyfunction]
-#[pyo3(signature = (input, dim))]
-pub fn cumprod(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
+#[pyo3(signature = (input, dim=None))]
+pub fn cumprod(input: &Bound<PyAny>, dim: Option<isize>) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.cumprod(dim)
 }

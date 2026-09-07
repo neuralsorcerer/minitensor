@@ -1148,8 +1148,10 @@ True
 
 #### Running totals that are not sums
 
-`cumsum` and `cumprod` accumulate with `+` and `*`. Three more accumulate with
-something else:
+`cumsum(input, dim=None)` and `cumprod(input, dim=None)` accumulate with `+`
+and `*`. With no `dim` the tensor is flattened first and the result is a line,
+which is what NumPy does and what `nancumsum` already did. Three more
+accumulate with something else:
 
 - `cummax(input, dim=-1)` and `cummin(input, dim=-1)` return
   `(values, indices)`: the running extremum and the position it came from. A tie

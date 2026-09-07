@@ -870,9 +870,8 @@ def nancumsum(input: object, dim: int | None = None) -> Tensor:
 
     tensor = _atleast_tensor(input)
     filled = _F.nan_to_num(tensor) if "float" in str(tensor.dtype) else tensor
-    if dim is None:
-        return _F.cumsum(filled.reshape(-1), 0)
-    return _F.cumsum(filled, _normalize_axis(dim, tensor.ndim(), "nancumsum"))
+    axis = None if dim is None else _normalize_axis(dim, tensor.ndim(), "nancumsum")
+    return _F.cumsum(filled, axis)
 
 
 def nancumprod(input: object, dim: int | None = None) -> Tensor:
@@ -884,9 +883,8 @@ def nancumprod(input: object, dim: int | None = None) -> Tensor:
         filled = _F.where(_F.isnan(tensor), ones, tensor)
     else:
         filled = tensor
-    if dim is None:
-        return _F.cumprod(filled.reshape(-1), 0)
-    return _F.cumprod(filled, _normalize_axis(dim, tensor.ndim(), "nancumprod"))
+    axis = None if dim is None else _normalize_axis(dim, tensor.ndim(), "nancumprod")
+    return _F.cumprod(filled, axis)
 
 
 def ediff1d(
