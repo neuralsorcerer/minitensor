@@ -52,6 +52,31 @@ pub(crate) fn scan_along_dim<I, A, W, F>(
     // `widen` is the identity for every dtype but `i32`, which scans into
     // `i64` (see `accumulating_dtype`) -- so the seeding copy becomes a map.
     let run = |out: &mut [A], inp: &[I]| {
+        if inner == 1 {
+            // The scanned axis is the last one, so a slab is one running
+            // total. Carrying it in a register is the difference between a
+            // scan and what the general form below degenerates to here: a
+            // `split_at_mut` and a one-iteration loop *per element*, which on
+            // four million float32 cost 22ms against NumPy's 11.
+            //
+            // Same order of operations, so the same answer to the bit.
+            if reverse {
+                let mut acc = widen(inp[dim_size - 1]);
+                out[dim_size - 1] = acc;
+                for d in (0..dim_size - 1).rev() {
+                    acc = combine(acc, widen(inp[d]));
+                    out[d] = acc;
+                }
+            } else {
+                let mut acc = widen(inp[0]);
+                out[0] = acc;
+                for d in 1..dim_size {
+                    acc = combine(acc, widen(inp[d]));
+                    out[d] = acc;
+                }
+            }
+            return;
+        }
         if reverse {
             let last = (dim_size - 1) * inner;
             for i in 0..inner {

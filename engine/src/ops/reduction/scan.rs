@@ -73,6 +73,27 @@ fn scan_extreme<T, F>(
     }
     par_out_chunks2(values, indices, slab, &|start, value_slab, index_slab| {
         let source = &input[start..start + value_slab.len()];
+        if inner == 1 {
+            // The scanned axis is the last one, so a slab is one running
+            // extremum and one position. Carrying both in registers is the
+            // difference between a scan and what the general form below
+            // degenerates to here: two `split_at_mut` calls and two
+            // one-iteration loops *per element*.
+            let mut best = source[0];
+            let mut at = 0i64;
+            value_slab[0] = best;
+            index_slab[0] = 0;
+            for d in 1..dim_size {
+                let candidate = source[d];
+                if better(candidate, best) {
+                    best = candidate;
+                    at = d as i64;
+                }
+                value_slab[d] = best;
+                index_slab[d] = at;
+            }
+            return;
+        }
         for i in 0..inner {
             value_slab[i] = source[i];
             index_slab[i] = 0;

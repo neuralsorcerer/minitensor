@@ -348,3 +348,63 @@ def test_an_empty_axis_gives_an_empty_answer():
 def test_the_axis_must_exist():
     with pytest.raises(Exception):
         mt.cummax(_t([1.0, 2.0]), 3)
+
+
+# --------------------------------------------------------------------------
+# The two shapes a scan takes
+# --------------------------------------------------------------------------
+#
+# A scan along the *last* axis is one running value per slab, and it now
+# carries that value in a register. The general form -- the one a scan along
+# any other axis needs, where a slab is `dim_size` rows of `inner` elements
+# side by side -- degenerated to a `split_at_mut` and a one-iteration loop per
+# element when `inner` was one: four million float32 cost 22ms to `cumsum`
+# against NumPy's 11, and 35 to `cummax`. The two paths must agree everywhere,
+# so the tests below run the same data down both by transposing it.
+
+
+@pytest.mark.parametrize("name", ["cumsum", "cumprod", "cummax", "cummin"])
+@pytest.mark.parametrize("length", [1, 2, 8, 129, 1000])
+def test_a_scan_along_the_last_axis_agrees_with_one_along_the_first(name, length):
+    """The same numbers, once as a row and once as a column -- the register
+    path and the general one, on identical input."""
+    rng = np.random.default_rng(length)
+    values = rng.standard_normal((3, length))
+    scan = getattr(mt, name)
+
+    def result(tensor, dim):
+        answer = scan(tensor, dim)
+        return answer[0] if isinstance(answer, tuple) else answer
+
+    rows = result(_t(values), 1).numpy()
+    columns = result(_t(np.ascontiguousarray(values.T)), 0).numpy()
+    np.testing.assert_array_equal(rows, columns.T)
+
+
+@pytest.mark.parametrize("name", ["cummax", "cummin"])
+@pytest.mark.parametrize("length", [1, 2, 9, 257])
+def test_the_scanned_indices_agree_between_the_two_shapes(name, length):
+    rng = np.random.default_rng(length + 1)
+    values = np.round(rng.standard_normal((4, length)) * 3)  # ties on purpose
+    values.reshape(-1)[::7] = np.nan
+    scan = getattr(mt, name)
+
+    rows = scan(_t(values), 1)[1].numpy()
+    columns = scan(_t(np.ascontiguousarray(values.T)), 0)[1].numpy()
+    np.testing.assert_array_equal(rows, columns.T)
+
+
+@pytest.mark.parametrize("name", ["cumsum", "cumprod"])
+def test_a_scan_of_one_element_is_that_element(name):
+    got = getattr(mt, name)(_t([[2.5], [3.5]]), 1).numpy()
+    np.testing.assert_array_equal(got, [[2.5], [3.5]])
+
+
+def test_a_long_last_axis_scan_matches_numpy_exactly():
+    """Long enough that the register path is the whole of the work, and in
+    float64 so the comparison is exact rather than approximate."""
+    values = np.arange(1.0, 20001.0) / 10000.0
+    np.testing.assert_array_equal(mt.cumsum(_t(values), 0).numpy(), np.cumsum(values))
+    np.testing.assert_array_equal(
+        mt.cummax(_t(values), 0)[0].numpy(), np.maximum.accumulate(values)
+    )
