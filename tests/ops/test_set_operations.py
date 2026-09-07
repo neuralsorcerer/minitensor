@@ -186,3 +186,54 @@ def test_trim_zeros_on_nothing_and_on_all_zeros():
     assert mt.trim_zeros(mt.from_numpy(empty)).numpy().size == 0
     with pytest.raises(ValueError, match="'f', 'b' or 'fb'"):
         mt.trim_zeros(mt.from_numpy(zeros), "x")
+
+
+# A row of zeros between two non-zero rows survives, the same way a zero
+# between two non-zeros does on a line -- and the rank survives with it.
+_TRIM_GRID = np.array(
+    [
+        [0, 0, 0, 0, 0],
+        [0, 0, 2, 3, 0],
+        [0, 0, 0, 0, 0],
+        [0, 1, 0, 3, 0],
+        [0, 0, 0, 0, 0],
+    ],
+    dtype=np.int64,
+)
+
+
+@pytest.mark.parametrize("trim", ["fb", "f", "b"])
+@pytest.mark.parametrize("axis", [None, 0, 1, -1, (0, 1), ()])
+def test_trim_zeros_crops_a_box_and_keeps_the_rank(trim, axis):
+    np.testing.assert_array_equal(
+        mt.trim_zeros(mt.from_numpy(_TRIM_GRID), trim, axis).numpy(),
+        np.trim_zeros(_TRIM_GRID, trim, axis),
+    )
+
+
+@pytest.mark.parametrize("shape", [(2, 3), (3, 0), (0, 3), (2, 2, 2)])
+def test_trim_zeros_on_an_all_zero_box_empties_every_cropped_axis(shape):
+    zeros = np.zeros(shape, dtype=np.int64)
+    for trim in ("fb", "f", "b"):
+        result = mt.trim_zeros(mt.from_numpy(zeros), trim)
+        assert tuple(result.shape) == np.trim_zeros(zeros, trim).shape
+        assert tuple(result.shape) == (0,) * len(shape)
+
+
+def test_trim_zeros_leaves_a_scalar_alone():
+    # There is no axis to crop, so there is nothing to do -- and flattening it
+    # to a line would be a rank change nobody asked for.
+    for value in (0.0, 5.0):
+        scalar = mt.Tensor(np.float64(value), dtype="float64")
+        assert tuple(mt.trim_zeros(scalar).shape) == ()
+        assert mt.trim_zeros(scalar).item() == value
+    with pytest.raises(ValueError, match="out of range"):
+        mt.trim_zeros(mt.Tensor(np.float64(0.0), dtype="float64"), "fb", 0)
+
+
+def test_trim_zeros_rejects_a_repeated_axis():
+    grid = mt.from_numpy(_TRIM_GRID)
+    with pytest.raises(ValueError, match="repeated axis"):
+        mt.trim_zeros(grid, "fb", (0, 0))
+    with pytest.raises(ValueError, match="repeated axis"):
+        mt.trim_zeros(grid, "fb", (1, -1))

@@ -594,10 +594,15 @@ pub(crate) fn broadcast_mask_index(
     mask_index
 }
 
-/// A one-element float tensor holding `value`, for the scalar coefficients the
-/// loss and gradient kernels multiply through (`1/n`, `2/n`, …).
+/// A 0-d float tensor holding `value`, for the scalar coefficients the loss
+/// and gradient kernels multiply through (`1/n`, `2/n`, …).
 ///
-/// Shape is `[1]` rather than `[]` so it broadcasts against any operand.
+/// The shape is `[]`, not `[1]`. Both broadcast against an operand of rank one
+/// or more and give the same answer there, but `[1]` also *raises* the rank of
+/// a 0-d operand: `count - 1` on a full reduction came back shaped `[1]`, and
+/// so did the gradient every backward kernel that reaches for a constant
+/// handed to a 0-d input. A gradient has to have its input's shape, so the
+/// scalar has to be a scalar.
 pub(crate) fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) -> Result<Tensor> {
     let mut data = TensorData::zeros_on_device(1, dtype, device);
     match dtype {
@@ -622,7 +627,7 @@ pub(crate) fn create_scalar_tensor(value: f64, dtype: DataType, device: Device) 
 
     Ok(Tensor::new(
         Arc::new(data),
-        Shape::new(vec![1]),
+        Shape::scalar(),
         dtype,
         device,
         false,
@@ -679,9 +684,10 @@ mod tests {
     }
 
     #[test]
-    fn create_scalar_tensor_builds_a_broadcastable_one_element_tensor() {
+    fn create_scalar_tensor_builds_a_zero_dimensional_tensor() {
         let t = create_scalar_tensor(0.25, DataType::Float32, Device::cpu()).unwrap();
-        assert_eq!(t.shape().dims(), &[1]);
+        assert!(t.shape().dims().is_empty());
+        assert_eq!(t.numel(), 1);
         assert_eq!(t.data().as_f32_slice().unwrap(), &[0.25]);
         assert!(!t.requires_grad());
 

@@ -520,6 +520,32 @@ def _normalize_axis(dim: object, ndim: int, name: str) -> int:
     return axis
 
 
+def _normalize_axis_tuple(axis: object, ndim: int, name: str) -> tuple[int, ...]:
+    """One axis or a sequence of them, each brought into range, none repeated.
+
+    A repeated axis is rejected rather than folded away: an op that trims or
+    reduces one axis twice would do the second pass on the answer of the first,
+    so asking for it is a mistake, not a shorthand.
+    """
+
+    try:
+        return (_normalize_axis(axis, ndim, name),)
+    except TypeError:
+        pass
+
+    try:
+        entries = tuple(axis)  # type: ignore[call-overload]
+    except TypeError as exc:
+        raise TypeError(
+            f"{name} requires an integer axis or a sequence of them"
+        ) from exc
+
+    axes = tuple(_normalize_axis(entry, ndim, name) for entry in entries)
+    if len(set(axes)) != len(axes):
+        raise ValueError(f"{name} was given a repeated axis in {axis!r}")
+    return axes
+
+
 def fliplr(input: object) -> Tensor:
     """Reverse the columns: `flip` on axis 1, which needs a second axis."""
 

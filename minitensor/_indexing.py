@@ -36,6 +36,7 @@ from ._shape import (
     _element_count,
     _index_tensor,
     _normalize_axis,
+    _normalize_axis_tuple,
     _normalize_shape_argument,
     broadcast_tensors,
     broadcast_to,
@@ -1026,31 +1027,67 @@ def setxor1d(input: object, other: object, assume_unique: bool = False) -> Tenso
     return _F.unique(_F.cat([only_left, only_right]))
 
 
-def trim_zeros(input: object, trim: str = "fb") -> Tensor:
-    """A 1-D tensor with leading and trailing zeros removed.
+def _nonzero_extent(mask: Tensor, axis: int, ndim: int) -> tuple[int, int]:
+    """The first and one-past-the-last position along `axis` that holds a
+    non-zero, reducing the other axes away to find them.
 
-    `trim` says which ends to trim: `'f'` for the front, `'b'` for the back,
-    `'fb'` for both. Only the ends -- a zero between two non-zeros stays, which
-    is the difference between this and a mask.
+    The other axes go from the top down so that `axis` keeps its position as
+    they disappear, which is what lets the reduction skip a `movedim` and the
+    copy that comes with it.
     """
 
-    tensor = _atleast_tensor(input).reshape(-1)
+    line = mask
+    for other in range(ndim - 1, -1, -1):
+        if other != axis:
+            line = _F.any(line, other, False)
+
+    found = flatnonzero(line).numpy()
+    if found.size == 0:
+        return 0, 0
+    return builtins.int(found[0]), builtins.int(found[-1]) + 1
+
+
+def trim_zeros(input: object, trim: str = "fb", axis: object = None) -> Tensor:
+    """The tensor cropped to the smallest box that still holds every non-zero.
+
+    `trim` says which ends to crop: `'f'` for the front, `'b'` for the back,
+    `'fb'` for both. Only the ends -- a zero between two non-zeros stays, which
+    is the difference between this and a mask.
+
+    Every axis is cropped unless `axis` names the ones to crop, and the rank is
+    preserved either way: a row of a matrix survives if anything in it is
+    non-zero, so trimming a matrix drops its all-zero border rows and columns
+    rather than flattening it. An all-zero tensor has no box to crop to, so
+    every cropped axis comes back empty whichever ends `trim` asked for.
+    """
+
+    tensor = _atleast_tensor(input)
     wanted = trim.lower()
-    if any(letter not in "fb" for letter in wanted):
+    if wanted not in ("fb", "bf", "f", "b"):
         raise ValueError(f"trim_zeros takes 'f', 'b' or 'fb', got {trim!r}")
 
-    length = tensor.shape[0]
-    start, stop = 0, length
-    if length:
-        nonzero = flatnonzero(tensor != 0)
-        if nonzero.shape[0] == 0:
-            start, stop = 0, 0
-        else:
-            if "f" in wanted:
-                start = builtins.int(nonzero.numpy()[0])
-            if "b" in wanted:
-                stop = builtins.int(nonzero.numpy()[-1]) + 1
-    return _F.narrow(tensor, 0, start, max(stop - start, 0))
+    ndim = tensor.ndim()
+    if axis is None:
+        axes: tuple[int, ...] = tuple(range(ndim))
+    else:
+        axes = _normalize_axis_tuple(axis, ndim, "trim_zeros")
+    if not axes:
+        return tensor
+
+    # One mask for every axis: each pass reduces it, none rebuilds it. The
+    # bounds all come from the original, so cropping one axis cannot move
+    # another's -- which is why they can be applied as they are found.
+    mask = tensor != 0
+    result = tensor
+    for target in sorted(axes):
+        start, stop = _nonzero_extent(mask, target, ndim)
+        if start != stop:
+            if "f" not in wanted:
+                start = 0
+            if "b" not in wanted:
+                stop = tensor.shape[target]
+        result = _F.narrow(result, target, start, stop - start)
+    return result
 
 
 class UniqueAllResult(_NamedTuple):

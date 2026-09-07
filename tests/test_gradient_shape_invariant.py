@@ -121,3 +121,64 @@ def test_gradients_keep_their_tensor_dtype(name, op, dtype):
     assert (
         x.grad.dtype == dtype
     ), f"{name}: {dtype} tensor got a {x.grad.dtype} gradient"
+
+
+def test_a_scalar_keeps_its_rank_through_every_no_arg_backward():
+    """A 0-d input must get a 0-d gradient, from every op that accepts one.
+
+    Probed against the live API rather than a hand-written list, for the reason
+    the gradcheck sweep gives: a list of "every op" that covers all but nine is
+    worse than one that admits its scope. Ops needing a rank raise here and are
+    skipped -- what is being checked is the shape of the gradient, not which
+    ops take a scalar.
+
+    The failure this catches is a backward kernel reaching for a constant to
+    multiply through. A constant shaped `[1]` broadcasts harmlessly against an
+    operand of rank one or more, so the bug is invisible everywhere except at
+    rank zero, where it hands back a `(1,)` gradient for a `()` parameter --
+    which is how `log`, `atan`, `rsqrt`, `log1p`, `expm1` and the inverse
+    hyperbolics were all quietly wrong at once.
+    """
+    wrong = []
+    for name in sorted(n for n in dir(mt.Tensor) if not n.startswith("_")):
+        try:
+            probe = mt.Tensor(np.float64(0.6), dtype="float64", requires_grad=True)
+            attr = getattr(probe, name)
+            if not callable(attr):
+                continue
+            result = attr()
+            outputs = result if isinstance(result, tuple) else (result,)
+            differentiable = [o for o in outputs if getattr(o, "requires_grad", False)]
+            if not differentiable:
+                continue
+            for output in differentiable:
+                output.backward()
+        except Exception:
+            continue  # needs arguments or a rank, or is not defined at 0.6
+        if probe.grad is not None and tuple(probe.grad.shape) != ():
+            wrong.append(f"{name} -> {tuple(probe.grad.shape)}")
+    mt.clear_autograd_graph()
+
+    assert not wrong, "0-d inputs given a gradient of the wrong rank: " + ", ".join(
+        wrong
+    )
+
+
+@pytest.mark.parametrize("shape", [(), (1,), (4,), (2, 3)])
+@pytest.mark.parametrize("unbiased", [True, False])
+def test_the_nan_skipping_spread_reduces_to_the_same_rank_as_the_plain_one(
+    shape, unbiased
+):
+    # `nanvar` divides by a count, and subtracting the correction from that
+    # count used to raise its rank: a full reduction reported `(1,)` where
+    # `var` reported `()`.
+    values = np.random.default_rng(4).standard_normal(shape)
+    tensor = mt.Tensor(values, dtype="float64")
+    for nan_name, plain_name in (("nanvar", "var"), ("nanstd", "std")):
+        nan_aware = getattr(tensor, nan_name)(unbiased=unbiased)
+        plain = getattr(tensor, plain_name)(unbiased=unbiased)
+        assert tuple(nan_aware.shape) == tuple(plain.shape) == (), (
+            f"{nan_name} on {shape} gave {tuple(nan_aware.shape)} "
+            f"where {plain_name} gave {tuple(plain.shape)}"
+        )
+        assert np.allclose(nan_aware.numpy(), plain.numpy(), equal_nan=True)
