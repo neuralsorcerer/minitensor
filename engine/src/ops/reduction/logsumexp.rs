@@ -11,7 +11,7 @@ use crate::autograd::NanMeanBackward;
 use crate::autograd::ProdBackward;
 use crate::ops::map::{par_out_chunks, reduction_band};
 use crate::ops::util::check_dim;
-use crate::ops::util::{accumulating_dtype, accurate_slab_sum};
+use crate::ops::util::{accumulating_dtype, accurate_indexed_sum, accurate_slab_sum};
 use crate::ops::{activation, arithmetic, shape_ops};
 use crate::{
     autograd::with_grad_fn,
@@ -159,6 +159,41 @@ fn logsumexp_fused_single_axis(tensor: &Tensor, axis: usize, keepdim: bool) -> R
                 par_out_chunks(out, band, &|start, out_chunk| {
                     let block_base = (start / inner) * outer_stride + start % inner;
                     let width = out_chunk.len();
+                    if width == 1 {
+                        // One output for the whole axis, which is every
+                        // reduction of a last dimension. The slab form below
+                        // then carries a one-element accumulator *vector* and
+                        // zips three iterators to add a single number: two
+                        // million elements cost 13.2ms against 1.8 for
+                        // `exp(x - max).sum()` spelled out with this library's
+                        // own operators.
+                        let mut top = <$ty>::NEG_INFINITY;
+                        for k in 0..dim_size {
+                            let v = input[block_base + k * inner];
+                            if v.is_nan() {
+                                top = v;
+                            } else if v > top {
+                                top = v;
+                            }
+                        }
+                        out_chunk[0] = if top.is_finite() {
+                            // The summation `softmax` uses down a contiguous
+                            // axis: eight lanes over short blocks, where the
+                            // slab form carries one lane over long ones. More
+                            // accurate, and the accuracy is the reason the
+                            // fused path blocks at all.
+                            let total = accurate_indexed_sum(dim_size, 0.0 as $ty, |k| {
+                                (input[block_base + k * inner] - top).exp()
+                            });
+                            top + total.ln()
+                        } else {
+                            // A non-finite maximum is the answer: `+inf` rows
+                            // reduce to `+inf`, all-`-inf` rows to `-inf`, and
+                            // NaN propagates.
+                            top
+                        };
+                        return;
+                    }
                     // Column max with NaN propagation (matches max_along_dim).
                     let mut col_max = vec![<$ty>::NEG_INFINITY; width];
                     for k in 0..dim_size {

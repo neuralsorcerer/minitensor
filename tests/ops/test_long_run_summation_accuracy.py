@@ -195,3 +195,90 @@ def test_var_agrees_across_paths_when_reducing_dimension_zero(rows, cols):
         fused < 1e-5 and composed < 1e-5
     ), f"fused {fused:.3e} composed {composed:.3e}"
     assert composed < 100 * max(fused, 1e-9)
+
+
+# A log-sum-exp whose output is a single value per band -- which is every
+# reduction of a *last* dimension -- carried a one-element accumulator vector
+# through the slab machinery, zipping three iterators to add one number. Two
+# million elements cost 13.2ms against 1.8 for `exp(x - max).sum()` spelled
+# out. It now sums the way `softmax` does down a contiguous axis: eight lanes
+# over short blocks, which is both faster and more accurate than the one lane
+# over long blocks the slab form carries.
+
+
+@pytest.mark.parametrize("n", [1000, 100_000, 1_000_000])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_logsumexp_is_the_same_answer_trained_through_or_not(n, dtype):
+    """The fused path runs only when nothing wants a gradient, and the autograd
+    composition runs when something does. A reduction that answers differently
+    depending on whether it is being trained through is a trap -- and it used
+    to answer differently by three orders of magnitude. They now sum the same
+    way, so they agree to within a rounding, and the fused one is never the
+    worse of the two."""
+    values = (np.random.default_rng(n).standard_normal(n) * 3).astype(dtype)
+    plain = mt.Tensor(values, dtype=dtype).logsumexp(-1).item()
+
+    trained = mt.Tensor(values, dtype=dtype, requires_grad=True)
+    through = trained.logsumexp(-1).item()
+    mt.clear_autograd_graph()
+
+    exact = values.astype(np.float64)
+    top = exact.max()
+    want = float(np.log(np.exp(exact - top).sum()) + top)
+    tolerance = 1e-6 if dtype == "float32" else 1e-14
+    assert _relative_error(plain, want) < tolerance
+    assert _relative_error(through, want) < tolerance
+    # Within a couple of the smaller type's roundings of each other.
+    assert abs(plain - through) <= 4 * abs(want) * (
+        np.finfo(dtype).eps if dtype == "float32" else np.finfo(dtype).eps
+    )
+    assert _relative_error(plain, want) <= _relative_error(through, want) + tolerance
+
+
+@pytest.mark.parametrize("n", [1000, 100_000, 1_000_000])
+def test_logsumexp_over_a_long_axis_stays_accurate(n):
+    values = (np.random.default_rng(n + 1).standard_normal(n) * 3).astype(np.float32)
+    got = mt.Tensor(values, dtype="float32").logsumexp(-1).item()
+
+    exact = values.astype(np.float64)
+    top = exact.max()
+    want = float(np.log(np.exp(exact - top).sum()) + top)
+    assert _relative_error(got, want) < 1e-6
+
+
+@pytest.mark.parametrize(
+    "shape,dim", [((1, 200_000), 1), ((4, 50_000), 1), ((200_000, 1), 0)]
+)
+def test_a_few_long_rows_agree_with_the_same_rows_reduced_one_at_a_time(shape, dim):
+    """Few outputs is the shape the one-element band exists for; reducing each
+    row on its own takes the same path with the same width."""
+    rng = np.random.default_rng(sum(shape))
+    values = (rng.standard_normal(shape) * 3).astype(np.float32)
+    together = mt.Tensor(values, dtype="float32").logsumexp(dim).numpy().reshape(-1)
+
+    moved = np.moveaxis(values, dim, -1).reshape(-1, shape[dim])
+    apart = [
+        mt.Tensor(np.ascontiguousarray(row), dtype="float32").logsumexp(-1).item()
+        for row in moved
+    ]
+    np.testing.assert_array_equal(together, np.array(apart, dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "row,expected",
+    [
+        ([np.inf, 1.0], np.inf),
+        ([-np.inf, -np.inf], -np.inf),
+        ([np.nan, 1.0], np.nan),
+        ([-np.inf, 2.0], 2.0),
+    ],
+    ids=["inf", "all_neg_inf", "nan", "neg_inf_and_a_number"],
+)
+def test_a_non_finite_maximum_is_the_answer(row, expected):
+    got = mt.Tensor(np.array(row), dtype="float64").logsumexp(0).item()
+    if np.isnan(expected):
+        assert np.isnan(got)
+    elif np.isinf(expected):
+        assert got == expected
+    else:
+        np.testing.assert_allclose(got, expected)
