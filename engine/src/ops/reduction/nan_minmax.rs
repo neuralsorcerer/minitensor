@@ -66,6 +66,28 @@ pub(crate) fn reduction_layout(
 /// 1024 and 32768 favour blocking by 3.5x and 1.6x.
 const BLOCKED_INNER_MIN: usize = 256;
 
+/// Most outputs a reduction can have before splitting *them* fills the machine
+/// on its own.
+///
+/// Below this many, the split has to be over the reduced axis instead: a
+/// reduction to a single value has one output however long the axis is, so
+/// `max(dim=0)` of a two-million-element vector ran on one core at 2.6ms where
+/// the whole-tensor form does the same work in 0.2.
+const ARG_BAND_MAX_OUTPUTS: usize = 64;
+
+/// Shortest reduced axis worth cutting into bands. Below it the whole
+/// reduction is a few microseconds and the partials cost more than they save.
+const ARG_BAND_MIN_LEN: usize = 1 << 15;
+
+/// How much of the reduced axis one band covers.
+///
+/// From the *shape*, never from the thread pool. The combination below is a
+/// comparison rather than an accumulation, so the answer does not depend on how
+/// the axis was cut -- but every partition in this library derives its
+/// boundaries from the shape, and keeping the rule uniform is what makes that
+/// easy to check.
+const ARG_BAND_LEN: usize = 1 << 14;
+
 /// Reduce `input` along a dimension into `output`, parallelizing over output
 /// elements (one rayon task per output position, each walking its column of the
 /// reduced dimension with a running offset). `combine` folds the accumulator
@@ -193,6 +215,63 @@ pub(crate) fn reduce_arg_along_dim_par<T, Better, Short>(
                 }
             }
         });
+        return;
+    }
+
+    // Too few outputs to split, and a long axis: band the axis instead. Each
+    // band takes its own extremum and they are combined in band order, so the
+    // earliest position still wins a tie and the answer is the walk's own.
+    //
+    // `short` is deliberately not used here, for the same reason the blocked
+    // path above does not use it: the comparison the callers pass already folds
+    // NaN in, which reproduces the index the break-on-first-NaN short circuit
+    // produced.
+    if values.len() <= ARG_BAND_MAX_OUTPUTS && dim_size >= ARG_BAND_MIN_LEN {
+        let bands = dim_size.div_ceil(ARG_BAND_LEN);
+        let mut partial: Vec<(T, usize)> = vec![(init, 0); values.len() * bands];
+        // One band per chunk: rayon splits the range itself, and a band is
+        // already `ARG_BAND_LEN` reads of work. Handing out whole *outputs*
+        // instead would be one chunk again whenever there is one output, which
+        // is the case this path exists for.
+        par_out_chunks(&mut partial, 1, &|start, chunk| {
+            for (offset, slot) in chunk.iter_mut().enumerate() {
+                let flat = start + offset;
+                let out_idx = flat / bands;
+                let band = flat % bands;
+                let o = out_idx / inner;
+                let r = out_idx % inner;
+                let from = band * ARG_BAND_LEN;
+                let to = ((band + 1) * ARG_BAND_LEN).min(dim_size);
+                // Seeded at the band's first position, so a band nothing beats
+                // still names somewhere inside itself -- and the first band's
+                // seed is position zero, which is what the walk reports when
+                // nothing beats the initial value.
+                let mut best = init;
+                let mut best_i = from;
+                let mut idx = o * outer_stride + r + from * inner;
+                for d in from..to {
+                    let val = input[idx];
+                    if better(val, best) {
+                        best = val;
+                        best_i = d;
+                    }
+                    idx += inner;
+                }
+                *slot = (best, best_i);
+            }
+        });
+        for (lane, (vout, iout)) in values.iter_mut().zip(indices.iter_mut()).enumerate() {
+            let (mut best, mut best_i) = partial[lane * bands];
+            for band in 1..bands {
+                let (value, at) = partial[lane * bands + band];
+                if better(value, best) {
+                    best = value;
+                    best_i = at;
+                }
+            }
+            *vout = best;
+            *iout = best_i as i64;
+        }
         return;
     }
 

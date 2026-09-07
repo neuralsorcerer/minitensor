@@ -281,3 +281,92 @@ def test_logsumexp_carries_the_nonfinite_cases(dtype):
     finite = np.array([1.0, 2.0], dtype=np.float64)
     peak = finite.max()
     check([1.0, 2.0, -np.inf], peak + np.log(np.exp(finite - peak).sum()))
+
+
+# An extremum that reports *where* it came from splits its work over the
+# outputs, and a reduction to a single value has one of those however long the
+# axis is: `max(dim=0)` of a two-million-element vector ran on one core at
+# 2.6ms, where the whole-tensor form does the same work in 0.2. With few
+# outputs and a long axis the reduced axis is banded instead, each band taking
+# its own extremum, and the bands are combined in order so the earliest
+# position still wins a tie. The tests below straddle the 32768-element
+# threshold that turns the banding on, and the 16384-element band itself.
+
+
+@pytest.mark.parametrize("length", [16383, 16384, 16385, 32767, 32768, 40000])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_a_banded_extremum_names_the_same_position_as_a_short_one(length, dtype):
+    """Values coarse enough that the winner repeats, so the tie rule decides
+    and a band boundary landing inside a run of equals would show."""
+    rng = np.random.default_rng(length)
+    values = np.round(rng.standard_normal(length) * 3).astype(dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+
+    top, at = tensor.max(-1)
+    assert top.item() == values.max()
+    assert at.item() == int(np.argmax(values))
+    bottom, at = tensor.min(-1)
+    assert bottom.item() == values.min()
+    assert at.item() == int(np.argmin(values))
+    assert tensor.argmax(-1).item() == int(np.argmax(values))
+    assert tensor.argmin(-1).item() == int(np.argmin(values))
+
+
+@pytest.mark.parametrize("position", [0, 1, 16383, 16384, 16385, 39999])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_the_winner_is_found_wherever_a_band_boundary_falls(position, dtype):
+    values = np.zeros(40000, dtype=dtype)
+    values[position] = 5.0
+    tensor = mt.Tensor(values, dtype=dtype)
+    top, at = tensor.max(-1)
+    assert top.item() == 5.0
+    assert at.item() == position
+
+
+@pytest.mark.parametrize("position", [0, 1, 16384, 20000, 39999])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_a_nan_wins_from_any_band_and_the_first_one_holds(position, dtype):
+    values = np.arange(40000, dtype=dtype)
+    values[position] = np.nan
+    if position + 10000 < 40000:
+        values[position + 10000] = np.nan  # a later one must not displace it
+    tensor = mt.Tensor(values, dtype=dtype)
+    top, at = tensor.max(-1)
+    assert np.isnan(top.item())
+    assert at.item() == position
+    assert tensor.argmax(-1).item() == position
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_an_all_equal_axis_reports_its_first_position(dtype):
+    """Nothing beats the running value, so every band keeps its seed and the
+    combination has to fall back on the first band's."""
+    values = np.full(40000, 3.5, dtype=dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+    assert tensor.max(-1)[1].item() == 0
+    assert tensor.min(-1)[1].item() == 0
+    assert tensor.argmax(-1).item() == 0
+
+
+@pytest.mark.parametrize("rows", [1, 3, 64, 65])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_the_banded_and_the_per_output_paths_agree(rows, dtype):
+    """65 rows is one past the point where splitting the outputs is judged
+    enough on its own, so the two paths meet on the same data."""
+    rng = np.random.default_rng(rows)
+    values = np.round(rng.standard_normal((rows, 40000)) * 3).astype(dtype)
+    tensor = mt.Tensor(values, dtype=dtype)
+    top, at = tensor.max(1)
+    np.testing.assert_array_equal(top.numpy(), values.max(1))
+    np.testing.assert_array_equal(at.numpy(), values.argmax(1))
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_the_nan_aware_form_skips_nans_from_any_band(dtype):
+    values = np.arange(40000, dtype=dtype)
+    values[::997] = np.nan
+    values[20000] = 1e6
+    tensor = mt.Tensor(values, dtype=dtype)
+    top, at = mt.functional.nanmax(tensor, -1)
+    assert top.item() == 1e6
+    assert at.item() == 20000

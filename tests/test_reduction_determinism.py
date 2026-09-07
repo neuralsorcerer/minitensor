@@ -106,7 +106,7 @@ _CHILD_ALONG_DIM = textwrap.dedent("""
     import numpy as np, minitensor as mt
     rng = np.random.default_rng(3)
     digests = []
-    for shape in [(4096, 1024), (5, 600), (2, 3, 400), (300, 3)]:
+    for shape in [(4096, 1024), (5, 600), (2, 3, 400), (300, 3), (200003,), (3, 60000)]:
         values = (rng.standard_normal(shape) * 10).astype(np.float32)
         poisoned = values.copy()
         poisoned.reshape(-1)[::997] = np.nan
@@ -116,7 +116,10 @@ _CHILD_ALONG_DIM = textwrap.dedent("""
                 digests.append(tensor.norm(float("inf"), dim).numpy().tobytes())
                 digests.append(tensor.norm(float("-inf"), dim).numpy().tobytes())
                 digests.append(tensor.max(dim)[0].numpy().tobytes())
+                digests.append(tensor.max(dim)[1].numpy().tobytes())
+                digests.append(tensor.min(dim)[1].numpy().tobytes())
                 digests.append(tensor.argmax(dim).numpy().tobytes())
+                digests.append(tensor.argmin(dim).numpy().tobytes())
             digests.append(clean.norm(2, dim).numpy().tobytes())
             digests.append(clean.logsumexp(dim).numpy().tobytes())
             digests.append(clean.softmax(dim).numpy().tobytes())
