@@ -29,6 +29,7 @@ built yet or already released.
 
 import numpy as np
 import pytest
+from conftest import callable_attribute
 
 import minitensor as mt
 from minitensor import nn
@@ -190,7 +191,7 @@ def test_no_tensor_method_can_corrupt_a_pending_backward():
     attempt("t[:] = v", lambda t: t.__setitem__(slice(None), source))
 
     for name in sorted(n for n in dir(probe) if not n.startswith("_")):
-        if not callable(getattr(probe, name, None)):
+        if callable_attribute(probe, name) is None:
             continue
         for args in ((), (99.0,), (source,), (0,)):
             try:

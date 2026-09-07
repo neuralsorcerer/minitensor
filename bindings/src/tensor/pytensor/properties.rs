@@ -163,6 +163,42 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    /// The axes in reverse order, which is NumPy's `.T`. A matrix is
+    /// transposed and anything of lower rank comes back unchanged.
+    ///
+    /// The three spellings of a transpose mean three different things and none
+    /// of them is the others: `t()` is PyTorch's, which transposes a matrix and
+    /// refuses a higher rank rather than guessing; `mT` is the array API's,
+    /// which swaps the last two axes and leaves batch axes alone; this one
+    /// reverses every axis, which is what a NumPy caller writing `a.T` means.
+    #[getter]
+    #[pyo3(name = "T")]
+    pub fn transposed(&self) -> PyResult<Self> {
+        let ndim = self.inner.shape().ndim();
+        let reversed: Vec<isize> = (0..ndim as isize).rev().collect();
+        let result = self.inner.permute(reversed).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
+    /// The last two axes swapped, leaving any batch axes alone -- the array
+    /// API's `.mT`, and the property spelling of `matrix_transpose`.
+    ///
+    /// A tensor with fewer than two axes has no matrix to transpose and is
+    /// refused rather than returned unchanged, which is what the standard
+    /// asks for and what tells a caller their batch has collapsed.
+    #[getter]
+    #[pyo3(name = "mT")]
+    pub fn matrix_transposed(&self) -> PyResult<Self> {
+        if self.inner.shape().ndim() < 2 {
+            return Err(PyValueError::new_err(format!(
+                "mT requires at least two dimensions, got {}",
+                self.inner.shape().ndim()
+            )));
+        }
+        let result = self.inner.transpose(-2, -1).map_err(_convert_error)?;
+        Ok(Self::from_tensor(result))
+    }
+
     #[pyo3(signature = (*dims))]
     pub fn permute(&self, dims: &Bound<PyTuple>) -> PyResult<Self> {
         let dims_vec = normalize_variadic_isize_args(dims, "dims")?;

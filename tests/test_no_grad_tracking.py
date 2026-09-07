@@ -25,6 +25,7 @@ is what made the inconsistency easy to miss.
 
 import numpy as np
 import pytest
+from conftest import callable_attribute
 
 import minitensor as mt
 from minitensor import functional as F
@@ -154,7 +155,7 @@ def test_no_op_under_no_grad_records_a_graph_node():
 
     for name in sorted(n for n in dir(mt.Tensor) if not n.startswith("_")):
         probe = mt.Tensor(np.arange(1, 7, dtype=np.float64), dtype="float64")
-        if not callable(getattr(probe, name, None)):
+        if callable_attribute(probe, name) is None:
             continue
         for args in ((), (0,), (1.0,), (source,)):
             x = _tracked((6,))

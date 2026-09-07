@@ -259,6 +259,63 @@ def test_permute_out_of_range():
         x.permute(0, 1, 3)
 
 
+@pytest.mark.parametrize(
+    "shape", [(), (4,), (2, 3), (2, 3, 4), (2, 3, 4, 5), (0,), (3, 0), (1, 1)]
+)
+def test_the_T_property_reverses_every_axis_as_numpy_does(shape):
+    values = np.arange(int(np.prod(shape)) if shape else 1, dtype=np.float64)
+    values = values.reshape(shape)
+    np.testing.assert_array_equal(
+        mt.Tensor(values, dtype="float64").T.numpy(), values.T
+    )
+
+
+@pytest.mark.parametrize("shape", [(2, 3), (2, 3, 4), (5, 2, 3, 4), (1, 1)])
+def test_the_mT_property_swaps_only_the_last_two_axes(shape):
+    values = np.arange(int(np.prod(shape)), dtype=np.float64).reshape(shape)
+    np.testing.assert_array_equal(
+        mt.Tensor(values, dtype="float64").mT.numpy(), np.matrix_transpose(values)
+    )
+    # And it is the property spelling of the function that already existed.
+    np.testing.assert_array_equal(
+        mt.Tensor(values, dtype="float64").mT.numpy(),
+        mt.matrix_transpose(mt.Tensor(values, dtype="float64")).numpy(),
+    )
+
+
+@pytest.mark.parametrize("shape", [(), (4,)])
+def test_mT_refuses_a_tensor_with_no_matrix_in_it(shape):
+    values = np.arange(int(np.prod(shape)) if shape else 1, dtype=np.float64)
+    tensor = mt.Tensor(values.reshape(shape), dtype="float64")
+    with pytest.raises(ValueError, match="at least two dimensions"):
+        tensor.mT
+
+
+def test_the_three_transposes_mean_three_different_things():
+    # `t()` is PyTorch's and refuses a batch, `mT` is the array API's and keeps
+    # the batch axes, `T` is NumPy's and reverses everything. A caller reaching
+    # for one of them by name is asking for that one.
+    cube = mt.Tensor(np.arange(24.0).reshape(2, 3, 4), dtype="float64")
+    assert tuple(cube.T.shape) == (4, 3, 2)
+    assert tuple(cube.mT.shape) == (2, 4, 3)
+    with pytest.raises(ValueError, match="at most two dimensions"):
+        cube.t()
+
+    # On a matrix all three agree, which is why the difference goes unnoticed.
+    grid = mt.Tensor(np.arange(6.0).reshape(2, 3), dtype="float64")
+    for spelling in (grid.T.numpy(), grid.mT.numpy(), grid.t().numpy()):
+        np.testing.assert_array_equal(spelling, np.arange(6.0).reshape(2, 3).T)
+
+
+def test_the_transpose_properties_carry_a_gradient():
+    for take in (lambda t: t.T, lambda t: t.mT):
+        x = mt.Tensor(np.arange(6.0).reshape(2, 3), dtype="float64", requires_grad=True)
+        weights = mt.Tensor(np.arange(6.0).reshape(3, 2), dtype="float64")
+        (take(x) * weights).sum().backward()
+        assert tuple(x.grad.shape) == (2, 3)
+        np.testing.assert_array_equal(x.grad.numpy(), np.arange(6.0).reshape(3, 2).T)
+
+
 def test_functional_transpose():
     t = Tensor.arange(0, 24).reshape([2, 3, 4])
     tr = F.transpose(t, 0, 1)

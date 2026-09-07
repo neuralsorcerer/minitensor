@@ -149,6 +149,12 @@ of convenience aliases.
 | `block_diag(*tensors)` | Arrange the inputs down the diagonal of one larger matrix, zero elsewhere. A 1-D input is a row and a scalar a one-by-one block. |
 | `cartesian_prod(*tensors)` | Every combination of one element from each 1-D input, one row each. A single input comes back unchanged. |
 | `t(input)` | The transpose of a matrix, and anything of lower rank unchanged. Declines a rank above two rather than guessing which axes were meant -- name them with `transpose`. |
+| `tensor.T` | Every axis in reverse order, which is NumPy's `.T`. A matrix is transposed and anything of lower rank comes back unchanged. |
+| `tensor.mT` | The last two axes swapped, leaving batch axes alone -- the array API's `.mT`, and the property spelling of `matrix_transpose`. Refuses a tensor with fewer than two axes. |
+
+The three transposes are three different operations and agree only on a
+matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
+`(2, 4, 3)`, and `t()` refuses rather than guess.
 | `numel(input)` | How many elements the tensor holds, as a Python int. |
 | `mm(input, mat2)` | The product of two matrices. `matmul` also broadcasts batches and promotes vectors; this rejects anything that is not two matrices, which is the point of asking by this name. |
 | `mv(input, vec)` | A matrix times a vector. |
