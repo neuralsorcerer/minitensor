@@ -158,10 +158,9 @@ pub fn searchsorted(sequence: &Tensor, values: &Tensor, right: bool) -> Result<T
 
     let per_row = if sequence.ndim() == 1 {
         values.numel()
-    } else if value_rows == 0 {
-        0
     } else {
-        values.numel() / value_rows
+        // No rows means no values, so there is nothing per row.
+        values.numel().checked_div(value_rows).unwrap_or(0)
     };
 
     let ordered = sequence.contiguous()?;

@@ -334,11 +334,11 @@ impl MemoryBandwidth {
             let start = Instant::now();
 
             let mut sum = 0u64;
-            for chunk in buffer.chunks_exact(8) {
-                let word = u64::from_ne_bytes(chunk.try_into().unwrap());
-                sum = sum.wrapping_add(word);
+            let (words, rest) = buffer.as_chunks::<8>();
+            for &chunk in words {
+                sum = sum.wrapping_add(u64::from_ne_bytes(chunk));
             }
-            for &b in buffer.chunks_exact(8).remainder() {
+            for &b in rest {
                 sum = sum.wrapping_add(b as u64);
             }
 

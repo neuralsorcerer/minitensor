@@ -803,12 +803,13 @@ pub(crate) fn integer_index_array(item: &Bound<PyAny>) -> PyResult<Option<(Vec<i
             // `[]` indexes nothing. `[[]]` has no leaf either, but it has a
             // shape, so it goes the same way as any other nested list.
             None if list.is_empty() => return Ok(Some((Vec::new(), vec![0]))),
-            None => {}
-            Some(leaf) => {
-                if leaf.is_instance_of::<pyo3::types::PyBool>() || leaf.extract::<i64>().is_err() {
-                    return Ok(None);
-                }
+            Some(leaf)
+                if leaf.is_instance_of::<pyo3::types::PyBool>()
+                    || leaf.extract::<i64>().is_err() =>
+            {
+                return Ok(None);
             }
+            None | Some(_) => {}
         }
         // A flat list is the common case and is read straight off; a nested one
         // is an index array of two dimensions or more, and the tensor

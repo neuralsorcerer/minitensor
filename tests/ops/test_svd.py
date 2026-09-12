@@ -179,8 +179,14 @@ def test_small_singular_values_survive():
     A matrix with singular values spread over nine orders of magnitude has every
     one of them comfortably representable. Squaring spreads them over eighteen,
     which is most of what a double can hold, and the smallest does not survive
-    the trip: `eigh` of the squared matrix returns it as *exactly zero*, a
-    relative error of one, while the same value comes back here to eight digits.
+    the trip: `eigh` of the squared matrix is asking for an eigenvalue of 1e-18
+    against a largest of 1, and returns whatever the rounding noise happens to
+    be. Which side of zero that lands on is a property of the LAPACK build --
+    the smallest eigenvalue here comes out at -2.4e-17 on one and +2.3e-17 on
+    another, so the squared route reports either exactly zero or 4.75e-9 for a
+    value that is 1e-9. The assertion below is therefore that it is wrong, not
+    that it is wrong in a particular way. The same value comes back here to
+    eight digits.
 
     Eight and not sixteen, and that is not a shortfall to fix -- reducing `A` to
     bidiagonal form is accurate in absolute terms, to rounding times the largest
@@ -204,8 +210,9 @@ def test_small_singular_values_survive():
     # Every value to eight digits, and no worse than LAPACK on any of them.
     assert np.allclose(s / expected, 1.0, rtol=1e-7)
     assert np.abs(s / expected - 1).max() < 2 * np.abs(reference / expected - 1).max()
-    # The squared route loses the smallest one entirely.
-    assert squared[-1] == 0.0
+    # The squared route loses the smallest one: zero, or a number off by a
+    # factor of several, depending on which way the noise fell.
+    assert abs(squared[-1] / expected[-1] - 1.0) > 0.5, squared[-1]
     assert s[-1] > 0.5 * expected[-1]
 
 

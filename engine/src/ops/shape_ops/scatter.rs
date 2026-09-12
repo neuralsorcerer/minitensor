@@ -766,13 +766,11 @@ pub(crate) fn scatter_reduce_backward(
                             for_input[dst_base + d] =
                                 seed * excluding(zeros[d], nonzero[d], own, zero);
                         }
-                        Reduction::Amax | Reduction::Amin => {
-                            // It was there before anything arrived, so it is the
-                            // earliest claimant of a tie.
-                            if own == result[dst_base + d] {
-                                for_input[dst_base + d] = seed;
-                                claimed[d] = true;
-                            }
+                        // It was there before anything arrived, so it is the
+                        // earliest claimant of a tie.
+                        Reduction::Amax | Reduction::Amin if own == result[dst_base + d] => {
+                            for_input[dst_base + d] = seed;
+                            claimed[d] = true;
                         }
                         _ => {}
                     }

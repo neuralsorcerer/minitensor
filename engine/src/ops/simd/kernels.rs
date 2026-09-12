@@ -501,8 +501,8 @@ pub fn simd_dot_f32(a: &[f32], b: &[f32]) -> f32 {
     let mut sums = [0f32; 8];
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let mut chunks = a.chunks_exact(8).zip(b.chunks_exact(8));
-    for (x, y) in &mut chunks {
+    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
         sums[0] += x[0] * y[0];
         sums[1] += x[1] * y[1];
         sums[2] += x[2] * y[2];
@@ -513,9 +513,8 @@ pub fn simd_dot_f32(a: &[f32], b: &[f32]) -> f32 {
         sums[7] += x[7] * y[7];
     }
     let mut total: f32 = sums.iter().sum();
-    let tail = n - n % 8;
-    for i in tail..n {
-        total += a[i] * b[i];
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        total += x * y;
     }
     total
 }
@@ -526,17 +525,16 @@ pub fn simd_dot_f64(a: &[f64], b: &[f64]) -> f64 {
     let mut sums = [0f64; 4];
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let mut chunks = a.chunks_exact(4).zip(b.chunks_exact(4));
-    for (x, y) in &mut chunks {
+    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<4>(), b.as_chunks::<4>());
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
         sums[0] += x[0] * y[0];
         sums[1] += x[1] * y[1];
         sums[2] += x[2] * y[2];
         sums[3] += x[3] * y[3];
     }
     let mut total: f64 = sums.iter().sum();
-    let tail = n - n % 4;
-    for i in tail..n {
-        total += a[i] * b[i];
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        total += x * y;
     }
     total
 }
@@ -557,17 +555,16 @@ pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
     let mut sums = [0f64; 4];
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
-    let mut chunks = a.chunks_exact(4).zip(b.chunks_exact(4));
-    for (x, y) in &mut chunks {
+    let ((a_chunks, a_rest), (b_chunks, b_rest)) = (a.as_chunks::<4>(), b.as_chunks::<4>());
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
         sums[0] += x[0] as f64 * y[0] as f64;
         sums[1] += x[1] as f64 * y[1] as f64;
         sums[2] += x[2] as f64 * y[2] as f64;
         sums[3] += x[3] as f64 * y[3] as f64;
     }
     let mut total: f64 = sums.iter().sum();
-    let tail = n - n % 4;
-    for i in tail..n {
-        total += a[i] as f64 * b[i] as f64;
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        total += *x as f64 * *y as f64;
     }
     total
 }
@@ -575,8 +572,7 @@ pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
 /// Unrolled sum for i32 slices to leverage auto-vectorization
 pub fn simd_sum_i32(data: &[i32]) -> i32 {
     let mut sums = [0i32; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for chunk in chunks {
         sums[0] = sums[0].wrapping_add(chunk[0]);
         sums[1] = sums[1].wrapping_add(chunk[1]);
@@ -617,8 +613,7 @@ pub fn simd_sum_i32(data: &[i32]) -> i32 {
 /// this, sixteen clearly worse.
 pub fn simd_sum_i32_to_i64(data: &[i32]) -> i64 {
     let mut sums = [0i64; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for chunk in chunks {
         sums[0] = sums[0].wrapping_add(chunk[0] as i64);
         sums[1] = sums[1].wrapping_add(chunk[1] as i64);
@@ -655,8 +650,7 @@ pub fn simd_count_true(data: &[bool]) -> i64 {
     let mut total = 0i64;
     for block in data.chunks(FOLD) {
         let mut lanes = [0u32; 8];
-        let chunks = block.chunks_exact(8);
-        let rem = chunks.remainder();
+        let (chunks, rem) = block.as_chunks::<8>();
         for chunk in chunks {
             for (lane, &flag) in lanes.iter_mut().zip(chunk) {
                 *lane += flag as u32;
@@ -674,8 +668,7 @@ pub fn simd_count_true(data: &[bool]) -> i64 {
 /// exactly why the wider accumulator is worth having.
 pub fn simd_prod_i32_to_i64(data: &[i32]) -> i64 {
     let mut prods = [1i64; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for chunk in chunks {
         prods[0] = prods[0].wrapping_mul(chunk[0] as i64);
         prods[1] = prods[1].wrapping_mul(chunk[1] as i64);
@@ -694,8 +687,7 @@ pub fn simd_prod_i32_to_i64(data: &[i32]) -> i64 {
 /// Unrolled sum for i64 slices to leverage auto-vectorization
 pub fn simd_sum_i64(data: &[i64]) -> i64 {
     let mut sums = [0i64; 4];
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<4>();
     for chunk in chunks {
         sums[0] = sums[0].wrapping_add(chunk[0]);
         sums[1] = sums[1].wrapping_add(chunk[1]);
@@ -710,8 +702,7 @@ pub fn simd_sum_i64(data: &[i64]) -> i64 {
 /// Unrolled product for f32 slices to leverage auto-vectorization
 pub fn simd_prod_f32(data: &[f32]) -> f32 {
     let mut prods = [1f32; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for chunk in chunks {
         prods[0] *= chunk[0];
         prods[1] *= chunk[1];
@@ -730,8 +721,7 @@ pub fn simd_prod_f32(data: &[f32]) -> f32 {
 /// Unrolled product for f64 slices to leverage auto-vectorization
 pub fn simd_prod_f64(data: &[f64]) -> f64 {
     let mut prods = [1f64; 4];
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<4>();
     for chunk in chunks {
         prods[0] *= chunk[0];
         prods[1] *= chunk[1];
@@ -746,8 +736,7 @@ pub fn simd_prod_f64(data: &[f64]) -> f64 {
 /// Unrolled product for i32 slices to leverage auto-vectorization
 pub fn simd_prod_i32(data: &[i32]) -> i32 {
     let mut prods = [1i32; 8];
-    let chunks = data.chunks_exact(8);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<8>();
     for chunk in chunks {
         prods[0] = prods[0].wrapping_mul(chunk[0]);
         prods[1] = prods[1].wrapping_mul(chunk[1]);
@@ -766,8 +755,7 @@ pub fn simd_prod_i32(data: &[i32]) -> i32 {
 /// Unrolled product for i64 slices to leverage auto-vectorization
 pub fn simd_prod_i64(data: &[i64]) -> i64 {
     let mut prods = [1i64; 4];
-    let chunks = data.chunks_exact(4);
-    let rem = chunks.remainder();
+    let (chunks, rem) = data.as_chunks::<4>();
     for chunk in chunks {
         prods[0] = prods[0].wrapping_mul(chunk[0]);
         prods[1] = prods[1].wrapping_mul(chunk[1]);

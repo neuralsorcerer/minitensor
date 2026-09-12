@@ -202,13 +202,30 @@ _TRIM_GRID = np.array(
 )
 
 
+def _numpy_trim(values, trim, dim):
+    """`np.trim_zeros`, reached in a way every supported NumPy can do.
+
+    A sequence of axes only became a legal `axis` in a NumPy newer than the
+    floor this library declares, and cropping one axis at a time is what a
+    sequence means -- checked above against the direct call on a NumPy that
+    takes one. `()` is the same statement about no axes at all: nothing to
+    crop, so the array comes back whole.
+    """
+
+    if isinstance(dim, tuple):
+        for axis in dim:
+            values = np.trim_zeros(values, trim, axis)
+        return values
+    return np.trim_zeros(values, trim, dim)
+
+
 @pytest.mark.parametrize("trim", ["fb", "f", "b"])
 @pytest.mark.parametrize("dim", [None, 0, 1, -1, (0, 1), ()])
 def test_trim_zeros_crops_a_box_and_keeps_the_rank(trim, dim):
     # NumPy calls the argument `axis`; here it is `dim`, as everywhere else.
     np.testing.assert_array_equal(
         mt.trim_zeros(mt.from_numpy(_TRIM_GRID), trim, dim).numpy(),
-        np.trim_zeros(_TRIM_GRID, trim, dim),
+        _numpy_trim(_TRIM_GRID, trim, dim),
     )
 
 

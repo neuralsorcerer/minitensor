@@ -74,8 +74,8 @@ pub(crate) fn resolve_padding(ndim: usize, padding: &[usize]) -> Result<Vec<(usi
     // Axes not mentioned are unpadded. Index 0 of the result is axis 0 of the
     // tensor, so the incoming pairs are laid in from the back.
     let mut resolved = vec![(0usize, 0usize); ndim];
-    for (pair, chunk) in padding.chunks_exact(2).enumerate() {
-        resolved[ndim - 1 - pair] = (chunk[0], chunk[1]);
+    for (pair, &[before, after]) in padding.as_chunks::<2>().0.iter().enumerate() {
+        resolved[ndim - 1 - pair] = (before, after);
     }
     Ok(resolved)
 }

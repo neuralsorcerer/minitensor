@@ -176,7 +176,7 @@ fn median_along_dim_par<T, E, M>(
     E: Entry,
     M: Fn(usize, T) -> E + Copy + Sync,
 {
-    let outer = if inner == 0 { 1 } else { values.len() / inner };
+    let outer = values.len().checked_div(inner).unwrap_or(1);
     par_out_chunks2(
         values,
         indices,
