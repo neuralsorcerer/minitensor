@@ -230,10 +230,14 @@ impl PyTensor {
         self.movedim(source, destination)
     }
 
+    /// Alias of `transpose`, under its array-library spelling. Named `axis0`
+    /// and `axis1` because the method's own name says which word it wants --
+    /// and so that `t.swapaxes(...)` and `mt.swapaxes(t, ...)` take the same
+    /// keyword, which they did not when one said `dim0` and the other `axis0`.
     #[pyo3(name = "swapaxes")]
-    #[pyo3(signature = (dim0, dim1))]
-    pub fn swapaxes_alias(&self, dim0: isize, dim1: isize) -> PyResult<Self> {
-        self.transpose(Some(dim0), Some(dim1))
+    #[pyo3(signature = (axis0, axis1))]
+    pub fn swapaxes_alias(&self, axis0: isize, axis1: isize) -> PyResult<Self> {
+        self.transpose(Some(axis0), Some(axis1))
     }
 
     #[pyo3(name = "swapdims")]
@@ -254,10 +258,13 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    #[pyo3(signature = (*dims))]
-    pub fn expand(&self, dims: &Bound<PyTuple>) -> PyResult<Self> {
-        let dims_vec = normalize_variadic_isize_args(dims, "shape")?;
-        let result = self.inner.expand(dims_vec).map_err(_convert_error)?;
+    /// Broadcast to `shape`, which is lengths rather than axis indices -- the
+    /// name its own error messages have always used, and the one the free
+    /// `expand` uses.
+    #[pyo3(signature = (*shape))]
+    pub fn expand(&self, shape: &Bound<PyTuple>) -> PyResult<Self> {
+        let lengths = normalize_variadic_isize_args(shape, "shape")?;
+        let result = self.inner.expand(lengths).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 

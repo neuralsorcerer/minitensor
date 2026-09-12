@@ -330,8 +330,10 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
-    #[pyo3(signature = (other, axis=None))]
-    pub fn cross(&self, other: &Bound<PyAny>, axis: Option<i32>) -> PyResult<Self> {
+    /// The cross product along `dim`. NumPy calls this argument `axis`; every
+    /// op here spells it `dim`, and PyTorch spells this one `dim` too.
+    #[pyo3(signature = (other, dim=None))]
+    pub fn cross(&self, other: &Bound<PyAny>, dim: Option<i32>) -> PyResult<Self> {
         let py = other.py();
 
         let maybe_tensor = if let Ok(tensor) = other.extract::<PyTensor>() {
@@ -351,7 +353,7 @@ impl PyTensor {
             PyTensor::from_tensor(converted)
         };
 
-        cross_impl(self, &other_tensor, axis)
+        cross_impl(self, &other_tensor, dim)
     }
 
     /// Element-wise larger of two tensors.

@@ -1035,18 +1035,21 @@ def _nonzero_extent(mask: Tensor, axis: int, ndim: int) -> tuple[int, int]:
     return builtins.int(found[0]), builtins.int(found[-1]) + 1
 
 
-def trim_zeros(input: object, trim: str = "fb", axis: object = None) -> Tensor:
+def trim_zeros(input: object, trim: str = "fb", dim: object = None) -> Tensor:
     """The tensor cropped to the smallest box that still holds every non-zero.
 
     `trim` says which ends to crop: `'f'` for the front, `'b'` for the back,
     `'fb'` for both. Only the ends -- a zero between two non-zeros stays, which
     is the difference between this and a mask.
 
-    Every axis is cropped unless `axis` names the ones to crop, and the rank is
+    Every axis is cropped unless `dim` names the ones to crop, and the rank is
     preserved either way: a row of a matrix survives if anything in it is
     non-zero, so trimming a matrix drops its all-zero border rows and columns
     rather than flattening it. An all-zero tensor has no box to crop to, so
     every cropped axis comes back empty whichever ends `trim` asked for.
+
+    NumPy spells this argument `axis`; every op here that takes one spells it
+    `dim`, and a single exception would be worse than the difference.
     """
 
     tensor = _atleast_tensor(input)
@@ -1055,10 +1058,10 @@ def trim_zeros(input: object, trim: str = "fb", axis: object = None) -> Tensor:
         raise ValueError(f"trim_zeros takes 'f', 'b' or 'fb', got {trim!r}")
 
     ndim = tensor.ndim()
-    if axis is None:
+    if dim is None:
         axes: tuple[int, ...] = tuple(range(ndim))
     else:
-        axes = _normalize_axis_tuple(axis, ndim, "trim_zeros")
+        axes = _normalize_axis_tuple(dim, ndim, "trim_zeros")
     if not axes:
         return tensor
 

@@ -116,7 +116,7 @@ of convenience aliases.
 | `setxor1d(input, other, assume_unique=False)` | The distinct values in exactly one of the two, ascending -- the union less the intersection, so a value in both is in neither answer. |
 | `packbits(input, dim=None, bitorder='big')` | Pack groups of eight truth values along `dim` into one integer each. NumPy answers in `uint8`; this library has no unsigned byte, so the values come back as **int32** -- the same numbers in a wider box, and `.numpy().astype(numpy.uint8)` recovers NumPy's array exactly. The axis is zero-padded up to a multiple of eight at its end, which is why `unpackbits` is the inverse only when told the original length. `bitorder` decides whether the first element of each group is the high bit or the low one. |
 | `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. NumPy pads an *empty* input by reading uninitialised memory; this answers zeros. |
-| `trim_zeros(input, trim='fb', axis=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `axis` the axes, defaulting to all of them. |
+| `trim_zeros(input, trim='fb', axis=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them -- NumPy calls that argument `axis`, but every op here spells it `dim`. |
 | `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
 | `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 8ms partitioned against 24 sorted. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
 | `argpartition(input, kth, dim=-1)` | Where the elements `partition` would produce came from, so `take_along_dim(x, argpartition(x, k), dim)` is a partition of the same data around the same `k`: that position holds what a sort would leave there and the two sides hold the same values. Not the same *arrangement* as `partition` when values repeat -- the order of everything but `k` is unspecified, which is what makes a selection cheaper than a sort, and the two forms take different routes to it. |
@@ -168,7 +168,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- the `torch` spelling of `pinv`, keeping that name's threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
 | `matrix_norm(input, ord="fro", keepdim=False)` | A norm of each matrix over its last two axes. `"fro"` is the elementwise 2-norm and `"nuc"` the sum of the singular values; `1` and `inf` are the induced norms (largest absolute column and row sum) and `2` the largest singular value, with each negative order the same quantity minimised. The axes are the last two, as for `inverse`, `diagonal` and `svd` -- `permute` first to use others. A condition number in an order other than 2 is `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`; `cond` is the 2-norm one, which needs no inverse. |
-| `tensorsolve(a, b, axes=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `axes` names axes of `a` to move to the end first. |
+| `tensorsolve(a, b, dims=None)` | Solve `a x = b` where the contraction runs over several axes at once: `a` has the shape of `b` followed by the shape of the answer, and the system is the square one that flattening each half gives. `dims` names axes of `a` to move to the end first -- NumPy calls that argument `axes`. |
 | `tensorinv(a, ind=2)` | The inverse of `a` seen as a matrix split at axis `ind` -- axes before it are the rows, axes after are the columns, and the result has them the other way round, which is what makes `tensordot(tensorinv(a), a, ind)` the identity of that shape. |
 | `logdet(input)` | The log of the determinant, `-inf` where it is not positive. Taken from `slogdet`, because the determinant of a large matrix leaves float64's range long before its logarithm becomes uninteresting. |
 | `renorm(input, p, dim, maxnorm)` | Scale down the sub-tensors along `dim` whose `p`-norm exceeds `maxnorm`, leaving the rest bit-for-bit unchanged -- which is what makes it usable as an embedding constraint applied every step. |
@@ -628,6 +628,17 @@ True
 
 The following instance methods are exercised by the test suite and are available
 on `Tensor` objects (many also have functional/top-level equivalents):
+
+```{note}
+The axis argument is spelled `dim`, and keeping it is `keepdim` — PyTorch's
+names, used everywhere including on the functions NumPy contributed (`ptp`,
+`compress`, `delete`, `expand_dims`, `trim_zeros`, `array_split`, …), where
+NumPy would say `axis` and `keepdims`. One name for one thing is worth more
+than matching each function to whichever library it came from; the only
+exception is `take_along_axis`, whose own name says which word it wants.
+Reductions accept a list there as well as an integer, so `dim` stays singular
+even when it takes several.
+```
 
 ### Shape and layout
 

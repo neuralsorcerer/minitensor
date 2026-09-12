@@ -409,7 +409,7 @@ def test_tensorsolve_moves_the_axes_it_is_given_to_the_end():
     a = RNG.standard_normal((3, 2, 6))
     b = RNG.standard_normal((2, 3))
     np.testing.assert_allclose(
-        mt.tensorsolve(_t(a), _t(b), axes=(2,)).numpy(),
+        mt.tensorsolve(_t(a), _t(b), dims=(2,)).numpy(),
         np.linalg.tensorsolve(a, b, axes=(2,)),
         rtol=1e-9,
     )
@@ -463,7 +463,7 @@ def test_tensorsolve_reports_a_repeated_axis():
         mt.tensorsolve(
             _t(RNG.standard_normal((2, 3, 6))),
             _t(RNG.standard_normal((2, 3))),
-            axes=(1, 1),
+            dims=(1, 1),
         )
 
 

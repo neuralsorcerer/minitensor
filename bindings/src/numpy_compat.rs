@@ -377,13 +377,17 @@ pub(crate) fn cross_impl(a: &PyTensor, b: &PyTensor, axis: Option<i32>) -> PyRes
     Ok(PyTensor::from_tensor(result))
 }
 
-/// Cross product of two tensors along a given axis
+/// Cross product of two tensors along `dim`.
+///
+/// NumPy calls this argument `axis`, but every op here spells it `dim` and so
+/// does PyTorch's `cross`; one name for one thing beats matching each function
+/// to whichever library contributed it.
 #[pyfunction]
-#[pyo3(signature = (a, b, axis=None))]
-fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, axis: Option<i32>) -> PyResult<PyTensor> {
+#[pyo3(signature = (a, b, dim=None))]
+fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, dim: Option<i32>) -> PyResult<PyTensor> {
     let a_tensor = PyTensor::from_python_value(a)?;
     let b_tensor = PyTensor::from_python_value(b)?;
-    cross_impl(&a_tensor, &b_tensor, axis)
+    cross_impl(&a_tensor, &b_tensor, dim)
 }
 
 /// Check if arrays are approximately equal

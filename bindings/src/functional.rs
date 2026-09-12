@@ -202,6 +202,11 @@ pub fn transpose(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyT
 }
 
 /// Alias of `transpose`, under its array-library spelling.
+///
+/// The one place an argument here is called `axis` rather than `dim`: the
+/// function's own name says which word it wants, and PyTorch spells this pair
+/// `axis0, axis1` for exactly that reason. `swapdims` below is the same
+/// operation under the other name, and takes `dim0, dim1`.
 #[pyfunction]
 #[pyo3(signature = (input, axis0, axis1))]
 pub fn swapaxes(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<PyTensor> {
@@ -210,9 +215,9 @@ pub fn swapaxes(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<Py
 
 /// Alias of `transpose`.
 #[pyfunction]
-#[pyo3(signature = (input, axis0, axis1))]
-pub fn swapdims(input: &Bound<PyAny>, axis0: isize, axis1: isize) -> PyResult<PyTensor> {
-    swapaxes(input, axis0, axis1)
+#[pyo3(signature = (input, dim0, dim1))]
+pub fn swapdims(input: &Bound<PyAny>, dim0: isize, dim1: isize) -> PyResult<PyTensor> {
+    transpose(input, dim0, dim1)
 }
 
 /// Reorder the dimensions; `dims` must be a permutation of all of them.

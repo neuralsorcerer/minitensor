@@ -645,12 +645,13 @@ def matrix_exp(input: object) -> Tensor:
 # --- linear systems over more than two axes ---------------------------------
 
 
-def tensorsolve(a: object, b: object, axes: object = None) -> Tensor:
+def tensorsolve(a: object, b: object, dims: object = None) -> Tensor:
     """Solve `a x = b` where the contraction runs over several axes at once.
 
     `a` has the shape of `b` followed by the shape of the answer, and the
-    system is the square one you get by flattening each half. `axes` names axes
-    of `a` to move to the end first, for when they are not already there.
+    system is the square one you get by flattening each half. `dims` names axes
+    of `a` to move to the end first, for when they are not already there --
+    NumPy calls that argument `axes`, and every op here spells it `dim`.
 
     This is `solve` with a reshape on each side; the reshape is the whole
     operation, and the gradient is `solve`'s.
@@ -658,13 +659,13 @@ def tensorsolve(a: object, b: object, axes: object = None) -> Tensor:
 
     tensor = _atleast_tensor(a)
     rhs = _atleast_tensor(b)
-    if axes is not None:
+    if dims is not None:
         moved = [
             _normalize_axis(axis, tensor.ndim(), "tensorsolve")
-            for axis in _as_sequence(axes)
+            for axis in _as_sequence(dims)
         ]
         if len(set(moved)) != len(moved):
-            raise ValueError(f"tensorsolve was given a repeated axis in {axes}")
+            raise ValueError(f"tensorsolve was given a repeated axis in {dims}")
         order = [axis for axis in range(tensor.ndim()) if axis not in moved] + moved
         tensor = _F.permute(tensor, order)
 

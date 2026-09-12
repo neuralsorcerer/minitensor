@@ -203,11 +203,12 @@ _TRIM_GRID = np.array(
 
 
 @pytest.mark.parametrize("trim", ["fb", "f", "b"])
-@pytest.mark.parametrize("axis", [None, 0, 1, -1, (0, 1), ()])
-def test_trim_zeros_crops_a_box_and_keeps_the_rank(trim, axis):
+@pytest.mark.parametrize("dim", [None, 0, 1, -1, (0, 1), ()])
+def test_trim_zeros_crops_a_box_and_keeps_the_rank(trim, dim):
+    # NumPy calls the argument `axis`; here it is `dim`, as everywhere else.
     np.testing.assert_array_equal(
-        mt.trim_zeros(mt.from_numpy(_TRIM_GRID), trim, axis).numpy(),
-        np.trim_zeros(_TRIM_GRID, trim, axis),
+        mt.trim_zeros(mt.from_numpy(_TRIM_GRID), trim, dim).numpy(),
+        np.trim_zeros(_TRIM_GRID, trim, dim),
     )
 
 

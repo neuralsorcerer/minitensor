@@ -539,7 +539,7 @@ def _normalize_axis(dim: object, ndim: int, name: str) -> int:
     return axis
 
 
-def _normalize_axis_tuple(axis: object, ndim: int, name: str) -> tuple[int, ...]:
+def _normalize_axis_tuple(dim: object, ndim: int, name: str) -> tuple[int, ...]:
     """One axis or a sequence of them, each brought into range, none repeated.
 
     A repeated axis is rejected rather than folded away: an op that trims or
@@ -548,20 +548,20 @@ def _normalize_axis_tuple(axis: object, ndim: int, name: str) -> tuple[int, ...]
     """
 
     try:
-        return (_normalize_axis(axis, ndim, name),)
+        return (_normalize_axis(dim, ndim, name),)
     except TypeError:
         pass
 
     try:
-        entries = tuple(axis)  # type: ignore[call-overload]
+        entries = tuple(dim)  # type: ignore[call-overload]
     except TypeError as exc:
         raise TypeError(
-            f"{name} requires an integer axis or a sequence of them"
+            f"{name} requires an integer dim or a sequence of them"
         ) from exc
 
     axes = tuple(_normalize_axis(entry, ndim, name) for entry in entries)
     if len(set(axes)) != len(axes):
-        raise ValueError(f"{name} was given a repeated axis in {axis!r}")
+        raise ValueError(f"{name} was given a repeated axis in {dim!r}")
     return axes
 
 

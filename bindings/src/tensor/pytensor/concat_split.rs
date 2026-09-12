@@ -30,17 +30,20 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(result))
     }
 
-    /// Stack tensors along a new axis
+    /// Stack tensors along a new axis.
+    ///
+    /// `dim`, not `axis`: the free `stack` already said `dim`, so the two
+    /// spellings of one operation wanted different keywords.
     #[staticmethod]
-    #[pyo3(signature = (tensors, axis=None))]
-    pub fn stack(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
+    #[pyo3(signature = (tensors, dim=None))]
+    pub fn stack(tensors: &Bound<PyList>, dim: Option<isize>) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot stack empty list of tensors",
             ));
         }
 
-        let axis = axis.unwrap_or(0);
+        let axis = dim.unwrap_or(0);
 
         let unsqueezed: Vec<Tensor> = tensors
             .iter()

@@ -887,7 +887,7 @@ def test_cross_product_matches_numpy():
 def test_cross_product_batch_axis():
     a = mt.Tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     b = mt.Tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-    c = mt.cross(a, b, axis=-1)
+    c = mt.cross(a, b, dim=-1)
     expected = np.cross(
         np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
         np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
@@ -901,7 +901,7 @@ def test_cross_product_non_last_axis():
     b_np = np.array([[6.0, 5.0], [4.0, 3.0], [2.0, 1.0]])
     a = mt.Tensor(a_np.tolist())
     b = mt.Tensor(b_np.tolist())
-    c = mt.cross(a, b, axis=0)
+    c = mt.cross(a, b, dim=0)
     expected = np.cross(a_np, b_np, axis=0)
     np.testing.assert_allclose(c.numpy(), expected)
 
@@ -920,7 +920,7 @@ def test_cross_product_invalid_axis():
     a = mt.Tensor([1.0, 2.0, 3.0])
     b = mt.Tensor([4.0, 5.0, 6.0])
     with pytest.raises(ValueError):
-        mt.cross(a, b, axis=1)
+        mt.cross(a, b, dim=1)
 
 
 def test_cross_product_invalid_dimension():
@@ -954,7 +954,7 @@ def test_cross_product_negative_axis_equivalent():
     )
     a = mt.Tensor(a_np.tolist())
     b = mt.Tensor(b_np.tolist())
-    c = mt.cross(a, b, axis=-2)
+    c = mt.cross(a, b, dim=-2)
     expected = np.cross(a_np, b_np, axis=-2)
     np.testing.assert_allclose(c.numpy(), expected)
 
@@ -964,7 +964,7 @@ def test_cross_product_high_dimensional_broadcasting():
     b_np = np.array([1.0, 0.0, 0.0])
     a = mt.Tensor(a_np.tolist())
     b = mt.Tensor(b_np.tolist())
-    c = mt.cross(a, b, axis=-1)
+    c = mt.cross(a, b, dim=-1)
     expected = np.cross(a_np, b_np, axis=-1)
     np.testing.assert_allclose(c.numpy(), expected)
 
@@ -980,7 +980,7 @@ def test_cross_product_negative_axis_out_of_range():
     a = mt.Tensor([[1.0, 0.0, 0.0]])
     b = mt.Tensor([[0.0, 1.0, 0.0]])
     with pytest.raises(ValueError):
-        mt.cross(a, b, axis=-3)
+        mt.cross(a, b, dim=-3)
 
 
 def test_cross_product_anti_commutativity():
@@ -1006,7 +1006,7 @@ def test_tensor_cross_axis_parameter():
     b_np = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
     a = Tensor(a_np.tolist())
     b = Tensor(b_np.tolist())
-    c = a.cross(b, axis=-1)
+    c = a.cross(b, dim=-1)
     expected = np.cross(a_np, b_np, axis=-1)
     np.testing.assert_allclose(c.numpy(), expected)
 
@@ -1015,7 +1015,7 @@ def test_tensor_cross_invalid_axis():
     a = Tensor([1.0, 2.0, 3.0])
     b = Tensor([4.0, 5.0, 6.0])
     with pytest.raises(ValueError):
-        a.cross(b, axis=1)
+        a.cross(b, dim=1)
 
 
 def test_broadcast_tensors_expands_inputs_without_eager_materialization() -> None:
