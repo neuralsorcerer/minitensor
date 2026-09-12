@@ -634,12 +634,56 @@ compares a bound method against an integer and is always `False`; use
 
 Conversion helpers:
 
-- `tensor.numpy()` → NumPy array
+- `tensor.numpy()` → NumPy array (a copy, writeable)
+- `numpy.asarray(tensor)` → NumPy array (**no copy**, read-only — see below)
 - `tensor.item()` → Python scalar (for 0-d tensors)
 - `tensor.tolist()` → Python list
 - `tensor.astype(dtype)` → dtype conversion
 - `float(tensor)` / `int(tensor)` → Python scalar (one-element tensors only;
   `int` truncates, bool converts to 1/0)
+
+#### Reading a tensor without copying it
+
+`numpy.asarray(tensor)` goes through `__array_interface__` and comes back
+pointing at the tensor's own memory. Every tensor is contiguous and row-major,
+which is exactly what an array header describes, so there is nothing to
+rearrange and nothing to allocate: a 64MB tensor crosses in microseconds where
+`.numpy()` takes milliseconds. NumPy holds a reference to the tensor for as
+long as the array lives, so the buffer cannot be freed underneath it.
+
+```python
+import numpy as np
+import minitensor as mt
+
+t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
+view = np.asarray(t)
+
+print(view.flags.writeable, view.base is t)
+print(np.shares_memory(view, np.asarray(t)))
+```
+
+```text
+False True
+True
+```
+
+The array is **read-only**, and not as a nicety: several tensors can share one
+buffer — `detach`, `reshape`, a no-op `astype` — and each of them is supposed
+to have its own values, so a NumPy array writing into that buffer would change
+all of them at once. When you want something to write into, ask for a copy:
+`numpy.array(tensor)`, `tensor.numpy()` and `tensor.numpy_copy()` all give one,
+and all three are writeable. Asking `numpy.asarray` for a different dtype also
+copies, because a conversion has to.
+
+An in-place operation on the tensor is the other direction of the same sharing.
+Writing to a buffer the tensor holds alone writes through the array; writing to
+one it shares copies first, and the array is left on the old buffer, still
+valid and still holding the values it had. So an exported array is a stable
+read of the values as they were, and a program that both exports a view and
+writes in place should not depend on which of the two it gets.
+
+Values only. Nothing flows back to the tensor through a NumPy array, which is
+what `.numpy()` has always meant too.
 
 `astype` between two float dtypes is differentiable: a cast is the identity on
 values, so the gradient passes straight through and comes back at whatever
@@ -1852,7 +1896,10 @@ either way, since they copy on write.
 ### Layout and conversion extras
 
 - `is_contiguous()` reports whether the storage is contiguous.
-- `numpy_copy()` returns a NumPy array that never shares storage.
+- `numpy_copy()` returns a NumPy array that never shares storage. `numpy()`
+  gives one too; the sharing spelling is `numpy.asarray(tensor)`, which is
+  read-only — see
+  [Reading a tensor without copying it](#reading-a-tensor-without-copying-it).
 - `split_with_sections(sections, dim)` splits into explicitly sized chunks.
 
 ```python
