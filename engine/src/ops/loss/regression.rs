@@ -956,6 +956,23 @@ pub(crate) fn reduce_loss(values: Tensor, reduction: &str) -> Result<Tensor> {
     }
 }
 
+/// Whether a loss recognises this reduction mode, asked before any work.
+///
+/// The reducers above find out by trying, which is the right time for them but
+/// the wrong time for a constructor: a loss *module* stores its mode and does
+/// not reduce anything until its first forward, so `MSELoss("men")` used to
+/// build happily and fail a training step later, where `mse_loss(..., "men")`
+/// refused at the call. Same list, asked earlier.
+pub fn check_reduction(reduction: &str, batchmean: bool) -> Result<()> {
+    let recognised =
+        matches!(reduction, "mean" | "sum" | "none") || (batchmean && reduction == "batchmean");
+    if recognised {
+        Ok(())
+    } else {
+        Err(invalid_reduction(reduction, batchmean))
+    }
+}
+
 /// The one message for a reduction mode a loss does not recognise. Shared so
 /// the wording cannot drift between the losses that reduce here and `ctc_loss`,
 /// which validates its mode up front instead (its own reduction is

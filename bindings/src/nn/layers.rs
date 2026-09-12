@@ -5,6 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
+use engine::ops::loss::check_reduction;
 #[pymethods]
 impl PyReLU {
     /// Create a new ReLU layer
@@ -1633,10 +1634,11 @@ impl PyMSELoss {
     /// Create a new MSE loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: MSELoss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1656,10 +1658,11 @@ impl PyMAELoss {
     /// Create a new MAE loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: MAELoss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1679,10 +1682,11 @@ impl PyHuberLoss {
     /// Create a new Huber loss
     #[new]
     #[pyo3(signature = (delta=1.0, reduction="mean"))]
-    fn new(delta: f64, reduction: &str) -> Self {
-        Self {
+    fn new(delta: f64, reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: HuberLoss::new(delta, reduction),
-        }
+        })
     }
 
     /// Get the delta parameter
@@ -1712,10 +1716,11 @@ impl PySmoothL1Loss {
     /// Create a new Smooth L1 loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: SmoothL1Loss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1735,10 +1740,11 @@ impl PyLogCoshLoss {
     /// Create a new Log-cosh loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: LogCoshLoss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1758,10 +1764,11 @@ impl PyCrossEntropyLoss {
     /// Create a new Cross Entropy loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: CrossEntropyLoss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1781,10 +1788,11 @@ impl PyBCELoss {
     /// Create a new BCE loss
     #[new]
     #[pyo3(signature = (reduction="mean"))]
-    fn new(reduction: &str) -> Self {
-        Self {
+    fn new(reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: BCELoss::new(reduction),
-        }
+        })
     }
 
     /// String representation
@@ -1805,6 +1813,7 @@ impl PyBCEWithLogitsLoss {
     #[new]
     #[pyo3(signature = (reduction="mean", pos_weight=None))]
     fn new(reduction: &str, pos_weight: Option<&Bound<PyAny>>) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
         let inner = match pos_weight {
             Some(w) => {
                 let w = borrow_tensor(w)?;
@@ -1846,10 +1855,11 @@ impl PyFocalLoss {
     /// Create a new Focal loss
     #[new]
     #[pyo3(signature = (alpha=0.25, gamma=2.0, reduction="mean"))]
-    fn new(alpha: f64, gamma: f64, reduction: &str) -> Self {
-        Self {
+    fn new(alpha: f64, gamma: f64, reduction: &str) -> PyResult<Self> {
+        check_reduction(reduction, false).map_err(_convert_error)?;
+        Ok(Self {
             inner: FocalLoss::new(alpha, gamma, reduction),
-        }
+        })
     }
 
     /// Get the alpha parameter

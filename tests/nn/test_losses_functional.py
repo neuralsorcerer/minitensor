@@ -163,3 +163,60 @@ def test_new_losses_are_differentiable(pair, name, call):
         lambda arr: call(mt.Tensor(arr, dtype="float64"), ty).item(), x
     )
     np.testing.assert_allclose(tensor.grad.numpy(), numeric, rtol=1e-5, atol=1e-8)
+
+
+# Every loss class in the library, with the arguments it needs besides
+# `reduction`. Derived by name so a new one has to be added here or noticed.
+_LOSS_CLASSES = sorted(n for n in dir(mt.nn) if n.endswith("Loss"))
+
+
+def test_the_loss_classes_are_the_ones_this_file_knows_about():
+    assert _LOSS_CLASSES == [
+        "BCELoss",
+        "BCEWithLogitsLoss",
+        "CrossEntropyLoss",
+        "FocalLoss",
+        "HuberLoss",
+        "LogCoshLoss",
+        "MAELoss",
+        "MSELoss",
+        "SmoothL1Loss",
+    ], "a loss class was added or removed; give it a case below"
+
+
+@pytest.mark.parametrize("name", _LOSS_CLASSES)
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+def test_a_loss_class_takes_the_three_reduction_modes(name, reduction):
+    getattr(mt.nn, name)(reduction=reduction)
+
+
+@pytest.mark.parametrize("name", _LOSS_CLASSES)
+@pytest.mark.parametrize("reduction", ["average", "MEAN", "", "batchmean"])
+def test_a_loss_class_refuses_a_mode_it_cannot_use_at_construction(name, reduction):
+    """The function refused at the call; the class used to wait for a forward.
+
+    `MSELoss("men")` built happily and failed at the first training step,
+    where `mse_loss(..., "men")` refused immediately -- so which spelling you
+    reached for decided how far a typo travelled. `batchmean` is in the list
+    because only `kl_div` has a meaning for it, and these classes do not.
+    """
+
+    with pytest.raises(ValueError, match="[Rr]eduction"):
+        getattr(mt.nn, name)(reduction=reduction)
+
+
+@pytest.mark.parametrize("reduction", ["mean", "sum", "none"])
+def test_a_loss_class_and_its_function_agree(reduction):
+    predictions = mt.Tensor(np.array([[0.2, 0.8], [0.4, 0.6]]), dtype="float64")
+    targets = mt.Tensor(np.array([[0.0, 1.0], [1.0, 0.0]]), dtype="float64")
+    for cls, function in (
+        ("MSELoss", F.mse_loss),
+        ("MAELoss", F.l1_loss),
+        ("HuberLoss", F.huber_loss),
+        ("SmoothL1Loss", F.smooth_l1_loss),
+        ("LogCoshLoss", F.log_cosh_loss),
+    ):
+        from_class = getattr(mt.nn, cls)(reduction=reduction)(predictions, targets)
+        from_function = function(predictions, targets, reduction)
+        assert tuple(from_class.shape) == tuple(from_function.shape)
+        np.testing.assert_allclose(from_class.numpy(), from_function.numpy())
