@@ -178,6 +178,38 @@ def test_none_means_an_input_takes_no_gradient(name):
     mt.clear_autograd_graph()
 
 
+def test_a_frozen_input_does_not_come_back_with_a_gradient(name):
+    """What a built-in operation does, and what this used not to do.
+
+    A backward is written for the operation, so it answers for every input --
+    it has no way to know that this call froze one of them. The gradient it
+    computes for a frozen input was being accumulated onto that tensor, giving
+    it a `.grad` no built-in operation would ever put there, and one an
+    optimizer holding the tensor would then step on.
+    """
+
+    mt.register_custom_op(
+        name,
+        lambda a, b: a * b,
+        lambda grad, inputs, output: (grad * inputs[1], grad * inputs[0]),
+        num_inputs=2,
+    )
+
+    frozen = _t([1.0, 2.0])
+    learned = _t([3.0, 4.0], requires_grad=True)
+    _run(name, frozen, learned).sum().backward()
+
+    np.testing.assert_array_equal(learned.grad.numpy(), [1.0, 2.0])
+    assert frozen.grad is None
+    # The same pair through a built-in multiply, for the comparison the fix is
+    # against.
+    plain_frozen = _t([1.0, 2.0])
+    plain_learned = _t([3.0, 4.0], requires_grad=True)
+    (plain_frozen * plain_learned).sum().backward()
+    assert plain_frozen.grad is None
+    mt.clear_autograd_graph()
+
+
 def test_a_single_input_may_return_a_bare_tensor_or_a_sequence(name):
     second = f"{name}_seq"
     mt.register_custom_op(name, lambda x: x * 2.0, lambda g, i, o: g * 5.0)

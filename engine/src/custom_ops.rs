@@ -220,34 +220,42 @@ impl CustomOpRegistry {
 
     /// Execute a registered custom operation
     pub fn execute(&self, name: &str, inputs: &[&Tensor]) -> Result<Tensor> {
-        let op = self.get(name)?;
-
-        // Validate inputs
-        op.validate_inputs(inputs)?;
-
-        // Execute forward pass
-        let output = op.forward(inputs)?;
-
-        // Set up gradient tracking if any input requires gradients
-        let requires_grad = inputs.iter().any(|t| t.requires_grad());
-        if requires_grad && let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
-            // `with_grad_fn`, not `add_to_graph`: the node has to go *on the
-            // output* as well as into the graph, and doing only the second
-            // leaves a tensor the walk treats as a leaf -- `backward()` reached
-            // it, found no gradient function, and stopped, so the custom
-            // gradient never ran and the inputs came back with none.
-            //
-            // The flag is set first for the same reason. A forward that
-            // supplies its own gradient computes the value with recording
-            // *off*, since the operations inside it are an implementation
-            // detail rather than the graph, so the tensor it hands back carries
-            // no flag of its own. It is differentiable because this node says
-            // so, and the flag has to say so too.
-            return with_grad_fn(output.requires_grad_(true), grad_fn);
-        }
-
-        Ok(output)
+        execute_op(self.get(name)?.as_ref(), inputs)
     }
+}
+
+/// Run one custom operation and put its node on the graph.
+///
+/// Split out of [`CustomOpRegistry::execute`] so an operation can be executed
+/// without being in a registry at all. A named operation is one a caller looks
+/// up later; an operation built for a single call site -- what
+/// `minitensor.autograd.Function` compiles to -- has nobody to look it up, and
+/// making it pick a globally unique name to run once is a namespace it does
+/// not want to be in and a hash lookup it does not need to pay for.
+pub fn execute_op(op: &dyn CustomOp, inputs: &[&Tensor]) -> Result<Tensor> {
+    op.validate_inputs(inputs)?;
+
+    let output = op.forward(inputs)?;
+
+    // Set up gradient tracking if any input requires gradients
+    let requires_grad = inputs.iter().any(|t| t.requires_grad());
+    if requires_grad && let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
+        // `with_grad_fn`, not `add_to_graph`: the node has to go *on the
+        // output* as well as into the graph, and doing only the second
+        // leaves a tensor the walk treats as a leaf -- `backward()` reached
+        // it, found no gradient function, and stopped, so the custom
+        // gradient never ran and the inputs came back with none.
+        //
+        // The flag is set first for the same reason. A forward that
+        // supplies its own gradient computes the value with recording
+        // *off*, since the operations inside it are an implementation
+        // detail rather than the graph, so the tensor it hands back carries
+        // no flag of its own. It is differentiable because this node says
+        // so, and the flag has to say so too.
+        return with_grad_fn(output.requires_grad_(true), grad_fn);
+    }
+
+    Ok(output)
 }
 
 impl Default for CustomOpRegistry {
@@ -305,6 +313,19 @@ pub fn is_custom_op_registered(name: &str) -> Result<bool> {
 /// Gradient function for custom operations
 pub struct CustomOpBackward {
     pub op_name: String,
+    /// Every input's identifier, in order, as the backward is handed them: it
+    /// keys its answers by these, and the positions have to line up with
+    /// [`inputs`](Self::inputs) whether or not a gradient flows anywhere.
+    pub saved_input_ids: Vec<TensorId>,
+    /// The subset of `saved_input_ids` whose tensors asked for a gradient --
+    /// the operation's edges in the graph, and the filter on what its backward
+    /// returns.
+    ///
+    /// A backward is written for the operation, not for one call of it, so it
+    /// answers for every input; a frozen input's answer is arithmetic nobody
+    /// asked for. A built-in operation does not put an edge to a frozen input
+    /// either, and one that did would hand that tensor a `.grad` the rest of
+    /// the library never gives it.
     pub input_ids: Vec<TensorId>,
     /// Inputs saved from the forward pass, so the backward function can
     /// evaluate a derivative at the point it was computed.
@@ -316,12 +337,16 @@ pub struct CustomOpBackward {
 
 impl GradientFunction for CustomOpBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        (self.backward_fn)(&BackwardContext {
+        let mut gradients = (self.backward_fn)(&BackwardContext {
             grad_output,
             inputs: &self.inputs,
             output: &self.output,
-            input_ids: &self.input_ids,
-        })
+            input_ids: &self.saved_input_ids,
+        })?;
+        if gradients.len() != self.input_ids.len() {
+            gradients.retain(|id, _| self.input_ids.contains(id));
+        }
+        Ok(gradients)
     }
 
     fn input_ids(&self) -> &[TensorId] {
@@ -481,13 +506,19 @@ impl CustomOp for BuiltCustomOp {
         output: &Tensor,
     ) -> Option<Arc<dyn GradientFunction>> {
         if let Some(backward_fn) = &self.backward_fn {
-            let input_ids: Vec<TensorId> = inputs.iter().map(|t| t.id()).collect();
+            let saved_input_ids: Vec<TensorId> = inputs.iter().map(|t| t.id()).collect();
+            let input_ids: Vec<TensorId> = inputs
+                .iter()
+                .filter(|t| t.requires_grad())
+                .map(|t| t.id())
+                .collect();
             // Cloning a tensor shares its storage, so saving the forward values
             // costs a refcount rather than a copy.
             let saved_inputs: Vec<Tensor> = inputs.iter().map(|t| (*t).clone()).collect();
 
             Some(Arc::new(CustomOpBackward {
                 op_name: self.name.clone(),
+                saved_input_ids,
                 input_ids,
                 inputs: saved_inputs,
                 output: output.clone(),
@@ -678,6 +709,55 @@ mod tests {
         loss.backward(None).unwrap();
         let grad = crate::autograd::get_gradient(&x).expect("input gradient");
         assert_eq!(grad.data().as_f32_slice().unwrap(), &[4.0, 9.0]);
+    }
+
+    #[test]
+    fn test_a_frozen_input_is_not_handed_a_gradient() {
+        // A backward is written for the operation, so it answers for every
+        // input -- it cannot know that this call froze one. The answer for a
+        // frozen input used to be accumulated onto that tensor, giving it a
+        // `.grad` no built-in operation would put there.
+        let registry = CustomOpRegistry::new();
+        let op = CustomOpBuilder::new("test_frozen", 2)
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[1]))
+            .backward(|ctx| {
+                let mut gradients = FxHashMap::default();
+                for (slot, &id) in ctx.input_ids.iter().enumerate() {
+                    let other = ctx.input(1 - slot).expect("both inputs saved");
+                    gradients.insert(id, crate::ops::arithmetic::mul(ctx.grad_output, other)?);
+                }
+                Ok(gradients)
+            })
+            .build()
+            .unwrap();
+        registry.register(op).unwrap();
+
+        let make = |values: Vec<f32>, requires_grad: bool| {
+            Tensor::new(
+                Arc::new(crate::tensor::TensorData::from_vec_f32(
+                    values,
+                    Device::cpu(),
+                )),
+                Shape::new(vec![2]),
+                DataType::Float32,
+                Device::cpu(),
+                requires_grad,
+            )
+        };
+        let frozen = make(vec![1.0, 2.0], false);
+        let learned = make(vec![3.0, 4.0], true);
+
+        let y = registry
+            .execute("test_frozen", &[&frozen, &learned])
+            .unwrap();
+        crate::ops::reduction::sum(&y, None, false)
+            .unwrap()
+            .backward(None)
+            .unwrap();
+
+        let grad = crate::autograd::get_gradient(&learned).expect("learned gradient");
+        assert_eq!(grad.data().as_f32_slice().unwrap(), &[1.0, 2.0]);
+        assert!(crate::autograd::get_gradient(&frozen).is_none());
     }
 
     #[test]

@@ -297,6 +297,12 @@ for _extra_name in _nn_extras._NN_EXTRAS:
 optim = _C.optim
 _sys.modules[__name__ + ".optim"] = optim
 
+from . import autograd  # noqa: E402  (after `_C`, which it imports)
+from . import kernels  # noqa: E402  (after `autograd`, which it builds on)
+
+_sys.modules[__name__ + ".autograd"] = autograd
+_sys.modules[__name__ + ".kernels"] = kernels
+
 numpy_compat = getattr(_C, "numpy_compat", None)
 if numpy_compat is not None:
     _sys.modules[__name__ + ".numpy_compat"] = numpy_compat
@@ -576,6 +582,8 @@ _BASE_EXPORTS = (
     "functional",
     "nn",
     "optim",
+    "autograd",
+    "kernels",
     "numpy_compat",
     "cross",
     "plugins",

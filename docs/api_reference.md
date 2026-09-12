@@ -392,7 +392,105 @@ mt.unregister_custom_op_py("step_through")
 A gradient whose shape or dtype does not match its input is refused rather than
 accumulated into a buffer it does not fit, and an exception raised inside
 either callable is reported with its own message, so a traceback from your own
-code is what you see.
+code is what you see. An input that did not ask for a gradient does not get
+one: the backward is written for the operation and answers for every input,
+but a frozen input's answer is discarded, exactly as a built-in operation
+would discard it.
+
+### `minitensor.autograd.Function`
+
+`register_custom_op` files an operation under a name, which is what you want
+when the whole program reaches for it. `Function` is the other case: an
+operation belonging to one call site, whose backward needs to remember
+something its own forward computed.
+
+```python
+import minitensor as mt
+from minitensor.autograd import Function
+
+
+class Clamp(Function):
+    @staticmethod
+    def forward(ctx, x, low, high):
+        ctx.save_for_backward(x)
+        ctx.low, ctx.high = low, high
+        return x.clip(low, high)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (x,) = ctx.saved_tensors
+        inside = (x > ctx.low) & (x < ctx.high)
+        return grad_output * inside.astype("float64"), None, None
+
+
+x = mt.Tensor([-2.0, 0.0, 2.0], dtype="float64", requires_grad=True)
+Clamp.apply(x, -1.0, 1.0).sum().backward()
+print(x.grad.tolist())
+```
+
+```text
+[0.0, 1.0, 0.0]
+```
+
+`apply(*args)` takes tensors and non-tensors alike and hands all of them to
+`forward`, after the `ctx`. Only the tensors become graph inputs, so `backward`
+may return one gradient per argument -- `None` in the non-tensor positions, the
+way it reads at the call site -- or one per tensor argument; both are
+unambiguous and both are accepted. There is one output: an operation producing
+several is expressible as several operations, and the node this compiles to
+carries one tensor.
+
+The two modes are the two `register_custom_op` offers, picked the same way. A
+subclass that writes a `backward` gets a forward that runs with recording off
+and a gradient that is whatever the backward returns; one that writes only a
+`forward` gets a recorded forward that differentiates by composition.
+
+| On `ctx` | |
+| --- | --- |
+| `save_for_backward(*tensors)` | Keep tensors for the backward. Stored, not copied -- a tensor shares its storage, so this costs a refcount and keeping the buffer alive. |
+| `saved_tensors` | What the forward saved, in order. Asking without having saved raises rather than answering an empty tuple, which would look like a saved nothing. |
+| `needs_input_grad` | One flag per positional argument of `apply`, `True` where that argument is a tensor wanting a gradient. Use it to skip work whose result is discarded. |
+| anything else | A `ctx` takes arbitrary attributes. The bounds of a clamp or the axis of a reduction are as much a part of what a backward needs as the tensors are. |
+
+Each `apply` builds its own node and its own `ctx`, which is what makes the
+example above correct when two clamps with different bounds are live at once --
+the backward reads the bounds its own forward saw, not whichever call ran last.
+Nothing is registered and no name is invented: an operation used once has
+nobody to look it up, so a name for it would be a global string chosen to be
+unique and a hash lookup on every call to get back what the caller is already
+holding.
+
+### Domain kernels (`minitensor.kernels`)
+
+`minitensor.kernels` holds operations a general array library has no reason to
+carry and a specialised one cannot do without. Each is an `autograd.Function`
+in ordinary Python, as much to be read as to be used: every one is a worked
+example of the extension path above, in the same handful of lines you would
+write for your own.
+
+| Function | |
+| --- | --- |
+| `soft_assignment(points, centroids, temperature=1.0)` | `softmax_k(-||x_n - c_k||^2 / 2T)` -- the responsibility of each centroid for each point, `[n, d]` and `[k, d]` in, `[n, k]` out with every row summing to one. A hard assignment has a derivative of zero almost everywhere and none at all on the boundaries, so a loss computed through one tells an optimizer nothing about where the centroids should move; this is the differentiable stand-in, approaching the hard answer as `temperature` falls and the uniform one as it rises. A non-positive temperature is refused. |
+
+The backward is written against the `[n, k]` responsibilities rather than
+composed out of the forward's pieces, which is the point of the kernel: the
+composed form keeps the `[n, k, d]` difference tensor alive for the backward
+pass -- `d` times the memory of the answer -- where the derivative needs only
+the responsibilities and the inputs. The forward avoids the same tensor through
+`||x - c||^2 = ||x||^2 - 2 x.c + ||c||^2`, two reductions and a matmul.
+
+```python
+import minitensor as mt
+
+points = mt.randn([256, 16], requires_grad=True)
+centroids = mt.randn([8, 16], requires_grad=True)
+
+responsibilities = mt.kernels.soft_assignment(points, centroids, temperature=0.5)
+# A clustering loss: how far each point is from where its responsibilities put
+# it. Both arguments take a gradient, so the centroids are trainable.
+loss = ((points - responsibilities.matmul(centroids)) ** 2).sum()
+loss.backward()
+```
 
 ## 2) Tensor creation API
 
@@ -3420,7 +3518,9 @@ False True
 
 ## 12) Custom operations
 
-MiniTensor supports custom ops in both Rust and Python. Refer to
+MiniTensor supports custom ops in both Rust and Python. The Python surface --
+`register_custom_op`, `minitensor.autograd.Function` and `minitensor.kernels` --
+is [in section 1](#custom-operations-python-api). Refer to
 `docs/custom_operations.md` for:
 
 - The `CustomOp` trait and builder pattern.

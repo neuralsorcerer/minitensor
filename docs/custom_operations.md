@@ -5,6 +5,16 @@ toolchain and no rebuild, and it then participates in autograd on the same terms
 as a built-in one. The same registry also holds operations written in Rust
 against the `CustomOp` trait, which is what the bundled examples are.
 
+Two ways in, and which one you want is decided by whether the operation has a
+name worth giving it:
+
+- `register_custom_op(name, forward, backward=None, num_inputs=1)` files an
+  operation in the process-wide registry, for one the whole program reaches
+  for.
+- [`minitensor.autograd.Function`](#minitensorautogradfunction) is a class you
+  subclass, applied at the call site, for an operation whose backward needs
+  something its own forward computed. Nothing is registered.
+
 ## Registering one from Python
 
 `register_custom_op(name, forward, backward=None, num_inputs=1)` is the
@@ -88,6 +98,71 @@ A gradient whose shape or dtype does not match its input is refused rather than
 accumulated into a buffer it does not fit, and an exception raised inside either
 callable is reported with its own message -- so what you see is a traceback from
 your own code.
+
+An input that did not ask for a gradient does not come back with one. The
+backward is written for the operation and answers for every input; it has no
+way to know that a particular call froze one of them, so the answer for a
+frozen input is discarded rather than accumulated -- what a built-in operation
+does, and what an optimizer holding that tensor is entitled to assume.
+
+## `minitensor.autograd.Function`
+
+A registry entry is one operation, shared by every call. That is exactly right
+for an operation with a name, and it is what makes a per-call backward
+impossible to write: two live calls would share whatever the second one
+stashed. `Function` gives each `apply` its own node and its own context.
+
+```python
+import minitensor as mt
+from minitensor.autograd import Function
+
+
+class Clamp(Function):
+    @staticmethod
+    def forward(ctx, x, low, high):
+        ctx.save_for_backward(x)
+        ctx.low, ctx.high = low, high
+        return x.clip(low, high)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (x,) = ctx.saved_tensors
+        inside = (x > ctx.low) & (x < ctx.high)
+        return grad_output * inside.astype("float64"), None, None
+
+
+narrow = mt.Tensor([-2.0, 0.0, 2.0], dtype="float64", requires_grad=True)
+wide = mt.Tensor([-2.0, 0.0, 2.0], dtype="float64", requires_grad=True)
+
+# Both nodes are on the graph before either backward runs, and each reads the
+# bounds its own forward saw.
+(Clamp.apply(narrow, -1.0, 1.0).sum() + Clamp.apply(wide, -5.0, 5.0).sum()).backward()
+print(narrow.grad.tolist(), wide.grad.tolist())
+```
+
+```text
+[0.0, 1.0, 0.0] [1.0, 1.0, 1.0]
+```
+
+`apply(*args)` hands tensors and non-tensors alike to `forward`, after the
+`ctx`. Only the tensors become graph inputs, so `backward` may return one
+gradient per argument -- `None` in the non-tensor positions, as it reads at the
+call site -- or one per tensor argument. There is one output.
+
+The same two modes as above, picked the same way: a subclass that writes a
+`backward` gets a forward that runs with recording off and a gradient that is
+whatever the backward returns; one that writes only a `forward` gets a recorded
+forward that differentiates by composition.
+
+| On `ctx` | Behavior |
+| --- | --- |
+| `save_for_backward(*tensors)` | Keeps tensors for the backward. Stored, not copied -- a tensor shares its storage, so this costs a refcount and keeping the buffer alive until the graph is released. |
+| `saved_tensors` | What the forward saved, in order. Asking without having saved raises rather than answering an empty tuple. |
+| `needs_input_grad` | One flag per positional argument of `apply`, `True` where that argument is a tensor wanting a gradient. |
+| anything else | Arbitrary attributes are allowed: the bounds of a clamp or the axis of a reduction are as much a part of what a backward needs as the tensors. |
+
+`minitensor.kernels` is written this way throughout, and is the place to read
+for worked examples.
 
 ## The rest of the registry API
 

@@ -8,8 +8,8 @@ use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::autograd::NoGradGuard;
 use engine::custom_ops::{
-    BackwardContext, CustomOpBuilder, examples::register_example_ops, execute_custom_op,
-    is_custom_op_registered, list_custom_ops, register_custom_op as register_op,
+    BackwardContext, CustomOp, CustomOpBuilder, examples::register_example_ops, execute_custom_op,
+    execute_op, is_custom_op_registered, list_custom_ops, register_custom_op as register_op,
     unregister_custom_op,
 };
 use engine::error::MinitensorError;
@@ -17,6 +17,7 @@ use engine::{autograd::TensorId, tensor::Tensor};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// Turn a Python exception into an engine error naming where it came from.
 ///
@@ -115,6 +116,19 @@ fn register_custom_op(
         Ok(())
     })?;
 
+    register_op(build_python_op(name, forward, backward, num_inputs)?).map_err(_convert_error)
+}
+
+/// One operation whose forward and backward are Python callables.
+///
+/// Shared by the named registry above and by [`build_custom_op`] below, which
+/// hands the same thing back as a handle instead of filing it under a name.
+fn build_python_op(
+    name: &str,
+    forward: Py<PyAny>,
+    backward: Option<Py<PyAny>>,
+    num_inputs: usize,
+) -> PyResult<Arc<dyn CustomOp>> {
     let owned = name.to_string();
     let detached = backward.is_some();
     let forward_name = owned.clone();
@@ -143,7 +157,68 @@ fn register_custom_op(
             .backward(move |ctx: &BackwardContext| python_backward(&backward_name, &backward, ctx));
     }
 
-    register_op(builder.build().map_err(_convert_error)?).map_err(_convert_error)
+    builder.build().map_err(_convert_error)
+}
+
+/// A built custom operation that is not in any registry.
+///
+/// `register_custom_op` files an operation under a name so it can be looked up
+/// later; a `minitensor.autograd.Function` has nobody to look it up. Each call
+/// to `apply` is its own node with its own saved context, so it wants an
+/// operation of its own -- and a name for it would be a globally unique string
+/// invented to be used once, plus a hash lookup on every call to get back what
+/// the caller already had.
+#[pyclass(name = "CustomOpHandle", module = "minitensor._core", frozen)]
+pub struct PyCustomOpHandle {
+    op: Arc<dyn CustomOp>,
+}
+
+#[pymethods]
+impl PyCustomOpHandle {
+    /// Run the operation on `inputs` and record its node on the graph.
+    fn apply(&self, inputs: &Bound<PyTuple>) -> PyResult<PyTensor> {
+        let tensors: Vec<Tensor> = inputs
+            .iter()
+            .map(|item| tensor_of(&item).map(|t| t.tensor().clone()))
+            .collect::<PyResult<_>>()?;
+        let refs: Vec<&Tensor> = tensors.iter().collect();
+        let output = execute_op(self.op.as_ref(), &refs).map_err(_convert_error)?;
+        Ok(PyTensor::from_tensor(output))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CustomOpHandle('{}')", self.op.name())
+    }
+}
+
+/// Build a custom operation without registering it, for a caller that will
+/// hold the handle rather than look the operation up by name.
+#[pyfunction]
+#[pyo3(signature = (name, forward, backward=None, num_inputs=1))]
+fn build_custom_op(
+    name: &str,
+    forward: Py<PyAny>,
+    backward: Option<Py<PyAny>>,
+    num_inputs: usize,
+) -> PyResult<PyCustomOpHandle> {
+    if num_inputs == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "a custom operation needs at least one input",
+        ));
+    }
+    Ok(PyCustomOpHandle {
+        op: build_python_op(name, forward, backward, num_inputs)?,
+    })
+}
+
+/// A `PyTensor` out of a tensor or a thing wrapping one.
+fn tensor_of(item: &Bound<PyAny>) -> PyResult<PyTensor> {
+    if let Ok(tensor) = item.extract::<PyTensor>() {
+        return Ok(tensor);
+    }
+    let inner = item.getattr("_tensor")?;
+    let tensor: PyTensor = inner.extract()?;
+    Ok(tensor)
 }
 
 /// Call a Python `backward` and turn what it returns into one gradient per
@@ -276,6 +351,8 @@ fn is_custom_op_registered_py(name: &str) -> PyResult<bool> {
 pub fn init_custom_ops_module(_py: Python, parent_module: &Bound<PyModule>) -> PyResult<()> {
     // Add functions to parent module
     parent_module.add_function(wrap_pyfunction!(register_custom_op, parent_module)?)?;
+    parent_module.add_function(wrap_pyfunction!(build_custom_op, parent_module)?)?;
+    parent_module.add_class::<PyCustomOpHandle>()?;
     parent_module.add_function(wrap_pyfunction!(
         register_example_custom_ops,
         parent_module
