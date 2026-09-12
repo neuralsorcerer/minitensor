@@ -102,16 +102,26 @@ Reductions, where the win is parallelism plus a single pass:
 |---|---|
 | `sum` | 5.9× |
 | `mean` | 4.5× |
+| `norm` | 3.5× |
 | `sum(axis=0)` | 2.5× |
 | `max` | 2.4× |
 | `argmax` | 1.2× |
 
-Where NumPy wins and the op stays native anyway: `tanh`, `log` and `exp` are
-within a few percent either way, because NumPy dispatches them to a vectorised
-transcendental library; and `norm` is 2–3× faster in NumPy. Moving any of them
-across would cost a Python call on every activation in a network, which is more
-than the margin is worth — and `norm` is worth a look at the kernel rather than
-at the boundary.
+`norm` was on the wrong side of this table until the sweep found it: 0.33× at
+16M, while `sum` over the same data was 5.9×. It was not an accuracy tax — the
+kernel is far more accurate than NumPy's there (7.6e-8 relative against 2.9e-5),
+but so is `sum`, at a tenth of the cost. The 2-norm was computing `mul` into a
+full-size temporary and then summing it, which at 16M means allocating 64MB,
+writing it, and reading it straight back. The squares are wanted one at a time
+by an accumulator and never again, so it is a dot product against the input
+twice. Fused, the whole-tensor norm went 15377 µs → 1430 µs, and the row norms
+of a 4000×4000 went 13613 µs → 1485 µs, which is 12× NumPy. Same accumulation,
+same accuracy, no buffer.
+
+Where NumPy still wins and the op stays native anyway: `tanh`, `log` and `exp`
+are within a few percent either way, because NumPy dispatches them to a
+vectorised transcendental library. Moving them across would cost a Python call
+on every activation in a network, which is more than the margin is worth.
 
 ## Reading a run
 

@@ -344,8 +344,8 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// because squaring leaves the exponent range in both directions. Dividing by
 /// the largest magnitude first moves the whole vector back into range.
 ///
-/// It is also three passes and a full-size temporary where the direct form is
-/// one reduction: a max over the input, then `(|x| / s)^2` materialized, then
+/// It is also three passes and a full-size temporary where the direct form
+/// needs neither: a max over the input, then `(|x| / s)^2` materialized, then
 /// the sum. On a 2048x1024 float32 tensor `norm()` measured 1.155ms against
 /// 0.271ms for `(x * x).sum()` spelled out with this library's own operators --
 /// its own `mul` and `sum` beat its `norm` by 4.3x, and NumPy's `norm` by 4x.
@@ -360,14 +360,133 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// The values this returns are not bit-identical to the scaled route's, and are
 /// slightly closer to the true norm: `(|x| / s)^2 ... * s` rounds at the divide
 /// and again at the multiply, and this does neither.
+/// `sum(x^2)` over `dims` without ever writing the squares down.
+///
+/// `mul` then `sum` is two passes over the data and a temporary the size of the
+/// input: 64MB for a 16-million-element float32 tensor, allocated, written,
+/// and read straight back. The squares are wanted one at a time by an
+/// accumulator and never again, so the whole buffer is avoidable -- square in a
+/// register and accumulate, which is what a dot product is. `accurate_pair_sum`
+/// against the input twice is exactly that, and it is the same accumulation
+/// `dot` and the Cholesky panels already use: chunk-pinned partials folded
+/// pairwise, so the answer depends on the length and not on how rayon split it.
+///
+/// Measured on a 4-core x86-64 container, float32, reducing every axis:
+///
+/// ```text
+///        N     mul + sum      fused
+///     65536         27 us       11 us
+///   1048576        275 us      130 us
+///   4194304        694 us      290 us
+///  16777216      15377 us     1430 us
+/// ```
+///
+/// and reducing the last axis only, where each row is its own run:
+///
+/// ```text
+///      shape     mul + sum      fused
+///  1000x1000        360 us      174 us
+///  4000x4000      13613 us     1485 us
+/// ```
+///
+/// The last row of each is the allocation. Below a few megabytes the temporary
+/// stays in cache and the second pass is cheap; at 64MB it does not, and the
+/// sum reads all of it back from main memory. That is also where this stops
+/// being a tuning question -- against NumPy's `linalg.norm` the whole-tensor
+/// float32 norm went from 0.33x to 3.5x, and the row norms of a 4000x4000 from
+/// 0.55x to 12x.
+///
+/// `None` when the reduced axes are not a trailing block, because then a
+/// reduced slice is not a contiguous run and the walk is a gather rather than a
+/// dot. That case keeps the old route. The two that matter are covered:
+/// reducing every axis (the flattened norm, and what gradient clipping asks
+/// for) and reducing the last (row norms), and both are one contiguous run per
+/// output element.
+fn fused_sum_of_squares(input: &Tensor, dims: &[usize]) -> Result<Option<Tensor>> {
+    let shape = input.shape().dims();
+    let ndim = shape.len();
+    // `dims` arrives sorted and deduplicated from `normalize_norm_dims`, so a
+    // trailing block is exactly a run ending at the last axis.
+    let trailing = dims.len() <= ndim
+        && dims
+            .iter()
+            .enumerate()
+            .all(|(i, &d)| d == ndim - dims.len() + i);
+    if !trailing || dims.is_empty() {
+        return Ok(None);
+    }
+
+    let run: usize = shape[ndim - dims.len()..].iter().product();
+    if run == 0 {
+        return Ok(None);
+    }
+    let outer = input.numel() / run;
+
+    macro_rules! fuse {
+        ($accessor:ident, $from_vec:path, $zero:expr, $dot:path, $ty:ty) => {{
+            let data = input.data().$accessor().ok_or_else(|| {
+                MinitensorError::internal_error("norm: tensor data did not match its dtype")
+            })?;
+            let mut out = vec![<$ty>::default(); outer];
+            if outer == 1 {
+                // One run over everything; `accurate_pair_sum` spreads it
+                // across the pool itself.
+                out[0] = crate::ops::util::accurate_pair_sum(data, data, $zero, $dot);
+            } else {
+                // Many independent runs, so the outer axis is the one to
+                // split; each run then folds on a single thread.
+                par_out_chunks(&mut out, PAR_CHUNK, &|start, block| {
+                    for (offset, slot) in block.iter_mut().enumerate() {
+                        let base = (start + offset) * run;
+                        let slice = &data[base..base + run];
+                        *slot = crate::ops::util::accurate_pair_sum(slice, slice, $zero, $dot);
+                    }
+                });
+            }
+            $from_vec(out, input.device())
+        }};
+    }
+
+    let data = match input.dtype() {
+        DataType::Float32 => fuse!(
+            as_f32_slice,
+            TensorData::from_vec_f32,
+            0.0_f32,
+            crate::ops::simd::simd_dot_f32,
+            f32
+        ),
+        DataType::Float64 => fuse!(
+            as_f64_slice,
+            TensorData::from_vec_f64,
+            0.0_f64,
+            crate::ops::simd::simd_dot_f64,
+            f64
+        ),
+        _ => return Ok(None),
+    };
+
+    Ok(Some(Tensor::new(
+        Arc::new(data),
+        keepdim_shape(input.shape(), dims),
+        input.dtype(),
+        input.device(),
+        false,
+    )))
+}
+
 fn euclidean_norm_unscaled(input: &Tensor, p: f64, dims: &[usize]) -> Result<Option<Tensor>> {
     if p != 2.0 {
         return Ok(None);
     }
 
-    let squared = arithmetic::mul(input, input)?;
-    let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
-    let summed = reduction::sum(&squared, Some(dims_isize), true)?;
+    let summed = match fused_sum_of_squares(input, dims)? {
+        Some(fused) => fused,
+        None => {
+            let squared = arithmetic::mul(input, input)?;
+            let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+            reduction::sum(&squared, Some(dims_isize), true)?
+        }
+    };
 
     // One element out of range is enough to fall back for the whole reduction:
     // the scaled path is per-slice, so it costs nothing extra to take it for
@@ -658,5 +777,78 @@ mod tests {
         assert!(norm(&t, -2.0, None, false).is_err());
         assert!(norm(&t, f64::NAN, None, false).is_err());
         assert!(norm(&t, 2.0, Some(vec![5]), false).is_err());
+    }
+
+    /// The fused sum of squares has to answer what `mul` then `sum` answered.
+    ///
+    /// It replaced that route for the trailing-axis reductions, so the two are
+    /// compared directly rather than both against a reference: a shared error
+    /// in the definition would pass a reference check and this is what catches
+    /// a fused path that reduced over the wrong extent.
+    #[test]
+    fn the_fused_sum_of_squares_agrees_with_mul_then_sum() {
+        let values: Vec<f64> = (0..(3 * 4 * 5)).map(|i| (i as f64) * 0.37 - 8.0).collect();
+        let t = tensor_f64(values, vec![3, 4, 5], false);
+
+        for dims in [
+            vec![0usize, 1, 2], // every axis: the flattened norm
+            vec![2],            // the last: one run per row
+            vec![1, 2],         // a trailing block of two
+        ] {
+            let fused = fused_sum_of_squares(&t, &dims)
+                .unwrap()
+                .expect("a trailing block should take the fused path");
+
+            let squared = arithmetic::mul(&t, &t).unwrap();
+            let dims_isize: Vec<isize> = dims.iter().map(|&d| d as isize).collect();
+            let composed = reduction::sum(&squared, Some(dims_isize), true).unwrap();
+
+            assert_eq!(fused.shape().dims(), composed.shape().dims(), "{dims:?}");
+            let a = fused.data().as_f64_slice().unwrap();
+            let b = composed.data().as_f64_slice().unwrap();
+            for (x, y) in a.iter().zip(b) {
+                assert!(
+                    (x - y).abs() <= 1e-12 * y.abs().max(1.0),
+                    "{dims:?}: {x} != {y}"
+                );
+            }
+        }
+    }
+
+    /// Axes that are not a trailing block leave a reduced slice strided rather
+    /// than contiguous, so the fused walk does not apply and must say so.
+    #[test]
+    fn a_non_trailing_reduction_declines_the_fused_path() {
+        let t = tensor_f64(vec![1.0; 24], vec![2, 3, 4], false);
+        assert!(fused_sum_of_squares(&t, &[0]).unwrap().is_none());
+        assert!(fused_sum_of_squares(&t, &[1]).unwrap().is_none());
+        assert!(fused_sum_of_squares(&t, &[0, 2]).unwrap().is_none());
+        // ... and the ones that are a trailing block do apply.
+        assert!(fused_sum_of_squares(&t, &[2]).unwrap().is_some());
+        assert!(fused_sum_of_squares(&t, &[1, 2]).unwrap().is_some());
+    }
+
+    /// The whole point of the scaled route is that it still catches what the
+    /// direct one cannot represent, and the fused path must not have taken
+    /// that decision away from it.
+    #[test]
+    fn the_fused_path_still_falls_back_when_squaring_overflows() {
+        // 1e200 squares to inf in f64, so the sum of squares is unusable and
+        // the scaled route has to produce the answer.
+        let t = tensor_f64(vec![1e200, 1e200], vec![2], false);
+        let got = norm(&t, 2.0, None, false).unwrap();
+        let value = got.data().as_f64_slice().unwrap()[0];
+        assert!(value.is_finite(), "norm of 1e200s came back {value}");
+        assert!((value / (1e200 * std::f64::consts::SQRT_2) - 1.0).abs() < 1e-12);
+    }
+
+    /// The other direction: squares that underflow to zero.
+    #[test]
+    fn the_fused_path_still_falls_back_when_squaring_underflows() {
+        let t = tensor_f64(vec![1e-200, 1e-200], vec![2], false);
+        let got = norm(&t, 2.0, None, false).unwrap();
+        let value = got.data().as_f64_slice().unwrap()[0];
+        assert!(value > 0.0, "norm of 1e-200s came back {value}");
+        assert!((value / (1e-200 * std::f64::consts::SQRT_2) - 1.0).abs() < 1e-12);
     }
 }
