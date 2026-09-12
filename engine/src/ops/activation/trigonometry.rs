@@ -513,6 +513,11 @@ pub fn elu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
 
 /// SELU activation function.
 pub fn selu(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and the widening is the one `mean` documents.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return selu(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => selu_f32(tensor)?,
         DataType::Float64 => selu_f64(tensor)?,
@@ -545,6 +550,11 @@ pub fn selu(tensor: &Tensor) -> Result<Tensor> {
 
 /// SiLU (Swish) activation function with gradient support
 pub fn silu(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and the widening is the one `mean` documents.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return silu(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => silu_f32(tensor)?,
         DataType::Float64 => silu_f64(tensor)?,
@@ -577,6 +587,11 @@ pub fn silu(tensor: &Tensor) -> Result<Tensor> {
 
 /// Softsign activation function with gradient support
 pub fn softsign(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and the widening is the one `mean` documents.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return softsign(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => softsign_f32(tensor)?,
         DataType::Float64 => softsign_f64(tensor)?,

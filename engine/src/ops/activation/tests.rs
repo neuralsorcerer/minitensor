@@ -100,11 +100,16 @@ fn test_exp() {
 }
 
 #[test]
-fn test_exp_invalid_dtype() {
+fn test_exp_widens_an_integer_input() {
     let shape = Shape::new(vec![3]);
     let data = TensorData::from_vec_i32(vec![1, 2, 3], Device::cpu());
     let tensor = Tensor::new(Arc::new(data), shape, DataType::Int32, Device::cpu(), false);
-    assert!(exp(&tensor).is_err());
+    // `exp(1)` is not an integer, so an `i32` widens to `f32` rather than
+    // being refused.
+    let widened = exp(&tensor).unwrap();
+    assert_eq!(widened.dtype(), DataType::Float32);
+    let values = widened.data().as_f32_slice().unwrap();
+    assert!((values[0] - std::f32::consts::E).abs() < 1e-6);
 }
 
 #[test]

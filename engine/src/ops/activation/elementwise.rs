@@ -31,6 +31,11 @@ pub(crate) use crate::ops::map::{
 
 /// Exponential function with gradient support
 pub fn exp(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return exp(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => exp_f32(tensor)?,
@@ -69,6 +74,11 @@ pub fn exp(tensor: &Tensor) -> Result<Tensor> {
 
 /// Natural logarithm function with gradient support
 pub fn log(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return log(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => log_f32(tensor)?,
@@ -107,6 +117,11 @@ pub fn log(tensor: &Tensor) -> Result<Tensor> {
 
 /// log1p (log(1 + x)) function with gradient support
 pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return log1p(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => log1p_f32(tensor)?,
         DataType::Float64 => log1p_f64(tensor)?,
@@ -139,11 +154,21 @@ pub fn log1p(tensor: &Tensor) -> Result<Tensor> {
 
 /// Base-2 logarithm with gradient support
 pub fn log2(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return log2(&widened);
+    }
     log_base(tensor, log2_f32, log2_f64, std::f64::consts::LN_2, "log2")
 }
 
 /// Base-10 logarithm with gradient support
 pub fn log10(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return log10(&widened);
+    }
     log_base(
         tensor,
         log10_f32,
@@ -195,6 +220,11 @@ fn log_base(
 
 /// Gauss error function with gradient support
 pub fn erf(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return erf(&widened);
+    }
     erf_family(tensor, false)
 }
 
@@ -204,6 +234,11 @@ pub fn erf(tensor: &Tensor) -> Result<Tensor> {
 /// rounds to 1 that subtraction returns exactly 0 and every significant digit
 /// of the tail is lost, which is precisely the regime `erfc` exists to serve.
 pub fn erfc(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return erfc(&widened);
+    }
     erf_family(tensor, true)
 }
 
@@ -244,6 +279,11 @@ fn erf_family(tensor: &Tensor, complementary: bool) -> Result<Tensor> {
 
 /// expm1 (exp(x) - 1) with gradient support
 pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return expm1(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => expm1_f32(tensor)?,
         DataType::Float64 => expm1_f64(tensor)?,
@@ -276,6 +316,11 @@ pub fn expm1(tensor: &Tensor) -> Result<Tensor> {
 
 /// Sine function with gradient support
 pub fn sin(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return sin(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => sin_f32(tensor)?,
@@ -314,6 +359,11 @@ pub fn sin(tensor: &Tensor) -> Result<Tensor> {
 
 /// Cosine function with gradient support
 pub fn cos(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return cos(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => cos_f32(tensor)?,
@@ -352,6 +402,11 @@ pub fn cos(tensor: &Tensor) -> Result<Tensor> {
 
 /// Tangent function with gradient support
 pub fn tan(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return tan(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => tan_f32(tensor)?,
@@ -390,6 +445,11 @@ pub fn tan(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse sine function with gradient support
 pub fn asin(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return asin(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => asin_f32(tensor)?,
         DataType::Float64 => asin_f64(tensor)?,
@@ -422,6 +482,11 @@ pub fn asin(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse cosine function with gradient support
 pub fn acos(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return acos(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => acos_f32(tensor)?,
         DataType::Float64 => acos_f64(tensor)?,
@@ -454,6 +519,11 @@ pub fn acos(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse tangent function with gradient support
 pub fn atan(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return atan(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => atan_f32(tensor)?,
         DataType::Float64 => atan_f64(tensor)?,
@@ -486,6 +556,11 @@ pub fn atan(tensor: &Tensor) -> Result<Tensor> {
 
 /// Hyperbolic sine with gradient support
 pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return sinh(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => sinh_f32(tensor)?,
         DataType::Float64 => sinh_f64(tensor)?,
@@ -518,6 +593,11 @@ pub fn sinh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Hyperbolic cosine with gradient support
 pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return cosh(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => cosh_f32(tensor)?,
         DataType::Float64 => cosh_f64(tensor)?,
@@ -550,6 +630,11 @@ pub fn cosh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic sine with gradient support
 pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return asinh(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => asinh_f32(tensor)?,
         DataType::Float64 => asinh_f64(tensor)?,
@@ -582,6 +667,11 @@ pub fn asinh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic cosine with gradient support
 pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return acosh(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => acosh_f32(tensor)?,
         DataType::Float64 => acosh_f64(tensor)?,
@@ -614,6 +704,11 @@ pub fn acosh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Inverse hyperbolic tangent with gradient support
 pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return atanh(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => atanh_f32(tensor)?,
         DataType::Float64 => atanh_f64(tensor)?,
@@ -646,6 +741,11 @@ pub fn atanh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Hyperbolic tangent function with gradient support
 pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return tanh(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => tanh_f32(tensor)?,
@@ -684,6 +784,11 @@ pub fn tanh(tensor: &Tensor) -> Result<Tensor> {
 
 /// Sigmoid activation function with gradient support
 pub fn sigmoid(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return sigmoid(&widened);
+    }
     // Create output tensor data
     let output_data = match tensor.dtype() {
         DataType::Float32 => sigmoid_f32(tensor)?,
@@ -890,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_non_float_dtypes() {
+    fn test_widens_an_integer_and_still_refuses_a_mask() {
         let ints = Tensor::new(
             Arc::new(TensorData::from_vec_i64(vec![1, 2], Device::cpu())),
             Shape::new(vec![2]),
@@ -898,9 +1003,30 @@ mod tests {
             Device::cpu(),
             false,
         );
-        assert!(log2(&ints).is_err());
-        assert!(log10(&ints).is_err());
-        assert!(erf(&ints).is_err());
-        assert!(erfc(&ints).is_err());
+        // None of these has an integer answer, so an `i64` widens to `f64`.
+        for widened in [
+            log2(&ints).unwrap(),
+            log10(&ints).unwrap(),
+            erf(&ints).unwrap(),
+            erfc(&ints).unwrap(),
+        ] {
+            assert_eq!(widened.dtype(), DataType::Float64);
+            assert_eq!(widened.shape().dims(), &[2]);
+        }
+
+        // A boolean has no width to take, and stays refused.
+        let mask = Tensor::new(
+            Arc::new(TensorData::from_vec(
+                vec![true, false],
+                DataType::Bool,
+                Device::cpu(),
+            )),
+            Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        assert!(log2(&mask).is_err());
+        assert!(erf(&mask).is_err());
     }
 }

@@ -594,6 +594,28 @@ pub(crate) fn broadcast_mask_index(
     mask_index
 }
 
+/// The float tensor an integer input widens to, or `None` if it is already a
+/// float (or a boolean, which has no width to take).
+///
+/// `sqrt(4)` is 2 and `sin(1)` is 0.841…; neither has an integer answer, so an
+/// op whose value is a real number takes an integer argument by widening it,
+/// which is what NumPy and PyTorch both do. The width follows the rule `mean`
+/// already documents -- `int32` to `float32`, `int64` to `float64` -- so a
+/// tensor widened by one of these ops lands where the same tensor averaged
+/// would.
+///
+/// A boolean is left alone. What a mask should mean to a reduction is a
+/// question this library has deliberately declined to answer, and answering it
+/// here for `sqrt` and nowhere else would be worse than not answering it.
+pub(crate) fn widen_integer_input(tensor: &Tensor) -> Result<Option<Tensor>> {
+    let widened = match tensor.dtype() {
+        DataType::Int32 => DataType::Float32,
+        DataType::Int64 => DataType::Float64,
+        _ => return Ok(None),
+    };
+    Ok(Some(tensor.astype(widened)?))
+}
+
 /// A 0-d float tensor holding `value`, for the scalar coefficients the loss
 /// and gradient kernels multiply through (`1/n`, `2/n`, …).
 ///

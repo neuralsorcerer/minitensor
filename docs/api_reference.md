@@ -1267,6 +1267,35 @@ the wrong count.
 `logsumexp` raise — what they should return for a mask is a design question
 rather than an obvious one.
 
+The element-wise maths follows the same widening, decided by whether the
+answer is an integer:
+
+- **A real answer widens.** `sqrt`, `exp`, `log` and the rest of the
+  transcendentals, and `erf`, `lgamma`, `digamma`, `logit`, `sigmoid` and the
+  other special functions, take an integer argument by widening it to
+  `float32` for `int32` and `float64` for `int64` — the width `mean` widens
+  to, and the promotion NumPy, SciPy and PyTorch all apply here.
+- **An integer answer keeps its dtype.** `floor`, `ceil`, `trunc` and `round`
+  are the identity on an integer, `frac` is zero on one, and `relu`, `abs` and
+  `sign` were already integer-valued. `round` with a negative `decimals`
+  rounds to a multiple of a power of ten in the integer dtype, halves going to
+  the even multiple, as the float path does — so `round([15, 25], -1)` is
+  `[20, 20]`. A value within half a step of the dtype's limit wraps, the same
+  rule integer `**` follows.
+- **A clamp keeps its dtype when its bounds are whole.** `relu6` and
+  `hardtanh` answer with a bound or the value itself, so on an integer the
+  answer is an integer — as long as the bounds are. `hardtanh(x, -0.5, 0.5)`
+  is a half at both ends, so that widens like everything else. Every other
+  unit (`silu`, `selu`, `mish`, `softsign`, `logsigmoid`, `hardsigmoid`,
+  `hardswish`, `tanhshrink`, `celu`, `softshrink`, `threshold`) is
+  real-valued and widens.
+- **The derived statistics widen too.** `cov`, `corrcoef`, `cdist`, `pdist`,
+  `pairwise_distance`, `normalize`, `trapezoid` and `histogramdd` all answer
+  in real numbers, so an integer argument widens rather than being refused.
+- **A `bool` is refused either way.** It has no width to widen to, and
+  answering for a mask here while `mean` declines to would be worse than not
+  answering at all.
+
 The widening is what makes an integer total trustworthy. Accumulation is still
 two's-complement once it reaches `int64`, so an extreme input can still wrap,
 but the everyday case no longer does: summing pixel values in `0..=255` used to

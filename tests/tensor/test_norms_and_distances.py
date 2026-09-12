@@ -88,9 +88,19 @@ def test_normalize_carries_a_gradient():
     mt.clear_autograd_graph()
 
 
-def test_normalize_refuses_an_integer_tensor():
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_normalize_widens_an_integer_tensor(dtype, widened):
+    # A unit vector is not made of integers, so the argument widens.
+    values = np.arange(1, 7, dtype=dtype).reshape(2, 3)
+    result = mt.normalize(mt.Tensor(values, dtype=dtype))
+    assert result.dtype == widened
+    expected = values / np.linalg.norm(values, axis=1, keepdims=True)
+    np.testing.assert_allclose(result.numpy(), expected, rtol=1e-6)
+
+
+def test_normalize_still_refuses_a_mask():
     with pytest.raises(ValueError, match="floating point"):
-        mt.normalize(mt.Tensor.zeros([2, 3], dtype="int64"))
+        mt.normalize(mt.Tensor(np.zeros((2, 3), dtype=bool), dtype="bool"))
 
 
 # --- pairwise_distance ------------------------------------------------------

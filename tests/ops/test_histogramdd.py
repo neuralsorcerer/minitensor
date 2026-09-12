@@ -190,6 +190,17 @@ def test_an_empty_edge_vector_is_refused():
         mt.histogramdd(_t(np.zeros((5, 1))), [_t([1.0])])
 
 
-def test_an_integer_sample_is_refused():
+def test_an_integer_sample_is_widened():
+    # Bin edges are real numbers, so an integer sample widens rather than
+    # being refused.
+    sample = np.array([[0, 0], [1, 1], [2, 2], [3, 3]], dtype=np.int64)
+    counts, edges = mt.histogramdd(mt.Tensor(sample, dtype="int64"), 3)
+    reference, numpy_edges = np.histogramdd(sample.astype(np.float64), 3)
+    np.testing.assert_array_equal(counts.numpy(), reference)
+    for ours, theirs in zip(edges, numpy_edges):
+        np.testing.assert_allclose(ours.numpy(), theirs)
+
+
+def test_a_boolean_sample_is_refused():
     with pytest.raises(ValueError, match="floating point"):
-        mt.histogramdd(mt.Tensor.zeros([4, 2], dtype="int64"), 3)
+        mt.histogramdd(mt.Tensor(np.zeros((4, 2), dtype=bool), dtype="bool"), 3)

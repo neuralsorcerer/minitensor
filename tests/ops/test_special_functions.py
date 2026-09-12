@@ -272,10 +272,33 @@ def test_the_functional_spelling_agrees_with_the_method(name):
 
 
 @pytest.mark.parametrize("name", UNARY)
-def test_an_integer_tensor_is_refused_by_name(name):
-    integers = mt.Tensor(np.array([1, 2], dtype=np.int64), dtype="int64")
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_an_integer_tensor_is_widened_by_name(name, dtype, widened):
+    # These answer in real numbers, so an integer argument widens rather than
+    # being refused -- as it does for SciPy's spelling of each of them.
+    # `logit` and `erfinv` are only real on [0, 1], so 0 and 1 are the only
+    # integers either of them has an answer for.
+    values = np.array([0, 1] if name in ("logit", "erfinv") else [1, 2], dtype=dtype)
+    result = getattr(mt, name)(mt.Tensor(values, dtype=dtype))
+    assert result.dtype == widened
+    # `atol` because `sinc` of a non-zero integer is exactly zero, and the two
+    # widths leave different rounding dust behind it -- 3e-17 against 3e-8,
+    # which no relative tolerance can reconcile and neither needs to.
+    np.testing.assert_allclose(
+        result.numpy().astype(np.float64),
+        getattr(mt, name)(
+            mt.Tensor(values.astype(np.float64), dtype="float64")
+        ).numpy(),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
+@pytest.mark.parametrize("name", UNARY)
+def test_a_boolean_tensor_is_still_refused_by_name(name):
+    mask = mt.Tensor(np.array([True, False]), dtype="bool")
     with pytest.raises(Exception, match=name):
-        getattr(mt, name)(integers)
+        getattr(mt, name)(mask)
 
 
 @pytest.mark.parametrize("name", UNARY)

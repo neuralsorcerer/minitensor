@@ -31,9 +31,22 @@ _F = _C.functional
 
 
 def _require_float(tensor: Tensor, name: str) -> Tensor:
-    if "float" not in str(tensor.dtype):
-        raise ValueError(f"{name} requires a floating point tensor, got {tensor.dtype}")
-    return tensor
+    """`tensor` as a float, widening an integer rather than refusing it.
+
+    A distance between integer points, a normalized integer vector and an
+    integral of integers are all real numbers, so these take an integer
+    argument by widening it -- to `float32` for `int32` and `float64` for
+    `int64`, the width `mean` widens to and the one the element-wise maths
+    uses. A `bool` has no width to take and is still refused, as it is there.
+    """
+
+    dtype = str(tensor.dtype)
+    if "float" in dtype:
+        return tensor
+    widened = {"int32": "float32", "int64": "float64"}.get(dtype)
+    if widened is not None:
+        return tensor.astype(widened)
+    raise ValueError(f"{name} requires a floating point tensor, got {tensor.dtype}")
 
 
 def outer(input: object, other: object) -> Tensor:

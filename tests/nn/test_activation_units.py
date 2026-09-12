@@ -194,11 +194,45 @@ def test_invalid_parameters_are_rejected(call, message):
         call(mt.from_numpy(np.array([1.0])))
 
 
+# `relu6` and `hardtanh` only clamp, so on an integer they answer with one of
+# the bounds or the value itself -- all integers, when the bounds are. Every
+# other unit here has a real answer and widens instead.
+_CLAMPS_WITH_WHOLE_BOUNDS = {"relu6", "hardtanh"}
+
+
 @pytest.mark.parametrize("name", sorted(UNITS))
-def test_integer_inputs_are_rejected(name):
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_integer_inputs_are_widened_unless_the_unit_only_clamps(name, dtype, widened):
+    call, reference = UNITS[name]
+    values = np.arange(-3, 4, dtype=dtype)
+    result = call(mt.Tensor(values, dtype=dtype))
+
+    if name in _CLAMPS_WITH_WHOLE_BOUNDS:
+        assert result.dtype == dtype
+        np.testing.assert_array_equal(result.numpy(), reference(values).astype(dtype))
+    else:
+        assert result.dtype == widened
+        np.testing.assert_allclose(
+            result.numpy().astype(np.float64),
+            reference(values.astype(np.float64)),
+            rtol=1e-6,
+            atol=1e-7,
+        )
+
+
+def test_a_clamp_with_fractional_bounds_widens_an_integer():
+    # The answer is a half at both ends, which no integer dtype holds.
+    values = np.array([-3, 0, 2, 5], dtype=np.int64)
+    result = mt.hardtanh(mt.Tensor(values, dtype="int64"), -0.5, 0.5)
+    assert result.dtype == "float64"
+    np.testing.assert_array_equal(result.numpy(), np.clip(values, -0.5, 0.5))
+
+
+@pytest.mark.parametrize("name", sorted(UNITS))
+def test_boolean_inputs_are_still_rejected(name):
     call, _ = UNITS[name]
     with pytest.raises(ValueError):
-        call(mt.Tensor.arange(-3, 4, dtype="int64"))
+        call(mt.Tensor(np.array([True, False]), dtype="bool"))
 
 
 @pytest.mark.parametrize("name", sorted(UNITS))

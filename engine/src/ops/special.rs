@@ -88,6 +88,11 @@ unit_grad_kernel!(
 
 /// `2^x`, element-wise.
 pub fn exp2(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return exp2(&widened);
+    }
     unary_unit(tensor, "exp2", EXP2, EXP2_D, [LN_2, 0.0])
 }
 
@@ -147,6 +152,11 @@ unit_grad_kernel!(
 /// bounds the result for a probability that has rounded to 0 or 1. Without it
 /// those give infinities, and anything outside `[0, 1]` gives NaN.
 pub fn logit(tensor: &Tensor, eps: Option<f64>) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return logit(&widened, eps);
+    }
     let clamp = match eps {
         None => f64::NAN,
         // A NaN eps is refused along with the out-of-range ones: it compares
@@ -203,6 +213,11 @@ unit_grad_kernel!(
 
 /// `sin(pi * input) / (pi * input)`, taken as `1` at zero.
 pub fn sinc(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return sinc(&widened);
+    }
     unary_unit(tensor, "sinc", SINC, SINC_D, [PI, 0.0])
 }
 
@@ -532,11 +547,21 @@ fn polygamma_scalar(order: u32, x: f64) -> f64 {
 
 /// `log |gamma(input)|`, element-wise.
 pub fn lgamma(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return lgamma(&widened);
+    }
     unary_unit(tensor, "lgamma", LGAMMA, LGAMMA_D, [0.0; 2])
 }
 
 /// `digamma(input)`, the derivative of `lgamma`.
 pub fn digamma(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return digamma(&widened);
+    }
     unary_unit(tensor, "digamma", DIGAMMA, DIGAMMA_D, [0.0; 2])
 }
 
@@ -725,21 +750,41 @@ wide_grad_kernel!(
 
 /// `i0(input)`, the modified Bessel function of the first kind, order zero.
 pub fn i0(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return i0(&widened);
+    }
     unary_unit(tensor, "i0", I0, I0_D, [0.0; 2])
 }
 
 /// `i1(input)`, the modified Bessel function of the first kind, order one.
 pub fn i1(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return i1(&widened);
+    }
     unary_unit(tensor, "i1", I1, I1_D, [0.0; 2])
 }
 
 /// `i0e(input)`, `exp(-|x|) i0(x)`.
 pub fn i0e(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return i0e(&widened);
+    }
     unary_unit(tensor, "i0e", I0E, I0E_D, [0.0; 2])
 }
 
 /// `i1e(input)`, `exp(-|x|) i1(x)`.
 pub fn i1e(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return i1e(&widened);
+    }
     unary_unit(tensor, "i1e", I1E, I1E_D, [0.0; 2])
 }
 
@@ -803,6 +848,11 @@ wide_grad_kernel!(
 
 /// `erfcx(input)`, `exp(x**2) erfc(x)`.
 pub fn erfcx(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return erfcx(&widened);
+    }
     unary_unit(tensor, "erfcx", ERFCX, ERFCX_D, [0.0; 2])
 }
 
@@ -837,6 +887,11 @@ wide_grad_kernel!(
 
 /// The inverse error function on `[-1, 1]`.
 pub fn erfinv(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return erfinv(&widened);
+    }
     unary_unit(tensor, "erfinv", ERFINV, ERFINV_D, [0.0; 2])
 }
 
@@ -1607,14 +1662,16 @@ mod tests {
     }
 
     #[test]
-    fn an_integer_tensor_is_refused_by_name() {
+    fn an_integer_tensor_is_widened_and_a_mask_is_refused_by_name() {
         let integers = Tensor::new(
-            Arc::new(TensorData::from_vec_i64(vec![1, 2], Device::cpu())),
+            Arc::new(TensorData::from_vec_i64(vec![0, 1], Device::cpu())),
             Shape::new(vec![2]),
             DataType::Int64,
             Device::cpu(),
             false,
         );
+        // These answer in real numbers, so an integer argument widens. `0` and
+        // `1` are the only integers `logit` and `erfinv` are real at.
         for (name, result) in [
             ("exp2", exp2(&integers)),
             ("sinc", sinc(&integers)),
@@ -1622,6 +1679,29 @@ mod tests {
             ("digamma", digamma(&integers)),
             ("erfinv", erfinv(&integers)),
             ("logit", logit(&integers, None)),
+        ] {
+            let widened = result.unwrap_or_else(|e| panic!("{name} refused an integer: {e}"));
+            assert_eq!(widened.dtype(), DataType::Float64, "{name}");
+        }
+
+        let mask = Tensor::new(
+            Arc::new(TensorData::from_vec(
+                vec![true, false],
+                DataType::Bool,
+                Device::cpu(),
+            )),
+            Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        for (name, result) in [
+            ("exp2", exp2(&mask)),
+            ("sinc", sinc(&mask)),
+            ("lgamma", lgamma(&mask)),
+            ("digamma", digamma(&mask)),
+            ("erfinv", erfinv(&mask)),
+            ("logit", logit(&mask, None)),
         ] {
             let error = result.unwrap_err().to_string();
             assert!(error.contains(name), "{name} is missing from {error:?}");

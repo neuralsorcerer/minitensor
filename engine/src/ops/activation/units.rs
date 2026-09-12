@@ -350,10 +350,18 @@ pub(crate) fn unary_unit_from_data(
 }
 
 /// Declares a unit that takes no parameters.
+///
+/// Every unit declared this way is real-valued, so an integer argument widens
+/// rather than being refused -- the same rule the transcendentals follow, and
+/// the width `mean` documents. The units that *are* integer-valued on an
+/// integer (`relu6` and `hardtanh`, which only clamp) are declared by hand.
 macro_rules! plain_unit {
     ($name:ident, $kernel:ident, $grad:ident, $doc:literal) => {
         #[doc = $doc]
         pub fn $name(tensor: &Tensor) -> Result<Tensor> {
+            if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+                return $name(&widened);
+            }
             unary_unit(tensor, stringify!($name), $kernel, $grad, [0.0; 2])
         }
     };
@@ -391,6 +399,11 @@ plain_unit!(
 /// `libm` calls an element. Only the value kernel changes: the gradient is
 /// still the unit one, attached the way every other unit attaches it.
 pub fn logsigmoid(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and the widening is the one `mean` documents.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return logsigmoid(&widened);
+    }
     macro_rules! values_for {
         ($ty:ty, $slice:ident, $dtype:expr) => {{
             let input = tensor.data().$slice().ok_or_else(|| {
@@ -432,18 +445,38 @@ pub fn hardtanh(tensor: &Tensor, min_val: f64, max_val: f64) -> Result<Tensor> {
             "hardtanh requires min_val <= max_val, got {min_val} and {max_val}"
         )));
     }
+    // A clamp answers with one of the bounds or the value itself, so on an
+    // integer it has an integer answer exactly when the bounds are whole. Then
+    // it goes to `clip`, which is the same operation and has handled integers
+    // all along. Fractional bounds have no integer answer -- `hardtanh(x,
+    // -0.5, 0.5)` is a half at both ends -- so those widen like the
+    // real-valued units.
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
+        if min_val.fract() == 0.0 && max_val.fract() == 0.0 {
+            return crate::ops::activation::clip(tensor, Some(min_val), Some(max_val));
+        }
+        let widened =
+            crate::ops::util::widen_integer_input(tensor)?.expect("an integer dtype always widens");
+        return hardtanh(&widened, min_val, max_val);
+    }
     unary_unit(tensor, "hardtanh", HARDTANH, HARDTANH_D, [min_val, max_val])
 }
 
 /// `hardtanh` on `[0, 6]`: the clipped ReLU that quantized networks use.
 pub fn relu6(tensor: &Tensor) -> Result<Tensor> {
     // Named separately because it is what the literature and every other
-    // library call it, but there is nothing else to it.
-    unary_unit(tensor, "relu6", HARDTANH, HARDTANH_D, [0.0, 6.0])
+    // library call it, but there is nothing else to it -- including how it
+    // treats an integer, which `hardtanh` decides.
+    hardtanh(tensor, 0.0, 6.0)
 }
 
 /// `x` where it exceeds `threshold`, `value` everywhere else.
 pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> {
+    // An integer argument widens: `value` is not an integer, so neither is
+    // the answer.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return self::threshold(&widened, threshold, value);
+    }
     unary_unit(
         tensor,
         "threshold",
@@ -455,6 +488,11 @@ pub fn threshold(tensor: &Tensor, threshold: f64, value: f64) -> Result<Tensor> 
 
 /// Shrinks each element towards zero by `lambd`, flattening `[-lambd, lambd]`.
 pub fn softshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
+    // An integer argument widens: `|x| - lambd` is not an integer, so neither is
+    // the answer.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return softshrink(&widened, lambd);
+    }
     if lambd.is_nan() || lambd < 0.0 {
         return Err(MinitensorError::invalid_argument(format!(
             "softshrink requires lambd to be non-negative, got {lambd}"
@@ -466,6 +504,11 @@ pub fn softshrink(tensor: &Tensor, lambd: f64) -> Result<Tensor> {
 /// `max(0, x) + min(0, alpha * (exp(x / alpha) - 1))`: `elu` rescaled so the
 /// slope is continuous at zero for every `alpha`.
 pub fn celu(tensor: &Tensor, alpha: f64) -> Result<Tensor> {
+    // An integer argument widens: `alpha * expm1(x / alpha)` is not an integer, so neither is
+    // the answer.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return celu(&widened, alpha);
+    }
     if alpha == 0.0 || alpha.is_nan() {
         return Err(MinitensorError::invalid_argument(format!(
             "celu requires a non-zero alpha, got {alpha}"
@@ -712,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn parameters_are_validated_and_non_float_dtypes_rejected() {
+    fn parameters_are_validated_and_masks_rejected() {
         let input = f64_tensor(vec![1.0]);
         assert!(hardtanh(&input, 1.0, -1.0).is_err());
         assert!(softshrink(&input, -0.5).is_err());
@@ -721,16 +764,51 @@ mod tests {
         assert_eq!(wide(&hardtanh(&input, 2.0, 2.0).unwrap()), vec![2.0]);
         assert_eq!(wide(&softshrink(&input, 0.0).unwrap()), vec![1.0]);
 
-        let ints = Tensor::new(
-            Arc::new(TensorData::from_vec_i64(vec![1, 2], Device::cpu())),
+        let mask = Tensor::new(
+            Arc::new(TensorData::from_vec(
+                vec![true, false],
+                DataType::Bool,
+                Device::cpu(),
+            )),
             Shape::new(vec![2]),
+            DataType::Bool,
+            Device::cpu(),
+            false,
+        );
+        for (name, op) in units() {
+            assert!(op(&mask).is_err(), "{name} accepted a mask");
+        }
+    }
+
+    /// An integer argument is widened by the units whose answer is a real
+    /// number, and kept by the two that only clamp.
+    #[test]
+    fn integer_inputs_are_widened_unless_the_unit_only_clamps() {
+        let clamps = ["relu6", "hardtanh"];
+        let ints = Tensor::new(
+            Arc::new(TensorData::from_vec_i64(vec![-3, 1, 9], Device::cpu())),
+            Shape::new(vec![3]),
             DataType::Int64,
             Device::cpu(),
             false,
         );
-        for (_, op) in units() {
-            assert!(op(&ints).is_err());
+        for (name, op) in units() {
+            let out = op(&ints).unwrap_or_else(|e| panic!("{name} refused an integer: {e}"));
+            if clamps.contains(&name) {
+                assert_eq!(out.dtype(), DataType::Int64, "{name}");
+            } else {
+                assert_eq!(out.dtype(), DataType::Float64, "{name}");
+            }
         }
+
+        // `relu6` clamps into `[0, 6]`, and every one of those is an integer.
+        let clamped = relu6(&ints).unwrap();
+        assert_eq!(clamped.data().as_i64_slice().unwrap(), &[0, 1, 6]);
+
+        // Fractional bounds have no integer answer, so those widen.
+        let fractional = hardtanh(&ints, -0.5, 0.5).unwrap();
+        assert_eq!(fractional.dtype(), DataType::Float64);
+        assert_eq!(fractional.data().as_f64_slice().unwrap(), &[-0.5, 0.5, 0.5]);
     }
 
     #[test]

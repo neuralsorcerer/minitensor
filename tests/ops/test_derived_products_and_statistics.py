@@ -284,12 +284,31 @@ def test_gradients_match_central_differences(name):
     np.testing.assert_allclose(analytic, numeric, rtol=1e-5, atol=1e-6)
 
 
-def test_integer_inputs_are_rejected_where_the_answer_would_be_a_float():
-    ints = mt.Tensor.arange(0, 6, dtype="int64").reshape(2, 3)
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_integer_inputs_are_widened_where_the_answer_would_be_a_float(dtype, widened):
+    # A distance, a covariance and an integral are all real numbers, so an
+    # integer argument widens instead of being refused.
+    values = np.arange(0, 6, dtype=dtype).reshape(2, 3)
+    ints = mt.Tensor(values, dtype=dtype)
+    doubles = mt.Tensor(values.astype(np.float64), dtype="float64")
+    for widened_call, reference in (
+        (lambda: mt.cdist(ints, ints), lambda: mt.cdist(doubles, doubles)),
+        (lambda: mt.cov(ints), lambda: mt.cov(doubles)),
+        (lambda: mt.trapezoid(ints), lambda: mt.trapezoid(doubles)),
+    ):
+        result = widened_call()
+        assert result.dtype == widened
+        np.testing.assert_allclose(
+            result.numpy().astype(np.float64), reference().numpy(), rtol=1e-6
+        )
+
+
+def test_boolean_inputs_are_still_rejected_where_the_answer_would_be_a_float():
+    mask = mt.Tensor(np.zeros((2, 3), dtype=bool), dtype="bool")
     for call in (
-        lambda: mt.cdist(ints, ints),
-        lambda: mt.cov(ints),
-        lambda: mt.trapezoid(ints),
+        lambda: mt.cdist(mask, mask),
+        lambda: mt.cov(mask),
+        lambda: mt.trapezoid(mask),
     ):
         with pytest.raises(ValueError, match="floating point"):
             call()

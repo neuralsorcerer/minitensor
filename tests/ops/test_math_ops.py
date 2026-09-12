@@ -779,11 +779,20 @@ def test_reciprocal_backward_propagates_gradients():
     np.testing.assert_allclose(tensor.grad.numpy(), expected_grad, rtol=1e-6, atol=1e-7)
 
 
-def test_reciprocal_rejects_integers():
-    tensor = mt.Tensor.arange(1, 4, dtype="int32")
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_reciprocal_widens_an_integer(dtype, widened):
+    # `1/2` is a half, so the argument widens. NumPy reads this as integer
+    # division instead and answers 0 for every magnitude above 1; PyTorch
+    # widens, and so does the rest of this family.
+    values = np.array([1, 2, 4], dtype=dtype)
+    result = mt.Tensor(values, dtype=dtype).reciprocal()
+    assert result.dtype == widened
+    np.testing.assert_allclose(result.numpy(), np.array([1.0, 0.5, 0.25]))
 
+
+def test_reciprocal_still_rejects_a_mask():
     with pytest.raises(ValueError):
-        tensor.reciprocal()
+        mt.Tensor(np.array([True, False]), dtype="bool").reciprocal()
 
 
 def test_functional_and_top_level_forwarders_sign_and_reciprocal():
@@ -886,9 +895,50 @@ def test_frac_of_a_non_finite_input_is_nan():
     assert np.all(np.isnan(tensor.frac().numpy()))
 
 
+@pytest.mark.parametrize("name", ["round", "floor", "ceil", "trunc"])
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_rounding_an_integer_leaves_it_alone(name, dtype):
+    # An integer is already whole, so these are the identity on one rather
+    # than an error -- which is what NumPy answers, and what `relu`, `abs` and
+    # `sign` already did here. The dtype stays: the answer is an integer.
+    values = np.array([-3, -1, 0, 2, 5], dtype=dtype)
+    result = getattr(mt.Tensor(values, dtype=dtype), name)()
+    assert result.dtype == dtype
+    np.testing.assert_array_equal(result.numpy(), values)
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_an_integer_has_no_fractional_part(dtype):
+    values = np.array([-3, -1, 0, 2, 5], dtype=dtype)
+    result = mt.Tensor(values, dtype=dtype).frac()
+    assert result.dtype == dtype
+    np.testing.assert_array_equal(result.numpy(), np.zeros_like(values))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+@pytest.mark.parametrize("decimals", [-3, -2, -1, 0, 1, 2])
+def test_rounding_an_integer_to_decimals_matches_numpy(dtype, decimals):
+    # A negative `decimals` rounds to a multiple of a power of ten, halves
+    # going to the even multiple -- the same rule the float path follows, so
+    # `round([15, 25], -1)` is `[20, 20]` rather than `[20, 30]`.
+    values = np.arange(-500, 501, dtype=dtype)
+    result = mt.round(mt.Tensor(values, dtype=dtype), decimals)
+    assert result.dtype == dtype
+    np.testing.assert_array_equal(result.numpy(), np.round(values, decimals))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_rounding_an_integer_past_its_own_width_gives_zero(dtype):
+    # Every value is nearer zero than half a step, so they all round to it --
+    # and the step itself is past `i128`, which is where the shortcut lives.
+    values = np.array([-7, 0, 9], dtype=dtype)
+    result = mt.round(mt.Tensor(values, dtype=dtype), -40)
+    np.testing.assert_array_equal(result.numpy(), np.zeros_like(values))
+
+
 @pytest.mark.parametrize("name", ["round", "floor", "ceil", "trunc", "frac"])
-def test_rounding_ops_raise_for_integer_tensors(name):
-    tensor = mt.Tensor.arange(-3, 4, dtype="int32")
+def test_rounding_ops_raise_for_boolean_tensors(name):
+    tensor = mt.Tensor(np.array([True, False]), dtype="bool")
 
     with pytest.raises(ValueError):
         getattr(tensor, name)()
@@ -1233,10 +1283,26 @@ def test_log_bases_agree_with_log_on_edge_cases(name):
 
 
 @pytest.mark.parametrize("name", ["log2", "log10", "erf", "erfc"])
-@pytest.mark.parametrize("dtype", ["int64", "bool"])
-def test_elementwise_math_rejects_non_float_dtypes(name, dtype):
+@pytest.mark.parametrize("dtype,widened", [("int32", "float32"), ("int64", "float64")])
+def test_elementwise_math_widens_an_integer_argument(name, dtype, widened):
+    # None of these has an integer answer, so an integer argument is widened
+    # rather than refused -- to the width `mean` already widens to.
+    values = np.array([1, 2], dtype=dtype)
+    result = getattr(mt.Tensor(values, dtype=dtype), name)()
+    assert result.dtype == widened
+    np.testing.assert_allclose(
+        result.numpy().astype(np.float64),
+        getattr(mt.Tensor(values.astype(np.float64), dtype="float64"), name)().numpy(),
+        rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("name", ["log2", "log10", "erf", "erfc"])
+def test_elementwise_math_still_declines_a_mask(name):
+    # A bool has no width to widen to, and what a mask should mean is a
+    # question this library declines for `mean` too.
     with pytest.raises(Exception):
-        getattr(mt.Tensor([1, 0], dtype=dtype), name)()
+        getattr(mt.Tensor([1, 0], dtype="bool"), name)()
 
 
 @pytest.mark.parametrize("name", ["log2", "log10", "erf", "erfc"])

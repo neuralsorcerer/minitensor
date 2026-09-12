@@ -93,6 +93,11 @@ pub fn sign(tensor: &Tensor) -> Result<Tensor> {
 /// `sqrt(-inf)` and `sqrt(x<0)` are NaN, `sqrt(-0.0)` is `-0.0`. Gradients flow
 /// through [`SqrtBackward`].
 pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return sqrt(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => sqrt_f32(tensor)?,
         DataType::Float64 => sqrt_f64(tensor)?,
@@ -128,6 +133,11 @@ pub fn sqrt(tensor: &Tensor) -> Result<Tensor> {
 /// results `powf(-0.5)` misses (`rsqrt(-inf)` is NaN, `rsqrt(-0.0)` is `-inf`).
 /// Gradients flow through [`RsqrtBackward`].
 pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
+    // An integer argument widens rather than being refused: none of these has
+    // an integer answer, and both NumPy and PyTorch promote here.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return rsqrt(&widened);
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => rsqrt_f32(tensor)?,
         DataType::Float64 => rsqrt_f64(tensor)?,
@@ -159,6 +169,13 @@ pub fn rsqrt(tensor: &Tensor) -> Result<Tensor> {
 
 /// Element-wise reciprocal (1/x) with gradient support
 pub fn reciprocal(tensor: &Tensor) -> Result<Tensor> {
+    // `1/2` is a half, so an integer argument widens rather than being
+    // refused. NumPy reads it as integer division instead and answers 0 for
+    // every magnitude above 1, which is a footgun its own documentation warns
+    // about; PyTorch widens, and so does the rest of this family.
+    if let Some(widened) = crate::ops::util::widen_integer_input(tensor)? {
+        return reciprocal(&widened);
+    }
     match tensor.dtype() {
         DataType::Float32 | DataType::Float64 => powf(tensor, -1.0),
         _ => Err(MinitensorError::invalid_operation(
@@ -246,14 +263,82 @@ pub fn nan_to_num(
     }
 }
 
-/// Round tensor values
+/// One integer rounded to a multiple of `step`, halves going to the even
+/// multiple.
+///
+/// The rule floating point `round` already follows, applied to the integers so
+/// the two agree: `np.round([15, 25], -1)` is `[20, 20]`, not `[20, 30]`.
+/// Everything is done in `i128` because `step` can be larger than the dtype
+/// being rounded, and `2 * remainder` larger again.
+#[inline]
+fn round_integer_to_step(value: i128, step: i128) -> i128 {
+    let quotient = value.div_euclid(step);
+    let twice_remainder = 2 * value.rem_euclid(step);
+    let rounded = match twice_remainder.cmp(&step) {
+        std::cmp::Ordering::Greater => quotient + 1,
+        std::cmp::Ordering::Less => quotient,
+        // Exactly half: take whichever neighbouring multiple is even.
+        std::cmp::Ordering::Equal => quotient + (quotient & 1),
+    };
+    rounded * step
+}
+
+/// `10^power`, or `None` once it leaves `i128`.
+///
+/// A step that large is bigger than twice any value being rounded, so every
+/// one of them rounds to zero -- which is what NumPy answers too.
+fn power_of_ten(power: u32) -> Option<i128> {
+    (0..power).try_fold(1i128, |acc, _| acc.checked_mul(10))
+}
+
+/// Round tensor values.
+///
+/// An integer is already whole, so a non-negative `decimals` leaves it alone;
+/// a negative one rounds it to a multiple of a power of ten, in the dtype it
+/// came in, the way NumPy does.
 pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
+        if decimals >= 0 {
+            return Ok(tensor.clone());
+        }
+        let step = power_of_ten(decimals.unsigned_abs());
+        macro_rules! round_integer_arm {
+            ($accessor:ident, $ty:ty, $dtype:ident, $tyname:literal) => {{
+                let input = tensor.data().$accessor().ok_or_else(|| {
+                    MinitensorError::internal_error(concat!(
+                        "Failed to get ",
+                        $tyname,
+                        " slice from input tensor"
+                    ))
+                })?;
+                let rounded = match step {
+                    // The cast back wraps, which is the rule integer `pow`
+                    // follows too: the exact answer modulo the dtype's width.
+                    // Only reachable by rounding a value within a step of the
+                    // dtype's limit, where NumPy overflows a float cast and
+                    // warns about it.
+                    Some(step) => crate::ops::map::unary_map(input, move |x: $ty| {
+                        round_integer_to_step(x as i128, step) as $ty
+                    }),
+                    None => vec![0 as $ty; input.len()],
+                };
+                TensorData::from_vec::<$ty>(rounded, DataType::$dtype, tensor.device())
+            }};
+        }
+        let output_data = match tensor.dtype() {
+            DataType::Int32 => round_integer_arm!(as_i32_slice, i32, Int32, "i32"),
+            DataType::Int64 => round_integer_arm!(as_i64_slice, i64, Int64, "i64"),
+            _ => unreachable!("guarded by the matches! above"),
+        };
+        return Ok(step_function_output(tensor, output_data));
+    }
+
     let output_data = match tensor.dtype() {
         DataType::Float32 => round_f32(tensor, decimals)?,
         DataType::Float64 => round_f64(tensor, decimals)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
-                "Round only supported for floating point tensors",
+                "Round only supported for floating point and integer tensors",
             ));
         }
     };
@@ -263,6 +348,11 @@ pub fn round(tensor: &Tensor, decimals: i32) -> Result<Tensor> {
 
 /// The rounding modes that take no parameter. `round` is written out
 /// separately because it takes `decimals`.
+///
+/// An integer is already rounded, so these are the identity on one and return
+/// it unchanged rather than refusing it -- which is what NumPy does, and what
+/// `relu`, `abs` and `sign` already did here. Unlike the real-valued ops there
+/// is nothing to widen to: the answer is an integer and the dtype stays.
 macro_rules! float_rounding_op {
     ($name:ident, $f32_kernel:ident, $f64_kernel:ident, $label:literal, $doc:literal) => {
         #[doc = $doc]
@@ -270,10 +360,11 @@ macro_rules! float_rounding_op {
             let output_data = match tensor.dtype() {
                 DataType::Float32 => $f32_kernel(tensor, 0.0)?,
                 DataType::Float64 => $f64_kernel(tensor, 0.0)?,
+                DataType::Int32 | DataType::Int64 => return Ok(tensor.clone()),
                 _ => {
                     return Err(MinitensorError::invalid_operation(concat!(
                         $label,
-                        " only supported for floating point tensors"
+                        " only supported for floating point and integer tensors"
                     )));
                 }
             };
@@ -313,12 +404,22 @@ float_rounding_op!(
 /// through. Non-finite inputs give NaN, since `inf - inf` is what the
 /// definition asks for.
 pub fn frac(tensor: &Tensor) -> Result<Tensor> {
+    // An integer has no fractional part, so the answer is zeros in its own
+    // dtype -- the same reading that makes `floor` the identity on one.
+    if matches!(tensor.dtype(), DataType::Int32 | DataType::Int64) {
+        return Ok(Tensor::zeros(
+            tensor.shape().clone(),
+            tensor.dtype(),
+            tensor.device(),
+            false,
+        ));
+    }
     let output_data = match tensor.dtype() {
         DataType::Float32 => frac_f32(tensor, 0.0)?,
         DataType::Float64 => frac_f64(tensor, 0.0)?,
         _ => {
             return Err(MinitensorError::invalid_operation(
-                "Fractional part only supported for floating point tensors",
+                "Fractional part only supported for floating point and integer tensors",
             ));
         }
     };
