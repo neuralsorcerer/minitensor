@@ -219,3 +219,34 @@ impl PyTensor {
         Python::attach(|py| convert_tensor_to_python_scalar(&self.inner, py))
     }
 }
+
+/// The Python buffer protocol.
+///
+/// Reaches everything that predates or declines `__array_interface__` --
+/// `memoryview`, `numpy.frombuffer`, libraries that take raw frames -- without
+/// going through NumPy and without a copy. Read-only, for the reason
+/// `__array_interface__` is read-only: several tensors can share one buffer,
+/// and a writer would change all of them at once.
+#[pymethods]
+impl PyTensor {
+    /// # Safety
+    ///
+    /// `view` must point to a `Py_buffer` for CPython to fill in, which is
+    /// what `PyObject_GetBuffer` always passes.
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        let tensor = slf.borrow().inner.clone();
+        unsafe { crate::share::fill_buffer_view(&tensor, slf.into_any(), view, flags) }
+    }
+
+    /// # Safety
+    ///
+    /// `view` must be one `__getbuffer__` filled in; CPython pairs every
+    /// release with a successful export.
+    unsafe fn __releasebuffer__(&self, view: *mut pyo3::ffi::Py_buffer) {
+        unsafe { crate::share::release_buffer_view(view) }
+    }
+}

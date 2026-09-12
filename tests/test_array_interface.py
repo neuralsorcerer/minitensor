@@ -140,7 +140,16 @@ def test_the_array_keeps_the_tensor_alive():
 
     array = make()
     gc.collect()
-    assert isinstance(array.base, mt.Tensor)
+    # The tensor is reachable from the array and therefore not collectable.
+    # It is one link further than it used to be: a tensor offers both
+    # `__array_interface__` and the buffer protocol, and NumPy takes the
+    # buffer route, so the base is the `memoryview` that holds the tensor
+    # rather than the tensor itself. What the test is for -- that nothing is
+    # freed underneath a live array -- is unchanged, and
+    # `test_the_tensor_is_referenced_rather_than_copied_into_the_array` pins
+    # the refcount directly.
+    assert isinstance(array.base, memoryview)
+    assert isinstance(array.base.obj, mt.Tensor)
     np.testing.assert_array_equal(array[:3], [0.0, 1.0, 2.0])
     assert array[-1] == 511.0
 

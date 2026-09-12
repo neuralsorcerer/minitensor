@@ -41,13 +41,21 @@ pub enum Storage {
     Transposed,
 }
 
-/// One dense product: `out = lhs @ rhs`.
+/// One dense product, or `batch` of them: `out[b] = lhs[b] @ rhs[b]`.
 ///
-/// `lhs` is `[m, k]`, `rhs` is `[k, n]` and `out` is `[m, n]`, each packed with
-/// no padding -- the engine materialises every view, so nothing here is strided
-/// beyond the two axes being in one order or the other. `out` is row-major,
-/// arrives zeroed, and is written rather than accumulated into.
+/// `lhs` is `[batch, m, k]`, `rhs` is `[batch, k, n]` and `out` is
+/// `[batch, m, n]`, each packed with no padding -- the engine materialises
+/// every view, so nothing here is strided beyond the two matrix axes being in
+/// one order or the other. `out` is row-major, arrives zeroed, and is written
+/// rather than accumulated into.
+///
+/// A `batch` of 1 is the ordinary single product and is what most call sites
+/// build. The batched form exists because handing a stack of matrices over one
+/// at a time spends the crossing cost per matrix: at a batch of 256 that is
+/// more than the whole product costs to compute. One request, one crossing.
 pub struct Gemm<'a, T> {
+    /// Independent products laid out one after another. Never zero.
+    pub batch: usize,
     pub m: usize,
     pub k: usize,
     pub n: usize,
@@ -61,11 +69,14 @@ pub struct Gemm<'a, T> {
 impl<T> Gemm<'_, T> {
     /// Multiply-accumulate count, the size a provider should judge by.
     ///
-    /// `m * n * k` rather than the dimensions separately: `1x1024 @ 1024x1`
-    /// and `1024x1 @ 1x1024` are the same three numbers and nothing alike as
-    /// work, and only the product tells them apart.
+    /// `batch * m * n * k` rather than the dimensions separately: `1x1024 @
+    /// 1024x1` and `1024x1 @ 1x1024` are the same three numbers and nothing
+    /// alike as work, and only the product tells them apart.
     pub fn flops(&self) -> usize {
-        self.m.saturating_mul(self.n).saturating_mul(self.k)
+        self.batch
+            .saturating_mul(self.m)
+            .saturating_mul(self.n)
+            .saturating_mul(self.k)
     }
 }
 
@@ -95,6 +106,15 @@ static PROVIDER: OnceLock<Box<dyn GemmProvider>> = OnceLock::new();
 /// exists to make faster.
 pub fn set_gemm_provider(provider: Box<dyn GemmProvider>) -> bool {
     PROVIDER.set(provider).is_ok()
+}
+
+/// Whether a provider is installed at all, ignoring the thread restriction.
+///
+/// For introspection -- "will this build delegate?" -- rather than for
+/// dispatch, which is what [`gemm_provider`] is for and which additionally
+/// depends on where it is asked from.
+pub fn gemm_provider_installed() -> bool {
+    PROVIDER.get().is_some()
 }
 
 /// The installed provider, if this build has one and the caller may use it.

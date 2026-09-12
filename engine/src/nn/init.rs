@@ -4,6 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+use crate::ops::gaussian::{normal_cdf, normal_quantile};
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
@@ -11,7 +12,6 @@ use crate::{
     tensor::{DataType, Shape, Tensor, TensorData},
 };
 use rand_distr::{Distribution, Normal, Uniform};
-use statrs::distribution::{ContinuousCDF, Normal as StatrsNormal};
 use std::sync::Arc;
 
 /// Parameter initialization methods
@@ -267,12 +267,6 @@ pub fn truncated_normal_init(
         ));
     }
 
-    let normal = StatrsNormal::new(mean, std).map_err(|err| {
-        MinitensorError::invalid_argument(format!(
-            "truncated_normal could not construct distribution: {err}",
-        ))
-    })?;
-
     // Inverse-CDF sampling needs `Phi(lower)` and `Phi(upper)` to be far enough
     // apart to tell sample points inside the interval apart. Above the mean the
     // CDF saturates at 1: for [8, 9] on a standard normal both endpoints round
@@ -291,8 +285,8 @@ pub fn truncated_normal_init(
         (lower, upper)
     };
 
-    let lower_cdf = normal.cdf(sample_lower);
-    let upper_cdf = normal.cdf(sample_upper);
+    let lower_cdf = normal_cdf(sample_lower, mean, std);
+    let upper_cdf = normal_cdf(sample_upper, mean, std);
 
     if upper_cdf <= lower_cdf {
         return Err(MinitensorError::invalid_argument(
@@ -323,7 +317,7 @@ pub fn truncated_normal_init(
         } else {
             sample_cdf
         };
-        let value = normal.inverse_cdf(sample_cdf);
+        let value = normal_quantile(sample_cdf, mean, std);
         let value = if reflected { 2.0 * mean - value } else { value };
         value.clamp(lower, upper)
     };

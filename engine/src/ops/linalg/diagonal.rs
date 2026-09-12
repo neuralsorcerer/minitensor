@@ -666,10 +666,11 @@ fn optimized_matmul_f32(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
-        // A single whole product is the one shape a tuned BLAS beats the
-        // engine's kernel on, and the one a provider is offered. It sees the
-        // dimensions and declines anything too small to pay for the call.
+        // A single whole product, offered to the provider, which sees the
+        // dimensions and declines anything too small to pay for the call. The
+        // batched case is offered too, just below.
         if crate::ops::linalg::offer_gemm_f32(crate::ops::linalg::Gemm {
+            batch: 1,
             m,
             k,
             n,
@@ -693,6 +694,22 @@ fn optimized_matmul_f32(
                 output_data.as_mut_ptr(),
             )
         };
+    } else if crate::ops::linalg::offer_gemm_f32(crate::ops::linalg::Gemm {
+        batch,
+        m,
+        k,
+        n,
+        lhs: lhs_data,
+        lhs_storage: crate::ops::linalg::Storage::RowMajor,
+        rhs: rhs_data,
+        rhs_storage: crate::ops::linalg::Storage::RowMajor,
+        out: output_data,
+    }) {
+        // A stack of matrices, offered whole. This has to come before either
+        // branch below: the rayon one cannot reach a provider at all (they are
+        // withheld from worker threads, see `gemm_provider`), and the serial
+        // one would pay the crossing once per matrix, which at a batch of 256
+        // costs more than the whole product.
     } else if batch >= rayon::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.
@@ -739,10 +756,11 @@ fn optimized_matmul_f64(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
-        // A single whole product is the one shape a tuned BLAS beats the
-        // engine's kernel on, and the one a provider is offered. It sees the
-        // dimensions and declines anything too small to pay for the call.
+        // A single whole product, offered to the provider, which sees the
+        // dimensions and declines anything too small to pay for the call. The
+        // batched case is offered too, just below.
         if crate::ops::linalg::offer_gemm_f64(crate::ops::linalg::Gemm {
+            batch: 1,
             m,
             k,
             n,
@@ -766,6 +784,22 @@ fn optimized_matmul_f64(
                 output_data.as_mut_ptr(),
             )
         };
+    } else if crate::ops::linalg::offer_gemm_f64(crate::ops::linalg::Gemm {
+        batch,
+        m,
+        k,
+        n,
+        lhs: lhs_data,
+        lhs_storage: crate::ops::linalg::Storage::RowMajor,
+        rhs: rhs_data,
+        rhs_storage: crate::ops::linalg::Storage::RowMajor,
+        out: output_data,
+    }) {
+        // A stack of matrices, offered whole. This has to come before either
+        // branch below: the rayon one cannot reach a provider at all (they are
+        // withheld from worker threads, see `gemm_provider`), and the serial
+        // one would pay the crossing once per matrix, which at a batch of 256
+        // costs more than the whole product.
     } else if batch >= rayon::current_num_threads() {
         // The batch axis alone already fills the pool, so each element runs
         // whole rather than being subdivided again inside its own task.

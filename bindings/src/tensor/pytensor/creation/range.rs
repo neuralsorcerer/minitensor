@@ -87,15 +87,21 @@ impl PyTensor {
         Ok(Self::from_tensor(tensor))
     }
 
-    /// Create a tensor from a NumPy array.
+    /// A tensor over a NumPy array's own memory, with no copy.
     ///
-    /// Note: despite the name, this currently COPIES the array's data, exactly
-    /// like ``from_numpy`` — later writes to the NumPy array are not visible
-    /// through the tensor. True zero-copy sharing requires memory-lifetime
-    /// management that is not implemented yet.
+    /// The tensor holds a reference to `array`, so the buffer outlives it, and
+    /// the two see each other's writes. That is the point of asking, and also
+    /// the hazard: mutating the array changes what every tensor derived from
+    /// it reads, including operands a backward pass has saved. ``from_numpy``
+    /// is the one that copies, and is what you want unless you have a reason.
+    ///
+    /// The array must be C-contiguous, in native byte order, aligned, and of a
+    /// dtype minitensor stores. Anything else raises rather than quietly
+    /// copying: a caller who asked to share should find out when they did not
+    /// get it, not discover it later through a write that went nowhere.
     #[staticmethod]
     #[pyo3(signature = (array, requires_grad=false))]
     fn from_numpy_shared(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<Self> {
-        Self::from_numpy(array, requires_grad)
+        crate::share::shared_pytensor(array, requires_grad)
     }
 }

@@ -182,15 +182,34 @@ for them:
   answer rather than by computing it, and there NumPy's `matmul` measured
   1.4-2.9x *slower*: `256x16 @ 16x256` is 44us on the engine's kernel and 83us
   delegated, and the outer product `512x1 @ 1x512` is 148us against 721us.
-- **Batched products.** Several matrices at once already fill the thread pool
-  with one whole product per worker, which is what delegating was for. These
-  measure between 0.95x and 1.5x of NumPy without it.
+- **Nothing, as of the batched request.** Batched products used to be on this
+  list, on the reasoning that several matrices already fill the thread pool
+  with one whole product per worker. Re-measured on a 4-core container that is
+  not what happens: without delegation a batch runs at 0.27-0.66x of NumPy,
+  not the 0.95-1.5x the reasoning predicted. They are now offered as one
+  request -- the whole stack, before the batch axis is split -- which is
+  1.2-3.1x faster and brings them to 0.81-0.98x. Offering them one matrix at a
+  time would not have worked: at a batch of 256 the per-matrix crossing costs
+  more than the whole product.
 - **Integers.** Neither library sends an integer product to a BLAS.
 - **Anything running inside the engine's own thread pool.** A worker that
   stopped to take the interpreter lock would be waiting on the thread that
   holds it and is waiting on the worker.
 - **A build with `--features blas`.** That build linked a BLAS into the engine
   deliberately, and calls it directly.
+- **Convolution.** It is im2col plus one large dense product, so the product
+  looks like it belongs here. Measured across eight shapes, delegating it gives
+  a geometric mean of 0.94x -- a loss. A conv GEMM is not an isolated product:
+  the forward lowers and multiplies one cache-sized block at a time and the
+  lowering already fills the thread pool, so handing each block to OpenBLAS
+  puts a second pool on the same cores and pays a crossing per block.
+
+The boundary is reachable from Python, and is meant for measuring rather than
+tuning: `minitensor._core.dispatch.gemm_thresholds()` reports it and
+`set_gemm_thresholds(min_flops, min_k)` moves it. Setting both out of reach is
+how the same benchmark measures the engine's own kernels on one build --
+`python benchmarks/dispatch_bench.py --native` does exactly that, and
+`benchmarks/README.md` carries the tables it produced.
 
 Where a product is computed is a performance decision that depends on its shape
 and dtype, and it may change. The answer does not: both paths agree with a

@@ -97,6 +97,7 @@ impl GradientFunction for LinearBackward {
                         })?;
                         let out = data.$mut_accessor().unwrap();
                         let delegated = $offer(Gemm {
+                            batch: 1,
                             m: rows,
                             k: out_features,
                             n: in_features,
@@ -164,6 +165,7 @@ impl GradientFunction for LinearBackward {
                         // `(rows, out)`, and goes over that way rather than
                         // transposed into a copy the size of the activations.
                         let delegated = $offer(Gemm {
+                            batch: 1,
                             m: out_features,
                             k: rows,
                             n: in_features,

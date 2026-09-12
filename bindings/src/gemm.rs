@@ -38,8 +38,9 @@ use numpy::{Element, PyArrayDescrMethods};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyModule, PyTuple};
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Multiply-accumulates below which the call costs more than it saves.
 ///
@@ -48,7 +49,22 @@ use std::os::raw::c_void;
 /// engine's kernel finishes inside that: measured on 48x48x48 squares the two
 /// are within 20% of each other, and every size below that the engine wins
 /// outright. So the provider declines and one branch is all it cost.
-const MIN_FLOPS: usize = 1 << 17;
+const DEFAULT_MIN_FLOPS: usize = 1 << 17;
+
+/// The live thresholds, as atomics rather than constants.
+///
+/// Not because a caller is expected to tune them -- the defaults are measured,
+/// and a wrong value here costs throughput on every product -- but because the
+/// two paths have to be comparable *on one build* to be tested at all. The
+/// question a differential test asks is whether the delegated answer equals
+/// the native one for a given shape, and with the threshold compiled in there
+/// is no way to ask it: the shapes above the threshold have no native answer to
+/// compare against and the shapes below have no delegated one.
+///
+/// A relaxed atomic load is a plain load on every architecture this builds
+/// for, so this is the same instruction the constant was, and it keeps the
+/// provider itself a `OnceLock` with no lock on the path.
+static MIN_FLOPS: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_FLOPS);
 
 /// The shortest contraction worth handing over.
 ///
@@ -63,7 +79,10 @@ const MIN_FLOPS: usize = 1 << 17;
 /// on square products, and 8-58x on a matrix-vector product, where the
 /// blocked kernel is at its worst and a BLAS drops to a `gemv` written for
 /// exactly that shape.
-const MIN_K: usize = 32;
+const DEFAULT_MIN_K: usize = 32;
+
+/// See [`MIN_FLOPS`] for why this is an atomic and not a constant.
+static MIN_K: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_K);
 
 /// `numpy.matmul`, looked up once.
 ///
@@ -76,27 +95,36 @@ static MATMUL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 /// A dense GEMM through NumPy's C-API, on memory the engine owns.
 struct NumpyGemm;
 
-/// One `[rows, cols]` array header over `data`, owning nothing.
+/// One `[batch, rows, cols]` array header over `data`, owning nothing.
 ///
-/// `storage` says which way the two axes run in memory. A `Transposed` operand
-/// is a C-contiguous `[cols, rows]` block, which is the same thing as an
-/// F-contiguous `[rows, cols]` one -- so the header describes it exactly and
+/// `storage` says which way the two matrix axes run in memory. A `Transposed`
+/// operand is a C-contiguous `[cols, rows]` block, which is the same thing as
+/// an F-contiguous `[rows, cols]` one -- so the header describes it exactly and
 /// nothing is copied to make it readable.
 ///
-/// The flags are stated rather than left to be derived: a wrong contiguity
-/// flag is the kind of thing that shows up as a silent 2x on one shape, and
-/// for a two-dimensional block both answers are known here.
+/// A `batch` of 1 still produces a three-dimensional header. `matmul` treats a
+/// leading axis as a stack and gives the same answer either way, and one shape
+/// here means one code path to get right rather than two.
+///
+/// The contiguity flags are stated rather than left to be derived: a wrong one
+/// shows up as a silent 2x on one shape. They describe the *matrix* axes, and
+/// with a batch in front only the row-major case is contiguous as a whole --
+/// a stack of F-contiguous matrices is neither, so it is described by its
+/// strides alone and both flags are left off. NumPy reads the strides; the
+/// flags are an optimisation hint it is entitled to trust, so an honest
+/// omission costs nothing and a wrong claim would cost correctness.
 ///
 /// # Safety
 ///
-/// `data` must point at `rows * cols` initialised `T`, stay valid and stay put
-/// for as long as the returned object lives, and be aligned for `T`. The header
-/// is created without `NPY_ARRAY_OWNDATA` and with no base object, so NumPy
-/// reads and writes the buffer and never frees it -- the caller's borrow is
-/// what keeps it alive, and the returned `Bound` is dropped before that borrow
-/// ends.
+/// `data` must point at `batch * rows * cols` initialised `T`, stay valid and
+/// stay put for as long as the returned object lives, and be aligned for `T`.
+/// The header is created without `NPY_ARRAY_OWNDATA` and with no base object,
+/// so NumPy reads and writes the buffer and never frees it -- the caller's
+/// borrow is what keeps it alive, and the returned `Bound` is dropped before
+/// that borrow ends.
 unsafe fn header<'py, T: Element>(
     py: Python<'py>,
+    batch: usize,
     rows: usize,
     cols: usize,
     storage: Storage,
@@ -104,10 +132,23 @@ unsafe fn header<'py, T: Element>(
     writeable: bool,
 ) -> Option<Bound<'py, PyAny>> {
     let item = size_of::<T>() as npy_intp;
-    let mut dims = [rows as npy_intp, cols as npy_intp];
+    let matrix = (rows * cols) as npy_intp * item;
+    let mut dims = [batch as npy_intp, rows as npy_intp, cols as npy_intp];
     let (mut strides, contiguity) = match storage {
-        Storage::RowMajor => ([cols as npy_intp * item, item], NPY_ARRAY_C_CONTIGUOUS),
-        Storage::Transposed => ([item, rows as npy_intp * item], NPY_ARRAY_F_CONTIGUOUS),
+        // A stack of row-major matrices packed end to end is itself
+        // row-major, so this holds for any batch.
+        Storage::RowMajor => (
+            [matrix, cols as npy_intp * item, item],
+            NPY_ARRAY_C_CONTIGUOUS,
+        ),
+        Storage::Transposed => (
+            [matrix, item, rows as npy_intp * item],
+            if batch == 1 {
+                NPY_ARRAY_F_CONTIGUOUS
+            } else {
+                0
+            },
+        ),
     };
     let mut flags = contiguity | NPY_ARRAY_ALIGNED;
     if writeable {
@@ -118,7 +159,7 @@ unsafe fn header<'py, T: Element>(
             py,
             get_type_object(py, NpyTypes::PyArray_Type),
             T::get_dtype(py).into_dtype_ptr(),
-            2,
+            3,
             dims.as_mut_ptr(),
             strides.as_mut_ptr(),
             data.cast::<c_void>(),
@@ -137,7 +178,9 @@ unsafe fn header<'py, T: Element>(
 /// are dropped inside this call. `PyArray_MatrixProduct2` writes only into
 /// `out`, whose header is the only writeable one.
 fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
-    if request.flops() < MIN_FLOPS || request.k < MIN_K {
+    if request.flops() < MIN_FLOPS.load(Ordering::Relaxed)
+        || request.k < MIN_K.load(Ordering::Relaxed)
+    {
         return false;
     }
 
@@ -158,6 +201,7 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
             unsafe {
                 header(
                     py,
+                    request.batch,
                     request.m,
                     request.k,
                     request.lhs_storage,
@@ -168,6 +212,7 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
             unsafe {
                 header(
                     py,
+                    request.batch,
                     request.k,
                     request.n,
                     request.rhs_storage,
@@ -178,6 +223,7 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
             unsafe {
                 header(
                     py,
+                    request.batch,
                     request.m,
                     request.n,
                     Storage::RowMajor,
@@ -241,4 +287,54 @@ impl Zero for f64 {
 /// Point the engine's dense GEMM at NumPy, once, while the module loads.
 pub fn install_gemm_provider() {
     set_gemm_provider(Box::new(NumpyGemm));
+}
+
+/// Where the boundary between the two GEMM paths currently sits.
+///
+/// `(min_flops, min_k)`: a product is offered to NumPy only when it has at
+/// least `min_flops` multiply-accumulates and contracts over at least `min_k`.
+#[pyfunction]
+fn gemm_thresholds() -> (usize, usize) {
+    (
+        MIN_FLOPS.load(Ordering::Relaxed),
+        MIN_K.load(Ordering::Relaxed),
+    )
+}
+
+/// Move the boundary, returning where it was.
+///
+/// For tests and for measuring, not for tuning: the defaults come from the
+/// numbers in this module's header, and a benchmark that wants to compare the
+/// two paths is the reason this is reachable at all. `set_gemm_thresholds(0,
+/// 0)` delegates every product it can; a very large pair delegates none, which
+/// is how a differential test gets both answers out of one build.
+#[pyfunction]
+#[pyo3(signature = (min_flops, min_k))]
+fn set_gemm_thresholds(min_flops: usize, min_k: usize) -> (usize, usize) {
+    (
+        MIN_FLOPS.swap(min_flops, Ordering::Relaxed),
+        MIN_K.swap(min_k, Ordering::Relaxed),
+    )
+}
+
+/// Whether a NumPy-backed provider is installed and reachable.
+#[pyfunction]
+fn gemm_provider_installed() -> bool {
+    engine::ops::linalg::gemm_provider_installed()
+}
+
+pub fn register_gemm_module(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
+    let module = PyModule::new(py, "dispatch")?;
+    module.setattr(
+        "__doc__",
+        "Where dense products go: the NumPy provider, and the size boundary \
+         that decides when it is worth the crossing.",
+    )?;
+    module.add_function(wrap_pyfunction!(gemm_thresholds, &module)?)?;
+    module.add_function(wrap_pyfunction!(set_gemm_thresholds, &module)?)?;
+    module.add_function(wrap_pyfunction!(gemm_provider_installed, &module)?)?;
+    module.add("DEFAULT_MIN_FLOPS", DEFAULT_MIN_FLOPS)?;
+    module.add("DEFAULT_MIN_K", DEFAULT_MIN_K)?;
+    parent.add_submodule(&module)?;
+    Ok(())
 }

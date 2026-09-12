@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 mod custom_ops;
 mod debug;
 mod device;
+mod domains;
 mod dtype;
 mod error;
 mod functional;
@@ -26,6 +27,7 @@ mod numpy_compat;
 mod optim;
 mod plugins;
 mod serialization;
+mod share;
 mod tensor;
 
 use device::PyDevice;
@@ -88,6 +90,9 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_submodule(&plugins_module)?;
 
     // Add serialization module
+    gemm::register_gemm_module(py, m)?;
+    domains::register_domains_module(py, m)?;
+
     serialization::register_serialization_module(py, m)?;
 
     // Autograd helpers

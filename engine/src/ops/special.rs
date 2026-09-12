@@ -27,7 +27,12 @@ use crate::{
     tensor::Tensor,
 };
 use libm::erfc;
-use statrs::function::{erf::erf_inv, gamma::ln_gamma};
+// `lgamma` from `libm`, which this crate already depends on, and `erf_inverse`
+// from the AS241 quantile in `ops::gaussian` -- see there for why the inverse
+// error function is spelled through the normal quantile's lower tail. Both
+// replaced `statrs`, whose only other use was the truncated-normal sampler.
+use crate::ops::gaussian::erf_inverse as erf_inv;
+use libm::lgamma as ln_gamma;
 use std::f64::consts::{LN_2, PI};
 
 /// Defines a [`UnitKernel`] from a single `f64` body, with the `f32` arm

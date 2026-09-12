@@ -463,10 +463,21 @@ holding.
 ### Domain kernels (`minitensor.kernels`)
 
 `minitensor.kernels` holds operations a general array library has no reason to
-carry and a specialised one cannot do without. Each is an `autograd.Function`
-in ordinary Python, as much to be read as to be used: every one is a worked
-example of the extension path above, in the same handful of lines you would
-write for your own.
+carry and a specialised one cannot do without. Each would otherwise be written
+as a chain of eight or twenty tensor calls, where every link allocates a full
+intermediate that nothing wants; as one kernel it allocates its answer and
+nothing else, and its derivative is a closed form rather than a chain of
+recorded nodes.
+
+They come in two kinds, and the difference is a judgement about where the
+saving is. `soft_assignment` is an `autograd.Function` in ordinary Python: its
+forward is two calls and the whole saving is in the backward, so it is here as
+much to be read as to be used -- a worked example of the extension path above,
+in the same handful of lines you would write for your own. The finance and
+quantum kernels are native, because neither fusion survives being composed in
+Python whatever the backward looks like.
+
+#### Clustering
 
 | Function | |
 | --- | --- |
@@ -490,6 +501,98 @@ responsibilities = mt.kernels.soft_assignment(points, centroids, temperature=0.5
 # it. Both arguments take a gradient, so the centroids are trainable.
 loss = ((points - responsibilities.matmul(centroids)) ** 2).sum()
 loss.backward()
+```
+
+#### Quantitative finance
+
+| Function | |
+| --- | --- |
+| `black_scholes(spot, strike, rate, vol, time, kind="call")` | The European option price, elementwise. All five arguments are tensors of one shape and dtype; broadcasting is yours to arrange with `expand`, because guessing which of five operands was meant to be the scalar is how a book quietly gets priced against the wrong strike. `kind` is `"call"` or `"put"`. |
+| `implied_volatility(price, spot, strike, rate, time, kind="call", tolerance=1e-10, max_iterations=100)` | The volatility reproducing an observed price, by Newton on vega bracketed by a bisection. NaN where no volatility does -- a quote below intrinsic value, or above the spot -- because there is no answer and a clamped bound would look like one. |
+
+This is the one place where automatic differentiation and the domain want the
+same object: **the Greeks are the partial derivatives of the price.** After a
+backward pass `spot.grad` is delta, `vol.grad` is vega, `rate.grad` is rho, and
+`strike.grad` and `time.grad` are the other two. One pass computes `d1`, `d2`
+and the discount factor; all five Greeks are read off them, where the composed
+form would recompute `d1` in each of five separate gradient chains.
+
+`implied_volatility` carries no gradient and does not need one: by the implicit
+function theorem `dsigma/dprice = 1 / vega`, so evaluating `black_scholes` at
+the recovered volatility gives it exactly, through a recorded operation.
+Differentiating the Newton iteration would differentiate the solver instead.
+
+At `sigma * sqrt(T) == 0` the formula is `0 * inf`; the limit is the intrinsic
+value, which is what comes back. Its derivative is a step, and at exactly
+`S == K e^{-rT}` there is none -- a subgradient of zero is returned, the same
+convention `relu` uses at the origin.
+
+```python
+import minitensor as mt
+
+spot = mt.Tensor([100.0], dtype="float64", requires_grad=True)
+strike = mt.Tensor([100.0], dtype="float64")
+rate = mt.Tensor([0.05], dtype="float64")
+vol = mt.Tensor([0.2], dtype="float64", requires_grad=True)
+time = mt.Tensor([1.0], dtype="float64")
+
+price = mt.kernels.black_scholes(spot, strike, rate, vol, time, "call")
+price.sum().backward()
+
+print(f"{float(price.item()):.4f}")
+print(f"delta {float(spot.grad.item()):.4f}  vega {float(vol.grad.item()):.4f}")
+mt.clear_autograd_graph()
+```
+
+```text
+10.4506
+delta 0.6368  vega 37.5240
+```
+
+#### Quantum-inspired state vectors
+
+A state over `q` qubits is `2**q` complex amplitudes, held as a real tensor
+shaped `(..., 2**q, 2)` with the last axis carrying `(real, imaginary)` --
+interleaved, because both halves of an amplitude are always used together.
+Leading axes are a batch, so an ensemble evolves in one call.
+
+| Function | |
+| --- | --- |
+| `apply_gate(state, gate, qubit)` | One single-qubit gate, counting qubits from the low index bit. `gate` is a name -- `"h"`, `"x"`, `"z"` -- or eight reals giving an arbitrary `[[a, b], [c, d]]` as `[a.real, a.imag, b.real, b.imag, c.real, c.imag, d.real, d.imag]`. |
+| `probabilities(state)` | `|amplitude|**2` per basis state; `(..., 2**q)` out. |
+| `prefix_trace(state, keep)` | Marginal probabilities of the first `keep` qubits; `(..., 2**keep)` out. |
+| `expect_z(state, qubit)` | `<Z_q>`: `+1` for certainly `|0>`, `-1` for certainly `|1>`, the probability difference in between. |
+
+Applying a gate touches every amplitude once, in pairs whose indices differ only
+in the target bit -- a butterfly, the same access pattern as one radix-2 FFT
+stage. There is no elementwise way to say it: the composed form reshapes,
+slices, multiplies and concatenates, moving numbers between two halves of one
+buffer through several full copies of it.
+
+Gate application is linear, so its derivative is the **adjoint** gate applied to
+the incoming gradient -- the same butterfly run with `U†`, saving nothing from
+the forward pass. A long circuit therefore costs no tape memory beyond its
+states. The gate itself is a constant: a trainable rotation is better
+differentiated through its angle than through its four entries.
+
+```python
+import minitensor as mt
+
+# |00>, then a Hadamard on qubit 0.
+state = mt.Tensor(
+    [[1.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], dtype="float64"
+)
+state = mt.kernels.apply_gate(state, "h", 0)
+
+print([round(p, 4) for p in mt.kernels.probabilities(state).tolist()])
+print(round(float(mt.kernels.expect_z(state, 0).item()), 6))
+print([round(p, 4) for p in mt.kernels.prefix_trace(state, 1).tolist()])
+```
+
+```text
+[0.5, 0.5, 0.0, 0.0]
+0.0
+[1.0, 0.0]
 ```
 
 ## 2) Tensor creation API
@@ -544,9 +647,9 @@ its values, so nothing flows back to the source through it.
 
 ### NumPy interop
 
-- `from_numpy(array)`
-- `from_numpy_shared(array)` — currently copies like `from_numpy`; writes to
-  the source array after construction are not visible through the tensor
+- `from_numpy(array)` — copies the array's data
+- `from_numpy_shared(array)` — shares the array's memory; writes to either side
+  are visible through the other
 - `as_tensor(data, dtype=None, device=None, requires_grad=None, copy=False)`
 
 #### Which constructor keeps the source dtype
@@ -604,9 +707,54 @@ Shape([4, 4]) Shape([3, 3])
 [1.0, 2.0, 3.0]
 ```
 
-```{note}
-`from_numpy_shared` currently copies exactly like `from_numpy`. Writing to the
-source NumPy array after construction does **not** change the tensor.
+`from_numpy_shared` is the zero-copy import, and the counterpart of
+`numpy.asarray(tensor)` going the other way. The tensor holds a reference to
+the array, so the buffer outlives it, and the two see each other's writes:
+
+```python
+import numpy as np
+
+import minitensor as mt
+
+array = np.arange(6, dtype=np.float32)
+shared = mt.Tensor.from_numpy_shared(array)
+copied = mt.Tensor.from_numpy(array)
+
+array[0] = 42.0
+print(float(np.asarray(shared)[0]), float(np.asarray(copied)[0]))
+```
+
+```text
+42.0 0.0
+```
+
+That mutual visibility is the point of asking and also the hazard: writing to
+the array changes what every tensor derived from it reads, including operands a
+backward pass has saved. `from_numpy` is the one to reach for unless you have a
+reason.
+
+The array must be C-contiguous, in native byte order, aligned, and of a dtype
+minitensor stores. Anything else raises rather than quietly copying — a caller
+who asked to share should find out at the call, not later through a write that
+went nowhere.
+
+#### The buffer protocol
+
+Tensors also export through the Python buffer protocol, which reaches what does
+not speak NumPy — `memoryview`, `numpy.frombuffer`, libraries taking raw
+frames. Read-only, for the same reason `__array_interface__` is read-only:
+
+```python
+import minitensor as mt
+
+with memoryview(mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float64")) as view:
+    print(view.shape, view.format, view.readonly)
+    print(view.tolist())
+```
+
+```text
+(2, 2) d True
+[[1.0, 2.0], [3.0, 4.0]]
 ```
 
 ## 3) Tensor properties & conversion helpers
@@ -644,12 +792,18 @@ Conversion helpers:
 
 #### Reading a tensor without copying it
 
-`numpy.asarray(tensor)` goes through `__array_interface__` and comes back
-pointing at the tensor's own memory. Every tensor is contiguous and row-major,
-which is exactly what an array header describes, so there is nothing to
-rearrange and nothing to allocate: a 64MB tensor crosses in microseconds where
-`.numpy()` takes milliseconds. NumPy holds a reference to the tensor for as
-long as the array lives, so the buffer cannot be freed underneath it.
+`numpy.asarray(tensor)` comes back pointing at the tensor's own memory. Every
+tensor is contiguous and row-major, which is exactly what an array header
+describes, so there is nothing to rearrange and nothing to allocate: a 64MB
+tensor crosses in microseconds where `.numpy()` takes milliseconds. NumPy holds
+a reference to the tensor for as long as the array lives, so the buffer cannot
+be freed underneath it.
+
+A tensor offers two protocols for this — `__array_interface__` and the buffer
+protocol — and NumPy picks the buffer one, so `view.base` is a `memoryview`
+whose `.obj` is the tensor rather than the tensor itself. One more link in the
+chain, the same buffer at the end of it, and the same guarantee: nothing is
+freed while the array is reachable.
 
 ```python
 import numpy as np
@@ -658,13 +812,30 @@ import minitensor as mt
 t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
 view = np.asarray(t)
 
-print(view.flags.writeable, view.base is t)
+print(view.flags.writeable, view.base.obj is t)
 print(np.shares_memory(view, np.asarray(t)))
 ```
 
 ```text
 False True
 True
+```
+
+The buffer protocol is what makes the same memory reachable from things that
+have never heard of NumPy:
+
+```python
+import minitensor as mt
+
+t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float64")
+with memoryview(t) as view:
+    print(view.shape, view.format, view.readonly)
+    print(view.tolist())
+```
+
+```text
+(2, 2) d True
+[[1.0, 2.0], [3.0, 4.0]]
 ```
 
 The array is **read-only**, and not as a nicety: several tensors can share one

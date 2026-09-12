@@ -22,6 +22,11 @@ recursive-include examples *.py *.rs *.toml *.md
 recursive-include tests *.py
 include test_*.py
 
+# Include the dispatch benchmark: the measurement the delegation policy is
+# drawn from, which a packager on unfamiliar hardware should be able to re-take
+# from an sdist.
+recursive-include benchmarks *.py *.md
+
 # Include build scripts
 recursive-include scripts *.py
 

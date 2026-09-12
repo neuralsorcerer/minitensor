@@ -45,7 +45,6 @@ libc = "0.2"
 # Random number generation
 rand = "0.10"
 rand_distr = "0.6"
-statrs = "0.19"
 
 # Special mathematical functions
 libm = "0.2"
@@ -76,7 +75,35 @@ codegen-units = 1
 # Symbols are a large fraction of the shipped extension and buy nothing at
 # runtime; a backtrace-grade build can override this.
 strip = "symbols"
-# Left at "unwind" deliberately: pyo3 converts Rust panics into Python
-# exceptions, which requires unwinding. "abort" would shrink the binary further
-# and turn every panic into a hard process kill.
+# Left at "unwind" deliberately. This is the one release setting that is a
+# judgement rather than a free win, so it is worth writing down what it costs.
+#
+# "abort" is smaller. Measured on the extension module, changing nothing else:
+#
+#   panic = "unwind"    11,231,616 bytes
+#   panic = "abort"     10,367,936 bytes    -863,680  (-7.7%)
+#
+# It is not taken, because unwinding is load-bearing here rather than
+# incidental. pyo3 turns a Rust panic into a Python exception by catching the
+# unwind at the boundary, and `tensor/python/convert.rs` catches one itself
+# around the conversion of arbitrary Python objects. Without unwinding both
+# become `abort()`: the interpreter dies with SIGABRT, no traceback, no
+# `except`, and a notebook or a training run loses everything in memory.
+# `tests/test_no_panics_on_bad_input.py` asserts across its whole surface that
+# awkward input is *declined* rather than fatal, and every one of those cases
+# would become a process kill.
+#
+# 864 KB on an 11 MB artifact does not buy that. An embedder linking the engine
+# as a plain Rust crate, with no Python boundary to unwind to, can have the
+# smaller build through `release-min` below.
 panic = "unwind"
+
+# The release build with `panic = "abort"`, for embedders with no Python
+# boundary: `cargo build --profile release-min`.
+#
+# Do not ship a wheel from this. It exists so the trade above is available to
+# whoever it suits, not because it suits the extension module -- see the note
+# on `panic` for what it costs there.
+[profile.release-min]
+inherits = "release"
+panic = "abort"

@@ -100,6 +100,7 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
                 // handed a transposed copy: the copy is the cost this function
                 // exists to avoid, and a GEMM reads either layout.
                 let delegated = super::$offer(super::Gemm {
+                    batch: 1,
                     m: rows,
                     k: in_features,
                     n: out_features,

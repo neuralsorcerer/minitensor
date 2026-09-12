@@ -57,6 +57,7 @@ impl std::fmt::Debug for TensorData {
         let kind = match self.buffer_ref() {
             TensorBuffer::Owned(_) => "owned",
             TensorBuffer::Raw { .. } => "raw",
+            TensorBuffer::Foreign { .. } => "foreign",
         };
         f.debug_struct("TensorData")
             .field("buffer", &kind)
@@ -66,7 +67,6 @@ impl std::fmt::Debug for TensorData {
 }
 
 /// Buffer storage for tensor data
-#[derive(Debug)]
 enum TensorBuffer {
     /// Owned vector buffer (for CPU)
     Owned(Vec<u8>),
@@ -76,6 +76,43 @@ enum TensorBuffer {
         size: usize,
         device: Device,
     },
+    /// CPU memory belonging to something outside this crate -- a NumPy array
+    /// handed across the Python boundary, in practice.
+    ///
+    /// The distinction from [`TensorBuffer::Raw`] is who frees it. `Raw` is
+    /// ours and goes back to `global_deallocate`; this is not, and is released
+    /// by dropping `owner`. Sharing a foreign buffer through `Raw` would hand
+    /// a pointer we did not allocate to an allocator that did not allocate it.
+    Foreign {
+        ptr: *mut u8,
+        size: usize,
+        /// Keeps the memory alive; dropping it releases the claim.
+        /// Type-erased because the engine must not know what owns the buffer
+        /// -- for the Python bindings it is a `Py<PyAny>` holding the array.
+        ///
+        /// Never read, by design: its whole contribution is its `Drop`, so the
+        /// dead-code lint is right about the field and wrong about the field
+        /// being pointless.
+        #[allow(dead_code)]
+        owner: Box<dyn std::any::Any + Send + Sync>,
+    },
+}
+
+impl std::fmt::Debug for TensorBuffer {
+    /// Hand-written because [`TensorBuffer::Foreign`] carries a type-erased
+    /// owner and `dyn Any` is not `Debug`. Prints what a reader of a tensor
+    /// dump wants -- which kind of buffer, and how big -- rather than bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(vec) => f.debug_struct("Owned").field("bytes", &vec.len()).finish(),
+            Self::Raw { size, device, .. } => f
+                .debug_struct("Raw")
+                .field("bytes", size)
+                .field("device", device)
+                .finish(),
+            Self::Foreign { size, .. } => f.debug_struct("Foreign").field("bytes", size).finish(),
+        }
+    }
 }
 
 /// Memory layout specification
@@ -188,6 +225,7 @@ impl TensorData {
         match unsafe { &mut *self.buffer.get() } {
             TensorBuffer::Owned(vec) => vec.as_mut_ptr(),
             TensorBuffer::Raw { ptr, .. } => *ptr,
+            TensorBuffer::Foreign { ptr, .. } => *ptr,
         }
     }
 
@@ -464,6 +502,10 @@ impl TensorData {
         let actual_device = match &buffer {
             TensorBuffer::Owned(_) => Device::cpu(),
             TensorBuffer::Raw { device, .. } => *device,
+            // Unreachable: each of these constructors builds the buffer it is
+            // matching on and none of them builds a `Foreign`, which only
+            // `from_foreign` produces.
+            TensorBuffer::Foreign { .. } => Device::cpu(),
         };
 
         Self {
@@ -508,6 +550,10 @@ impl TensorData {
         let actual_device = match &buffer {
             TensorBuffer::Owned(_) => Device::cpu(),
             TensorBuffer::Raw { device, .. } => *device,
+            // Unreachable: each of these constructors builds the buffer it is
+            // matching on and none of them builds a `Foreign`, which only
+            // `from_foreign` produces.
+            TensorBuffer::Foreign { .. } => Device::cpu(),
         };
 
         Self {
@@ -618,6 +664,10 @@ impl TensorData {
         let actual_device = match &buffer {
             TensorBuffer::Owned(_) => Device::cpu(),
             TensorBuffer::Raw { device, .. } => *device,
+            // Unreachable: each of these constructors builds the buffer it is
+            // matching on and none of them builds a `Foreign`, which only
+            // `from_foreign` produces.
+            TensorBuffer::Foreign { .. } => Device::cpu(),
         };
 
         Self {
@@ -681,6 +731,48 @@ impl TensorData {
         }
     }
 
+    /// Wrap CPU memory this crate does not own.
+    ///
+    /// The zero-copy import path: a NumPy array (or any other host buffer)
+    /// becomes tensor storage without its bytes being copied, and `owner` is
+    /// whatever must stay alive for `ptr` to stay valid -- for the Python
+    /// bindings, the array object. Dropping the returned `TensorData` drops
+    /// `owner`, and nothing reaches `global_deallocate`.
+    ///
+    /// # Safety
+    ///
+    /// * `ptr` must point to `size` initialised, readable bytes, and stay
+    ///   valid and un-reallocated for as long as `owner` is alive.
+    /// * `size` must be exactly `numel * dtype.size_in_bytes()`, and `ptr`
+    ///   aligned for `dtype`'s element type.
+    /// * The memory must be C-contiguous: the engine's kernels read tensor
+    ///   storage in contiguous logical order.
+    /// * Nothing else may write to the buffer while tensors derived from it
+    ///   are readable, which for the Python bindings the GIL provides.
+    #[inline(always)]
+    pub unsafe fn from_foreign(
+        ptr: *mut u8,
+        size: usize,
+        dtype: DataType,
+        numel: usize,
+        owner: Box<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        debug_assert_eq!(
+            size,
+            numel * dtype.size_in_bytes(),
+            "foreign buffer length disagrees with its element count"
+        );
+        Self {
+            buffer: UnsafeCell::new(TensorBuffer::Foreign { ptr, size, owner }),
+            layout: MemoryLayout {
+                dtype,
+                numel,
+                is_contiguous: true,
+                device: Device::cpu(),
+            },
+        }
+    }
+
     /// Get the raw buffer as a slice (CPU only)
     #[inline(always)]
     pub fn as_bytes(&self) -> Option<&[u8]> {
@@ -697,6 +789,12 @@ impl TensorData {
                     None // GPU memory not directly accessible
                 }
             }
+            // Always CPU by construction; `from_foreign` takes no device.
+            TensorBuffer::Foreign { ptr, size, .. } => Some(if *size == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(*ptr, *size) }
+            }),
         }
     }
 
@@ -716,6 +814,11 @@ impl TensorData {
                     None // GPU memory not directly accessible
                 }
             }
+            TensorBuffer::Foreign { ptr, size, .. } => Some(if *size == 0 {
+                &mut []
+            } else {
+                unsafe { std::slice::from_raw_parts_mut(*ptr, *size) }
+            }),
         }
     }
 
@@ -725,6 +828,7 @@ impl TensorData {
         match self.buffer_ref() {
             TensorBuffer::Owned(vec) => vec.as_ptr(),
             TensorBuffer::Raw { ptr, .. } => *ptr,
+            TensorBuffer::Foreign { ptr, .. } => *ptr,
         }
     }
 
@@ -734,6 +838,7 @@ impl TensorData {
         match self.buffer.get_mut() {
             TensorBuffer::Owned(vec) => vec.as_mut_ptr(),
             TensorBuffer::Raw { ptr, .. } => *ptr,
+            TensorBuffer::Foreign { ptr, .. } => *ptr,
         }
     }
 
@@ -773,6 +878,7 @@ impl TensorData {
         match self.buffer_ref() {
             TensorBuffer::Owned(vec) => vec.len(),
             TensorBuffer::Raw { size, .. } => *size,
+            TensorBuffer::Foreign { size, .. } => *size,
         }
     }
 
@@ -817,6 +923,14 @@ impl TensorData {
                         }
                     }
                 }
+            }
+            // A copy of foreign memory is ours, so it becomes an owned buffer
+            // and stops depending on whatever lent it to us. This is what
+            // `.contiguous()` and `.clone_data()` give a caller who wants a
+            // tensor outliving the array it came from.
+            TensorBuffer::Foreign { ptr, size, .. } => {
+                let bytes = unsafe { std::slice::from_raw_parts(*ptr, *size) };
+                TensorBuffer::Owned(Self::copied_bytes(bytes))
             }
         };
 
@@ -908,6 +1022,8 @@ impl Drop for TensorData {
         // `TensorData` is shared via `Arc`, so `drop` runs exactly once, when
         // the last reference goes away. Owned buffers free themselves; raw
         // device buffers are returned to the allocator here.
+        // `Foreign` needs nothing here: dropping the struct drops its `owner`,
+        // which is what releases the borrow.
         if let TensorBuffer::Raw { ptr, size, device } = self.buffer.get_mut() {
             let _ = global_deallocate(*ptr, *size, *device);
         }

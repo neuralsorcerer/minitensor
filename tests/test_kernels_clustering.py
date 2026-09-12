@@ -234,7 +234,10 @@ def test_nothing_requiring_a_gradient_leaves_the_answer_off_the_graph(data):
 
 def test_the_kernel_is_exported_from_the_package():
     assert mt.kernels.soft_assignment is soft_assignment
-    assert mt.kernels.__all__ == ["soft_assignment"]
+    # Named rather than compared against the whole list: this file is about
+    # `soft_assignment`, and pinning the package's full export set here would
+    # make every new kernel fail a clustering test.
+    assert "soft_assignment" in mt.kernels.__all__
 
 
 def test_the_kernel_registers_nothing():
