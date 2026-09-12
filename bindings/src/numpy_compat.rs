@@ -61,11 +61,12 @@ pub fn numpy_compat(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Array manipulation functions
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
-    m.add_function(wrap_pyfunction!(vstack, m)?)?;
-    m.add_function(wrap_pyfunction!(hstack, m)?)?;
+    // `vstack`, `hstack`, `hsplit` and `vsplit` are installed from the
+    // Python layer, which already implements them correctly. The versions
+    // that used to live here were `concatenate` and `chunk` on a fixed
+    // axis, with none of the rank promotion those four are *for*: they
+    // joined two vectors into one long one where NumPy makes two rows.
     m.add_function(wrap_pyfunction!(split, m)?)?;
-    m.add_function(wrap_pyfunction!(hsplit, m)?)?;
-    m.add_function(wrap_pyfunction!(vsplit, m)?)?;
 
     // Mathematical functions
     m.add_function(wrap_pyfunction!(dot, m)?)?;
@@ -228,36 +229,12 @@ fn stack(tensors: &Bound<PyList>, axis: isize) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, axis)
 }
 
-/// Stack tensors vertically (row-wise)
-#[pyfunction]
-fn vstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
-    PyTensor::concatenate(tensors, Some(0))
-}
-
-/// Stack tensors horizontally (column-wise)
-#[pyfunction]
-fn hstack(tensors: &Bound<PyList>) -> PyResult<PyTensor> {
-    PyTensor::concatenate(tensors, Some(1))
-}
-
 /// Split tensor into multiple sub-tensors
 #[pyfunction]
 #[pyo3(signature = (tensor, sections, axis=None))]
 fn split(tensor: &PyTensor, sections: usize, axis: Option<isize>) -> PyResult<Vec<PyTensor>> {
     let dim = axis.unwrap_or(0);
     tensor.chunk(sections, dim)
-}
-
-/// Split tensor horizontally
-#[pyfunction]
-fn hsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
-    tensor.chunk(sections, 1)
-}
-
-/// Split tensor vertically
-#[pyfunction]
-fn vsplit(tensor: &PyTensor, sections: usize) -> PyResult<Vec<PyTensor>> {
-    tensor.chunk(sections, 0)
 }
 
 /// Dot product of two tensors

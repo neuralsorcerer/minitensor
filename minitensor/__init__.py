@@ -301,6 +301,17 @@ numpy_compat = getattr(_C, "numpy_compat", None)
 if numpy_compat is not None:
     _sys.modules[__name__ + ".numpy_compat"] = numpy_compat
     cross = getattr(numpy_compat, "cross", None)
+    # These four are the same operations the top level already provides, and
+    # what makes them themselves is the rank promotion: `vstack` of two vectors
+    # is two rows, `hstack` of two vectors is one longer one, and `hsplit` cuts
+    # a vector along the only axis it has. The compiled module used to carry
+    # its own `concatenate`-on-a-fixed-axis versions with none of that, so
+    # `numpy_compat.vstack([v, v])` gave one long vector where NumPy gives two
+    # rows, and `hstack` and `hsplit` raised `IndexError` outright. Installing
+    # the real ones keeps one implementation rather than a second, worse one.
+    for _name in ("vstack", "hstack", "hsplit", "vsplit"):
+        setattr(numpy_compat, _name, globals()[_name])
+    del _name
 else:
     cross = None
 

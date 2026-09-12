@@ -118,6 +118,47 @@ def test_splits_match_numpy(name, got, want):
         np.testing.assert_allclose(_value(part), reference, rtol=1e-6)
 
 
+# What makes these four themselves is the rank promotion, and every case above
+# hands them a matrix, where there is none to do. `numpy_compat` used to carry
+# its own versions -- `concatenate` and `chunk` on a fixed axis -- which passed
+# every matrix case and were wrong for all four of these: `vstack` joined two
+# vectors into one long one where NumPy makes two rows, and the other three
+# raised `IndexError` or accepted what NumPy rejects.
+_RANK_PROMOTION = [
+    ("vstack-1d", lambda: nc.vstack([T(V), T(W)]), lambda: np.vstack([V, W])),
+    ("hstack-1d", lambda: nc.hstack([T(V), T(W)]), lambda: np.hstack([V, W])),
+    ("hsplit-1d", lambda: nc.hsplit(T(V), 3), lambda: np.hsplit(V, 3)),
+]
+
+
+@pytest.mark.parametrize(
+    "name,got,want", _RANK_PROMOTION, ids=[c[0] for c in _RANK_PROMOTION]
+)
+def test_the_stacks_promote_a_vector_the_way_numpy_does(name, got, want):
+    ours, expected = got(), want()
+    if isinstance(expected, list):
+        assert len(ours) == len(expected)
+        for part, reference in zip(ours, expected):
+            np.testing.assert_allclose(_value(part), reference, rtol=1e-6)
+    else:
+        actual = _value(ours)
+        assert actual.shape == expected.shape
+        np.testing.assert_allclose(actual, expected, rtol=1e-6)
+
+
+def test_vsplit_still_refuses_a_vector():
+    # There is no second axis to split, and NumPy says so rather than falling
+    # back to the first -- which the compiled version used to do.
+    with pytest.raises(ValueError):
+        nc.vsplit(T(V), 2)
+
+
+def test_the_stacks_are_the_ones_the_top_level_exports():
+    # One implementation, not two. The second one was the broken one.
+    for name in ("vstack", "hstack", "hsplit", "vsplit"):
+        assert getattr(nc, name) is getattr(mt, name), f"{name} has two implementations"
+
+
 @pytest.mark.parametrize(
     "name,got,want",
     [

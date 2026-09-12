@@ -3026,6 +3026,11 @@ is what `axis=None` means to NumPy -- not "the default axis", which is what
 `None` means almost everywhere else here. This module exists so NumPy code runs
 unchanged, so it follows NumPy where the two disagree.
 
+`vstack`, `hstack`, `hsplit` and `vsplit` are the top-level functions of the
+same names, not separate implementations, so they promote a vector the way
+NumPy does: `vstack` of two vectors is two rows, `hstack` of two is one longer
+one, and `hsplit` cuts a vector along the only axis it has.
+
 ### Math & comparisons
 
 - `dot`, `matmul`, `cross`, `where`
