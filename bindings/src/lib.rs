@@ -14,6 +14,11 @@ mod device;
 mod dtype;
 mod error;
 mod functional;
+// Not under `--features blas`: that build linked a BLAS into the engine
+// deliberately, and its GEMM is then the same kind of thing this module reaches
+// for, called directly and without the interpreter in the way.
+#[cfg(not(feature = "blas"))]
+mod gemm;
 mod grad_utils;
 mod lr_scheduler;
 mod nn;
@@ -30,6 +35,11 @@ use tensor::{PyTensor, ShapeSequence};
 /// Python module for minitensor core
 #[pymodule]
 fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
+    // Before anything can build a tensor: a single large dense product goes to
+    // the BLAS `numpy` already brought rather than to the engine's own kernel.
+    #[cfg(not(feature = "blas"))]
+    gemm::install_gemm_provider();
+
     // Add version information
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 

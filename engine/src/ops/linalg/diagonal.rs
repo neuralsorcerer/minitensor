@@ -666,6 +666,23 @@ fn optimized_matmul_f32(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
+        // A single whole product is the one shape a tuned BLAS beats the
+        // engine's kernel on, and the one a provider is offered. It sees the
+        // dimensions and declines anything too small to pay for the call.
+        if let Some(provider) = crate::ops::linalg::gemm_provider()
+            && provider.gemm_f32(crate::ops::linalg::Gemm {
+                m,
+                k,
+                n,
+                lhs: lhs_data,
+                lhs_storage: crate::ops::linalg::Storage::RowMajor,
+                rhs: rhs_data,
+                rhs_storage: crate::ops::linalg::Storage::RowMajor,
+                out: output_data,
+            })
+        {
+            return Ok(());
+        }
         // One product, so `gemm_f32` is the one that decides whether to spread
         // it across the pool.
         unsafe {
@@ -724,6 +741,23 @@ fn optimized_matmul_f64(
 
     let batch = lhs_data.len() / (m * k);
     if batch == 1 {
+        // A single whole product is the one shape a tuned BLAS beats the
+        // engine's kernel on, and the one a provider is offered. It sees the
+        // dimensions and declines anything too small to pay for the call.
+        if let Some(provider) = crate::ops::linalg::gemm_provider()
+            && provider.gemm_f64(crate::ops::linalg::Gemm {
+                m,
+                k,
+                n,
+                lhs: lhs_data,
+                lhs_storage: crate::ops::linalg::Storage::RowMajor,
+                rhs: rhs_data,
+                rhs_storage: crate::ops::linalg::Storage::RowMajor,
+                out: output_data,
+            })
+        {
+            return Ok(());
+        }
         // One product, so `gemm_f64` is the one that decides whether to spread
         // it across the pool.
         unsafe {

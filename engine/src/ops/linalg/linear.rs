@@ -87,7 +87,7 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
 
     if rows != 0 && in_features != 0 && out_features != 0 {
         macro_rules! forward {
-            ($accessor:ident, $mut_accessor:ident, $gemm:path) => {{
+            ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:ident) => {{
                 let a = input.data().$accessor().ok_or_else(|| {
                     MinitensorError::internal_error("linear: unexpected input dtype")
                 })?;
@@ -96,21 +96,38 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
                 })?;
                 let c = output_data.$mut_accessor().unwrap();
                 // `weight` holds the logical `(in, out)` operand as `(out, in)`.
-                unsafe {
-                    $gemm(
-                        rows,
-                        in_features,
-                        out_features,
-                        a.as_ptr(),
-                        b.as_ptr(),
-                        c.as_mut_ptr(),
-                    )
-                };
+                // The provider is offered it that way round rather than being
+                // handed a transposed copy: the copy is the cost this function
+                // exists to avoid, and a GEMM reads either layout.
+                let delegated = super::gemm_provider().is_some_and(|provider| {
+                    provider.$offer(super::Gemm {
+                        m: rows,
+                        k: in_features,
+                        n: out_features,
+                        lhs: a,
+                        lhs_storage: super::Storage::RowMajor,
+                        rhs: b,
+                        rhs_storage: super::Storage::Transposed,
+                        out: c,
+                    })
+                });
+                if !delegated {
+                    unsafe {
+                        $gemm(
+                            rows,
+                            in_features,
+                            out_features,
+                            a.as_ptr(),
+                            b.as_ptr(),
+                            c.as_mut_ptr(),
+                        )
+                    };
+                }
             }};
         }
         match input.dtype() {
-            DataType::Float32 => forward!(as_f32_slice, as_f32_slice_mut, gemm_nt_f32),
-            DataType::Float64 => forward!(as_f64_slice, as_f64_slice_mut, gemm_nt_f64),
+            DataType::Float32 => forward!(as_f32_slice, as_f32_slice_mut, gemm_nt_f32, gemm_f32),
+            DataType::Float64 => forward!(as_f64_slice, as_f64_slice_mut, gemm_nt_f64, gemm_f64),
             _ => unreachable!("dtype checked above"),
         }
     }

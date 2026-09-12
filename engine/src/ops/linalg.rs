@@ -14,6 +14,8 @@ mod determinant_impl;
 mod diagonal_impl;
 #[path = "linalg/eigen.rs"]
 mod eigen_impl;
+#[path = "linalg/gemm_provider.rs"]
+mod gemm_provider_impl;
 #[path = "linalg/linear.rs"]
 mod linear_impl;
 #[path = "linalg/lu.rs"]
@@ -36,6 +38,7 @@ pub use self::derived_impl::*;
 pub use self::determinant_impl::*;
 pub use self::diagonal_impl::*;
 pub use self::eigen_impl::*;
+pub use self::gemm_provider_impl::*;
 pub use self::linear_impl::*;
 pub use self::lu_impl::*;
 pub use self::matmul_impl::*;

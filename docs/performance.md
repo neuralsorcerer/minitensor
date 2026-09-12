@@ -117,13 +117,85 @@ alone it looks several times slower again (9x here, 25x on an older NumPy), but
 that is comparing different work, and the gap moves with whatever SIMD sort the
 installed NumPy ships rather than with anything in this library.
 
+## Where a dense product is computed
+
+A single large `float32` or `float64` product does not run on this library's
+own kernel. It runs on the BLAS that `numpy` already brought -- OpenBLAS on the
+wheels -- on the buffers the engine allocated, with nothing copied on the way
+in or out. Every install has `numpy` in it, every install of `numpy` has a
+tuned BLAS in it, and that BLAS is per-architecture assembly selected at load
+time from a table of implementations. A portable Rust kernel does not close
+that gap.
+
+Measured against NumPy on a 4-core x86-64 container, threads pinned to 4,
+release build. Ratios above 1 mean MiniTensor is slower:
+
+| product | dtype | own kernel | delegated |
+| --- | --- | --- | --- |
+| 256x256 @ 256x256 | float32 | 3.42x | 1.36x |
+| 512x512 @ 512x512 | float32 | 2.20x | 1.34x |
+| 1024x1024 @ 1024x1024 | float32 | 1.86x | 1.15x |
+| 2048x2048 @ 2048x2048 | float32 | 1.75x | 1.12x |
+| 512x2048 @ 2048x512 | float32 | 2.05x | 1.06x |
+| 1024x1024 @ 1024x1024 | float64 | 1.80x | 1.13x |
+| 2048x2048 @ 2048x2048 | float64 | 1.85x | 1.09x |
+
+The largest wins are not in that table. A matrix-vector product is the shape a
+blocked kernel is worst at and the shape a BLAS has a routine written for:
+`1x1024 @ 1024x1024` goes from 874us to 109us, and `1024x1024 @ 1024x1` from
+2086us to 36us -- 8x and 58x.
+
+`nn.Linear` goes the same way. Its weight is stored `[out, in]` for a product
+that wants `[in, out]`, and it is handed over that way rather than transposed
+into a copy first, so the saving the fused forward exists for is kept:
+
+| `rows x in x out` | dtype | own kernel | delegated |
+| --- | --- | --- | --- |
+| 8 x 256 x 256 | float32 | 136us | 52us |
+| 64 x 512 x 512 | float32 | 618us | 350us |
+| 16 x 1024 x 1024 | float32 | 888us | 493us |
+| 256 x 768 x 768 | float32 | 2259us | 1808us |
+| 32 x 4096 x 4096 | float32 | 13241us | 10676us |
+
+### What stays on the engine's own kernel
+
+Handing the product over costs three array headers and a call, a little over a
+microsecond, and for a whole class of shapes a BLAS has nothing to offer
+anyway. Those go to the engine's kernel, which is measurably the right answer
+for them:
+
+- **Anything under ~1.3e5 multiply-accumulates.** A 48x48x48 product finishes
+  inside the call overhead. Below that the engine's kernel wins outright.
+- **A contraction shorter than 32.** Such a product is bound by writing its
+  answer rather than by computing it, and there NumPy's `matmul` measured
+  1.4-2.9x *slower*: `256x16 @ 16x256` is 44us on the engine's kernel and 83us
+  delegated, and the outer product `512x1 @ 1x512` is 148us against 721us.
+- **Batched products.** Several matrices at once already fill the thread pool
+  with one whole product per worker, which is what delegating was for. These
+  measure between 0.95x and 1.5x of NumPy without it.
+- **Integers.** Neither library sends an integer product to a BLAS.
+- **Anything running inside the engine's own thread pool.** A worker that
+  stopped to take the interpreter lock would be waiting on the thread that
+  holds it and is waiting on the worker.
+- **A build with `--features blas`.** That build linked a BLAS into the engine
+  deliberately, and calls it directly.
+
+Where a product is computed is a performance decision that depends on its shape
+and dtype, and it may change. The answer does not: both paths agree with a
+float64 reference to the precision of the dtype asked for. They do not agree
+bit for bit, and neither does a BLAS with itself across shapes -- it dispatches
+on all three extents and on how each operand is stored, so reordering the
+accumulation of `k` is normal.
+
 ## Choosing a GEMM backend
 
-Matrix multiplication runs through `matrixmultiply` by default -- pure Rust, no
-system library. The `blas` feature routes it to an installed OpenBLAS instead.
-Which is faster depends on the machine and the size, so measure rather than
-assume. On the machine these docs were last measured on (x86-64, OpenBLAS 0.3 from
-`libopenblas-dev`), square float32 matmul came out:
+Under `--features blas`, matrix multiplication routes to an installed OpenBLAS
+inside the engine instead of to `numpy`'s. Without it the engine's own kernel
+is `matrixmultiply` -- pure Rust, no system library -- and it is what runs for
+everything the section above lists. Which is faster depends on the machine and
+the size, so measure rather than assume. On the machine these docs were last
+measured on (x86-64, OpenBLAS 0.3 from `libopenblas-dev`), square float32
+matmul came out:
 
 | size | matrixmultiply, older | matrixmultiply, now | OpenBLAS, older |
 | --- | --- | --- | --- |

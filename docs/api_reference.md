@@ -3816,7 +3816,7 @@ Feature flags for the `engine` crate:
 | `metal` | no | Metal scaffolding. **Apple targets only** — the dependency is declared under `cfg(target_vendor = "apple")`, so on other platforms the feature resolves to nothing rather than failing the build. |
 | `opencl` | no | OpenCL scaffolding via `opencl3`. |
 | `gpu` | no | `cuda` + `metal` + `opencl`; builds on every platform, contributing whichever of the three that platform can have. |
-| `blas` | no | Routes GEMM through a system OpenBLAS (`libopenblas-dev` or equivalent). `openblas-src` is pinned to `system`, so the build links the installed library rather than downloading and compiling OpenBLAS itself. Worth roughly 1.4x-2.0x on square `f32` GEMM — see below. |
+| `blas` | no | Links GEMM against a system OpenBLAS (`libopenblas-dev` or equivalent) inside the engine. `openblas-src` is pinned to `system`, so the build links the installed library rather than downloading and compiling OpenBLAS itself. The Python extension already reaches a BLAS without it — see below. |
 | `dynamic-loading` | no | Runtime plugin loading (`docs/plugin_system.md`). |
 
 ### Building the Python extension with BLAS
@@ -3829,23 +3829,21 @@ sudo apt-get install libopenblas-dev        # or your platform's equivalent
 maturin develop --release --features blas
 ```
 
-Without it, GEMM uses `matrixmultiply`, which is pure Rust and needs no system
-library. With it, square `f32` matmul is roughly at parity with NumPy, which
-links OpenBLAS itself; without it MiniTensor is 1.5x-2.4x behind. Measured on
-x86-64 with OpenBLAS 0.3.26, each timing taken in its own process so the two
-thread pools do not contend:
+**The Python extension does not need it.** A single large `float32` or
+`float64` product already runs on the BLAS that `numpy` brought, on the
+engine's own buffers with nothing copied, which puts square matmul within
+1.1x-1.4x of NumPy and a matrix-vector product 8x-58x ahead of where the
+library's own kernel leaves it. `docs/performance.md` has the measurements and
+the rules for which products go which way.
 
-| size | default | `--features blas` | NumPy |
-| --- | --- | --- | --- |
-| 256 | 0.41 ms | 0.21 ms | 0.11 ms |
-| 512 | 1.76 ms | 0.94 ms | 0.67 ms |
-| 1024 | 9.22 ms | 5.18 ms | 4.82 ms |
-| 2048 | 55.2 ms | 37.1 ms | 36.6 ms |
+What `--features blas` changes is that the engine calls a BLAS *itself*,
+without the interpreter in the way, and does so for every product rather than
+the ones worth handing over — including inside the thread pool, where the
+`numpy` route cannot go. That is worth the system dependency for a Rust program
+embedding the engine, and rarely worth it for a Python one.
 
-The gap that remains at 256 is fixed per-call overhead, not GEMM throughput; it
-stops mattering by 1024. Everything else in the library is unaffected, so this
-is worth enabling only if matmul dominates your workload and you are willing to
-carry the system dependency.
+Without either, GEMM uses `matrixmultiply`: pure Rust, no system library, and
+what the delegation rules fall back to.
 
 Neither `hardware` nor `debug` is used by any tensor or autograd execution
 path, so a Rust consumer embedding the engine can drop both:
