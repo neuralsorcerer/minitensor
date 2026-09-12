@@ -104,7 +104,7 @@ def create_loss_and_optimizer():
         # Create optimizer with simple model parameters
         model = nn.DenseLayer(4, 2)
         optimizer = optim.Adam(
-            model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8
+            model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-8
         )
         print(f"Created optimizer: {optimizer}")
 

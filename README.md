@@ -105,7 +105,7 @@ model = nn.Sequential([
 
 # Set up training
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8)
+optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-8)
 
 print(f"Model type: {type(model).__name__}")
 print(f"Input shape: {x.shape}")
@@ -240,9 +240,9 @@ model = nn.DenseLayer(10, 5)
 params = model.parameters()
 
 sgd = optim.SGD(params, lr=0.01, momentum=0.9, weight_decay=0.0, nesterov=False)
-adam = optim.Adam(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.0)
-adamw = optim.AdamW(params, lr=0.001, betas=(0.9, 0.999), epsilon=1e-8, weight_decay=0.01)
-rmsprop = optim.RMSprop(params, lr=0.01, alpha=0.99, epsilon=1e-8, weight_decay=0.0, momentum=0.0)
+adam = optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+adamw = optim.AdamW(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+rmsprop = optim.RMSprop(params, lr=0.01, alpha=0.99, eps=1e-8, weight_decay=0.0, momentum=0.0)
 lion = optim.Lion(params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0)
 
 print(type(sgd).__name__, type(adam).__name__, type(adamw).__name__, type(rmsprop).__name__, type(lion).__name__)
@@ -293,7 +293,7 @@ model = nn.Sequential([
 
 # Initialize model
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), epsilon=1e-8)
+optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-8)
 
 print(type(model).__name__, type(optimizer).__name__)
 ```

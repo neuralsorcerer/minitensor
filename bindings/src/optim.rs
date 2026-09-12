@@ -419,15 +419,20 @@ pub struct PySGD;
 impl PySGD {
     /// Create a new SGD optimizer
     #[new]
-    #[pyo3(signature = (parameters, lr, momentum=None, dampening=None, weight_decay=None, nesterov=None))]
+    #[pyo3(
+        signature = (parameters, lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=false)
+    )]
+    #[pyo3(
+        text_signature = "(parameters, lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False)"
+    )]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,
         lr: f64,
-        momentum: Option<f64>,
-        dampening: Option<f64>,
-        weight_decay: Option<f64>,
-        nesterov: Option<bool>,
+        momentum: f64,
+        dampening: f64,
+        weight_decay: f64,
+        nesterov: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
@@ -435,19 +440,14 @@ impl PySGD {
 
         let params = collect_parameters(parameters)?;
 
-        let momentum = momentum.unwrap_or(0.0);
         if momentum < 0.0 {
             return Err(PyValueError::new_err("Momentum must be non-negative."));
         }
 
-        let weight_decay = weight_decay.unwrap_or(0.0);
         if weight_decay < 0.0 {
             return Err(PyValueError::new_err("Weight decay must be non-negative."));
         }
 
-        let dampening = dampening.unwrap_or(0.0);
-
-        let nesterov = nesterov.unwrap_or(false);
         if nesterov && momentum <= 0.0 {
             return Err(PyValueError::new_err(
                 "Nesterov momentum requires a positive momentum value.",
@@ -508,7 +508,7 @@ impl PyAdam {
             betas=None,
             beta1=None,
             beta2=None,
-            epsilon=1e-8,
+            eps=1e-8,
             weight_decay=0.0,
             amsgrad=false
         )
@@ -521,7 +521,7 @@ impl PyAdam {
         betas: Option<(f64, f64)>,
         beta1: Option<f64>,
         beta2: Option<f64>,
-        epsilon: f64,
+        eps: f64,
         weight_decay: f64,
         amsgrad: bool,
     ) -> PyResult<PyClassInitializer<Self>> {
@@ -529,7 +529,7 @@ impl PyAdam {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
 
-        if epsilon <= 0.0 {
+        if eps <= 0.0 {
             return Err(PyValueError::new_err("Epsilon must be positive."));
         }
 
@@ -543,14 +543,8 @@ impl PyAdam {
         // The engine has carried `with_amsgrad` (and a tested `v_hat` update)
         // since the start; nothing bound it, so the max-second-moment variant
         // was unreachable from Python.
-        let adam = Adam::new(
-            lr,
-            Some(beta1),
-            Some(beta2),
-            Some(epsilon),
-            Some(weight_decay),
-        )
-        .with_amsgrad(amsgrad);
+        let adam = Adam::new(lr, Some(beta1), Some(beta2), Some(eps), Some(weight_decay))
+            .with_amsgrad(amsgrad);
 
         Ok(PyClassInitializer::from(PyOptimizer::new(adam, params)).add_subclass(Self))
     }
@@ -567,9 +561,9 @@ impl PyAdam {
         Ok(concrete::<Adam>(slf.as_ref())?.beta2())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<Adam>(slf.as_ref())?.epsilon())
     }
 
@@ -601,7 +595,7 @@ impl PyAdamW {
             betas=None,
             beta1=None,
             beta2=None,
-            epsilon=1e-8,
+            eps=1e-8,
             weight_decay=0.01
         )
     )]
@@ -613,14 +607,14 @@ impl PyAdamW {
         betas: Option<(f64, f64)>,
         beta1: Option<f64>,
         beta2: Option<f64>,
-        epsilon: f64,
+        eps: f64,
         weight_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
         }
 
-        if epsilon <= 0.0 {
+        if eps <= 0.0 {
             return Err(PyValueError::new_err("Epsilon must be positive."));
         }
 
@@ -631,13 +625,7 @@ impl PyAdamW {
         let params = collect_parameters(parameters)?;
         let (beta1, beta2) = resolve_betas(betas, beta1, beta2)?;
 
-        let adamw = AdamW::new(
-            lr,
-            Some(beta1),
-            Some(beta2),
-            Some(epsilon),
-            Some(weight_decay),
-        );
+        let adamw = AdamW::new(lr, Some(beta1), Some(beta2), Some(eps), Some(weight_decay));
 
         Ok(PyClassInitializer::from(PyOptimizer::new(adamw, params)).add_subclass(Self))
     }
@@ -654,9 +642,9 @@ impl PyAdamW {
         Ok(concrete::<AdamW>(slf.as_ref())?.beta2())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<AdamW>(slf.as_ref())?.epsilon())
     }
 
@@ -680,7 +668,7 @@ impl PyRMSprop {
             parameters,
             lr,
             alpha=0.99,
-            epsilon=1e-8,
+            eps=1e-8,
             weight_decay=0.0,
             momentum=0.0,
             centered=false
@@ -692,7 +680,7 @@ impl PyRMSprop {
         parameters: &Bound<PyAny>,
         lr: f64,
         alpha: f64,
-        epsilon: f64,
+        eps: f64,
         weight_decay: f64,
         momentum: f64,
         centered: bool,
@@ -705,7 +693,7 @@ impl PyRMSprop {
             return Err(PyValueError::new_err("Alpha must be in the range [0, 1]."));
         }
 
-        if epsilon <= 0.0 {
+        if eps <= 0.0 {
             return Err(PyValueError::new_err("Epsilon must be positive."));
         }
 
@@ -722,7 +710,7 @@ impl PyRMSprop {
         let rmsprop = RMSprop::new(
             lr,
             Some(alpha),
-            Some(epsilon),
+            Some(eps),
             Some(weight_decay),
             Some(momentum),
         )
@@ -737,9 +725,9 @@ impl PyRMSprop {
         Ok(concrete::<RMSprop>(slf.as_ref())?.alpha())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<RMSprop>(slf.as_ref())?.epsilon())
     }
 
@@ -764,7 +752,7 @@ pub struct PyNAdam;
 impl PyNAdam {
     /// Create a new NAdam optimizer
     #[new]
-    #[pyo3(signature = (parameters, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004))]
+    #[pyo3(signature = (parameters, lr=0.002, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, momentum_decay=0.004))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         _py: Python,
@@ -772,7 +760,7 @@ impl PyNAdam {
         lr: f64,
         beta1: f64,
         beta2: f64,
-        epsilon: f64,
+        eps: f64,
         weight_decay: f64,
         momentum_decay: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
@@ -784,7 +772,7 @@ impl PyNAdam {
                 "Beta coefficients must be in the range [0, 1).",
             ));
         }
-        if epsilon <= 0.0 {
+        if eps <= 0.0 {
             return Err(PyValueError::new_err("Epsilon must be positive."));
         }
         if weight_decay < 0.0 {
@@ -801,7 +789,7 @@ impl PyNAdam {
             lr,
             Some(beta1),
             Some(beta2),
-            Some(epsilon),
+            Some(eps),
             Some(weight_decay),
             Some(momentum_decay),
         );
@@ -821,9 +809,9 @@ impl PyNAdam {
         Ok(concrete::<NAdam>(slf.as_ref())?.beta2())
     }
 
-    /// Get epsilon
+    /// Get eps
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<NAdam>(slf.as_ref())?.epsilon())
     }
 
@@ -855,7 +843,7 @@ impl PyAdagrad {
             lr_decay=0.0,
             weight_decay=0.0,
             initial_accumulator_value=0.0,
-            epsilon=1e-10
+            eps=1e-10
         )
     )]
     fn new(
@@ -865,7 +853,7 @@ impl PyAdagrad {
         lr_decay: f64,
         weight_decay: f64,
         initial_accumulator_value: f64,
-        epsilon: f64,
+        eps: f64,
     ) -> PyResult<PyClassInitializer<Self>> {
         if lr <= 0.0 {
             return Err(PyValueError::new_err("Learning rate must be positive."));
@@ -881,7 +869,7 @@ impl PyAdagrad {
                 "initial_accumulator_value must be non-negative.",
             ));
         }
-        if epsilon <= 0.0 {
+        if eps <= 0.0 {
             return Err(PyValueError::new_err("Epsilon must be positive."));
         }
 
@@ -891,7 +879,7 @@ impl PyAdagrad {
             Some(lr_decay),
             Some(weight_decay),
             Some(initial_accumulator_value),
-            Some(epsilon),
+            Some(eps),
         );
 
         Ok(PyClassInitializer::from(PyOptimizer::new(adagrad, params)).add_subclass(Self))
@@ -903,9 +891,9 @@ impl PyAdagrad {
         Ok(concrete::<Adagrad>(slf.as_ref())?.lr_decay())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<Adagrad>(slf.as_ref())?.epsilon())
     }
 
@@ -1031,9 +1019,9 @@ impl PyAdadelta {
         Ok(concrete::<Adadelta>(slf.as_ref())?.rho())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<Adadelta>(slf.as_ref())?.epsilon())
     }
 
@@ -1111,9 +1099,9 @@ impl PyAdamax {
         Ok(concrete::<Adamax>(slf.as_ref())?.beta2())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<Adamax>(slf.as_ref())?.epsilon())
     }
 
@@ -1196,9 +1184,9 @@ impl PyRAdam {
         Ok(concrete::<RAdam>(slf.as_ref())?.beta2())
     }
 
-    /// Get epsilon parameter
+    /// Get eps parameter
     #[getter]
-    fn epsilon(slf: PyRef<Self>) -> PyResult<f64> {
+    fn eps(slf: PyRef<Self>) -> PyResult<f64> {
         Ok(concrete::<RAdam>(slf.as_ref())?.epsilon())
     }
 
@@ -1221,6 +1209,9 @@ impl PyRprop {
     /// Create a new Rprop optimizer
     #[new]
     #[pyo3(signature = (parameters, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0)))]
+    // PyO3 renders a tuple default as `...`; spelling it out keeps `help()`
+    // honest about the step bounds, which are the whole of what Rprop tunes.
+    #[pyo3(text_signature = "(parameters, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50.0))")]
     fn new(
         _py: Python,
         parameters: &Bound<PyAny>,

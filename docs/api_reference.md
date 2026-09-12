@@ -2697,11 +2697,11 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 ### Built-in optimizers
 
 - `SGD(params, lr, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False)`
-- `Adam(params, lr=1e-3, betas=None, beta1=None, beta2=None, epsilon=1e-8, weight_decay=0.0, amsgrad=False)`
+- `Adam(params, lr=1e-3, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0, amsgrad=False)`
 - `AdamW`
-- `RMSprop(params, lr, alpha=0.99, epsilon=1e-8, weight_decay=0.0, momentum=0.0, centered=False)`
-- `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, epsilon=1e-8, weight_decay=0.0, momentum_decay=0.004)`
-- `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, epsilon=1e-10)`
+- `RMSprop(params, lr, alpha=0.99, eps=1e-8, weight_decay=0.0, momentum=0.0, centered=False)`
+- `NAdam(params, lr=0.002, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, momentum_decay=0.004)`
+- `Adagrad(params, lr=0.01, lr_decay=0.0, weight_decay=0.0, initial_accumulator_value=0.0, eps=1e-10)`
 - `Lion(params, lr=1e-4, betas=None, beta1=None, beta2=None, weight_decay=0.0)`
 - `Adadelta(params, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0.0)`
 - `Adamax(params, lr=0.002, betas=None, beta1=None, beta2=None, eps=1e-8, weight_decay=0.0)`
@@ -2734,7 +2734,7 @@ the full learning rate, which is what makes it suit sparse features. It is also
 why Adagrad stalls on long runs, and why the moving-average methods exist.
 `lr_decay` shrinks the rate further as `lr / (1 + (t - 1) * lr_decay)`, and
 `initial_accumulator_value` starts the sum above zero to damp the first steps.
-Its `epsilon` default is `1e-10` rather than the `1e-8` used elsewhere, because
+Its `eps` default is `1e-10` rather than the `1e-8` used elsewhere, because
 it floors a quantity that only grows.
 
 `Lion` (Chen et al., 2023) updates parameters by the *sign* of an interpolated

@@ -20,6 +20,7 @@ which spelling you reached for.
 """
 
 import inspect
+import re
 
 import pytest
 
@@ -253,13 +254,15 @@ def test_a_method_makes_the_same_arguments_optional(name):
 
 
 def _every_public_callable():
-    """Every callable a user can reach, across all four surfaces."""
+    """Every callable a user can reach, across all six surfaces."""
 
     for holder, label in (
         (mt, "minitensor"),
         (mt.Tensor, "Tensor"),
         (mt.functional, "functional"),
         (mt.numpy_compat, "numpy_compat"),
+        (mt.nn, "nn"),
+        (mt.optim, "optim"),
     ):
         for name in sorted(n for n in dir(holder) if not n.startswith("_")):
             function = getattr(holder, name, None)
@@ -298,3 +301,29 @@ def test_every_signature_says_what_its_defaults_are():
 
     assert not unparseable, "signatures Python cannot parse: " + ", ".join(unparseable)
     assert not vague, "defaults rendered as `...`: " + ", ".join(vague)
+
+
+def test_the_numerical_floor_is_called_eps_everywhere():
+    """One name for one thing, on the layers and the optimizers alike.
+
+    Twenty-two places called it `eps` and five called it `epsilon`, and the
+    split ran through the optimizers themselves: `Adamax(eps=...)` beside
+    `Adam(epsilon=...)`. It was an accident that accumulated -- the
+    reference-algorithm sweep had a line in it naming both spellings so its
+    own guard would keep working.
+    """
+
+    offenders = []
+    for label, function in _every_public_callable():
+        signature = getattr(function, "__text_signature__", None)
+        if signature is None:
+            try:
+                signature = str(inspect.signature(function))
+            except Exception:
+                continue
+        if re.search(r"\bepsilon\b", signature):
+            offenders.append(label)
+
+    assert not offenders, "these say `epsilon` rather than `eps`: " + ", ".join(
+        offenders
+    )

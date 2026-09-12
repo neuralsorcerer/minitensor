@@ -160,14 +160,14 @@ def test_nadam_exposes_its_hyperparameters():
         lr=0.003,
         beta1=0.85,
         beta2=0.995,
-        epsilon=1e-7,
+        eps=1e-7,
         weight_decay=0.2,
         momentum_decay=0.01,
     )
     assert optimizer.lr == pytest.approx(0.003)
     assert optimizer.beta1 == pytest.approx(0.85)
     assert optimizer.beta2 == pytest.approx(0.995)
-    assert optimizer.epsilon == pytest.approx(1e-7)
+    assert optimizer.eps == pytest.approx(1e-7)
     assert optimizer.weight_decay == pytest.approx(0.2)
     assert optimizer.momentum_decay == pytest.approx(0.01)
     assert "NAdam" in repr(optimizer)
@@ -189,7 +189,7 @@ def test_nadam_defaults_match_the_paper():
         {"lr": 0.01, "beta1": 1.0},
         {"lr": 0.01, "beta2": 1.0},
         {"lr": 0.01, "beta1": -0.1},
-        {"lr": 0.01, "epsilon": 0.0},
+        {"lr": 0.01, "eps": 0.0},
         {"lr": 0.01, "weight_decay": -0.1},
         {"lr": 0.01, "momentum_decay": -0.1},
     ],

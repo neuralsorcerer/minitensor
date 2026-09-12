@@ -184,9 +184,9 @@ def test_adagrad_exposes_its_hyperparameters():
     assert optimizer.lr_decay == pytest.approx(0.1)
     assert optimizer.weight_decay == pytest.approx(0.3)
     assert optimizer.initial_accumulator_value == pytest.approx(0.4)
-    # Adagrad's epsilon floors a sum that only grows, so it is smaller than the
+    # Adagrad's eps floors a sum that only grows, so it is smaller than the
     # 1e-8 the moving-average optimisers use.
-    assert optimizer.epsilon == pytest.approx(1e-10)
+    assert optimizer.eps == pytest.approx(1e-10)
     assert "Adagrad" in repr(optimizer)
 
 
@@ -198,7 +198,7 @@ def test_adagrad_exposes_its_hyperparameters():
         {"lr": 0.1, "lr_decay": -0.1},
         {"lr": 0.1, "weight_decay": -0.1},
         {"lr": 0.1, "initial_accumulator_value": -0.1},
-        {"lr": 0.1, "epsilon": 0.0},
+        {"lr": 0.1, "eps": 0.0},
     ],
 )
 def test_adagrad_rejects_invalid_hyperparameters(kwargs):

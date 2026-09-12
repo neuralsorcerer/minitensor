@@ -76,7 +76,7 @@ def test_adadelta_defaults_to_a_learning_rate_of_one():
     opt = optim.Adadelta([_param([1.0])])
     assert opt.lr == 1.0
     assert opt.rho == 0.9
-    assert opt.epsilon == 1e-6
+    assert opt.eps == 1e-6
     assert opt.weight_decay == 0.0
 
 
@@ -127,7 +127,7 @@ def test_adamax_defaults_match_the_paper():
     opt = optim.Adamax([_param([1.0])])
     assert opt.lr == 0.002
     assert (opt.beta1, opt.beta2) == (0.9, 0.999)
-    assert opt.epsilon == 1e-8
+    assert opt.eps == 1e-8
 
 
 def test_adamax_accepts_betas_as_a_tuple_or_as_two_arguments():
@@ -179,7 +179,7 @@ def test_radam_defaults_match_the_paper():
     opt = optim.RAdam([_param([1.0])])
     assert opt.lr == 0.001
     assert (opt.beta1, opt.beta2) == (0.9, 0.999)
-    assert opt.epsilon == 1e-8
+    assert opt.eps == 1e-8
 
 
 def test_radam_refuses_a_beta2_of_one():

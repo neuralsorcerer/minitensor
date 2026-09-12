@@ -391,9 +391,11 @@ def test_sgd_exposes_dampening_and_rejects_it_with_nesterov():
 _UNVARIED = {
     # Sweeping the learning rate proves nothing the fixed value does not.
     "lr",
-    # Numerical floors. Changing them perturbs every step by ~eps, which the
+    # The numerical floor. Changing it perturbs every step by ~eps, which the
     # reference reproduces trivially and which no user tunes for behaviour.
-    "epsilon",
+    # It was spelled `epsilon` in half the constructors and `eps` in the other
+    # half, so this set used to have to name both.
+    "eps",
     # Spelling variants of beta1/beta2, checked for equivalence in the
     # per-optimizer files rather than re-derived through the algorithm box.
     "betas",
@@ -401,8 +403,6 @@ _UNVARIED = {
     "beta2",
     "alpha",
     "momentum_decay",
-    # The floor spelled `eps` rather than `epsilon` in the newer constructors.
-    "eps",
 }
 
 
