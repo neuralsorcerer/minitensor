@@ -597,15 +597,14 @@ fn dropout2d_functional(input: &Bound<PyAny>, p: f64, training: bool) -> PyResul
 
 /// Mean squared error between predictions and targets.
 #[pyfunction(name = "mse_loss")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction="mean"))]
 fn mse_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let loss = MSELoss::new(reduction);
     let result = loss
         .forward(prediction.tensor(), target_tensor.tensor())
@@ -615,16 +614,15 @@ fn mse_loss_functional(
 
 /// `beta` was previously fixed at 1.0 -- `SmoothL1Loss` had no field for it. The default is unchanged.
 #[pyfunction(name = "smooth_l1_loss")]
-#[pyo3(signature = (input, target, reduction=None, beta=1.0))]
+#[pyo3(signature = (input, target, reduction="mean", beta=1.0))]
 fn smooth_l1_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
     beta: f64,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     // The op validates beta; huber and smooth-l1 differ by a factor of beta and
     // coincide only at 1.0, so this must not just forward to `huber_loss_op`.
     let result = smooth_l1_loss_op(prediction.tensor(), target_tensor.tensor(), beta, reduction)
@@ -634,16 +632,15 @@ fn smooth_l1_loss_functional(
 
 /// Squared error within `delta` of the target and linear beyond it, so outliers pull less than under `mse_loss`.
 #[pyfunction(name = "huber_loss")]
-#[pyo3(signature = (input, target, reduction=None, delta=1.0))]
+#[pyo3(signature = (input, target, reduction="mean", delta=1.0))]
 fn huber_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
     delta: f64,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let result = huber_loss_op(
         prediction.tensor(),
         target_tensor.tensor(),
@@ -656,15 +653,14 @@ fn huber_loss_functional(
 
 /// Mean absolute error between predictions and targets.
 #[pyfunction(name = "l1_loss")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction="mean"))]
 fn l1_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let result = mae_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -672,15 +668,14 @@ fn l1_loss_functional(
 
 /// Kullback-Leibler divergence from `target` to `input`, both given as probabilities -- *not* as log-probabilities, which is what PyTorch's `kl_div` takes. A zero in `target` contributes nothing, as the definition requires.
 #[pyfunction(name = "kl_div")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction="mean"))]
 fn kl_div_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let result = kl_div_loss_op(prediction.tensor(), target_tensor.tensor(), reduction)
         .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -688,17 +683,16 @@ fn kl_div_functional(
 
 /// Cross-entropy down-weighted on well-classified examples by `(1 - p) ** gamma`, for imbalanced classes.
 #[pyfunction(name = "focal_loss")]
-#[pyo3(signature = (input, target, alpha=0.25, gamma=2.0, reduction=None))]
+#[pyo3(signature = (input, target, alpha=0.25, gamma=2.0, reduction="mean"))]
 fn focal_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
     alpha: f64,
     gamma: f64,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let result = focal_loss_op(
         prediction.tensor(),
         target_tensor.tensor(),
@@ -712,13 +706,13 @@ fn focal_loss_functional(
 
 /// `max(0, -target * (input1 - input2) + margin)`, for a `target` of `+1` where `input1` should rank higher and `-1` where `input2` should.
 #[pyfunction(name = "margin_ranking_loss")]
-#[pyo3(signature = (input1, input2, target, margin=0.0, reduction=None))]
+#[pyo3(signature = (input1, input2, target, margin=0.0, reduction="mean"))]
 fn margin_ranking_loss_functional(
     input1: &Bound<PyAny>,
     input2: &Bound<PyAny>,
     target: &Bound<PyAny>,
     margin: f64,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let left = borrow_tensor(input1)?;
     let right = borrow_tensor(input2)?;
@@ -728,7 +722,7 @@ fn margin_ranking_loss_functional(
         right.tensor(),
         labels.tensor(),
         margin,
-        reduction.unwrap_or("mean"),
+        reduction,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -736,34 +730,29 @@ fn margin_ranking_loss_functional(
 
 /// The distance itself where `target` is `+1`, and `max(0, margin - distance)` where it is `-1`.
 #[pyfunction(name = "hinge_embedding_loss")]
-#[pyo3(signature = (input, target, margin=1.0, reduction=None))]
+#[pyo3(signature = (input, target, margin=1.0, reduction="mean"))]
 fn hinge_embedding_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
     margin: f64,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let distances = borrow_tensor(input)?;
     let labels = borrow_tensor(target)?;
-    let result = hinge_embedding_loss_op(
-        distances.tensor(),
-        labels.tensor(),
-        margin,
-        reduction.unwrap_or("mean"),
-    )
-    .map_err(_convert_error)?;
+    let result = hinge_embedding_loss_op(distances.tensor(), labels.tensor(), margin, reduction)
+        .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
 /// `1 - cos(x1, x2)` where `target` is `+1`, and `max(0, cos(x1, x2) - margin)` where it is `-1`.
 #[pyfunction(name = "cosine_embedding_loss")]
-#[pyo3(signature = (input1, input2, target, margin=0.0, reduction=None))]
+#[pyo3(signature = (input1, input2, target, margin=0.0, reduction="mean"))]
 fn cosine_embedding_loss_functional(
     input1: &Bound<PyAny>,
     input2: &Bound<PyAny>,
     target: &Bound<PyAny>,
     margin: f64,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let left = borrow_tensor(input1)?;
     let right = borrow_tensor(input2)?;
@@ -773,7 +762,7 @@ fn cosine_embedding_loss_functional(
         right.tensor(),
         labels.tensor(),
         margin,
-        reduction.unwrap_or("mean"),
+        reduction,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -781,7 +770,7 @@ fn cosine_embedding_loss_functional(
 
 /// `max(0, d(anchor, positive) - d(anchor, negative) + margin)`. With `swap`, the negative distance is the smaller of `d(anchor, negative)` and `d(positive, negative)`, so a triplet whose positive sits closest to the negative still counts as a violation.
 #[pyfunction(name = "triplet_margin_loss")]
-#[pyo3(signature = (anchor, positive, negative, margin=1.0, p=2.0, eps=1e-6, swap=false, reduction=None))]
+#[pyo3(signature = (anchor, positive, negative, margin=1.0, p=2.0, eps=1e-6, swap=false, reduction="mean"))]
 #[allow(clippy::too_many_arguments)]
 fn triplet_margin_loss_functional(
     anchor: &Bound<PyAny>,
@@ -791,7 +780,7 @@ fn triplet_margin_loss_functional(
     p: f64,
     eps: f64,
     swap: bool,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let a = borrow_tensor(anchor)?;
     let positive = borrow_tensor(positive)?;
@@ -804,7 +793,7 @@ fn triplet_margin_loss_functional(
         p,
         eps,
         swap,
-        reduction.unwrap_or("mean"),
+        reduction,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -812,33 +801,29 @@ fn triplet_margin_loss_functional(
 
 /// `log(1 + exp(-target * input))`, the smooth hinge, for a `target` of `+1` or `-1`.
 #[pyfunction(name = "soft_margin_loss")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction="mean"))]
 fn soft_margin_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let scores = borrow_tensor(input)?;
     let labels = borrow_tensor(target)?;
-    let result = soft_margin_loss_op(
-        scores.tensor(),
-        labels.tensor(),
-        reduction.unwrap_or("mean"),
-    )
-    .map_err(_convert_error)?;
+    let result =
+        soft_margin_loss_op(scores.tensor(), labels.tensor(), reduction).map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
 }
 
 /// The negative log-likelihood of a Poisson observation. `log_input` says whether `input` is the log of the rate or the rate itself; `full` adds the Stirling term, which changes no gradient because it depends only on `target`.
 #[pyfunction(name = "poisson_nll_loss")]
-#[pyo3(signature = (input, target, log_input=true, full=false, eps=1e-8, reduction=None))]
+#[pyo3(signature = (input, target, log_input=true, full=false, eps=1e-8, reduction="mean"))]
 fn poisson_nll_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
     log_input: bool,
     full: bool,
     eps: f64,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let rate = borrow_tensor(input)?;
     let counts = borrow_tensor(target)?;
@@ -848,7 +833,7 @@ fn poisson_nll_loss_functional(
         log_input,
         full,
         eps,
-        reduction.unwrap_or("mean"),
+        reduction,
     )
     .map_err(_convert_error)?;
     Ok(PyTensor::from_tensor(result))
@@ -856,7 +841,7 @@ fn poisson_nll_loss_functional(
 
 /// Connectionist temporal classification: the total probability of every alignment of `targets` to `log_probs`, for a model whose output is longer than its target and unaligned with it. `log_probs` is `(steps, batch, classes)` and is expected to be log probabilities already. `targets` is either a padded `(batch, length)` block or the rows concatenated into a vector, and may not contain the blank class. `reduction="mean"` divides each loss by its own target length before averaging. `zero_infinity` replaces the infinite loss of a target too long to fit its input, and its gradient, with zero.
 #[pyfunction(name = "ctc_loss")]
-#[pyo3(signature = (log_probs, targets, input_lengths, target_lengths, blank=0, reduction=None, zero_infinity=false))]
+#[pyo3(signature = (log_probs, targets, input_lengths, target_lengths, blank=0, reduction="mean", zero_infinity=false))]
 #[allow(clippy::too_many_arguments)]
 fn ctc_loss_functional(
     log_probs: &Bound<PyAny>,
@@ -864,7 +849,7 @@ fn ctc_loss_functional(
     input_lengths: &Bound<PyAny>,
     target_lengths: &Bound<PyAny>,
     blank: usize,
-    reduction: Option<&str>,
+    reduction: &str,
     zero_infinity: bool,
 ) -> PyResult<PyTensor> {
     let probabilities = borrow_tensor(log_probs)?;
@@ -877,7 +862,7 @@ fn ctc_loss_functional(
         inputs.tensor(),
         lengths.tensor(),
         blank,
-        reduction.unwrap_or("mean"),
+        reduction,
         zero_infinity,
     )
     .map_err(_convert_error)?;
@@ -909,15 +894,14 @@ fn grid_sample_functional(
 
 /// `log(cosh(prediction - target))`: smooth everywhere, and asymptotically linear like `l1_loss`.
 #[pyfunction(name = "log_cosh_loss")]
-#[pyo3(signature = (input, target, reduction=None))]
+#[pyo3(signature = (input, target, reduction="mean"))]
 fn log_cosh_loss_functional(
     input: &Bound<PyAny>,
     target: &Bound<PyAny>,
-    reduction: Option<&str>,
+    reduction: &str,
 ) -> PyResult<PyTensor> {
     let prediction = borrow_tensor(input)?;
     let target_tensor = borrow_tensor(target)?;
-    let reduction = reduction.unwrap_or("mean");
     let loss = LogCoshLoss::new(reduction);
     let result = loss
         .forward(prediction.tensor(), target_tensor.tensor())

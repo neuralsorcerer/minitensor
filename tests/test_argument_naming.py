@@ -327,3 +327,53 @@ def test_the_numerical_floor_is_called_eps_everywhere():
     assert not offenders, "these say `epsilon` rather than `eps`: " + ", ".join(
         offenders
     )
+
+
+def test_no_signature_hides_a_default_behind_none():
+    """`reduction=None` said nothing; the answer is always `"mean"`.
+
+    A PyO3 argument taken as `Option<T>` and resolved with `unwrap_or` in the
+    body advertises `None`, which tells a reader of `help()` neither the value
+    nor that there is one. Twenty-five losses did that for `reduction` while
+    two of their neighbours said `reduction="mean"` outright, and the
+    activations, the optimizers and `HuberLoss`'s `delta` were the same.
+
+    `None` is still a fine default where it *is* the value -- an absent
+    `weight`, an absent `pos_weight`, a `dim` meaning "all of them". What this
+    catches is the arguments below, which have a real default and hid it.
+    """
+
+    named = (
+        "reduction",
+        "alpha",
+        "gamma",
+        "delta",
+        "beta",
+        "eps",
+        "lambd",
+        "negative_slope",
+        "approximate",
+        "momentum",
+        "threshold",
+    )
+    # `logit`'s `eps` is the exception that proves the rule: `None` there means
+    # "do not clamp", which is a value of the argument and what PyTorch's
+    # `logit` means by it too, so it has no hidden default to reveal.
+    allowed = {"minitensor.logit", "Tensor.logit", "functional.logit"}
+    offenders = []
+    for label, function in _every_public_callable():
+        if label in allowed:
+            continue
+        signature = getattr(function, "__text_signature__", None)
+        if signature is None:
+            try:
+                signature = str(inspect.signature(function))
+            except Exception:
+                continue
+        offenders.extend(
+            f"{label}({argument}=None)"
+            for argument in named
+            if f"{argument}=None" in signature
+        )
+
+    assert not offenders, "defaults hidden behind `None`: " + ", ".join(offenders)

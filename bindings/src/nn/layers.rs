@@ -1632,9 +1632,8 @@ pub struct PyMSELoss {
 impl PyMSELoss {
     /// Create a new MSE loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: MSELoss::new(reduction),
         }
@@ -1656,9 +1655,8 @@ pub struct PyMAELoss {
 impl PyMAELoss {
     /// Create a new MAE loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: MAELoss::new(reduction),
         }
@@ -1680,10 +1678,8 @@ pub struct PyHuberLoss {
 impl PyHuberLoss {
     /// Create a new Huber loss
     #[new]
-    #[pyo3(signature = (delta=None, reduction=None))]
-    fn new(delta: Option<f64>, reduction: Option<&str>) -> Self {
-        let delta = delta.unwrap_or(1.0);
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (delta=1.0, reduction="mean"))]
+    fn new(delta: f64, reduction: &str) -> Self {
         Self {
             inner: HuberLoss::new(delta, reduction),
         }
@@ -1715,9 +1711,8 @@ pub struct PySmoothL1Loss {
 impl PySmoothL1Loss {
     /// Create a new Smooth L1 loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: SmoothL1Loss::new(reduction),
         }
@@ -1739,9 +1734,8 @@ pub struct PyLogCoshLoss {
 impl PyLogCoshLoss {
     /// Create a new Log-cosh loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: LogCoshLoss::new(reduction),
         }
@@ -1763,9 +1757,8 @@ pub struct PyCrossEntropyLoss {
 impl PyCrossEntropyLoss {
     /// Create a new Cross Entropy loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: CrossEntropyLoss::new(reduction),
         }
@@ -1787,9 +1780,8 @@ pub struct PyBCELoss {
 impl PyBCELoss {
     /// Create a new BCE loss
     #[new]
-    #[pyo3(signature = (reduction=None))]
-    fn new(reduction: Option<&str>) -> Self {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean"))]
+    fn new(reduction: &str) -> Self {
         Self {
             inner: BCELoss::new(reduction),
         }
@@ -1811,9 +1803,8 @@ pub struct PyBCEWithLogitsLoss {
 impl PyBCEWithLogitsLoss {
     /// Create a new BCE-with-logits loss
     #[new]
-    #[pyo3(signature = (reduction=None, pos_weight=None))]
-    fn new(reduction: Option<&str>, pos_weight: Option<&Bound<PyAny>>) -> PyResult<Self> {
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (reduction="mean", pos_weight=None))]
+    fn new(reduction: &str, pos_weight: Option<&Bound<PyAny>>) -> PyResult<Self> {
         let inner = match pos_weight {
             Some(w) => {
                 let w = borrow_tensor(w)?;
@@ -1854,11 +1845,8 @@ pub struct PyFocalLoss {
 impl PyFocalLoss {
     /// Create a new Focal loss
     #[new]
-    #[pyo3(signature = (alpha=None, gamma=None, reduction=None))]
-    fn new(alpha: Option<f64>, gamma: Option<f64>, reduction: Option<&str>) -> Self {
-        let alpha = alpha.unwrap_or(0.25);
-        let gamma = gamma.unwrap_or(2.0);
-        let reduction = reduction.unwrap_or("mean");
+    #[pyo3(signature = (alpha=0.25, gamma=2.0, reduction="mean"))]
+    fn new(alpha: f64, gamma: f64, reduction: &str) -> Self {
         Self {
             inner: FocalLoss::new(alpha, gamma, reduction),
         }
