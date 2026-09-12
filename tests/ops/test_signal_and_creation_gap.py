@@ -231,9 +231,24 @@ def test_frexp_and_ldexp_are_inverses():
     )
     mantissa, exponent = mt.frexp(mt.from_numpy(values))
     expected_mantissa, expected_exponent = np.frexp(values)
+
     np.testing.assert_array_equal(mantissa.numpy(), expected_mantissa)
-    np.testing.assert_array_equal(exponent.numpy(), expected_exponent)
-    # Exactly, because the only arithmetic is by powers of two.
+
+    # The exponent of an infinity or a NaN is *unspecified* in C, and the
+    # platforms actually disagree: glibc answers 0 and the Microsoft runtime
+    # answers -1, so `numpy.frexp` is not the same function on Linux and on
+    # Windows. It is compared where it is specified.
+    finite = np.isfinite(values)
+    np.testing.assert_array_equal(exponent.numpy()[finite], expected_exponent[finite])
+    # And pinned where it is not, since this library answers the same number
+    # everywhere rather than following whichever libm it was built against.
+    np.testing.assert_array_equal(
+        exponent.numpy()[~finite], np.zeros(3, dtype=np.int64)
+    )
+
+    # Exactly, because the only arithmetic is by powers of two -- and it holds
+    # for the unspecified three too, since scaling an infinity or a NaN by any
+    # power of two leaves it alone.
     np.testing.assert_array_equal(mt.ldexp(mantissa, exponent).numpy(), values)
 
 

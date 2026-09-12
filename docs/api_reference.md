@@ -1631,7 +1631,10 @@ assert row_std.shape == (2, 3)
 - `frexp(input)` — the mantissa in `[0.5, 1)` and the exponent, as a pair, so
   that `ldexp(*frexp(x))` reproduces `x` *exactly*: the only arithmetic in
   either direction is by powers of two. Zero, infinity and NaN come back as
-  themselves with an exponent of zero, as in C and NumPy.
+  themselves with an exponent of zero. C pins that only for zero -- for
+  infinity and NaN the exponent is *unspecified*, and platforms disagree
+  (glibc says 0, the Microsoft runtime says -1, so `numpy.frexp` differs
+  between Linux and Windows). This answers zero on every machine.
 - `divmod(input, other)` — the quotient and the remainder together, as Python's
   builtin gives them. Both round toward negative infinity, so
   `q * other + r == input` and the remainder takes the divisor's sign.

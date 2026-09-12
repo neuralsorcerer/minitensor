@@ -384,8 +384,16 @@ def frexp(input: object) -> tuple[Tensor, Tensor]:
     """Split each value into a mantissa in `[0.5, 1)` and an exponent.
 
     The inverse of `ldexp`: `ldexp(*frexp(x))` is `x` exactly, because the only
-    arithmetic is by powers of two. Zero, infinity and NaN come back as
-    themselves with an exponent of zero, as they do in C and NumPy.
+    arithmetic is by powers of two.
+
+    Zero, infinity and NaN come back as themselves with an exponent of zero.
+    C pins that only for zero; for infinity and NaN it leaves the exponent
+    *unspecified*, and platforms differ -- glibc answers 0 and the Microsoft
+    runtime answers -1, so `numpy.frexp` gives one on Linux and the other on
+    Windows. This gives zero everywhere, which is the same number on every
+    machine and the one that makes the round trip read as a round trip. Either
+    choice reconstructs the value, since scaling an infinity or a NaN by any
+    power of two leaves it alone.
 
     The exponent is found through a logarithm and then *corrected*, because
     `log2` of a power of two can land a hair either side of the integer; one
