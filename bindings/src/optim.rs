@@ -151,13 +151,14 @@ impl PyOptimizer {
     }
 
     /// Zero out gradients for the tracked parameters.
-    #[pyo3(signature = (set_to_none=None))]
-    fn zero_grad(&mut self, py: Python<'_>, set_to_none: Option<bool>) -> PyResult<()> {
+    #[pyo3(signature = (set_to_none=false))]
+    #[pyo3(text_signature = "($self, set_to_none=False)")]
+    fn zero_grad(&mut self, py: Python<'_>, set_to_none: bool) -> PyResult<()> {
         if self.parameters.is_empty() {
             return Err(PyValueError::new_err("No parameters to optimize."));
         }
 
-        let set = set_to_none.unwrap_or(false);
+        let set = set_to_none;
 
         {
             let mut borrowed: Vec<PyRefMut<PyTensor>> = Vec::with_capacity(self.parameters.len());

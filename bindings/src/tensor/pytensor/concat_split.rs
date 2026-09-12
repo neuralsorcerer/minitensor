@@ -7,17 +7,22 @@
 use super::*;
 #[pymethods]
 impl PyTensor {
-    /// Concatenate tensors along an axis
+    /// Join tensors along an existing axis.
+    ///
+    /// `dim`, not `axis`, and defaulted the way `stack` below defaults it:
+    /// these two are the same pair of static constructors, and one of them
+    /// wanting NumPy's keyword made the choice depend on which you reached
+    /// for. The free spellings -- `cat`, `concat` -- have always said `dim`.
+    /// `numpy_compat.concatenate` keeps `axis`, as everything in that module
+    /// does.
     #[staticmethod]
-    #[pyo3(signature = (tensors, axis=None))]
-    pub fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
+    #[pyo3(signature = (tensors, dim=0))]
+    pub fn concatenate(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
         if tensors.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Cannot concatenate empty list of tensors",
             ));
         }
-
-        let axis = axis.unwrap_or(0);
 
         let tensor_vec: Vec<Tensor> = tensors
             .iter()
@@ -26,7 +31,7 @@ impl PyTensor {
 
         let tensor_refs: Vec<&Tensor> = tensor_vec.iter().collect();
         let result =
-            engine::ops::shape_ops::concatenate(&tensor_refs, axis).map_err(_convert_error)?;
+            engine::ops::shape_ops::concatenate(&tensor_refs, dim).map_err(_convert_error)?;
         Ok(PyTensor::from_tensor(result))
     }
 
@@ -187,12 +192,18 @@ impl PyTensor {
         self.split_with_sections(sections, axis)
     }
 
-    fn split_with_sections(&self, sections: Vec<usize>, axis: usize) -> PyResult<Vec<PyTensor>> {
+    /// Split into pieces of the given sizes along `dim`.
+    ///
+    /// `dim`, like every other axis argument here -- the reference has always
+    /// documented it that way, and this was the one signature that said
+    /// `axis` without a name asking for it.
+    #[pyo3(signature = (sections, dim))]
+    fn split_with_sections(&self, sections: Vec<usize>, dim: usize) -> PyResult<Vec<PyTensor>> {
         let mut outputs = Vec::with_capacity(sections.len());
         let mut start = 0;
         for size in sections {
             let end = start + size;
-            let slice = engine::ops::shape_ops::slice(&self.inner, axis as isize, start, end, 1)
+            let slice = engine::ops::shape_ops::slice(&self.inner, dim as isize, start, end, 1)
                 .map_err(_convert_error)?;
             outputs.push(PyTensor::from_tensor(slice));
             start = end;

@@ -215,7 +215,7 @@ fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTenso
         let joined = tensor_concatenate(&refs, 0).map_err(_convert_error)?;
         return Ok(PyTensor::from_tensor(joined));
     };
-    PyTensor::concatenate(tensors, Some(axis))
+    PyTensor::concatenate(tensors, axis)
 }
 
 /// Stack tensors along a new axis.

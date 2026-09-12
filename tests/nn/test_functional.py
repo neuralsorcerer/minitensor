@@ -237,8 +237,8 @@ def test_activation_methods_have_pytorch_defaults():
     assert tuple(stacked.shape) == (2, 2, 2)
     joined = mt.Tensor.concatenate([t, t])
     assert tuple(joined.shape) == (4, 2)
-    joined_axis = mt.Tensor.concatenate([t, t], axis=1)
-    assert tuple(joined_axis.shape) == (2, 4)
+    joined_dim = mt.Tensor.concatenate([t, t], dim=1)
+    assert tuple(joined_dim.shape) == (2, 4)
 
 
 def test_softplus_matches_numpy_and_grad():

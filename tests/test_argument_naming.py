@@ -89,6 +89,60 @@ def test_the_axis_argument_is_called_dim_unless_the_name_says_otherwise():
     assert checked > 80, f"only {checked} functions reached -- the sweep broke"
 
 
+def _tensor_methods():
+    """Every introspectable `Tensor` method, under the name it is reached by.
+
+    The sweep above walks `mt.__all__`, which is the free functions. A method
+    that has no free spelling -- `split_with_sections`, the static `concatenate`
+    -- is reached only from here, and both of those were added with NumPy's
+    keyword because nothing looked.
+    """
+    for name in sorted(dir(mt.Tensor)):
+        if name.startswith("_"):
+            continue
+        method = getattr(mt.Tensor, name, None)
+        if not callable(method):
+            continue
+        try:
+            parameters = list(inspect.signature(method).parameters)
+        except (ValueError, TypeError):
+            continue  # a builtin with no introspectable signature
+        yield name, method, parameters
+
+
+def test_a_method_spells_its_axis_argument_dim_too():
+    offenders = []
+    checked = 0
+    for name, _, parameters in _tensor_methods():
+        axis_like = [p for p in parameters if p in _AXIS_WORDS]
+        if not axis_like:
+            continue
+        checked += 1
+        numpy_spelled = [p for p in axis_like if p in _NUMPY_WORDS]
+        if not numpy_spelled:
+            continue
+        if _NAMED_FOR_THEIR_ARGUMENT.get(name) in {"axis", "axes"}:
+            continue
+        offenders.append(f"Tensor.{name}{tuple(numpy_spelled)}")
+
+    assert not offenders, (
+        "these methods spell the axis argument NumPy's way without a name "
+        "that asks for it: " + ", ".join(offenders)
+    )
+    assert checked > 60, f"only {checked} methods reached -- the sweep broke"
+
+
+def test_a_method_keeping_the_axis_says_keepdim():
+    offenders = [
+        f"Tensor.{name}"
+        for name, _, parameters in _tensor_methods()
+        if "keepdims" in parameters
+    ]
+    assert not offenders, "these say `keepdims` rather than `keepdim`: " + ", ".join(
+        offenders
+    )
+
+
 def test_keeping_the_axis_is_called_keepdim():
     offenders = [
         name

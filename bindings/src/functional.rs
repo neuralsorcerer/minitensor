@@ -1891,7 +1891,7 @@ pub fn glu(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
-    PyTensor::concatenate(tensors, Some(dim))
+    PyTensor::concatenate(tensors, dim)
 }
 
 /// Join tensors along a new dimension, which all of them must be shaped alike for.

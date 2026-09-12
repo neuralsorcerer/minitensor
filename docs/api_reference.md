@@ -116,7 +116,7 @@ of convenience aliases.
 | `setxor1d(input, other, assume_unique=False)` | The distinct values in exactly one of the two, ascending -- the union less the intersection, so a value in both is in neither answer. |
 | `packbits(input, dim=None, bitorder='big')` | Pack groups of eight truth values along `dim` into one integer each. NumPy answers in `uint8`; this library has no unsigned byte, so the values come back as **int32** -- the same numbers in a wider box, and `.numpy().astype(numpy.uint8)` recovers NumPy's array exactly. The axis is zero-padded up to a multiple of eight at its end, which is why `unpackbits` is the inverse only when told the original length. `bitorder` decides whether the first element of each group is the high bit or the low one. |
 | `unpackbits(input, dim=None, count=None, bitorder='big')` | Expand each element along `dim` into its eight bits. A value outside `0..255` is refused rather than truncated: there is no eight-bit answer for it, and quietly giving the low byte would make the round trip lie. `count` cuts the result to length -- non-negative keeps that many bits and pads with zeros past the end, negative trims that many, which is how the padding `packbits` added is undone. NumPy pads an *empty* input by reading uninitialised memory; this answers zeros. |
-| `trim_zeros(input, trim='fb', axis=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them -- NumPy calls that argument `axis`, but every op here spells it `dim`. |
+| `trim_zeros(input, trim='fb', dim=None)` | The tensor cropped to the smallest box that still holds every non-zero, with the rank preserved. Only the ends: a zero between two non-zeros stays, which is the difference between this and a mask. `trim` picks the ends (`'f'`, `'b'`, `'fb'`) and `dim` the axes, defaulting to all of them -- NumPy calls that argument `axis`, but every op here spells it `dim`. |
 | `unique_values(input)` / `unique_counts(input)` / `unique_inverse(input)` / `unique_all(input)` | The array API's spellings of `unique`, each answer named rather than positional. The standard leaves `unique_values`' order unspecified and NumPy returns it unsorted; these come back ascending, which is what `unique` already promised. |
 | `partition(input, kth, dim=-1)` | Each slice along `dim` rearranged so position `kth` holds what a sort would put there, everything before it no greater and everything after no less. The rest of the order is unspecified, and that is the point: the selection is linear in the slice where a sort is `n log n` -- two million floats take 8ms partitioned against 24 sorted. `kth` may be several positions, each landing where a sort would put it, and may count from the end; `dim=None` partitions the flattened tensor. NaN sorts after every number, as for `sort`. |
 | `argpartition(input, kth, dim=-1)` | Where the elements `partition` would produce came from, so `take_along_dim(x, argpartition(x, k), dim)` is a partition of the same data around the same `k`: that position holds what a sort would leave there and the two sides hold the same values. Not the same *arrangement* as `partition` when values repeat -- the order of everything but `k` is unspecified, which is what makes a selection cheaper than a sort, and the two forms take different routes to it. |
@@ -164,7 +164,7 @@ matrix. On a `(2, 3, 4)` tensor, `.T` gives `(4, 3, 2)`, `.mT` gives
 | `inner(input, other)` | The sum-product over the last axis of each operand -- the dot product for two vectors, and every pair of trailing rows contracted above that. |
 | `tensordot(input, other, dims=2)` | Contract over the axes `dims` names, as an integer count or a pair of axis lists. Done by moving the contracted axes to the ends, flattening each side into a matrix and calling `matmul` once: a general contraction *is* a matrix product with the axes rearranged, so this inherits the blocked matmul rather than looping over indices. |
 | `addmm(input, mat1, mat2, beta=1, alpha=1)` | `beta * input + alpha * (mat1 @ mat2)`, the fused form a linear layer is written in. `baddbmm(...)` is the batched one. |
-| `inverse(input)` | The inverse of each square matrix in the stack -- the `torch` spelling of `inv`. For `inverse(A) @ b`, ask `solve(A, b)` instead -- same answer, without forming the inverse, faster and better conditioned. |
+| `inverse(input)` | The inverse of each square matrix in the stack -- the `torch` spelling of `inv`. For `inverse(A) @ b`, ask `solve(lhs, rhs)` instead -- same answer, without forming the inverse, faster and better conditioned. |
 | `pinverse(input, rcond=1e-15)` | The Moore-Penrose pseudo-inverse of each matrix in the stack -- the `torch` spelling of `pinv`, keeping that name's threshold of `1e-15` rather than `pinv`'s own `max(m, n) * eps`. The threshold is what makes it a pseudo-inverse rather than a division by nearly zero. |
 | `matrix_exp(input)` | The matrix exponential `sum_k A**k / k!` of each square matrix -- the solution operator of `dx/dt = A x`, not `exp` applied elementwise. Scaling and squaring with a Pade approximant, at the degree and halving count Higham's 2005 analysis gives for the input's precision, so float32 takes a shorter route rather than the same one at a worse answer. Every step is a `matmul`, a `solve` or a scalar multiply, so the gradient is the exact derivative of the approximant that was evaluated. A batch shares one scaling, chosen from the largest norm in it. |
 | `matrix_norm(input, ord="fro", keepdim=False)` | A norm of each matrix over its last two axes. `"fro"` is the elementwise 2-norm and `"nuc"` the sum of the singular values; `1` and `inf` are the induced norms (largest absolute column and row sum) and `2` the largest singular value, with each negative order the same quantity minimised. The axes are the last two, as for `inverse`, `diagonal` and `svd` -- `permute` first to use others. A condition number in an order other than 2 is `matrix_norm(a, ord) * matrix_norm(inverse(a), ord)`; `cond` is the 2-norm one, which needs no inverse. |
@@ -449,7 +449,7 @@ its values, so nothing flows back to the source through it.
 - `from_numpy(array)`
 - `from_numpy_shared(array)` — currently copies like `from_numpy`; writes to
   the source array after construction are not visible through the tensor
-- `as_tensor(obj, dtype=None, requires_grad=None, copy=False)`
+- `as_tensor(data, dtype=None, device=None, requires_grad=None, copy=False)`
 
 #### Which constructor keeps the source dtype
 
@@ -458,7 +458,7 @@ The two families differ, and the difference is easy to trip over:
 | Constructor | dtype when `dtype=` is omitted |
 | --- | --- |
 | `Tensor(obj)`, `tensor(obj)` | always `float32` |
-| `from_numpy(array)`, `as_tensor(obj)` | taken from the source |
+| `from_numpy(array)`, `as_tensor(data)` | taken from the source |
 
 So `Tensor(np.arange(3))` is `float32` while `from_numpy(np.arange(3))` is
 `int64`, and a float64 array loses precision through `Tensor` but not through
@@ -653,7 +653,7 @@ no argument drops every length-1 axis.
 
 ### Splitting an axis
 
-- `split(size_or_sections, dim)` cuts into pieces of `size` each, the last one
+- `split(split_size_or_sections, dim=0)` cuts into pieces of `size` each, the last one
   shorter if the axis does not divide evenly, or into explicitly given sizes.
 - `chunk(sections, dim)` cuts into `sections` pieces of equal size.
 - `split_with_sections(sections, dim)` takes the sizes explicitly.
@@ -1027,7 +1027,7 @@ square matrix.
 
 #### Solving against a factorisation you already have
 
-- `lu_solve(lu, pivots, b)` — solve `A X = B` from what `lu_factor` returned,
+- `lu_solve(factors, pivots, rhs)` — solve `A X = B` from what `lu_factor` returned,
   without factorising again. That is the reason the packed form is worth
   keeping: several right-hand sides against one matrix cost one factorisation
   and a pair of substitutions each, rather than a full elimination every time.
@@ -1475,7 +1475,7 @@ assert row_std.shape == (2, 3)
 - `lerp(input, end, weight)` — `input + weight * (end - input)`, written as a
   step from `input` so `weight = 0` and `weight = 1` return the endpoints
   exactly rather than approximately.
-- `addcmul(input, t1, t2, value=1)`, `addcdiv(...)` — `input + value * t1 * t2`
+- `addcmul(input, tensor1, tensor2, value=1)`, `addcdiv(...)` — `input + value * tensor1 * tensor2`
   and the same with a division.
 - `deg2rad`, `rad2deg` — a multiplication by `pi/180` and its inverse.
 - `float_power(input, exponent)` — the power computed in float64 whatever the
@@ -1703,17 +1703,17 @@ operator protocol can dispatch without building a temporary tensor.
 Create a new tensor that inherits dtype and device from an existing one:
 
 - `new_zeros(shape)`, `new_ones(shape)`, `new_empty(shape)`
-- `new_full(shape, value)`
+- `new_full(shape, fill_value)`
 - `new_tensor(data)`
 
 ### Autograd + in-place
 
 - `backward()` to trigger gradient computation.
 - `fill_(value)` for in-place fills.
-- `copy_(other)` copies another tensor's values in place.
+- `copy_(source)` copies another tensor's values in place.
 - `detach()` returns a view that autograd does not track; `detach_()` detaches
   in place and returns `None`.
-- `requires_grad_(flag)` sets gradient tracking and returns the tensor, so it
+- `requires_grad_(requires_grad)` sets gradient tracking and returns the tensor, so it
   chains.
 - `grad` holds the accumulated gradient; `has_grad` is a **property** reporting
   whether one is present.
@@ -2191,14 +2191,14 @@ when you already hold the weights and do not want a module:
 | `alpha_dropout(input, p=0.5, training=True)` | Dropout that leaves a self-normalizing network self-normalizing. Ordinary dropout zeroes an element and rescales the rest, keeping the mean and moving the variance -- fine after a rectifier, wrong after `selu`, whose premise is a mean of zero and a variance of one from layer to layer. This drops to `selu`'s own saturation value and applies the affine correction that restores both moments, so a standard normal comes back standard normal at any `p`. |
 | `feature_alpha_dropout(input, p=0.5, training=True)` | `alpha_dropout` over whole channels, as `dropout2d` is over `dropout`: the same correction and saturation value, one draw per channel rather than per element. |
 | `rrelu(input, lower=0.125, upper=0.333..., training=True)` | A leaky rectifier whose negative slope is drawn uniformly from `[lower, upper]` per element while training, and is the midpoint in evaluation so the network sees the average of what it trained against. Bit-exact on the positive side, and its derivative at the origin is the negative side's, agreeing with `leaky_relu` and `prelu`. |
-| `mse_loss(predictions, targets, reduction="mean")` | Mean squared error. |
-| `l1_loss(predictions, targets, reduction="mean")` | Mean absolute error. |
-| `smooth_l1_loss(predictions, targets, reduction="mean", beta=1.0)` | Smooth L1: quadratic below `beta`, linear above. `beta` must be positive and finite. |
-| `huber_loss(predictions, targets, reduction="mean", delta=1.0)` | Huber loss. Related to the above by `huber(x, d) == d * smooth_l1(x, beta=d)`, so the two agree only at `1.0`. |
-| `log_cosh_loss(predictions, targets, ...)` | Log-cosh loss. |
-| `kl_div(predictions, targets, reduction="mean")` | KL divergence over probabilities (not log-probabilities). `reduction="mean"` is the element-wise mean, as for every other loss here; `"batchmean"` divides by the leading dimension, which is the divisor that makes the result a true KL divergence per sample. |
+| `mse_loss(input, target, reduction="mean")` | Mean squared error. |
+| `l1_loss(input, target, reduction="mean")` | Mean absolute error. |
+| `smooth_l1_loss(input, target, reduction="mean", beta=1.0)` | Smooth L1: quadratic below `beta`, linear above. `beta` must be positive and finite. |
+| `huber_loss(input, target, reduction="mean", delta=1.0)` | Huber loss. Related to the above by `huber(x, d) == d * smooth_l1(x, beta=d)`, so the two agree only at `1.0`. |
+| `log_cosh_loss(input, target, ...)` | Log-cosh loss. |
+| `kl_div(input, target, reduction="mean")` | KL divergence over probabilities (not log-probabilities). `reduction="mean"` is the element-wise mean, as for every other loss here; `"batchmean"` divides by the leading dimension, which is the divisor that makes the result a true KL divergence per sample. |
 | `focal_loss(input, target, alpha=0.25, gamma=2.0, reduction="mean")` | Multi-class focal loss over logits, with one-hot or index targets. `alpha` must lie strictly in `(0, 1)`. |
-| `binary_cross_entropy(predictions, targets, ...)` | Binary cross entropy over probabilities. |
+| `binary_cross_entropy(input, target, ...)` | Binary cross entropy over probabilities. |
 | `binary_cross_entropy_with_logits(input, target, pos_weight=None, reduction="mean")` | Binary cross entropy over raw logits, with the sigmoid fused in. Prefer this to `sigmoid` followed by `binary_cross_entropy`: it is the same function mathematically but keeps its gradient at logit magnitudes where the two-step form has already lost it. `pos_weight` is broadcast against the targets and weights the positive class. |
 | `cross_entropy(input, target, reduction="mean", dim=1)` | Softmax cross entropy over `dim`. |
 | `nll_loss(input, target, weight=None, ignore_index=-100, reduction="mean")` | Negative log-likelihood over *log*-probabilities -- what `log_softmax` produces. Pairing the two gives what `cross_entropy` gives; they are separate so a model that already carries its own log-probabilities does not have them recomputed. `weight` scales each class, and with `reduction="mean"` the divisor becomes the total weight rather than the count, which is what makes a weighted mean an average and not a scaled sum. `ignore_index` drops positions from both. |
