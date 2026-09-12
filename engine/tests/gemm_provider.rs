@@ -35,6 +35,9 @@ const SENTINEL: f32 = -12.5;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Offer {
+    /// How many independent products the request carried. One for an ordinary
+    /// matrix product; more when a stack of them is offered whole.
+    batch: usize,
     m: usize,
     k: usize,
     n: usize,
@@ -60,6 +63,7 @@ impl Recorder {
             return;
         }
         offers().lock().unwrap().push(Offer {
+            batch: request.batch,
             m: request.m,
             k: request.k,
             n: request.n,
@@ -176,6 +180,7 @@ fn a_two_dimensional_product_is_offered_row_major_on_both_sides() {
     assert_eq!(
         taken(),
         vec![Offer {
+            batch: 1,
             m,
             k,
             n,
@@ -208,6 +213,7 @@ fn a_dense_layer_offers_its_weight_transposed_where_it_lies() {
     assert_eq!(
         taken(),
         vec![Offer {
+            batch: 1,
             m: rows,
             k: in_features,
             n: out_features,
@@ -266,6 +272,7 @@ fn a_dense_layer_backward_offers_both_of_its_products() {
         seen,
         vec![
             Offer {
+                batch: 1,
                 m: rows,
                 k: out_features,
                 n: in_features,
@@ -273,6 +280,7 @@ fn a_dense_layer_backward_offers_both_of_its_products() {
                 rhs_storage: Storage::RowMajor,
             },
             Offer {
+                batch: 1,
                 m: out_features,
                 k: rows,
                 n: in_features,
@@ -391,18 +399,87 @@ fn an_integer_product_is_never_offered() {
 }
 
 #[test]
-fn a_batched_product_stays_with_the_engines_own_kernel() {
+fn a_batched_product_is_offered_as_one_request() {
     let _serial = begin();
 
-    // Several products at once already fill the thread pool with one whole
-    // matrix per worker, which is what a provider would otherwise be for.
+    // This used to assert the opposite -- that a stack of matrices stayed with
+    // the engine, on the reasoning that the batch axis already fills the thread
+    // pool with one whole matrix per worker. Measured, that reasoning did not
+    // hold: batched products ran at 0.27-0.66x of NumPy, and offering the stack
+    // is 1.2-3.1x faster. So they are offered, and offered *whole*: handing
+    // them over one matrix at a time would spend the crossing per matrix, which
+    // at a batch of 256 costs more than the product does.
     let (batch, m, k, n) = (3, 4, DECLINED_K, 5);
     let lhs = tensor_f32(ramp_f32(batch * m * k), vec![batch, m, k]);
     let rhs = tensor_f32(ramp_f32(batch * k * n), vec![batch, k, n]);
     let out = linalg::matmul(&lhs, &rhs).unwrap();
 
-    assert!(taken().is_empty());
+    assert_eq!(
+        taken(),
+        vec![Offer {
+            batch,
+            m,
+            k,
+            n,
+            lhs_storage: Storage::RowMajor,
+            rhs_storage: Storage::RowMajor,
+        }],
+        "one offer carrying the whole stack, not one per matrix"
+    );
     assert_eq!(out.shape().dims(), &[batch, m, n]);
+}
+
+#[test]
+fn a_declined_batch_is_computed_correctly_by_the_engine() {
+    let _serial = begin();
+
+    // `DECLINED_K` is recorded and refused, so this exercises the path where
+    // the offer is made, turned down, and every matrix in the stack still has
+    // to come back right -- including the ones after the first, which is what
+    // a wrong batch offset would break.
+    let (batch, m, k, n) = (3, 2, DECLINED_K, 2);
+    let lhs_values = ramp_f32(batch * m * k);
+    let rhs_values = ramp_f32(batch * k * n);
+    let lhs = tensor_f32(lhs_values.clone(), vec![batch, m, k]);
+    let rhs = tensor_f32(rhs_values.clone(), vec![batch, k, n]);
+    let out = linalg::matmul(&lhs, &rhs).unwrap();
+    let got = out.data().as_f32_slice().unwrap();
+
+    for b in 0..batch {
+        for i in 0..m {
+            for j in 0..n {
+                let expected: f32 = (0..k)
+                    .map(|l| lhs_values[b * m * k + i * k + l] * rhs_values[b * k * n + l * n + j])
+                    .sum();
+                let actual = got[b * m * n + i * n + j];
+                assert!(
+                    (actual - expected).abs() <= 1e-3 * expected.abs().max(1.0),
+                    "batch {b} element ({i}, {j}): {actual} != {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_handled_batch_writes_the_whole_stack() {
+    let _serial = begin();
+
+    // `HANDLED_K` fills the output with the sentinel, so this says the request
+    // handed over covers every element of the batch and not just the first
+    // matrix -- a `batch` the provider believed but an `out` sized for one
+    // product would leave the rest untouched.
+    let (batch, m, k, n) = (4, 3, HANDLED_K, 2);
+    let lhs = tensor_f32(ramp_f32(batch * m * k), vec![batch, m, k]);
+    let rhs = tensor_f32(ramp_f32(batch * k * n), vec![batch, k, n]);
+    let out = linalg::matmul(&lhs, &rhs).unwrap();
+
+    let got = out.data().as_f32_slice().unwrap();
+    assert_eq!(got.len(), batch * m * n);
+    assert!(
+        got.iter().all(|v| *v == SENTINEL),
+        "the provider was given the whole stack to write"
+    );
 }
 
 #[test]

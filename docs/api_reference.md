@@ -790,7 +790,7 @@ Conversion helpers:
 - `float(tensor)` / `int(tensor)` → Python scalar (one-element tensors only;
   `int` truncates, bool converts to 1/0)
 
-#### Reading a tensor without copying it
+### Reading a tensor without copying it
 
 `numpy.asarray(tensor)` comes back pointing at the tensor's own memory. Every
 tensor is contiguous and row-major, which is exactly what an array header
