@@ -250,3 +250,51 @@ def test_a_method_makes_the_same_arguments_optional(name):
     ), f"{name} advertises different defaults on its two spellings: " + ", ".join(
         differing
     )
+
+
+def _every_public_callable():
+    """Every callable a user can reach, across all four surfaces."""
+
+    for holder, label in (
+        (mt, "minitensor"),
+        (mt.Tensor, "Tensor"),
+        (mt.functional, "functional"),
+        (mt.numpy_compat, "numpy_compat"),
+    ):
+        for name in sorted(n for n in dir(holder) if not n.startswith("_")):
+            function = getattr(holder, name, None)
+            if (
+                not callable(function)
+                or inspect.isclass(function)
+                or inspect.ismodule(function)
+            ):
+                continue
+            yield f"{label}.{name}", function
+
+
+def test_every_signature_says_what_its_defaults_are():
+    """`help()` has to answer "what happens if I leave this out?".
+
+    PyO3 renders a default it cannot spell -- a negative number, a `Some(0)` --
+    as `...`, so `help(mt.diagonal)` said `dim1=Ellipsis, dim2=Ellipsis` for
+    the two axes a caller most needs the defaults of, and sixteen signatures
+    were like it. A `text_signature` fixes each, and one written by hand can be
+    wrong in a way the generated one cannot: `keepdim=false` is Rust, and
+    `inspect` rejects the whole signature over it.
+    """
+
+    unparseable, vague = [], []
+    for label, function in _every_public_callable():
+        try:
+            signature = inspect.signature(function)
+        except Exception as exc:  # a hand-written signature Python cannot read
+            unparseable.append(f"{label}: {type(exc).__name__}")
+            continue
+        vague.extend(
+            f"{label}({parameter})"
+            for parameter, value in signature.parameters.items()
+            if value.default is Ellipsis
+        )
+
+    assert not unparseable, "signatures Python cannot parse: " + ", ".join(unparseable)
+    assert not vague, "defaults rendered as `...`: " + ", ".join(vague)

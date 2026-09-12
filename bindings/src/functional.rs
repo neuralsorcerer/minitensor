@@ -142,7 +142,10 @@ fn make_one_hot_data(
 
 /// Collapse dimensions `start_dim` through `end_dim` into one.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, start_dim=0, end_dim=-1))]
+#[pyo3(text_signature = "(input, start_dim=0, end_dim=-1)")]
 pub fn flatten(input: &Bound<PyAny>, start_dim: isize, end_dim: isize) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.flatten(start_dim, end_dim)
@@ -903,7 +906,10 @@ pub fn scatter_reduce(
 
 /// Running maximum along `dim`, as `(values, indices)`. Each index says where the running maximum came from; ties keep the earliest position, and a NaN takes over the running maximum and holds it. Keeps the input's shape.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, dim=-1))]
+#[pyo3(text_signature = "(input, dim=-1)")]
 pub fn cummax(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)> {
     let tensor = PyTensor::from_python_value(input)?;
     let (values, indices) = engine::ops::cummax(tensor.tensor(), dim).map_err(_convert_error)?;
@@ -915,7 +921,10 @@ pub fn cummax(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)
 
 /// Running minimum along `dim`, as `(values, indices)`. The mirror of `cummax`, with the same tie and NaN rules.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, dim=-1))]
+#[pyo3(text_signature = "(input, dim=-1)")]
 pub fn cummin(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)> {
     let tensor = PyTensor::from_python_value(input)?;
     let (values, indices) = engine::ops::cummin(tensor.tensor(), dim).map_err(_convert_error)?;
@@ -927,7 +936,10 @@ pub fn cummin(input: &Bound<PyAny>, dim: isize) -> PyResult<(PyTensor, PyTensor)
 
 /// Running `log(sum(exp(x)))` along `dim`. The accumulation stays in the log domain, so a long axis of log-probabilities does not underflow the way `cumsum` of `exp` would.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, dim=-1))]
+#[pyo3(text_signature = "(input, dim=-1)")]
 pub fn logcumsumexp(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     let tensor = PyTensor::from_python_value(input)?;
     Ok(PyTensor::from_tensor(
@@ -1160,7 +1172,10 @@ pub fn nan_to_num(
 
 /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, min_val=-1.0, max_val=1.0))]
+#[pyo3(text_signature = "(input, min_val=-1.0, max_val=1.0)")]
 pub fn hardtanh(input: &Bound<PyAny>, min_val: f64, max_val: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.hardtanh(min_val, max_val)
@@ -1276,7 +1291,10 @@ pub fn tril(input: &Bound<PyAny>, diagonal: i64) -> PyResult<PyTensor> {
 
 /// The requested diagonal of the last two dimensions, as a new trailing axis.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+#[pyo3(text_signature = "(input, offset=0, dim1=-2, dim2=-1)")]
 pub fn diagonal(
     input: &Bound<PyAny>,
     offset: isize,
@@ -1289,7 +1307,10 @@ pub fn diagonal(
 
 /// Sum of the main diagonal.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+#[pyo3(text_signature = "(input, offset=0, dim1=-2, dim2=-1)")]
 pub fn trace(input: &Bound<PyAny>, offset: isize, dim1: isize, dim2: isize) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     tensor.trace(offset, dim1, dim2)
@@ -1383,7 +1404,10 @@ fn unique_result(py: Python<'_>, found: engine::ops::UniqueParts) -> PyResult<Py
 
 /// The value occurring most often along `dim`, as `(values, indices)`. Ties go to the smaller value and the index is its first position along `dim`.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, dim=-1, keepdim=false))]
+#[pyo3(text_signature = "(input, dim=-1, keepdim=False)")]
 pub fn mode(input: &Bound<PyAny>, dim: isize, keepdim: bool) -> PyResult<(PyTensor, PyTensor)> {
     let values = PyTensor::from_python_value(input)?;
     let (found, positions) =
@@ -1536,7 +1560,10 @@ pub fn matrix_power(input: &Bound<PyAny>, power: i64) -> PyResult<PyTensor> {
 
 /// A tensor whose diagonal is `input`: the inverse of `diagonal`.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, offset=0, dim1=-2, dim2=-1))]
+#[pyo3(text_signature = "(input, offset=0, dim1=-2, dim2=-1)")]
 pub fn diag_embed(
     input: &Bound<PyAny>,
     offset: isize,
@@ -1653,7 +1680,10 @@ pub fn topk(
 
 /// Rearrange each slice along `dim` so the `kth` positions hold what a sort would put there.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, kth, dim=-1, want_indices=false))]
+#[pyo3(text_signature = "(input, kth, dim=-1, want_indices=False)")]
 pub fn partition(
     input: &Bound<PyAny>,
     kth: Vec<i64>,
@@ -1847,7 +1877,10 @@ pub fn rope(x: &Bound<PyAny>, base: f64, offset: usize) -> PyResult<PyTensor> {
 /// into `(a, b)` and returns `a * sigmoid(b)` — the gate underlying GLU-family
 /// feed-forward blocks (GEGLU, SwiGLU). `dim` must have even length.
 #[pyfunction]
+// PyO3 renders a negative default as `...`; spelling the signature out
+// keeps `help()` honest about it.
 #[pyo3(signature = (input, dim=-1))]
+#[pyo3(text_signature = "(input, dim=-1)")]
 pub fn glu(input: &Bound<PyAny>, dim: isize) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
     let result = engine::ops::glu(tensor.tensor(), dim).map_err(_convert_error)?;

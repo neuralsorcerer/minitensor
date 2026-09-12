@@ -371,7 +371,10 @@ impl PyTensor {
     }
 
     /// `x` clamped to `[min_val, max_val]`, with no gradient outside them.
+    // PyO3 renders a negative default as `...`; spelling the signature out
+    // keeps `help()` honest about it.
     #[pyo3(signature = (min_val=-1.0, max_val=1.0))]
+    #[pyo3(text_signature = "($self, min_val=-1.0, max_val=1.0)")]
     pub fn hardtanh(&self, min_val: f64, max_val: f64) -> PyResult<Self> {
         let result = self
             .inner

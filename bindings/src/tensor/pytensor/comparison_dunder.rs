@@ -182,7 +182,10 @@ impl PyTensor {
     }
 
     /// A tensor whose diagonal is `self`, the inverse of `diagonal`.
+    // PyO3 renders a negative default as `...`; spelling the signature out
+    // keeps `help()` honest about it.
     #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    #[pyo3(text_signature = "($self, offset=0, dim1=-2, dim2=-1)")]
     pub fn diag_embed(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
         Ok(Self::from_tensor(
             self.inner
@@ -256,7 +259,11 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    // PyO3 renders a negative default as `...`, so `help()` showed
+    // `dim1=Ellipsis` for the two axes a caller most needs to know the
+    // defaults of. Spelling the signature out restores them.
     #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    #[pyo3(text_signature = "($self, offset=0, dim1=-2, dim2=-1)")]
     pub fn diagonal(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
         let result = self
             .inner
@@ -265,7 +272,10 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    // PyO3 renders a negative default as `...`; spelling the signature out
+    // keeps `help()` honest about it.
     #[pyo3(signature = (offset=0, dim1=-2, dim2=-1))]
+    #[pyo3(text_signature = "($self, offset=0, dim1=-2, dim2=-1)")]
     pub fn trace(&self, offset: isize, dim1: isize, dim2: isize) -> PyResult<Self> {
         let result = self
             .inner

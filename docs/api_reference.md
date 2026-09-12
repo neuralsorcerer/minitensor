@@ -3018,8 +3018,13 @@ True
 
 ### Array manipulation
 
-- `concatenate`, `stack`, `vstack`, `hstack`
+- `concatenate(tensors, axis=0)`, `stack(tensors, axis=0)`, `vstack`, `hstack`
 - `split`, `hsplit`, `vsplit`
+
+`concatenate(..., axis=None)` flattens every operand and returns a line, which
+is what `axis=None` means to NumPy -- not "the default axis", which is what
+`None` means almost everywhere else here. This module exists so NumPy code runs
+unchanged, so it follows NumPy where the two disagree.
 
 ### Math & comparisons
 

@@ -379,7 +379,10 @@ impl PyTensor {
         Ok(Self::from_tensor(result))
     }
 
+    // PyO3 renders a negative default as `...`; spelling the signature out
+    // keeps `help()` honest about it.
     #[pyo3(signature = (start_dim=0, end_dim=-1))]
+    #[pyo3(text_signature = "($self, start_dim=0, end_dim=-1)")]
     pub fn flatten(&self, start_dim: isize, end_dim: isize) -> PyResult<Self> {
         let result = engine::ops::shape_ops::flatten(&self.inner, start_dim, end_dim)
             .map_err(_convert_error)?;

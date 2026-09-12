@@ -182,11 +182,39 @@ fn full_like(tensor: &Bound<PyAny>, fill_value: f64, dtype: Option<&str>) -> PyR
     )
 }
 
-/// Concatenate tensors along an axis
+/// Concatenate tensors along `axis`, or over the flattened operands when it is
+/// `None`.
+///
+/// `None` is not "the default axis" here, the way it is elsewhere in this
+/// library: NumPy gives it a meaning of its own, flattening every operand
+/// first and returning a line. This module exists so NumPy code runs
+/// unchanged, and answering `(4, 3)` where NumPy answers `(12,)` is the kind
+/// of divergence that produces a wrong result rather than an error.
 #[pyfunction]
-#[pyo3(signature = (tensors, axis=None))]
+#[pyo3(signature = (tensors, axis=Some(0)))]
+// PyO3 renders a `Some(0)` default as `...`; spelling the signature out keeps
+// `help()` honest about it, and about `None` being a value with a meaning here
+// rather than the absence of one.
+#[pyo3(text_signature = "(tensors, axis=0)")]
 fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
-    PyTensor::concatenate(tensors, axis)
+    let Some(axis) = axis else {
+        if tensors.is_empty() {
+            return Err(PyValueError::new_err(
+                "Cannot concatenate empty list of tensors",
+            ));
+        }
+        let flattened: Vec<engine::Tensor> = tensors
+            .iter()
+            .map(|obj| {
+                PyTensor::from_python_value(&obj)
+                    .and_then(|t| t.tensor().flatten_all().map_err(_convert_error))
+            })
+            .collect::<PyResult<_>>()?;
+        let refs: Vec<&engine::Tensor> = flattened.iter().collect();
+        let joined = tensor_concatenate(&refs, 0).map_err(_convert_error)?;
+        return Ok(PyTensor::from_tensor(joined));
+    };
+    PyTensor::concatenate(tensors, Some(axis))
 }
 
 /// Stack tensors along a new axis.
@@ -394,19 +422,19 @@ fn cross(a: &Bound<PyAny>, b: &Bound<PyAny>, dim: Option<i32>) -> PyResult<PyTen
     cross_impl(&a_tensor, &b_tensor, dim)
 }
 
-/// Check if arrays are approximately equal
+/// Check if arrays are approximately equal, to NumPy's tolerances.
 #[pyfunction]
-#[pyo3(signature = (a, b, rtol=None, atol=None, equal_nan=false))]
+#[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8, equal_nan=false))]
 fn allclose(
     a: &Bound<PyAny>,
     b: &Bound<PyAny>,
-    rtol: Option<f64>,
-    atol: Option<f64>,
+    rtol: f64,
+    atol: f64,
     equal_nan: bool,
 ) -> PyResult<bool> {
     let a_tensor = PyTensor::from_python_value(a)?;
     let b_tensor = PyTensor::from_python_value(b)?;
-    a_tensor.allclose(&b_tensor, rtol, atol, equal_nan)
+    a_tensor.allclose(&b_tensor, Some(rtol), Some(atol), equal_nan)
 }
 
 /// Check if arrays are exactly equal

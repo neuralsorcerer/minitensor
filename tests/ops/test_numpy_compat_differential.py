@@ -64,6 +64,24 @@ CASES = [
         lambda: nc.concatenate([T(A), T(B)], 0),
         lambda: np.concatenate([A, B], 0),
     ),
+    # `axis=None` is a value with a meaning of its own to NumPy -- flatten
+    # every operand and return a line -- not "the default axis". Answering
+    # `(6, 4)` here instead of `(24,)` was a wrong result rather than an error.
+    (
+        "concatenate-flattened",
+        lambda: nc.concatenate([T(A), T(B)], None),
+        lambda: np.concatenate([A, B], None),
+    ),
+    (
+        "concatenate-flattened-ragged",
+        lambda: nc.concatenate([T(A), T(V)], axis=None),
+        lambda: np.concatenate([A, V], axis=None),
+    ),
+    (
+        "concatenate-default-axis",
+        lambda: nc.concatenate([T(A), T(B)]),
+        lambda: np.concatenate([A, B]),
+    ),
     ("stack", lambda: nc.stack([T(A), T(B)], 0), lambda: np.stack([A, B], 0)),
     ("hstack", lambda: nc.hstack([T(A), T(B)]), lambda: np.hstack([A, B])),
     ("vstack", lambda: nc.vstack([T(A), T(B)]), lambda: np.vstack([A, B])),
