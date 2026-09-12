@@ -12,7 +12,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 <div align="center">
 
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/minitensor.svg)](https://github.com/neuralsorcerer/minitensor/releases)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![rustc 1.89+](https://img.shields.io/badge/rustc-1.89+-blue.svg?logo=rust&logoColor=white)](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)
 [![Test Linux](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/neuralsorcerer/minitensor/actions/workflows/test_windows.yml?query=branch%3Amain)
@@ -43,7 +43,7 @@ A lightweight, high-performance tensor operations library with automatic differe
 ### Installation
 
 MiniTensor can be installed either from PyPI or from source. Source installs
-compile the Rust extension, so they require Python 3.10+, Rust/Cargo, and
+compile the Rust extension, so they require Python 3.12+, Rust/Cargo, and
 maturin. The full, platform-aware instructions live in the
 [installation guide](docs/installation.md).
 

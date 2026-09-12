@@ -8,7 +8,7 @@ so source installs require both Python and the Rust toolchain.
 
 | Requirement | Needed for | Notes |
 | --- | --- | --- |
-| Python 3.10 or newer | All installs | Use `python -m pip` so packages are installed into the interpreter you will run. |
+| Python 3.12 or newer | All installs | Use `python -m pip` so packages are installed into the interpreter you will run. |
 | Rust and Cargo | Source installs and development | Install with [`rustup`](https://rustup.rs/) if `cargo --version` is unavailable. |
 | maturin | Source builds | Linux source builds should install `maturin[patchelf]`; macOS and Windows can use `maturin`. |
 | A virtual environment | Recommended | Keeps MiniTensor and development tools isolated from system Python. |

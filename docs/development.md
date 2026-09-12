@@ -78,7 +78,7 @@ place it is written down.
 
 ## Environment setup
 
-MiniTensor source builds require Python 3.10 or newer, Rust/Cargo, and maturin.
+MiniTensor source builds require Python 3.12 or newer, Rust/Cargo, and maturin.
 For detailed platform notes, see [the installation guide](installation.md).
 
 ```bash

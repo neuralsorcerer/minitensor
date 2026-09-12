@@ -4,7 +4,7 @@
 #
 # Cross-platform (Linux, macOS, Windows via Git Bash/WSL) install script.
 # It will:
-# - Ensure Python 3.10+, pip, and optionally create a virtual environment (.venv by default)
+# - Ensure Python 3.12+, pip, and optionally create a virtual environment (.venv by default)
 # - Ensure Rust toolchain (rustup/cargo)
 # - Install maturin (with patchelf on Linux)
 # - Build and install MiniTensor into the selected Python environment (release by default)
@@ -108,13 +108,13 @@ pick_python_cmd() {
   elif [[ $IS_WINDOWS -eq 1 ]] && command -v py >/dev/null 2>&1; then
     echo "py -3"
   else
-    die "Python 3.10+ not found. Please install Python and re-run."
+    die "Python 3.12+ not found. Please install Python and re-run."
   fi
 }
 
 BASE_PYTHON="$(pick_python_cmd)"
 
-# Verify Python version >= 3.10
+# Verify Python version >= 3.12
 check_py_ver() {
   local cmd="$1"
   local v
@@ -124,8 +124,8 @@ print("%d.%d" % (sys.version_info[0], sys.version_info[1]))
 PY
   )" || die "Failed to run Python"
   local major="${v%%.*}"; local minor="${v##*.}"
-  if (( major < 3 || (major == 3 && minor < 10) )); then
-    die "Python >= 3.10 required (found ${v})"
+  if (( major < 3 || (major == 3 && minor < 12) )); then
+    die "Python >= 3.12 required (found ${v})"
   fi
 }
 
