@@ -140,3 +140,27 @@ def test_the_operations_a_strided_library_would_call_views_are_materialised():
     np.testing.assert_allclose(
         cases["permute"].numpy(), _BASES["3d"].transpose(2, 0, 1)
     )
+
+
+@pytest.mark.parametrize("name", ["floor", "ceil", "trunc", "round"])
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_an_identity_result_does_not_alias_its_input(name, dtype):
+    """Rounding an integer hands back the input, storage and all.
+
+    That is the cheapest correct answer -- the values are already what the op
+    would compute -- and it is safe only because a write to either tensor goes
+    through the engine's copy-on-write: `data_mut` clones the buffer when the
+    `Arc` is shared. This pins that, because the identity returns rely on it
+    and nothing else in the suite does.
+    """
+
+    values = np.array([-3, -1, 0, 2, 5], dtype=dtype)
+    original = mt.Tensor(values, dtype=dtype)
+    rounded = getattr(original, name)()
+    np.testing.assert_array_equal(rounded.numpy(), values)
+
+    rounded.fill_(99)
+    np.testing.assert_array_equal(
+        original.numpy(), values
+    ), f"{name} let a write to its result reach the input"
+    np.testing.assert_array_equal(rounded.numpy(), np.full_like(values, 99))
