@@ -513,6 +513,12 @@ impl PyTensor {
     }
 
     /// Root-mean-square layer normalization (RMSNorm).
+    ///
+    /// `weight` and `eps` carry the defaults the free function has always had
+    /// and the reference has always documented; without them on this side,
+    /// `t.rms_norm(shape)` was a `TypeError` while `mt.rms_norm(t, shape)`
+    /// worked.
+    #[pyo3(signature = (normalized_shape, weight=None, eps=None))]
     pub fn rms_norm(
         &self,
         normalized_shape: Vec<usize>,

@@ -129,3 +129,107 @@ def test_a_method_and_its_free_function_take_the_same_keywords(name):
         f"mt.{name} names its axis argument {sorted(shared)} while "
         f"Tensor.{name} names it {sorted(other)}"
     )
+
+
+# The free function takes the tensor first under one of these names; the method
+# takes it as `self`. Past that, the two describe the same call.
+_LEADING_TENSOR = {"input", "a", "x", "tensor"}
+
+# Where the two forms legitimately differ past the leading tensor, with why.
+_DIFFERENT_BY_DESIGN = {
+    # `mt.where(condition, input, other)` picks between two tensors, while
+    # `t.where(condition, other)` makes `t` the "if true" branch -- so the
+    # method's argument list is the free function's with `input` removed from
+    # the middle rather than the front. PyTorch is arranged the same way.
+    "where",
+    # `mt.polygamma(order, input)` takes the order first, as NumPy and SciPy do.
+    "polygamma",
+    # These take the tensor under a name of their own (`a`, `b`, `factor`),
+    # which the method supplies as `self` from a different position.
+    "cholesky_solve",
+    "lstsq",
+    "lu_solve",
+    "solve",
+    "solve_triangular",
+    "tensorinv",
+    "tensorsolve",
+    "vander",
+    "cross",
+}
+
+
+def _free_and_method_arguments(name):
+    """The two argument lists, with the leading tensor dropped from each."""
+
+    free = list(inspect.signature(getattr(mt, name)).parameters)
+    method = [
+        p for p in inspect.signature(getattr(mt.Tensor, name)).parameters if p != "self"
+    ]
+    if free and free[0] in _LEADING_TENSOR:
+        free = free[1:]
+    # A Python-level forwarder is written as `f(input, ...)` and bound as a
+    # method, so its own first parameter is the tensor on both sides.
+    if method and method[0] in _LEADING_TENSOR and method[:1] != free[:1]:
+        method = method[1:]
+    return free, method
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(
+        n
+        for n, _, _ in _exported_callables()
+        if hasattr(mt.Tensor, n) and n not in _DIFFERENT_BY_DESIGN
+    ),
+)
+def test_a_method_and_its_free_function_describe_the_same_call(name):
+    """`t.chunk(sections=2)` worked while `mt.chunk(t, sections=2)` did not.
+
+    Three of these were live when this was written: `chunk` said `chunks` on
+    one side and `sections` on the other, `pow` said `other` and `exponent`,
+    and `Tensor.rms_norm` required the two arguments its free function -- and
+    the reference -- give defaults to.
+    """
+
+    try:
+        free, method = _free_and_method_arguments(name)
+    except (ValueError, TypeError):
+        pytest.skip(f"{name} has no introspectable signature")
+
+    assert free == method, f"mt.{name} takes {free} while Tensor.{name} takes {method}"
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(
+        n
+        for n, _, _ in _exported_callables()
+        if hasattr(mt.Tensor, n) and n not in _DIFFERENT_BY_DESIGN
+    ),
+)
+def test_a_method_makes_the_same_arguments_optional(name):
+    """An argument with a default on one side must have one on the other.
+
+    `Tensor.rms_norm` required `weight` and `eps` where the free function
+    defaulted them, so the method could not be called the way the reference
+    documented it.
+    """
+
+    try:
+        free_params = inspect.signature(getattr(mt, name)).parameters
+        method_params = inspect.signature(getattr(mt.Tensor, name)).parameters
+        free, method = _free_and_method_arguments(name)
+    except (ValueError, TypeError):
+        pytest.skip(f"{name} has no introspectable signature")
+    if free != method:
+        pytest.skip(f"{name} has differing argument lists")
+
+    empty = inspect.Parameter.empty
+    mismatched = [
+        p
+        for p in free
+        if (free_params[p].default is empty) != (method_params[p].default is empty)
+    ]
+    assert (
+        not mismatched
+    ), f"{name}: {mismatched} are optional on one spelling and required on the other"

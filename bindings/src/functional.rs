@@ -363,15 +363,21 @@ macro_rules! unary_forwarders {
 }
 
 macro_rules! binary_forwarders {
-    ($($name:ident => $doc:literal),* $(,)?) => {
+    ($($name:ident $(as $operand:ident)? => $doc:literal),* $(,)?) => {
         $(
-            #[doc = $doc]
-            #[pyfunction]
-            pub fn $name(input: &Bound<PyAny>, other: &Bound<PyAny>) -> PyResult<PyTensor> {
-                let tensor = borrow_tensor(input)?;
-                tensor.$name(other)
-            }
+            binary_forwarders!(@one $name, ($($operand)? other), $doc);
         )*
+    };
+    // The second operand is `other` unless the entry names it. `pow` does,
+    // because a power's second operand is its exponent -- which is what its
+    // own docstring, the method and PyTorch all call it.
+    (@one $name:ident, ($operand:ident $($ignored:ident)*), $doc:literal) => {
+        #[doc = $doc]
+        #[pyfunction]
+        pub fn $name(input: &Bound<PyAny>, $operand: &Bound<PyAny>) -> PyResult<PyTensor> {
+            let tensor = borrow_tensor(input)?;
+            tensor.$name($operand)
+        }
     };
 }
 unary_forwarders!(
@@ -459,7 +465,7 @@ binary_forwarders!(
     maximum => "Element-wise larger of two tensors.",
     minimum => "Element-wise smaller of two tensors.",
     ne => "Element-wise inequality, giving a boolean tensor.",
-    pow => "Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.",
+    pow as exponent => "Raise each element to `exponent`, which may be a scalar or a broadcastable tensor.",
     fmod => "Element-wise modulo taking the sign of the dividend, matching C's `fmod`.",
     gcd => "Element-wise greatest common divisor, always non-negative. `gcd(x, 0)` is the magnitude of `x`.",
     remainder => "Element-wise modulo taking the sign of the divisor, matching Python's `%`.",
@@ -490,10 +496,10 @@ pub fn round(input: &Bound<PyAny>, decimals: i32) -> PyResult<PyTensor> {
 
 /// Split into `sections` equal parts along `dim`.
 #[pyfunction]
-#[pyo3(signature = (input, chunks, dim=0))]
-pub fn chunk(input: &Bound<PyAny>, chunks: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
+#[pyo3(signature = (input, sections, dim=0))]
+pub fn chunk(input: &Bound<PyAny>, sections: usize, dim: isize) -> PyResult<Vec<PyTensor>> {
     let tensor = borrow_tensor(input)?;
-    tensor.chunk(chunks, dim)
+    tensor.chunk(sections, dim)
 }
 
 /// Split along `dim` into pieces of the given size, or into the given explicit sizes.
