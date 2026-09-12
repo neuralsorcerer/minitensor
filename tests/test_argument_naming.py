@@ -233,3 +233,20 @@ def test_a_method_makes_the_same_arguments_optional(name):
     assert (
         not mismatched
     ), f"{name}: {mismatched} are optional on one spelling and required on the other"
+
+    # And the same default, not merely some default. A PyO3 method taking
+    # `Option<f64>` and calling `unwrap_or(1.0)` advertises `alpha=None`, which
+    # tells a reader of `help()` nothing about what alpha will be -- while the
+    # free function beside it says `alpha=1.0`.
+    differing = [
+        f"{p}: {free_params[p].default!r} vs {method_params[p].default!r}"
+        for p in free
+        if free_params[p].default is not empty
+        and method_params[p].default is not empty
+        and free_params[p].default != method_params[p].default
+    ]
+    assert (
+        not differing
+    ), f"{name} advertises different defaults on its two spellings: " + ", ".join(
+        differing
+    )

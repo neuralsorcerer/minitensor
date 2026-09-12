@@ -142,16 +142,10 @@ fn make_one_hot_data(
 
 /// Collapse dimensions `start_dim` through `end_dim` into one.
 #[pyfunction]
-#[pyo3(signature = (input, start_dim=None, end_dim=None))]
-pub fn flatten(
-    input: &Bound<PyAny>,
-    start_dim: Option<isize>,
-    end_dim: Option<isize>,
-) -> PyResult<PyTensor> {
+#[pyo3(signature = (input, start_dim=0, end_dim=-1))]
+pub fn flatten(input: &Bound<PyAny>, start_dim: isize, end_dim: isize) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    let start = start_dim.unwrap_or(0);
-    let end = end_dim.unwrap_or(-1);
-    tensor.flatten(start, end)
+    tensor.flatten(start_dim, end_dim)
 }
 
 /// A tensor with the same elements in a new shape. One dimension may be -1 to be inferred.
@@ -1225,7 +1219,7 @@ pub fn cosine_similarity(
 #[pyo3(signature = (input, lambd=0.5))]
 pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.hardshrink(Some(lambd))
+    tensor.hardshrink(lambd)
 }
 
 /// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
@@ -1233,7 +1227,7 @@ pub fn hardshrink(input: &Bound<PyAny>, lambd: f64) -> PyResult<PyTensor> {
 #[pyo3(signature = (input, beta=1.0, threshold=20.0))]
 pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.softplus(Some(beta), Some(threshold))
+    tensor.softplus(beta, threshold)
 }
 
 /// Gaussian Error Linear Unit, `x * Phi(x)`. Pass `approximate=\"tanh\"` for the tanh approximation.
@@ -1241,7 +1235,7 @@ pub fn softplus(input: &Bound<PyAny>, beta: f64, threshold: f64) -> PyResult<PyT
 #[pyo3(signature = (input, approximate="none"))]
 pub fn gelu(input: &Bound<PyAny>, approximate: &str) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.gelu(Some(approximate))
+    tensor.gelu(approximate)
 }
 
 /// Exponential Linear Unit: `x` where positive, `alpha * (exp(x) - 1)` elsewhere.
@@ -1249,7 +1243,7 @@ pub fn gelu(input: &Bound<PyAny>, approximate: &str) -> PyResult<PyTensor> {
 #[pyo3(signature = (input, alpha=1.0))]
 pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.elu(Some(alpha))
+    tensor.elu(alpha)
 }
 
 /// `x` where positive, `negative_slope * x` elsewhere.
@@ -1261,7 +1255,7 @@ pub fn elu(input: &Bound<PyAny>, alpha: f64) -> PyResult<PyTensor> {
 #[pyo3(signature = (input, negative_slope=0.01))]
 pub fn leaky_relu(input: &Bound<PyAny>, negative_slope: f64) -> PyResult<PyTensor> {
     let tensor = borrow_tensor(input)?;
-    tensor.leaky_relu(Some(negative_slope))
+    tensor.leaky_relu(negative_slope)
 }
 
 /// Zero everything below the `diagonal`-th diagonal.
@@ -1796,7 +1790,7 @@ pub fn rms_norm(
     let tensor = borrow_tensor(input)?;
     let shape = parse_normalized_shape(normalized_shape)?;
     let weight_tensor = borrow_optional_tensor(weight)?;
-    tensor.rms_norm(shape, weight_tensor.as_deref(), Some(eps))
+    tensor.rms_norm(shape, weight_tensor.as_deref(), eps)
 }
 
 /// Scaled dot-product attention — the core Transformer primitive
@@ -1871,7 +1865,7 @@ pub fn cat(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
 #[pyfunction]
 #[pyo3(signature = (tensors, dim=0))]
 pub fn stack(tensors: &Bound<PyList>, dim: isize) -> PyResult<PyTensor> {
-    PyTensor::stack(tensors, Some(dim))
+    PyTensor::stack(tensors, dim)
 }
 
 /// Element-wise test for being within `rtol`/`atol`.

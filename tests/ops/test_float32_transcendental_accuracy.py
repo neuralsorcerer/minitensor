@@ -444,7 +444,10 @@ def _gelu_tanh_grad_reference(sample):
 
 
 _GELU_GRADS = [
-    ("gelu", None, _gelu_erf_grad_reference),
+    # `"none"` is the exact `erf` form, and the default -- named here rather
+    # than passed as `None`, which the signature no longer has to accept now
+    # that it states its own default.
+    ("gelu", "none", _gelu_erf_grad_reference),
     ("gelu-tanh", "tanh", _gelu_tanh_grad_reference),
 ]
 

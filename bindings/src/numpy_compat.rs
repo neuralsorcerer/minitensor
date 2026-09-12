@@ -189,10 +189,14 @@ fn concatenate(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTenso
     PyTensor::concatenate(tensors, axis)
 }
 
-/// Stack tensors along a new axis
+/// Stack tensors along a new axis.
+///
+/// Spelled `axis`, as everything in this module is: it exists so a caller can
+/// reach for NumPy's names. The top-level `stack` is the same operation under
+/// this library's own convention, where the argument is `dim`.
 #[pyfunction]
-#[pyo3(signature = (tensors, axis=None))]
-fn stack(tensors: &Bound<PyList>, axis: Option<isize>) -> PyResult<PyTensor> {
+#[pyo3(signature = (tensors, axis=0))]
+fn stack(tensors: &Bound<PyList>, axis: isize) -> PyResult<PyTensor> {
     PyTensor::stack(tensors, axis)
 }
 

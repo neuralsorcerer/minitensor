@@ -415,12 +415,9 @@ impl PyTensor {
     }
 
     /// Zero out values with magnitude below `lambd`, leaving the rest unchanged.
-    #[pyo3(signature = (lambd=None))]
-    pub fn hardshrink(&self, lambd: Option<f64>) -> PyResult<Self> {
-        let result = self
-            .inner
-            .hardshrink(lambd.unwrap_or(0.5))
-            .map_err(_convert_error)?;
+    #[pyo3(signature = (lambd=0.5))]
+    pub fn hardshrink(&self, lambd: f64) -> PyResult<Self> {
+        let result = self.inner.hardshrink(lambd).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
@@ -518,12 +515,12 @@ impl PyTensor {
     /// and the reference has always documented; without them on this side,
     /// `t.rms_norm(shape)` was a `TypeError` while `mt.rms_norm(t, shape)`
     /// worked.
-    #[pyo3(signature = (normalized_shape, weight=None, eps=None))]
+    #[pyo3(signature = (normalized_shape, weight=None, eps=1e-6))]
     pub fn rms_norm(
         &self,
         normalized_shape: Vec<usize>,
         weight: Option<&PyTensor>,
-        eps: Option<f64>,
+        eps: f64,
     ) -> PyResult<Self> {
         if normalized_shape.is_empty() {
             return Err(PyValueError::new_err(
@@ -533,15 +530,15 @@ impl PyTensor {
         let weight_inner = weight.map(|w| &w.inner);
         let result = self
             .inner
-            .rms_norm(&normalized_shape, weight_inner, eps.unwrap_or(1e-6))
+            .rms_norm(&normalized_shape, weight_inner, eps)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Gaussian Error Linear Unit, `x * Phi(x)`. Pass `approximate="tanh"` for the tanh approximation.
-    #[pyo3(signature = (approximate=None))]
-    pub fn gelu(&self, approximate: Option<&str>) -> PyResult<Self> {
-        let approx_mode = approximate.unwrap_or("none");
+    #[pyo3(signature = (approximate="none"))]
+    pub fn gelu(&self, approximate: &str) -> PyResult<Self> {
+        let approx_mode = approximate;
         let approximate = if approx_mode.eq_ignore_ascii_case("none") {
             false
         } else if approx_mode.eq_ignore_ascii_case("tanh") {
@@ -563,31 +560,28 @@ impl PyTensor {
     }
 
     /// Element-wise `log(1 + exp(beta * x)) / beta`, falling back to the linear `x` above `threshold`.
-    #[pyo3(signature = (beta=None, threshold=None))]
-    pub fn softplus(&self, beta: Option<f64>, threshold: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (beta=1.0, threshold=20.0))]
+    pub fn softplus(&self, beta: f64, threshold: f64) -> PyResult<Self> {
         let result = self
             .inner
-            .softplus(beta.unwrap_or(1.0), threshold.unwrap_or(20.0))
+            .softplus(beta, threshold)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// Exponential Linear Unit: `x` where positive, `alpha * (exp(x) - 1)` elsewhere.
-    #[pyo3(signature = (alpha=None))]
-    pub fn elu(&self, alpha: Option<f64>) -> PyResult<Self> {
-        let result = self
-            .inner
-            .elu(alpha.unwrap_or(1.0))
-            .map_err(_convert_error)?;
+    #[pyo3(signature = (alpha=1.0))]
+    pub fn elu(&self, alpha: f64) -> PyResult<Self> {
+        let result = self.inner.elu(alpha).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
 
     /// `x` where positive, `negative_slope * x` elsewhere.
-    #[pyo3(signature = (negative_slope=None))]
-    pub fn leaky_relu(&self, negative_slope: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (negative_slope=0.01))]
+    pub fn leaky_relu(&self, negative_slope: f64) -> PyResult<Self> {
         let result = self
             .inner
-            .leaky_relu(negative_slope.unwrap_or(0.01))
+            .leaky_relu(negative_slope)
             .map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
