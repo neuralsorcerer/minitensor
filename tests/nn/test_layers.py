@@ -7,7 +7,7 @@
 import numpy as np
 import pytest
 
-from minitensor import nn
+from minitensor import nn, optim
 from minitensor.nn import (
     BatchNorm1d,
     BatchNorm2d,
@@ -240,3 +240,95 @@ def test_reduced_loss_is_scalar():
     loss = mt.nn.mse_loss(pred, tgt, "mean")
     assert loss.numpy().shape == ()
     assert float(loss.numpy()) == pytest.approx(0.25)
+
+
+# --- Module.zero_grad -------------------------------------------------------
+
+
+def _dense_with_gradients(seed=0):
+    """A layer whose parameters carry a non-zero gradient."""
+
+    rng = np.random.default_rng(seed)
+    layer = nn.DenseLayer(4, 3)
+    x = Tensor(rng.standard_normal((5, 4)).astype(np.float32), dtype="float32")
+    target = Tensor(rng.standard_normal((5, 3)).astype(np.float32), dtype="float32")
+    nn.mse_loss(layer.forward(x), target).backward()
+    assert all(p.grad is not None for p in layer.parameters())
+    assert any(np.any(p.grad.numpy()) for p in layer.parameters())
+    return layer
+
+
+@pytest.mark.parametrize("set_to_none", [False, True])
+def test_a_module_can_clear_its_own_gradients(set_to_none):
+    """The reference has promised `layer.zero_grad()` all along.
+
+    Nothing implemented it, so a reader following the reference got an
+    `AttributeError` -- `optimizer.zero_grad()` was the only way to clear a
+    gradient, which needs an optimizer for something that has nothing to do
+    with optimizing.
+    """
+
+    layer = _dense_with_gradients()
+    layer.zero_grad(set_to_none)
+    assert all(p.grad is None for p in layer.parameters())
+
+
+@pytest.mark.parametrize("set_to_none", [False, True])
+def test_a_module_clears_exactly_what_the_optimizer_clears(set_to_none):
+    # Two spellings of one operation; the answer cannot depend on which.
+    by_optimizer = _dense_with_gradients(1)
+    optim.SGD(list(by_optimizer.parameters()), 0.1).zero_grad(set_to_none)
+
+    by_module = _dense_with_gradients(1)
+    by_module.zero_grad(set_to_none)
+
+    for left, right in zip(by_optimizer.parameters(), by_module.parameters()):
+        assert (left.grad is None) == (right.grad is None)
+        if left.grad is not None:
+            np.testing.assert_array_equal(left.grad.numpy(), right.grad.numpy())
+
+
+def test_a_module_that_clears_its_own_gradients_still_trains():
+    rng = np.random.default_rng(2)
+    layer = nn.DenseLayer(4, 1)
+    optimizer = optim.SGD(list(layer.parameters()), 0.05)
+    x = Tensor(rng.standard_normal((32, 4)).astype(np.float32), dtype="float32")
+    target = Tensor(rng.standard_normal((32, 1)).astype(np.float32), dtype="float32")
+
+    first = last = None
+    for _ in range(60):
+        loss = nn.mse_loss(layer.forward(x), target)
+        layer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        last = loss.item()
+        first = last if first is None else first
+
+    assert last < first
+
+
+def test_every_layer_carries_the_module_protocol():
+    """One method on the base class, so no layer can be missing it.
+
+    Each of these is `#[pyclass(extends = PyModule)]`, which is what makes a
+    single `zero_grad` reach all of them -- and what would make one that
+    defined its own diverge silently.
+    """
+
+    import inspect
+
+    layers = [
+        name
+        for name in dir(nn)
+        if inspect.isclass(getattr(nn, name))
+        and issubclass(getattr(nn, name), nn.Module)
+        and getattr(nn, name) is not nn.Module
+    ]
+    assert len(layers) > 25, f"only {len(layers)} layers found -- the sweep broke"
+    for name in layers:
+        cls = getattr(nn, name)
+        for method in ("parameters", "zero_grad", "train", "eval", "state_dict"):
+            assert hasattr(cls, method), f"{name} is missing {method}"
+        assert (
+            getattr(cls, "zero_grad") is nn.Module.zero_grad
+        ), f"{name} defines its own zero_grad"

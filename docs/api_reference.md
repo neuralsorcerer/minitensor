@@ -2690,7 +2690,12 @@ print(tuple(weight.shape), weight.dtype, weight.requires_grad)
 ### Common utilities
 
 - `layer.parameters()` returns tensors for optimizers.
-- `layer.zero_grad()` clears gradients for trainable tensors.
+- `layer.zero_grad(set_to_none=False)` clears the gradient of every trainable
+  tensor the module owns -- `optimizer.zero_grad()` without an optimizer, for
+  zeroing one branch of a model or for a loop that does its own stepping. Both
+  spellings clear the same gradients, and both leave `parameter.grad` as
+  `None`: the gradient lives in the autograd graph, and clearing it removes it
+  rather than leaving a zero tensor behind.
 
 ## 7) Optimizers (`minitensor.optim`)
 

@@ -1061,6 +1061,21 @@ impl PyModule {
             .collect()
     }
 
+    /// Clear the gradient of every trainable tensor this module owns.
+    ///
+    /// The reference has promised this since the module surface was written,
+    /// and nothing implemented it: a reader following `layer.zero_grad()` got
+    /// an `AttributeError`. It is `optimizer.zero_grad()` without an
+    /// optimizer, for zeroing one branch of a model or for a loop that does
+    /// its own stepping.
+    #[pyo3(signature = (set_to_none=false))]
+    fn zero_grad(&self, set_to_none: bool) {
+        for parameter in self.inner.as_layer().parameters() {
+            let mut owned = parameter.clone();
+            owned.zero_grad(set_to_none);
+        }
+    }
+
     /// Set module to training mode
     fn train(&mut self) {
         self.inner.as_module_mut().train()
