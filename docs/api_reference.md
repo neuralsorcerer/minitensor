@@ -577,6 +577,12 @@ boolean where NumPy promotes to `int8`. The ordered comparisons `lt`, `le`, `gt`
 and `ge` accept booleans with `False < True`, the same ordering `minimum` and
 `maximum` apply to them.
 
+`//` and `%` by zero raise for an integer pair and give `inf`/`nan` for a float
+one. An integer dtype has no infinity to land in, so there is no answer to give
+— NumPy warns and answers 0 instead, which is a value the arithmetic does not
+support. A `bool` divisor is the same rule seen through a mask: `x // mask`
+raises exactly when the mask has a `False` in it.
+
 `**` raises integers to integer powers, and the answer is the true power taken
 modulo the dtype's width — a chain of wrapping multiplications, which is what
 NumPy gives. A *negative* integer exponent has no integer answer at all and is
