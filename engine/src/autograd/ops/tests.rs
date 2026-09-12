@@ -866,6 +866,48 @@ mod tests {
         clear_graph().unwrap();
     }
 
+    /// A pass-through gradient shares the incoming buffer rather than copying
+    /// it, and the sharing has to survive both things that write into a
+    /// gradient map: a second branch accumulating onto the same input, and the
+    /// node's own gradient staying readable afterwards.
+    #[test]
+    fn test_a_pass_through_gradient_shares_the_buffer_it_was_given() {
+        clear_graph().unwrap();
+
+        let leaf = Tensor::ones(Shape::new(vec![4]), DataType::Float64, Device::cpu(), true);
+        let copy = leaf.deep_clone().unwrap();
+
+        // Two paths to `leaf`: one through the copy, one direct. The copy's
+        // gradient is `3` and the leaf's is `3 + 1`, so an accumulation that
+        // wrote into a shared buffer would show up in both.
+        let mut three_data = TensorData::zeros(4, DataType::Float64);
+        three_data.as_f64_slice_mut().unwrap().fill(3.0);
+        let three = Tensor::new(
+            Arc::new(three_data),
+            Shape::new(vec![4]),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        );
+        let scaled = arithmetic::mul(&copy, &three).unwrap();
+        let total = arithmetic::add(
+            &reduction::sum(&scaled, None, false).unwrap(),
+            &reduction::sum(&leaf, None, false).unwrap(),
+        )
+        .unwrap();
+
+        let seed = Tensor::ones(total.shape().clone(), total.dtype(), total.device(), false);
+        let grads = backward_collect(&total, Some(seed)).unwrap();
+
+        let leaf_grad = grads.get(&leaf.id()).expect("leaf gradient");
+        assert_eq!(leaf_grad.data().as_f64_slice().unwrap(), &[4.0; 4]);
+
+        let copy_grad = grads.get(&copy.id()).expect("copy gradient");
+        assert_eq!(copy_grad.data().as_f64_slice().unwrap(), &[3.0; 4]);
+
+        clear_graph().unwrap();
+    }
+
     #[test]
     fn test_concat_frozen_inputs_receive_no_gradient() {
         clear_graph().unwrap();

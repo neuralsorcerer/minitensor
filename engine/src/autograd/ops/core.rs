@@ -545,7 +545,15 @@ impl GradientFunction for IdentityBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
         let mut gradients = FxHashMap::default();
         gradients.reserve(1);
-        gradients.insert(self.input_id, grad_output.deep_clone()?);
+        // The buffer, not a copy of it. This used to deep-clone, which is a
+        // full copy of the gradient at every `clone` in a graph and buys
+        // nothing: the only thing that writes into a gradient already in the
+        // map is `add_inplace`, which refuses to write into a shared buffer
+        // and produces a new tensor instead. Every other pass-through in the
+        // engine -- `AddBackward` on same-shaped operands, the `keepdim`
+        // branch of a reduction -- has always handed back a shared clone for
+        // exactly that reason.
+        gradients.insert(self.input_id, grad_output.clone());
         Ok(gradients)
     }
 

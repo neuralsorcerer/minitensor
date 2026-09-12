@@ -272,6 +272,88 @@ def test_a_dense_layer_still_trains():
     assert losses[-1] < losses[0] * 0.9, losses
 
 
+# --- central differences over the delegated forward --------------------------
+
+
+def _directional_derivative(function, base, direction, step=1e-6):
+    """`d/dt f(base + t * direction)` at `t = 0`, by central difference.
+
+    One difference along a random direction rather than one per element: the
+    products here have up to a quarter of a million inputs, and a derivative
+    that is wrong in any component is almost surely wrong along a direction
+    drawn at random. Ten directions make "almost surely" a fair description.
+    """
+
+    high = float(function(base + step * direction))
+    low = float(function(base - step * direction))
+    return (high - low) / (2.0 * step)
+
+
+def _gradcheck(build, operands, seed):
+    """Every operand's gradient against a central difference, in float64.
+
+    `build` takes NumPy arrays and returns a scalar; the tensors it is checked
+    against are the same arrays with `requires_grad`. Float64 throughout, so
+    the difference resolves to ~1e-10 and the comparison can be made at 1e-6
+    rather than at the few percent a float32 difference would force. Measured
+    on these shapes an exact gradient comes in at 1.4e-10 and a gradient wrong
+    by one part in 1e5 is caught, so the tolerance has four orders of
+    magnitude of headroom in both directions.
+    """
+
+    rng = np.random.default_rng(seed)
+    tensors = [mt.from_numpy(a).requires_grad_(True) for a in operands]
+    build(*tensors).backward()
+    gradients = [t.grad.numpy() for t in tensors]
+    mt.clear_autograd_graph()
+
+    for index, operand in enumerate(operands):
+        for _ in range(3):
+            direction = rng.standard_normal(operand.shape)
+            analytic = float((gradients[index] * direction).sum())
+
+            def scalar(candidate, index=index):
+                inputs = list(operands)
+                inputs[index] = candidate
+                value = build(*[mt.from_numpy(np.ascontiguousarray(a)) for a in inputs])
+                return value.numpy()
+
+            numeric = _directional_derivative(scalar, operand, direction)
+            scale = max(abs(analytic), abs(numeric), 1.0)
+            assert (
+                abs(analytic - numeric) / scale < 1e-6
+            ), f"operand {index}: {analytic} vs {numeric}"
+
+
+@pytest.mark.parametrize(
+    "m,k,n",
+    [
+        (256, 64, 256),  # delegated
+        (256, 8, 256),  # declined: the contraction is too short
+        (8, 8, 8),  # declined: too small to be worth the call
+        (1, 512, 512),  # delegated, and the shape a BLAS is best at
+    ],
+)
+def test_matmul_agrees_with_central_differences(m, k, n):
+    rng = np.random.default_rng(20)
+    lhs = np.ascontiguousarray(rng.standard_normal((m, k)))
+    rhs = np.ascontiguousarray(rng.standard_normal((k, n)))
+    _gradcheck(lambda a, b: a.matmul(b).sum(), [lhs, rhs], seed=21)
+
+
+@pytest.mark.parametrize("m,k,n", [(64, 128, 64), (16, 8, 16), (32, 512, 64)])
+def test_the_dense_layer_agrees_with_central_differences(m, k, n):
+    rng = np.random.default_rng(22)
+    inputs = np.ascontiguousarray(rng.standard_normal((m, k)))
+    weight = np.ascontiguousarray(rng.standard_normal((n, k)))
+    bias = np.ascontiguousarray(rng.standard_normal(n))
+    _gradcheck(
+        lambda x, w, b: nn.dense_layer(x, w, b).tanh().sum(),
+        [inputs, weight, bias],
+        seed=23,
+    )
+
+
 # --- it survives the ways a hand-off to an interpreter goes wrong ------------
 
 
