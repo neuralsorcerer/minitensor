@@ -113,3 +113,19 @@ pub(crate) fn gemm_provider() -> Option<&'static dyn GemmProvider> {
     }
     PROVIDER.get().map(|boxed| boxed.as_ref())
 }
+
+/// Offer one `f32` product; `false` means compute it here.
+///
+/// The two of these are what a call site uses. They read as one condition --
+/// "unless somebody else did it" -- which is what a GEMM call site wants
+/// wrapped around it, rather than three lines of plumbing repeated at each.
+#[inline]
+pub(crate) fn offer_gemm_f32(request: Gemm<'_, f32>) -> bool {
+    gemm_provider().is_some_and(|provider| provider.gemm_f32(request))
+}
+
+/// Offer one `f64` product; see [`offer_gemm_f32`].
+#[inline]
+pub(crate) fn offer_gemm_f64(request: Gemm<'_, f64>) -> bool {
+    gemm_provider().is_some_and(|provider| provider.gemm_f64(request))
+}

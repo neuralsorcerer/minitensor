@@ -236,6 +236,88 @@ fn a_dense_layer_offers_its_weight_transposed_where_it_lies() {
 }
 
 #[test]
+fn a_dense_layer_backward_offers_both_of_its_products() {
+    let _serial = begin();
+
+    // `grad_input = grad_output @ weight`, and `grad_weight = grad_output^T @
+    // input` -- the second with `grad_output` handed over transposed where it
+    // lies, since a copy of it is the size of the activations.
+    // Both the batch and the output width are lengths the recorder answers
+    // to, since they are the contractions of the two backward products; the
+    // forward's own contraction is `in_features`, which is not, so its offer
+    // stays out of the list below.
+    let (rows, in_features, out_features) = (DECLINED_K, 4, DECLINED_K);
+    let input =
+        tensor_f32(ramp_f32(rows * in_features), vec![rows, in_features]).requires_grad_(true);
+    let weight = tensor_f32(
+        ramp_f32(out_features * in_features),
+        vec![out_features, in_features],
+    )
+    .requires_grad_(true);
+
+    let out = linalg::linear(&input, &weight, None).unwrap();
+    engine::ops::reduction::sum(&out, None, false)
+        .unwrap()
+        .backward(None)
+        .unwrap();
+
+    let seen = taken();
+    assert_eq!(
+        seen,
+        vec![
+            Offer {
+                m: rows,
+                k: out_features,
+                n: in_features,
+                lhs_storage: Storage::RowMajor,
+                rhs_storage: Storage::RowMajor,
+            },
+            Offer {
+                m: out_features,
+                k: rows,
+                n: in_features,
+                lhs_storage: Storage::Transposed,
+                rhs_storage: Storage::RowMajor,
+            },
+        ],
+        "grad_input then grad_weight"
+    );
+
+    // Declining is honoured on both: `d(sum(x W^T))/dW` is the column sums of
+    // `x` repeated down every output row, and `d/dx` the column sums of `W`.
+    let input_values = ramp_f64(rows * in_features);
+    let weight_values = ramp_f64(out_features * in_features);
+
+    let grad_input = engine::autograd::get_gradient(&input).expect("input gradient");
+    for i in 0..rows {
+        for c in 0..in_features {
+            let want: f64 = (0..out_features)
+                .map(|r| weight_values[r * in_features + c])
+                .sum();
+            let got = grad_input.data().as_f32_slice().unwrap()[i * in_features + c] as f64;
+            assert!(
+                (got - want).abs() < 1e-4,
+                "grad_input[{i}][{c}]: {got} vs {want}"
+            );
+        }
+    }
+
+    let grad_weight = engine::autograd::get_gradient(&weight).expect("weight gradient");
+    for r in 0..out_features {
+        for c in 0..in_features {
+            let want: f64 = (0..rows).map(|i| input_values[i * in_features + c]).sum();
+            let got = grad_weight.data().as_f32_slice().unwrap()[r * in_features + c] as f64;
+            assert!(
+                (got - want).abs() < 1e-4,
+                "grad_weight[{r}][{c}]: {got} vs {want}"
+            );
+        }
+    }
+
+    engine::autograd::clear_graph().unwrap();
+}
+
+#[test]
 fn handling_the_product_is_honoured() {
     let _serial = begin();
 

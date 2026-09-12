@@ -157,6 +157,11 @@ into a copy first, so the saving the fused forward exists for is kept:
 | 256 x 768 x 768 | float32 | 2259us | 1808us |
 | 32 x 4096 x 4096 | float32 | 13241us | 10676us |
 
+Its backward is two more products -- `grad_output @ weight` and
+`grad_output^T @ input`, the second handing `grad_output` over transposed
+where it lies -- so a forward and backward together go 1667us to 837us at
+64x512x512 and 3469us to 2098us at 16x1024x1024.
+
 ### What stays on the engine's own kernel
 
 Handing the product over costs three array headers and a call, a little over a

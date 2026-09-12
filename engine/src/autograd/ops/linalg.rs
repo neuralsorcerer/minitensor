@@ -63,7 +63,10 @@ pub struct LinearBackward {
 
 impl GradientFunction for LinearBackward {
     fn backward(&self, grad_output: &Tensor) -> Result<FxHashMap<TensorId, Tensor>> {
-        use crate::ops::linalg::{gemm_f32, gemm_f64, gemm_tn_f32, gemm_tn_f64};
+        use crate::ops::linalg::{
+            Gemm, Storage, gemm_f32, gemm_f64, gemm_tn_f32, gemm_tn_f64, offer_gemm_f32,
+            offer_gemm_f64,
+        };
         use crate::tensor::{DataType, Shape, TensorData};
         use std::sync::Arc;
 
@@ -82,8 +85,10 @@ impl GradientFunction for LinearBackward {
                 grad_output.device(),
             );
             if !empty {
+                // `grad_input = grad_output @ weight`, both stored the way
+                // the product names them.
                 macro_rules! run {
-                    ($accessor:ident, $mut_accessor:ident, $gemm:path) => {{
+                    ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:path) => {{
                         let g = grad_output.data().$accessor().ok_or_else(|| {
                             MinitensorError::internal_error("linear backward: grad dtype")
                         })?;
@@ -91,21 +96,37 @@ impl GradientFunction for LinearBackward {
                             MinitensorError::internal_error("linear backward: weight dtype")
                         })?;
                         let out = data.$mut_accessor().unwrap();
-                        unsafe {
-                            $gemm(
-                                rows,
-                                out_features,
-                                in_features,
-                                g.as_ptr(),
-                                w.as_ptr(),
-                                out.as_mut_ptr(),
-                            )
-                        };
+                        let delegated = $offer(Gemm {
+                            m: rows,
+                            k: out_features,
+                            n: in_features,
+                            lhs: g,
+                            lhs_storage: Storage::RowMajor,
+                            rhs: w,
+                            rhs_storage: Storage::RowMajor,
+                            out,
+                        });
+                        if !delegated {
+                            unsafe {
+                                $gemm(
+                                    rows,
+                                    out_features,
+                                    in_features,
+                                    g.as_ptr(),
+                                    w.as_ptr(),
+                                    out.as_mut_ptr(),
+                                )
+                            };
+                        }
                     }};
                 }
                 match grad_output.dtype() {
-                    DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut, gemm_f32),
-                    DataType::Float64 => run!(as_f64_slice, as_f64_slice_mut, gemm_f64),
+                    DataType::Float32 => {
+                        run!(as_f32_slice, as_f32_slice_mut, gemm_f32, offer_gemm_f32)
+                    }
+                    DataType::Float64 => {
+                        run!(as_f64_slice, as_f64_slice_mut, gemm_f64, offer_gemm_f64)
+                    }
                     _ => {
                         return Err(MinitensorError::invalid_operation(
                             "linear backward only supports floating point tensors",
@@ -131,7 +152,7 @@ impl GradientFunction for LinearBackward {
             );
             if !empty {
                 macro_rules! run {
-                    ($accessor:ident, $mut_accessor:ident, $gemm:path) => {{
+                    ($accessor:ident, $mut_accessor:ident, $gemm:path, $offer:path) => {{
                         let g = grad_output.data().$accessor().ok_or_else(|| {
                             MinitensorError::internal_error("linear backward: grad dtype")
                         })?;
@@ -140,22 +161,39 @@ impl GradientFunction for LinearBackward {
                         })?;
                         let out = data.$mut_accessor().unwrap();
                         // `grad` holds the logical `(out, rows)` operand as
-                        // `(rows, out)`.
-                        unsafe {
-                            $gemm(
-                                out_features,
-                                rows,
-                                in_features,
-                                g.as_ptr(),
-                                x.as_ptr(),
-                                out.as_mut_ptr(),
-                            )
-                        };
+                        // `(rows, out)`, and goes over that way rather than
+                        // transposed into a copy the size of the activations.
+                        let delegated = $offer(Gemm {
+                            m: out_features,
+                            k: rows,
+                            n: in_features,
+                            lhs: g,
+                            lhs_storage: Storage::Transposed,
+                            rhs: x,
+                            rhs_storage: Storage::RowMajor,
+                            out,
+                        });
+                        if !delegated {
+                            unsafe {
+                                $gemm(
+                                    out_features,
+                                    rows,
+                                    in_features,
+                                    g.as_ptr(),
+                                    x.as_ptr(),
+                                    out.as_mut_ptr(),
+                                )
+                            };
+                        }
                     }};
                 }
                 match grad_output.dtype() {
-                    DataType::Float32 => run!(as_f32_slice, as_f32_slice_mut, gemm_tn_f32),
-                    DataType::Float64 => run!(as_f64_slice, as_f64_slice_mut, gemm_tn_f64),
+                    DataType::Float32 => {
+                        run!(as_f32_slice, as_f32_slice_mut, gemm_tn_f32, offer_gemm_f32)
+                    }
+                    DataType::Float64 => {
+                        run!(as_f64_slice, as_f64_slice_mut, gemm_tn_f64, offer_gemm_f64)
+                    }
                     _ => {
                         return Err(MinitensorError::invalid_operation(
                             "linear backward only supports floating point tensors",

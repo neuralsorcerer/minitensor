@@ -216,6 +216,37 @@ def test_both_operands_get_the_gradient_the_product_implies(m, k, n):
     mt.clear_autograd_graph()
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "m,k,n", [(64, 512, 512), (16, 1024, 1024), (7, 5, 4), (33, 8, 65)]
+)
+def test_the_dense_layer_backward_matches_its_closed_forms(m, k, n, dtype):
+    """`grad_input = g @ W` and `grad_weight = g^T @ x`, both of them products.
+
+    The second hands `g` over transposed where it lies for the same reason the
+    forward hands the weight over that way: the copy is the size of the
+    activations, and a GEMM reads either layout.
+    """
+
+    rng = np.random.default_rng(14)
+    inputs = np.ascontiguousarray(rng.standard_normal((m, k)), dtype=dtype)
+    weight = np.ascontiguousarray(rng.standard_normal((n, k)), dtype=dtype)
+    cotangent = np.ascontiguousarray(rng.standard_normal((m, n)), dtype=dtype)
+
+    tx = mt.from_numpy(inputs).requires_grad_(True)
+    tw = mt.from_numpy(weight).requires_grad_(True)
+    (nn.dense_layer(tx, tw) * mt.from_numpy(cotangent)).sum().backward()
+
+    wide = (
+        inputs.astype(np.float64),
+        weight.astype(np.float64),
+        cotangent.astype(np.float64),
+    )
+    assert _relative_error(tx.grad.numpy(), wide[2] @ wide[1]) < _TOLERANCE[dtype]
+    assert _relative_error(tw.grad.numpy(), wide[2].T @ wide[0]) < _TOLERANCE[dtype]
+    mt.clear_autograd_graph()
+
+
 def test_a_dense_layer_still_trains():
     """The end of the road: a delegated GEMM inside a training step."""
 
