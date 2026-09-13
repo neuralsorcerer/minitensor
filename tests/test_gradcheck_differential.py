@@ -915,6 +915,15 @@ _MASK_34 = mt.Tensor(np.array([[True, False, True, False]] * 3), dtype="bool")
 # zero and whose finite difference is `-inf` minus `-inf`.
 _UNMASKED_34 = mt.Tensor(np.array([[False, True, False, True]] * 3), dtype="bool")
 
+_OTHER_33 = _f64(_ARG_RNG.standard_normal((3, 3)))
+_RHS_32B = _f64(_ARG_RNG.standard_normal((3, 2)))
+_TWOS_34 = _f64(np.full((3, 4), 2.0))
+_ARG_SQ_DOM = _ARG_RNG.standard_normal((3, 3)) + 3 * np.eye(3)
+_ARG_TRIL = np.tril(_ARG_RNG.standard_normal((3, 3))) + 3 * np.eye(3)
+_ARG_RHS32 = _ARG_RNG.standard_normal((3, 2))
+_ARG_VEC3B = _ARG_RNG.standard_normal(3)
+_CHOL_3 = _f64(np.linalg.cholesky(_ARG_SPD))
+
 _ARG_GRADCHECK_OPS = [
     # binary arithmetic and the fused multiply-adds
     ("add", lambda x: x.add(_OTHER_34), _ARG_M),
@@ -996,7 +1005,47 @@ _ARG_GRADCHECK_OPS = [
         lambda x: x.masked_log_softmax(_MASK_34, 1).masked_select(_UNMASKED_34),
         _ARG_M,
     ),
+    # aliases of kernels already above, listed so the coverage guard below can
+    # insist the list is complete rather than take its author's word for it
+    ("divide", lambda x: x.divide(_POS_34), _ARG_M),
+    ("multiply", lambda x: x.multiply(_OTHER_34), _ARG_M),
+    ("subtract", lambda x: x.subtract(_OTHER_34), _ARG_M),
+    ("true_divide", lambda x: x.true_divide(_POS_34), _ARG_M),
+    ("inverse", lambda x: x.inverse(), _ARG_SQ_DOM),
+    ("movedim", lambda x: x.movedim(0, 1), _ARG_M),
+    ("swapaxes", lambda x: x.swapaxes(0, 1), _ARG_M),
+    ("swapdims", lambda x: x.swapdims(0, 1), _ARG_M),
+    ("transpose", lambda x: x.transpose(0, 1), _ARG_M),
+    # more products
+    ("cross", lambda x: x.cross(_OTHER_33), _ARG_SQ),
+    ("matvec", lambda x: x.matvec(_VEC_4), _ARG_M),
+    ("vecmat", lambda x: x.vecmat(_OTHER_34), _ARG_VEC3B),
+    # branchy elementwise, with the inputs kept clear of the kinks
+    ("clamp_max", lambda x: x.clamp_max(0.35), _ARG_M),
+    ("clamp_min", lambda x: x.clamp_min(-0.35), _ARG_M),
+    ("fmod", lambda x: x.fmod(_TWOS_34), _ARG_M),
+    ("remainder", lambda x: x.remainder(_TWOS_34), _ARG_M),
+    ("ldexp", lambda x: x.ldexp(_TWOS_34), _ARG_M),
+    ("nextafter", lambda x: x.nextafter(_OTHER_34), _ARG_M),
+    # the rest of the linear algebra surface
+    ("cholesky_solve", lambda x: x.cholesky_solve(_CHOL_3), _ARG_RHS32),
+    ("solve_triangular", lambda x: x.solve_triangular(_RHS_32B, True), _ARG_TRIL),
+    ("eigvalsh", lambda x: x.eigvalsh(), _ARG_SPD),
+    ("slogdet", lambda x: x.slogdet()[1], _ARG_SQ_DOM),
+    ("svdvals", lambda x: x.svdvals(), _ARG_M),
+    ("pinv", lambda x: x.pinv(), _ARG_M),
+    ("pinverse", lambda x: x.pinverse(), _ARG_M),
+    ("qr_q", lambda x: x.qr()[0], _ARG_M),
+    ("qr_r", lambda x: x.qr()[1], _ARG_M),
+    ("lstsq", lambda x: x.lstsq(_RHS_32B)[0], _ARG_SQ_DOM),
+    ("tensorinv", lambda x: x.tensorinv(1), _ARG_SQ_DOM),
+    ("tensorsolve", lambda x: x.tensorsolve(_OTHER_3), _ARG_SQ_DOM),
+    ("matrix_norm", lambda x: x.matrix_norm(), _ARG_M),
     ("polygamma", lambda x: x.polygamma(1), _ARG_POS),
+    # `divmod` returns (floor, remainder). The floor half comes back with
+    # `requires_grad` false, correctly -- it is piecewise constant -- so the
+    # pair is covered by checking the half that carries a gradient.
+    ("divmod_remainder", lambda x: x.divmod(_TWOS_34)[1], _ARG_M),
 ]
 
 
@@ -1060,3 +1109,144 @@ def test_cholesky_gradient_is_the_symmetric_one():
             want = analytic[i, j] + (analytic[j, i] if i != j else 0.0)
             assert directional == pytest.approx(want, abs=1e-6), f"direction ({i},{j})"
     mt.clear_autograd_graph()
+
+
+_ARG_GRADCHECK_EXEMPT = {
+    # Constructors. They take dtype, device and `requires_grad` from the tensor
+    # they are called on -- deliberately, and asserted by
+    # `test_tensor_new_ones_defaults_to_reference_metadata` -- so the result
+    # carries the flag while its *values* do not depend on the source at all.
+    # There is no gradient path to check.
+    "new_empty": "constructor: inherits requires_grad, output does not depend on the input",
+    "new_full": "constructor: inherits requires_grad, output does not depend on the input",
+    "new_ones": "constructor: inherits requires_grad, output does not depend on the input",
+    "new_tensor": "constructor: inherits requires_grad, output does not depend on the input",
+    "new_zeros": "constructor: inherits requires_grad, output does not depend on the input",
+    # In-place writes. The "output" is the tensor they were called on, so it
+    # carries the flag it already had; none has a backward of its own.
+    "copy_": "in-place: returns the tensor it was called on",
+    "fill_": "in-place: returns the tensor it was called on",
+    "requires_grad_": "sets the flag; there is no operation to differentiate",
+    # A step. Its derivative in the first argument is zero wherever it exists --
+    # confirmed against a central difference, both sides zero -- so leaving it
+    # in the sweep would only trip the "this case checks nothing" assertion.
+    "heaviside": "derivative in the input is identically zero",
+}
+
+
+def _arg_probe_recipes():
+    """Argument tuples to try against each method, and the inputs to try them on.
+
+    Deliberately small. This is a reachability probe, not a fuzzer: it needs to
+    find *one* call that produces a gradient, and the shapes below are the ones
+    the tensor API actually accepts.
+    """
+    f34 = _f64(np.random.default_rng(5).standard_normal((3, 4)))
+    f33 = _f64(np.random.default_rng(6).standard_normal((3, 3)))
+    f43 = _f64(np.random.default_rng(7).standard_normal((4, 3)))
+    f3 = _f64(np.random.default_rng(8).standard_normal(3))
+    f4 = _f64(np.random.default_rng(9).standard_normal(4))
+    idx = mt.Tensor(np.array([[0, 2, 1, 0], [1, 0, 2, 1]]), dtype="int64")
+    rows = mt.Tensor(np.array([0, 2]), dtype="int64")
+    mask = mt.Tensor(np.array([[True, False, True, False]] * 3), dtype="bool")
+    recipes = [
+        (),
+        (f34,),
+        (f33,),
+        (f43,),
+        (f3,),
+        (f4,),
+        (0,),
+        (1,),
+        (-1,),
+        (2,),
+        (0.5,),
+        (2.0,),
+        (True,),
+        (0, 1),
+        (1, 0),
+        (0, 0),
+        (1, 1),
+        (2, 1),
+        ([4, 3],),
+        ([2, 1],),
+        ([0, 1],),
+        ([4],),
+        (f34, 0.5),
+        (f34, f34),
+        (f34, f34, 0.5),
+        (f34, True),
+        (idx,),
+        (0, idx),
+        (0, rows),
+        (0, idx, f34),
+        (mask,),
+        (mask, 0.5),
+        (mask, 1),
+        (1, 1, 2),
+    ]
+    a = np.random.default_rng(10).standard_normal((3, 3))
+    sources = [
+        np.random.default_rng(11).standard_normal((3, 4)),
+        np.random.default_rng(12).standard_normal((3, 3)) + 3 * np.eye(3),
+        a @ a.T + 3 * np.eye(3),
+        np.random.default_rng(13).standard_normal(3),
+    ]
+    return recipes, sources
+
+
+def test_the_argument_gradcheck_list_covers_every_op_it_can_reach():
+    """The same guard the no-argument list has, for the list that takes them.
+
+    `_ARG_GRADCHECK_OPS` started as a hand-picked set, and the comment above it
+    claimed to hold "every argument-taking op with a backward kernel of its
+    own". That claim was wrong by 31 ops -- among them `qr`, `pinv`, `lstsq`,
+    `slogdet` and `solve_triangular`, which is exactly the part of the surface
+    where a gradient is hard to get right. Hand-picking cannot be trusted here,
+    so this probes the live API instead: any method that yields a
+    gradient-carrying result under some plausible argument tuple has to be in
+    the list, or exempted with a reason.
+    """
+    recipes, sources = _arg_probe_recipes()
+    # Exactly the two list literals, and nothing between them: a slice wide
+    # enough to take in the test bodies would count any method those happen to
+    # call, which is how a guard quietly stops guarding.
+    text = pathlib.Path(__file__).read_text()
+    no_arg = text[text.index("_GRADCHECK_OPS = [") : text.index("_GRADCHECK_EXEMPT")]
+    with_arg = text[
+        text.index("_ARG_GRADCHECK_OPS = [") : text.index("_ARG_GRADCHECK_EXEMPT")
+    ]
+    listed = set(re.findall(r"\.([a-z_0-9]+)\(", no_arg + with_arg))
+    listed.add("cholesky")  # checked by test_cholesky_gradient_is_the_symmetric_one
+
+    missing = {}
+    for name in sorted(n for n in dir(mt.Tensor) if not n.startswith("_")):
+        if name in listed or name in _ARG_GRADCHECK_EXEMPT:
+            continue
+        for source in sources:
+            for args in recipes:
+                try:
+                    probe = mt.Tensor(
+                        np.ascontiguousarray(source.copy()),
+                        dtype="float64",
+                        requires_grad=True,
+                    )
+                    attr = getattr(probe, name)
+                    if not callable(attr):
+                        break
+                    result = attr(*args)
+                except Exception:
+                    continue
+                outputs = result if isinstance(result, tuple) else (result,)
+                if any(getattr(o, "requires_grad", False) for o in outputs):
+                    missing[name] = f"{source.shape} {args!r:.60}"
+                    break
+            if name in missing:
+                break
+    mt.clear_autograd_graph()
+
+    assert not missing, (
+        "differentiable ops with no finite-difference check: "
+        + ", ".join(sorted(missing))
+        + " -- add them to _ARG_GRADCHECK_OPS, or to _ARG_GRADCHECK_EXEMPT with a reason"
+    )
