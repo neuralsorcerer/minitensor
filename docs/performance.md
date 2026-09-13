@@ -185,10 +185,10 @@ for them:
 - **Nothing, as of the batched request.** Batched products used to be on this
   list, on the reasoning that several matrices already fill the thread pool
   with one whole product per worker. Re-measured on a 4-core container that is
-  not what happens: without delegation a batch runs at 0.27-0.66x of NumPy,
+  not what happens: without delegation a batch runs at 0.49-0.77x of NumPy,
   not the 0.95-1.5x the reasoning predicted. They are now offered as one
   request -- the whole stack, before the batch axis is split -- which is
-  1.2-3.1x faster and brings them to 0.81-0.98x. Offering them one matrix at a
+  1.2-1.7x faster and brings them to 0.82-0.89x. Offering them one matrix at a
   time would not have worked: at a batch of 256 the per-matrix crossing costs
   more than the whole product.
 - **Integers.** Neither library sends an integer product to a BLAS.

@@ -23,6 +23,10 @@ loop, in each library's own native container, so no conversion cost is charged
 to either side. Timing is min-of-repeats rather than mean: the minimum is the
 run least disturbed by the scheduler, and for a deterministic kernel the
 disturbance is all that the spread measures.
+
+Calls are run back to back in batches long enough that a thread pool stays
+awake across them -- see `_MIN_BATCH_SECONDS`, which is the one parameter here
+that has already been wrong once.
 """
 
 from __future__ import annotations
@@ -39,11 +43,30 @@ import numpy as np
 
 import minitensor as mt
 
-# A case is only worth reporting if it ran long enough to be measured above the
-# clock's own noise. `time.perf_counter` resolves to well under a microsecond on
-# every platform we build for, so 50us of work leaves two orders of magnitude of
-# headroom while keeping the whole sweep to a few seconds.
-_MIN_BATCH_SECONDS = 5e-5
+# How long one timed batch must run before the number is believed.
+#
+# The obvious value is "long enough to beat the clock" -- `time.perf_counter`
+# resolves well under a microsecond, so 50us would do. That was the value here
+# and it was wrong, in a way worth recording because it made the library look
+# slow at exactly the sizes it is not.
+#
+# The batch size doubles until one batch reaches this long. At 50us, any kernel
+# taking more than 50us per call satisfies it on the *first* try, with a batch
+# of one -- so every subsequent repeat also runs a single call, with Python loop
+# overhead in between. That is enough idle time for rayon's workers to park, so
+# each measured call woke them again and the wake landed inside the measurement.
+# A kernel doing 75us of real work measured 261us.
+#
+# It biased one band and left the rest alone, which is what made it hard to see:
+# below ~50us a batch holds many calls and the pool stays hot, above a few
+# milliseconds the pool stays hot *within* one call, and in between every call
+# paid. Across the sweep it showed up as an unexplained dip at 100k elements in
+# almost every operation at once -- `gelu` reading 3.09x, 0.65x, 3.44x as the
+# size grew, which is not a shape any kernel has.
+#
+# 20ms is far past the point where waking dominates, and it is also what a real
+# workload looks like: calls back to back, on a pool that is already awake.
+_MIN_BATCH_SECONDS = 2e-2
 
 
 @dataclass(frozen=True)
@@ -94,7 +117,11 @@ def _time(fn: Callable[[], object], *, repeats: int = 7) -> float:
         elapsed = time.perf_counter() - start
         if elapsed >= _MIN_BATCH_SECONDS or calls >= 1 << 20:
             break
-        calls *= 8
+        # Grow by the shortfall rather than by a fixed factor, so a kernel three
+        # orders of magnitude faster than the target does not need six rounds to
+        # find its batch size. Capped so one bad first reading cannot ask for a
+        # batch that takes minutes.
+        calls *= max(2, min(64, int(_MIN_BATCH_SECONDS / max(elapsed, 1e-9))))
     best = elapsed
     for _ in range(repeats - 1):
         start = time.perf_counter()

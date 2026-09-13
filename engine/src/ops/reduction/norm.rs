@@ -393,7 +393,7 @@ fn count_nonzero_over(tensor: &Tensor, dims: &[usize]) -> Result<Tensor> {
 /// stays in cache and the second pass is cheap; at 64MB it does not, and the
 /// sum reads all of it back from main memory. That is also where this stops
 /// being a tuning question -- against NumPy's `linalg.norm` the whole-tensor
-/// float32 norm went from 0.33x to 3.5x, and the row norms of a 4000x4000 from
+/// float32 norm went from 0.33x to 3.3x, and the row norms of a 4000x4000 from
 /// 0.55x to 12x.
 ///
 /// `None` when the reduced axes are not a trailing block, because then a

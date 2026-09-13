@@ -405,10 +405,11 @@ fn a_batched_product_is_offered_as_one_request() {
     // This used to assert the opposite -- that a stack of matrices stayed with
     // the engine, on the reasoning that the batch axis already fills the thread
     // pool with one whole matrix per worker. Measured, that reasoning did not
-    // hold: batched products ran at 0.27-0.66x of NumPy, and offering the stack
-    // is 1.2-3.1x faster. So they are offered, and offered *whole*: handing
-    // them over one matrix at a time would spend the crossing per matrix, which
-    // at a batch of 256 costs more than the product does.
+    // hold: batched products ran at 0.49-0.77x of NumPy, and offering the stack
+    // is 1.2-1.7x faster, which brings them to 0.82-0.89x. So they are offered,
+    // and offered *whole*: handing them over one matrix at a time would spend
+    // the crossing per matrix, which at a batch of 256 costs more than the
+    // product does.
     let (batch, m, k, n) = (3, 4, DECLINED_K, 5);
     let lhs = tensor_f32(ramp_f32(batch * m * k), vec![batch, m, k]);
     let rhs = tensor_f32(ramp_f32(batch * k * n), vec![batch, k, n]);
