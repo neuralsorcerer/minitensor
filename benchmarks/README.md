@@ -158,18 +158,64 @@ Elementwise arithmetic, where the win is only parallelism and a fused output:
 ## What still loses
 
 At 16M elements there is **nothing** in float32 that NumPy computes faster, and
-one thing in float64: `tanh`, at 0.55×.
+one thing in float64: `tanh`. It is not only a 16M problem — it loses at every
+size, and worse at the small ones:
 
-That one is structural rather than a threshold. `ops::simd::transcendental`
-holds hand-vectorized kernels for `tanh`, `erf`, `exp`, `log` and the rest —
-float32 only, and computing internally in float64 to get the last bits right. A
-float64 *output* cannot borrow that trick: it would need either a longer
-polynomial fitted for the wider target or double-double arithmetic in the range
-reduction. That is a real piece of numerical work rather than a type
-substitution, which is why the module stops where it does. Everything built on
-those kernels inherits the same shape — float64 `sigmoid` and `gelu` still win
-(2.8× and 2.3×), because their cost is dominated by the passes they avoid
-rather than by the transcendental itself.
+```
+tanh float64        1,000     14.6us  vs    2.2us    0.15x
+                  100,000    524.6us  vs  158.3us    0.30x
+                1,000,000      4.48ms vs    1.56ms   0.35x
+               16,000,000     85.64ms vs   43.83ms   0.51x
+```
+
+`ops::simd::transcendental` holds hand-vectorized kernels for `tanh`, `erf`,
+`exp`, `log` and the rest — float32 only, computing internally in float64 and
+rounding once. A float64 *output* cannot borrow that trick, and the reason is
+worth stating precisely, because the obvious one is wrong.
+
+It is **not** the polynomial. Extending the module's `expm1` Taylor series from
+r¹² to r¹⁴ moves the worst case from 6 ulp to 4 and stops there. Feed the same
+`tanh(x) = u/(u+2), u = expm1(2x)` form an `expm1` from libm — better than any
+polynomial worth writing — and it still reaches **3 ulp**, with 109,151 of
+2,000,001 sampled points over 1 ulp. The error is in the algebraic form: `u`
+cancels against `+2` for negative `x`, and `2ⁿ·p + (2ⁿ − 1)` cancels again
+inside the recombination. No polynomial fixes either.
+
+That form is nevertheless exactly right for a float32 result, and the module
+already proves it rather than assuming it: its `tanh` is bit-identical to
+`(x as f64).tanh() as f32` on **all 2³² float32 inputs**, on every dispatch
+path, checked exhaustively by an ignored test rather than sampled. One float32
+ulp is 2²⁹ float64 ulps, so three of the latter disappear entirely in the
+rounding — that headroom is exactly what the float32 kernel is spending. A
+float64 output has none to spend.
+
+The bar for float64 is higher than libm, not equal to it. Measured against a
+200-bit `mpmath` reference over 23,997 points, NumPy's array `np.tanh` is
+faithful to **≤ 1 ulp**, while the scalar `tanh` glibc gives the engine today
+reaches **2 ulp**. So for float64 `tanh` NumPy is currently both faster *and*
+more accurate than what we do, and matching it means a different algorithm — a
+segmented table with a polynomial per segment, which is what NumPy has — rather
+than a better polynomial in this one.
+
+One thing does help, for anyone who takes it on: folding to `|x|` before the
+reduction removes the first of the two cancellations, and drops the points over
+1 ulp from 109,151 to 3,641. The maximum stays at 3.
+
+By the logic that sends GEMM to NumPy, this op is a candidate for the same
+treatment — it is the one kernel where NumPy is better on both axes. It is not
+delegated because a provider path costs a trait, a registration, a threshold
+and a rayon-worker guard, and this is one operation at one dtype; it would also
+leave float64 `tanh` returning different bits to the Python package than to a
+Rust embedder. If a second op ever joins it, that arithmetic changes.
+
+Everything built on these kernels inherits the shape but not the loss — float64
+`sigmoid` and `gelu` still win (2.9× and 2.3×), because their cost is dominated
+by the passes they avoid rather than by the transcendental itself. float64
+`exp` and `log` do lose at 1000 elements (0.29× and 0.38×), for the reason the
+next paragraph gives, but close as the array grows and are ahead or level by
+16M: `exp` 1.07–1.11× and `log` 0.99–1.02× over repeat runs. `tanh` is the only
+one that stays behind at every size, which is why it is the only one described
+here.
 
 Below 16M the remaining losses are small ones at small sizes, where a few
 microseconds of call overhead is the whole measurement, and in the band the

@@ -291,12 +291,33 @@
 //!
 //! # Not covered
 //!
-//! The float64 kernels all still call `libm`. The same skeleton would serve
-//! them, but a correctly-rounded float64 result needs the reduction and the
-//! polynomials carried to ~2^-60 -- double-double residuals in places where
-//! the float32 path can round freely -- and that is a different piece of work.
-//! The float64 gap is also much smaller to begin with (`tanh` is 2.5x off a
-//! vectorized baseline at a million elements against float32's 11.8x).
+//! The float64 kernels all still call `libm`, and `tanh` is the one that costs
+//! something for it: 0.15x to 0.51x of NumPy depending on size, and the only
+//! kernel anywhere in the library that NumPy still beats at 16M elements. It
+//! is not covered here, and the reason is not the one it looks like.
+//!
+//! It is not the polynomial. Extending `expm1_poly` from `r^12` to `r^14`
+//! takes the worst case from 6 ulp to 4 and stops. Give the same
+//! `tanh(x) = u/(u+2)`, `u = expm1(2x)` an `expm1` straight from libm --
+//! better than any polynomial worth writing here -- and it still reaches 3
+//! ulp, 109,151 of 2,000,001 sampled points over 1 ulp. The error is in the
+//! form: `u` cancels against `+ 2` for negative `x`, and `2^n * p + (2^n - 1)`
+//! cancels again in the recombination. Neither is a polynomial's fault, and
+//! folding to `|x|` first -- which removes the first cancellation and takes
+//! the over-1-ulp count to 3,641 -- does not move the maximum.
+//!
+//! What makes that form right *here* is the rounding that follows it. One
+//! float32 ulp is `2^29` float64 ulps, so three of the latter vanish in the
+//! conversion -- which is why the exhaustive sweep above can report these
+//! kernels bit-identical to the promoted reference on all 2^32 inputs while
+//! the float64 arithmetic underneath is three ulp out. That headroom is what
+//! these kernels spend, and a float64 output has none to spend.
+//!
+//! The bar there is not libm either: against a 200-bit reference NumPy's
+//! `tanh` is faithful to 1 ulp where the glibc call this module leaves in
+//! place reaches 2, so NumPy is currently both faster and more accurate for
+//! float64 `tanh`. Matching it wants a segmented table with a polynomial per
+//! segment, which is a different piece of work from anything in this file.
 //!
 //! `erfc` is untouched: it needs relative accuracy out where `erf` has
 //! saturated, so it wants the high branch extended rather than reused.
