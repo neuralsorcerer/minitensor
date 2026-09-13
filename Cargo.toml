@@ -57,18 +57,64 @@ numpy = "0.29"
 # Release builds are what ship in the wheel and what every benchmark quotes.
 # Cargo's defaults leave a lot on the table here: no cross-crate inlining, and
 # full debug symbols retained in the artifact.
-# Measured on the extension module, each step over the one above it:
 #
-#   cargo defaults                     17.21 MB    ~75 s
-#   strip only                         12.44 MB     97 s
-#   strip + thin LTO (codegen-units 16) 12.44 MB     92 s
-#   strip + thin LTO + codegen-units 1  9.80 MB    176 s
+# Measured on the extension module, each row adding one setting to the one
+# above it. The whole ladder was re-measured on the current tree: the table
+# that stood here ended at 9.80 MB, which no build of this tree produces, so it
+# was describing a smaller codebase and every row of it had gone stale
+# together.
 #
-# Note the third row: thin LTO on its own changes nothing here. Shrinking the
+#   cargo defaults (no LTO, codegen-units 16)   19,268,264      98 s
+#     + strip = "symbols"                       12,506,200      97 s
+#     + lto = "thin"                            12,506,192      93 s
+#     + codegen-units = 1          <- shipped   11,229,472     190 s
+#
+# Note the third row: thin LTO on its own is worth eight bytes. Shrinking the
 # unit count is what lets it merge and inline across the crate boundaries the
 # hot kernels cross constantly -- rayon, matrixmultiply, and the generic
 # `ops::map` combinators -- and that is where both the size and the small
-# runtime gain come from. The two settings only pay off together.
+# runtime gain come from. The two settings only pay off together, and together
+# they are worth 42% of the artifact for an extra ninety seconds.
+#
+# # What is left, and why it stays
+#
+# A 10 MB wheel would be a nice round place to land and this is not one, so
+# here is where the bytes actually are, to save the next person looking for a
+# switch that is not there. Aggregating an unstripped build's symbol table by
+# crate, `.text` is 9.02 MB over 11,621 symbols:
+#
+#   engine        4.99 MB     minitensor's own kernels and autograd
+#   bindings      1.64 MB     the pyo3 surface
+#   core + std    0.87 MB     mostly formatting and iterator instantiations
+#   rayon         0.91 MB
+#   pyo3          0.23 MB     everything else is under 75 KB
+#
+# So 73% of the code is ours and live. Nothing unreachable survives to be
+# pruned: `engine::hardware` (3,310 lines), `engine::plugins` and every
+# `engine::backends` submodule but `cpu` do not appear in the symbol table at
+# all -- thin LTO and `--gc-sections` had already discarded them, which is also
+# why turning their default features off changes nothing. The remaining levers
+# were each measured, and only one of them is free:
+#
+#   lld --icf=safe        11,229,472    identical to the byte -- worth nothing
+#   lld --icf=all         10,986,064    -243,408
+#   panic = "abort"       10,366,480    -862,992   (see the note below)
+#
+# Identical-code folding is the interesting one, because the two variants
+# answer the question completely. `--icf=safe` folds only functions LLVM has
+# marked address-insignificant, and here it saves not one byte: every
+# duplicate worth folding is a function whose address is taken somewhere, so
+# all 243 KB of the `--icf=all` win comes from making functions that were
+# distinct share an address. That is a real semantic change, across pyo3's and
+# rayon's internals as much as ours, and it also puts `lld` on the critical
+# path of a build that `maturin develop --release` currently does with whatever
+# linker is installed. 2.2% does not buy that.
+#
+# Which leaves the floor where it is: ~11.2 MB, or ~10.4 MB for an embedder who
+# can take `release-min`. Getting under 10 MB from here means deleting live
+# kernels or de-monomorphizing the hot dtype-generic ones, and both cost the
+# speed this whole architecture exists to get. Well inside the 20 MB the brief
+# called acceptable, and it stops there deliberately.
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -80,8 +126,8 @@ strip = "symbols"
 #
 # "abort" is smaller. Measured on the extension module, changing nothing else:
 #
-#   panic = "unwind"    11,231,616 bytes
-#   panic = "abort"     10,367,936 bytes    -863,680  (-7.7%)
+#   panic = "unwind"    11,229,472 bytes
+#   panic = "abort"     10,366,480 bytes    -862,992  (-7.7%)
 #
 # It is not taken, because unwinding is load-bearing here rather than
 # incidental. pyo3 turns a Rust panic into a Python exception by catching the
@@ -93,7 +139,7 @@ strip = "symbols"
 # awkward input is *declined* rather than fatal, and every one of those cases
 # would become a process kill.
 #
-# 864 KB on an 11 MB artifact does not buy that. An embedder linking the engine
+# 863 KB on an 11 MB artifact does not buy that. An embedder linking the engine
 # as a plain Rust crate, with no Python boundary to unwind to, can have the
 # smaller build through `release-min` below.
 panic = "unwind"
