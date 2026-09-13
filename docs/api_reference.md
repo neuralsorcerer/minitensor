@@ -508,7 +508,7 @@ loss.backward()
 | Function | |
 | --- | --- |
 | `black_scholes(spot, strike, rate, vol, time, kind="call")` | The European option price, elementwise. All five arguments are tensors of one shape and dtype; broadcasting is yours to arrange with `expand`, because guessing which of five operands was meant to be the scalar is how a book quietly gets priced against the wrong strike. `kind` is `"call"` or `"put"`. |
-| `implied_volatility(price, spot, strike, rate, time, kind="call", tolerance=1e-10, max_iterations=100)` | The volatility reproducing an observed price, by Newton on vega bracketed by a bisection. NaN where no volatility does -- a quote below intrinsic value, or above the spot -- because there is no answer and a clamped bound would look like one. |
+| `implied_volatility(price, spot, strike, rate, time, kind="call", tolerance=1e-10, max_iterations=100)` | The volatility reproducing an observed price, by Newton on vega bracketed by a bisection. NaN where no volatility does -- a quote below intrinsic value, or above the spot -- because there is no answer and a clamped bound would look like one. Where *many* do, see the note below. |
 
 This is the one place where automatic differentiation and the domain want the
 same object: **the Greeks are the partial derivatives of the price.** After a
@@ -521,6 +521,18 @@ form would recompute `d1` in each of five separate gradient chains.
 function theorem `dsigma/dprice = 1 / vega`, so evaluating `black_scholes` at
 the recovered volatility gives it exactly, through a recorded operation.
 Differentiating the Newton iteration would differentiate the solver instead.
+
+`tolerance` bounds the **price**, not the volatility, which matters more than it
+sounds. The volatility is pinned to about `tolerance / vega`, and where vega
+underflows it is not pinned at all: a deep in-the-money call one month out is
+worth its intrinsic value to the last bit of a double. At `S=300, K=100, r=0.05,
+T=0.1` the volatilities 0.05, 0.1 and 0.2 all price to exactly
+`200.49875208073178`, with vega at 0.2 equal to `1.66e-65`, so the first iterate
+already meets the tolerance and what comes back is the `0.2` the search starts
+from -- a correct inverse, a useless one, and one that does not look useless. No
+vega threshold is imposed to catch it, because any threshold also refuses quotes
+that are legitimately informative; the same gradient that gives you vega tells
+you whether to trust the answer.
 
 At `sigma * sqrt(T) == 0` the formula is `0 * inf`; the limit is the intrinsic
 value, which is what comes back. Its derivative is a step, and at exactly

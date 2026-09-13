@@ -432,6 +432,22 @@ impl GradientFunction for BlackScholesBackward {
 /// Returns NaN where no volatility reproduces the price — a quote below
 /// intrinsic value, or above the spot — because there is no answer to return
 /// and a clamped bound would look like one.
+///
+/// The opposite case is the one to watch, and it is silent. `tolerance` is a
+/// bound on the *price*, so where vega is small the volatility is pinned only
+/// to about `tolerance / vega`, and where vega underflows it is not pinned at
+/// all: a deep in-the-money call one month out is worth its intrinsic value to
+/// the last bit of a double. At `S = 300, K = 100, r = 0.05, T = 0.1` the
+/// volatilities 0.05, 0.1 and 0.2 all price to exactly 200.49875208073178, with
+/// vega at 0.2 equal to 1.66e-65; the first iterate already satisfies the
+/// tolerance, so what comes back is the 0.2 the search starts from. That is a
+/// correct inverse and a useless one, and it does not look useless.
+///
+/// No threshold on vega is imposed to catch it, because every threshold refuses
+/// quotes that are legitimately informative. A caller who needs to know can
+/// measure it: evaluate [`black_scholes`] at the recovered volatility with a
+/// gradient on `vol`, and compare `tolerance / vega` against the precision the
+/// answer is wanted to.
 pub fn implied_volatility(
     price: &Tensor,
     spot: &Tensor,

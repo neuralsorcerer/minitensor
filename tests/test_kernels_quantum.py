@@ -324,3 +324,99 @@ def test_a_state_that_is_not_a_power_of_two_is_rejected():
 def test_a_state_without_the_component_axis_is_rejected():
     with pytest.raises(Exception):
         probabilities(mt.Tensor([1.0, 0.0, 0.0, 0.0], dtype="float64"))
+
+
+# --- against a reference that does not share the kernel's index arithmetic ----
+
+
+def _dense_operator(matrix, qubits, target):
+    """The full `2**q x 2**q` operator for a one-qubit gate, by tensor product.
+
+    `_reference_gate` above walks index pairs with `stride = 1 << qubit`, which
+    is the same arithmetic the kernel does -- so it agrees with the kernel about
+    the qubit ordering whether or not that ordering is right. This derives the
+    operator from the tensor-product structure instead: with qubit 0 the least
+    significant bit of the index, the amplitude vector is ordered so that the
+    operator is `I ⊗ U ⊗ I` with the identities sized by the qubits above and
+    below the target. It shares nothing with the butterfly but the convention it
+    is there to test.
+    """
+    above = np.eye(2 ** (qubits - 1 - target), dtype=np.complex128)
+    below = np.eye(2**target, dtype=np.complex128)
+    return np.kron(above, np.kron(matrix, below))
+
+
+@pytest.mark.parametrize("qubits", [1, 2, 3, 4])
+@pytest.mark.parametrize(
+    "name,matrix", [("h", _HADAMARD), ("x", _PAULI_X), ("z", _PAULI_Z)]
+)
+def test_a_named_gate_matches_a_tensor_product_operator(qubits, name, matrix):
+    rng = np.random.default_rng(20260913 + qubits)
+    for target in range(qubits):
+        vector = rng.normal(size=2**qubits) + 1j * rng.normal(size=2**qubits)
+        vector /= np.linalg.norm(vector)
+        got = _complex(apply_gate(_state(_pairs(vector)), name, target))
+        want = _dense_operator(matrix, qubits, target) @ vector
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-14)
+
+
+@pytest.mark.parametrize("qubits", [1, 2, 3])
+def test_an_arbitrary_gate_matches_a_tensor_product_operator(qubits):
+    """A non-unitary gate with four distinct complex entries, so that the entry
+    order `[a, b, c, d]` is under test as well as the striding: a transposed
+    matrix would still be unitary and would still preserve the norm."""
+    matrix = np.array(
+        [[0.3 + 0.7j, -1.1 + 0.2j], [0.5 - 0.4j, 0.9 + 1.3j]], dtype=np.complex128
+    )
+    flat = [
+        matrix[0, 0].real,
+        matrix[0, 0].imag,
+        matrix[0, 1].real,
+        matrix[0, 1].imag,
+        matrix[1, 0].real,
+        matrix[1, 0].imag,
+        matrix[1, 1].real,
+        matrix[1, 1].imag,
+    ]
+    rng = np.random.default_rng(4242 + qubits)
+    for target in range(qubits):
+        vector = rng.normal(size=2**qubits) + 1j * rng.normal(size=2**qubits)
+        got = _complex(apply_gate(_state(_pairs(vector)), flat, target))
+        want = _dense_operator(matrix, qubits, target) @ vector
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-14)
+
+
+@pytest.mark.parametrize("qubits", [1, 2, 3, 4])
+def test_the_measurements_match_amplitudes_read_directly(qubits):
+    """`probabilities`, `prefix_trace` and `expect_z` against the definitions,
+    with the index conventions written out rather than reused: the prefix is the
+    *high* bits of the index, and `expect_z` reads bit `target` counting from the
+    *low* one. Those two disagree with each other by design, which is exactly the
+    kind of thing a shared helper would paper over."""
+    rng = np.random.default_rng(99 + qubits)
+    vector = rng.normal(size=2**qubits) + 1j * rng.normal(size=2**qubits)
+    vector /= np.linalg.norm(vector)
+    state = _state(_pairs(vector))
+
+    np.testing.assert_allclose(
+        np.asarray(probabilities(state)), np.abs(vector) ** 2, rtol=0, atol=1e-15
+    )
+
+    for keep in range(1, qubits + 1):
+        block = 2 ** (qubits - keep)
+        want = np.array(
+            [
+                np.sum(np.abs(vector[outcome * block : (outcome + 1) * block]) ** 2)
+                for outcome in range(2**keep)
+            ]
+        )
+        np.testing.assert_allclose(
+            np.asarray(prefix_trace(state, keep)), want, rtol=0, atol=1e-15
+        )
+
+    for target in range(qubits):
+        signs = np.array([1 - 2 * ((i >> target) & 1) for i in range(2**qubits)])
+        want = float(np.sum(signs * np.abs(vector) ** 2))
+        assert float(np.asarray(expect_z(state, target))) == pytest.approx(
+            want, abs=1e-15
+        )

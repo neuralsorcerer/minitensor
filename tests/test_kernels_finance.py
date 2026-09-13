@@ -241,3 +241,233 @@ def test_mismatched_shapes_are_rejected():
         black_scholes(
             _t([1.0]), _t([1.0, 2.0]), _t([0.0]), _t([0.1]), _t([1.0]), "call"
         )
+
+
+# --- against a reference that shares no code with the kernel ------------------
+
+# Prices from the closed form evaluated at 200 bits with `mpmath`, and the five
+# partials from differentiating *that* numerically at 200 bits -- not from Greek
+# formulas. The tests above check the Greeks against central differences of the
+# kernel's own forward and delta against `Phi(d1)` spelled out here, both of
+# which agree with the kernel if the kernel and the test share a misreading.
+# This table cannot: nothing in it came from this repository.
+#
+# Each row is ((spot, strike, rate, vol, time), price, (d/dspot, d/dstrike,
+# d/drate, d/dvol, d/dtime)). Regenerate with `mpmath` at `mp.prec = 200` if the
+# cases ever change.
+_REFERENCE = {
+    "call": [
+        (
+            (100.0, 100.0, 0.05, 0.2, 1.0),
+            10.450583572185568,
+            (
+                0.6368306511756191,
+                -0.5323248154537634,
+                53.23248154537634,
+                37.524034691693785,
+                6.414027546438196,
+            ),
+        ),
+        (
+            (100.0, 120.0, 0.05, 0.2, 1.0),
+            3.2474774165608142,
+            (
+                0.28719163790512703,
+                -0.21226405311626573,
+                25.471686373951886,
+                34.07384227701016,
+                4.680968546398611,
+            ),
+        ),
+        (
+            (100.0, 80.0, 0.05, 0.2, 1.0),
+            24.588835443927753,
+            (
+                0.9286374026649281,
+                -0.8534363102820632,
+                68.27490482256506,
+                13.627194363994361,
+                4.77646467752769,
+            ),
+        ),
+        (
+            (42.0, 40.0, 0.1, 0.2, 0.5),
+            4.759422392871533,
+            (
+                0.779131290942669,
+                -0.6991022956680141,
+                13.982045913360281,
+                8.813415059602852,
+                4.559092194592627,
+            ),
+        ),
+        (
+            (100.0, 100.0, 0.0, 0.3, 2.0),
+            16.79959714273635,
+            (
+                0.5839979857136818,
+                -0.4160020142863183,
+                83.20040285726365,
+                55.16370633254119,
+                4.13727797494059,
+            ),
+        ),
+        (
+            (100.0, 100.0, -0.01, 0.15, 0.25),
+            2.8716165053154734,
+            (
+                0.5016622546919065,
+                -0.4729460896387518,
+                11.823652240968794,
+                19.946940868791735,
+                5.5111361709987685,
+            ),
+        ),
+    ],
+    "put": [
+        (
+            (100.0, 100.0, 0.05, 0.2, 1.0),
+            5.573526022256968,
+            (
+                -0.3631693488243809,
+                0.4189046090469506,
+                -41.89046090469506,
+                37.524034691693785,
+                1.6578804239346259,
+            ),
+        ),
+        (
+            (100.0, 120.0, 0.05, 0.2, 1.0),
+            17.395008356646496,
+            (
+                -0.712808362094873,
+                0.7389653713844483,
+                -88.67584456613379,
+                34.07384227701016,
+                -1.0264080006056737,
+            ),
+        ),
+        (
+            (100.0, 80.0, 0.05, 0.2, 1.0),
+            0.6871894039848735,
+            (
+                -0.07136259733507189,
+                0.09779311421865076,
+                -7.823449137492061,
+                13.627194363994361,
+                0.9715469795248332,
+            ),
+        ),
+        (
+            (42.0, 40.0, 0.1, 0.2, 0.5),
+            0.8085993729000936,
+            (
+                -0.22086870905733105,
+                0.25212712883269994,
+                -5.042542576653999,
+                8.813415059602852,
+                0.7541744965897705,
+            ),
+        ),
+        (
+            (100.0, 100.0, 0.0, 0.3, 2.0),
+            16.79959714273635,
+            (
+                -0.4160020142863183,
+                0.5839979857136818,
+                -116.79959714273635,
+                55.16370633254119,
+                4.13727797494059,
+            ),
+        ),
+        (
+            (100.0, 100.0, -0.01, 0.15, 0.25),
+            3.1219292658949818,
+            (
+                -0.4983377453080935,
+                0.5295570379670433,
+                -13.238925949176084,
+                19.946940868791735,
+                6.513639298604564,
+            ),
+        ),
+    ],
+}
+
+
+@pytest.mark.parametrize("kind", ["call", "put"])
+def test_price_and_greeks_match_a_two_hundred_bit_reference(kind):
+    """Every published figure agrees to about 1e-13; the bound here is 1e-10.
+
+    Loose on purpose. `erfc` comes from the platform's `libm` and its last bits
+    differ between them, while the failure this is guarding against -- a wrong
+    formula, a flipped sign, a Greek wired to the wrong input -- is off by a
+    factor, not by an ulp.
+    """
+    for args, want_price, want_greeks in _REFERENCE[kind]:
+        inputs = [_t([value], requires_grad=True) for value in args]
+        priced = black_scholes(*inputs, kind)
+        assert float(np.asarray(priced)[0]) == pytest.approx(want_price, rel=1e-10)
+
+        priced.backward()
+        for name, tensor, want in zip(
+            ("spot", "strike", "rate", "vol", "time"), inputs, want_greeks
+        ):
+            got = float(np.asarray(tensor.grad)[0])
+            assert got == pytest.approx(
+                want, rel=1e-10, abs=1e-10
+            ), f"d/d{name} at {args} ({kind}): {got} != {want}"
+
+
+def test_implied_volatility_stops_at_its_guess_where_vega_underflows():
+    """The solver converges in price, and deep enough in the money there is no
+    price left to converge on.
+
+    A deep in-the-money call one month out is worth its intrinsic value to the
+    last bit of a double: at `S=300, K=100, r=0.05, T=0.1` the volatilities
+    0.05, 0.1 and 0.2 all price to exactly 200.49875208073178, and vega at 0.2
+    is 1.66e-65. Nothing can recover 0.05 from that, and what comes back is the
+    0.2 the iteration starts at -- a number that looks like an answer.
+
+    This is pinned rather than fixed because every way of detecting it needs a
+    threshold on vega, and any threshold refuses quotes that are legitimately
+    informative. The docstring says so; this makes the two agree. A change that
+    returns NaN here is welcome and should update both.
+    """
+    args = (300.0, 100.0, 0.05, 0.1)  # spot, strike, rate, time
+    priced_low = black_scholes(
+        _t([args[0]]), _t([args[1]]), _t([args[2]]), _t([0.05]), _t([args[3]]), "call"
+    )
+    priced_guess = black_scholes(
+        _t([args[0]]), _t([args[1]]), _t([args[2]]), _t([0.2]), _t([args[3]]), "call"
+    )
+    # The premise: two very different volatilities, one identical price.
+    assert float(np.asarray(priced_low)[0]) == float(np.asarray(priced_guess)[0])
+
+    recovered = implied_volatility(
+        priced_low, _t([args[0]]), _t([args[1]]), _t([args[2]]), _t([args[3]]), "call"
+    )
+    assert float(np.asarray(recovered)[0]) == pytest.approx(0.2, abs=1e-12)
+
+
+def test_implied_volatility_recovers_the_volatility_where_the_price_carries_it():
+    """The other side of the same coin: where vega is not negligible, the round
+    trip comes back. The bound is `tolerance / vega`, which at these points is
+    far below the 1e-4 asserted here."""
+    for spot, strike, rate, time in [
+        (100.0, 100.0, 0.05, 1.0),
+        (100.0, 120.0, 0.05, 1.0),
+        (42.0, 40.0, 0.10, 0.5),
+        (100.0, 100.0, -0.01, 0.25),
+    ]:
+        for kind in ("call", "put"):
+            for vol in (0.1, 0.2, 0.5, 1.0):
+                priced = black_scholes(
+                    _t([spot]), _t([strike]), _t([rate]), _t([vol]), _t([time]), kind
+                )
+                recovered = implied_volatility(
+                    priced, _t([spot]), _t([strike]), _t([rate]), _t([time]), kind
+                )
+                assert float(np.asarray(recovered)[0]) == pytest.approx(
+                    vol, rel=1e-4
+                ), f"{kind} S={spot} K={strike} r={rate} T={time} vol={vol}"
