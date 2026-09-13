@@ -144,6 +144,40 @@ pre-commit run isort --all-files
 python -m pytest tests/tensor/test_tensor_core.py
 ```
 
+### Running the Python suite against a checked build
+
+`cargo test` compiles with `debug_assert!` and integer overflow checks on, so
+the engine's internal invariants are checked whenever its own tests run. The
+Python suite is not in that position: it imports `minitensor/_core.so`, which is
+a release build, and every assertion in the engine is compiled out of it. That
+leaves the whole binding surface -- the FFI, the zero-copy import and export
+paths, the `unsafe` slice construction in `TensorData` -- exercised only with
+the checks disabled.
+
+To close that gap, build the extension with both turned on and run the suite
+against it:
+
+```bash
+RUSTFLAGS="-C debug-assertions=yes -C overflow-checks=yes" \
+    cargo build --release -p bindings --features extension-module
+cp target/release/libminitensor.so minitensor/_core.so
+python -m pytest
+```
+
+It is worth doing after any change to the bindings or to `unsafe` code, and
+worth knowing what it currently reports: **13,764 of 13,766 pass**. The two that
+do not are `test_no_panics_on_bad_input.py::test_shape_ops_decline_impossible_targets`
+for `int32-limits` and `int64-limits`, and they are the expected answer rather
+than a defect. Integer `matmul` accumulates with `*o += a * b` on the element
+type, so multiplying values at the type's limits overflows; the release build
+wraps, which is what C does and what NumPy does -- `[[max, min], [min, max]]`
+squared gives `[1, 0, 0, 1]` from both libraries, bit for bit -- while an
+overflow-checked build panics instead, and a panic crossing pyo3 arrives in
+Python as `PanicException` rather than an `Exception`. Rebuild without the flags before
+committing or benchmarking: the checked build is a different artifact -- around
+8% larger, with a branch on every arithmetic operation the shipped one does not
+have -- so it is not what any published number was taken on.
+
 ## Documentation workflow
 
 - Keep examples copy-pasteable and prefer commands that work from the repository

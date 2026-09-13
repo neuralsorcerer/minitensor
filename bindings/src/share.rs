@@ -23,7 +23,6 @@
 //! the array interface is read-only: several tensors can share one buffer, and
 //! a writer would change all of them at once.
 
-use crate::error::_convert_error;
 use crate::tensor::PyTensor;
 use engine::tensor::{DataType, Shape, TensorData};
 use engine::{Device, Tensor};
@@ -114,6 +113,13 @@ pub(crate) fn tensor_from_array_shared(
     // above, and `owner` holds the array -- and so its buffer -- alive for as
     // long as this storage exists. NumPy does not reallocate an array's data
     // in place, so the pointer stays good.
+    //
+    // The owner outlives this call and is dropped wherever the last tensor
+    // sharing it is, which for a tensor freed inside a rayon fold is a thread
+    // holding no GIL. That is sound rather than lucky: pyo3's `Drop for Py<T>`
+    // checks whether the thread is attached and hands the reference to
+    // `register_decref` when it is not, so the decref happens later on a
+    // thread that is.
     let storage =
         unsafe { TensorData::from_foreign(data, size, dtype, numel, Box::new(owner) as Box<_>) };
 
@@ -176,6 +182,24 @@ pub(crate) unsafe fn fill_buffer_view(
     let storage = tensor.data();
     let itemsize = tensor.dtype().size_in_bytes();
     let dims = tensor.shape().dims();
+
+    // `buf` is the storage pointer and `len` below is computed from the
+    // *shape*, so the two agree only while every tensor's shape matches the
+    // storage it was built over. Nothing in `Tensor::new` enforces that, and
+    // the cost of it being false here is Python reading past the allocation --
+    // the worst failure this file could have. One comparison per export, not
+    // per element, turns it into an exception. No path in the library is known
+    // to break it (the whole Python suite runs with the alignment and length
+    // assertions in `TensorData` enabled and none fire); this is a guard on an
+    // assumption, not a fix for an observed bug. `__array_interface__` hands
+    // out the same pointer under the same assumption.
+    if tensor.numel() != storage.numel() {
+        return Err(PyBufferError::new_err(format!(
+            "tensor shape covers {} elements but its storage holds {}; refusing to export a              buffer that would read past the allocation",
+            tensor.numel(),
+            storage.numel(),
+        )));
+    }
 
     // Shape and strides must outlive this call and be reclaimed on release, so
     // they are boxed and parked in `internal` -- the field the protocol
@@ -245,7 +269,8 @@ pub(crate) unsafe fn release_buffer_view(view: *mut ffi::Py_buffer) {
 
 /// Build the shared tensor and wrap it, for the `from_numpy_shared` binding.
 pub(crate) fn shared_pytensor(array: &Bound<PyAny>, requires_grad: bool) -> PyResult<PyTensor> {
-    let tensor = tensor_from_array_shared(array, requires_grad)?;
-    let _ = _convert_error;
-    Ok(PyTensor::from_tensor(tensor))
+    Ok(PyTensor::from_tensor(tensor_from_array_shared(
+        array,
+        requires_grad,
+    )?))
 }
