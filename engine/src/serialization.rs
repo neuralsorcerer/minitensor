@@ -25,6 +25,184 @@ use std::{
     path::Path,
 };
 
+/// The one timestamp a checkpoint carries, formatted without a date library.
+///
+/// `ModelMetadata::created_at` is an RFC 3339 string, and nothing in the engine
+/// or the bindings ever reads it back -- it is written into the file and handed
+/// to Python as text. That single call was the entire use this crate made of
+/// `chrono`, which brings `iana-time-zone` with it to find a local zone this
+/// call never asks for.
+///
+/// Worth measuring rather than assuming, and the number is the same one the
+/// `statrs` removal produced -- building the extension module with and without
+/// the dependency, changing nothing else:
+///
+/// ```text
+///   with chrono      11,236,976 bytes    3m17s release build    60 crates
+///   without          11,229,472 bytes    3m11s                  58 crates
+/// ```
+///
+/// Seven and a half kilobytes. Thin LTO had already discarded everything in
+/// `chrono` that a `Utc::now()` does not reach, so the linked size was never
+/// where the cost sat; the cost was two crates in the supply chain, one of
+/// which opens `/etc/localtime` at runtime for a question this code does not
+/// ask. That is the whole case for the forty lines of calendar arithmetic
+/// below -- not bytes.
+///
+/// The output is fixed width where `chrono`'s was not: `to_rfc3339` prints the
+/// fractional second to 0, 3, 6 or 9 digits depending on its trailing zeros, so
+/// two saves a microsecond apart used to differ in length as well as in value.
+/// Nine digits always is just as valid under RFC 3339 -- section 5.6 puts no
+/// bound on `time-secfrac` -- and it makes the length of a checkpoint's header
+/// a function of the model rather than of the clock.
+mod rfc3339 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The current UTC instant as `YYYY-MM-DDTHH:MM:SS.nnnnnnnnn+00:00`.
+    pub(super) fn now() -> String {
+        let (secs, nanos) = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(since) => (since.as_secs() as i64, since.subsec_nanos()),
+            // A clock set before 1970. `Duration` cannot be negative, so the
+            // error carries the distance backwards instead; a non-zero
+            // subsecond part of that distance borrows a second, which is what
+            // keeps the nanoseconds below counting forwards like every other
+            // case rather than running backwards from the second boundary.
+            Err(before) => {
+                let behind = before.duration();
+                let subsec = behind.subsec_nanos();
+                if subsec == 0 {
+                    (-(behind.as_secs() as i64), 0)
+                } else {
+                    (-(behind.as_secs() as i64) - 1, 1_000_000_000 - subsec)
+                }
+            }
+        };
+        format(secs, nanos)
+    }
+
+    /// Split out from [`now`] so the formatting can be tested at instants a
+    /// test cannot arrange for the clock to be at.
+    fn format(secs: i64, nanos: u32) -> String {
+        // Euclidean, not truncating: one second before the epoch is the last
+        // second of 1969-12-31, and `-1 / 86_400` would call it day zero.
+        let days = secs.div_euclid(86_400);
+        let time = secs.rem_euclid(86_400);
+        let (year, month, day) = civil_from_days(days);
+        let (hour, minute, second) = (time / 3_600, (time / 60) % 60, time % 60);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}+00:00")
+    }
+
+    /// Howard Hinnant's `civil_from_days`: a count of days since 1970-01-01 as
+    /// a proleptic Gregorian date.
+    ///
+    /// The trick is the shift on the first line, which moves the epoch to
+    /// 0000-03-01. That puts February -- the only month whose length varies --
+    /// at the *end* of the year rather than near the front, so the leap day
+    /// never falls inside the span being measured and the remaining month
+    /// lengths (31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 28/29) become a
+    /// straight line: `mp = (5 * doy + 2) / 153` inverts them exactly, with no
+    /// table and no branch per month. The 400-year era then absorbs the
+    /// century rules, so 1900 and 2100 are handled by the same arithmetic as
+    /// 2000 with nothing special written for either.
+    fn civil_from_days(days: i64) -> (i64, u32, u32) {
+        let shifted = days + 719_468;
+        let era = shifted.div_euclid(146_097);
+        let day_of_era = shifted.rem_euclid(146_097); // [0, 146_096]
+        let year_of_era =
+            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365; // [0, 399]
+        let year = year_of_era + era * 400;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
+        let shifted_month = (5 * day_of_year + 2) / 153; // [0, 11], March is 0
+        let day = day_of_year - (153 * shifted_month + 2) / 5 + 1; // [1, 31]
+        let month = if shifted_month < 10 {
+            shifted_month + 3
+        } else {
+            shifted_month - 9
+        }; // [1, 12]
+        // January and February belong to the year after the March the era
+        // arithmetic counted them from.
+        (year + i64::from(month <= 2), month as u32, day as u32)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{civil_from_days, format};
+
+        /// Instants with a published UTC reading, chosen to cover the century
+        /// rules in both directions and the two sides of the epoch.
+        #[test]
+        fn known_instants_format_to_their_published_utc_reading() {
+            const CASES: [(i64, u32, &str); 9] = [
+                (0, 0, "1970-01-01T00:00:00.000000000+00:00"),
+                (-1, 0, "1969-12-31T23:59:59.000000000+00:00"),
+                (1, 500_000_000, "1970-01-01T00:00:01.500000000+00:00"),
+                // The two timestamps people quote from memory.
+                (1_000_000_000, 0, "2001-09-09T01:46:40.000000000+00:00"),
+                (1_234_567_890, 0, "2009-02-13T23:31:30.000000000+00:00"),
+                // 2000 is a leap year (divisible by 400) and 1900 is not
+                // (divisible by 100 but not 400), which is the pair that a
+                // hand-written calendar usually gets wrong.
+                (951_782_400, 0, "2000-02-29T00:00:00.000000000+00:00"),
+                (-2_203_891_200, 0, "1900-03-01T00:00:00.000000000+00:00"),
+                // Last second before a century that is also not a leap year.
+                (
+                    4_107_542_399,
+                    999_999_999,
+                    "2100-02-28T23:59:59.999999999+00:00",
+                ),
+                (4_107_542_400, 0, "2100-03-01T00:00:00.000000000+00:00"),
+            ];
+            for (secs, nanos, want) in CASES {
+                assert_eq!(format(secs, nanos), want, "at {secs}s + {nanos}ns");
+            }
+        }
+
+        /// Two centuries day by day, checked against a calendar advanced
+        /// independently. A table of a few dates cannot catch a month length
+        /// that is wrong only in one direction, or a leap year the era
+        /// arithmetic places one day out; walking every day between 1900 and
+        /// 2100 can, because any such error desynchronises the two and never
+        /// resynchronises.
+        #[test]
+        fn every_day_of_two_centuries_advances_by_exactly_one() {
+            fn leap(year: i64) -> bool {
+                year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+            }
+            fn month_length(year: i64, month: u32) -> u32 {
+                match month {
+                    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                    4 | 6 | 9 | 11 => 30,
+                    _ if leap(year) => 29,
+                    _ => 28,
+                }
+            }
+
+            // 1900-01-01, and the day count that reaches it.
+            let (mut year, mut month, mut day) = (1900_i64, 1_u32, 1_u32);
+            let first = -2_208_988_800_i64 / 86_400;
+            assert_eq!(civil_from_days(first), (1900, 1, 1));
+
+            for offset in first..=(first + 73_413) {
+                assert_eq!(
+                    civil_from_days(offset),
+                    (year, month, day),
+                    "day {offset} since the epoch"
+                );
+                day += 1;
+                if day > month_length(year, month) {
+                    day = 1;
+                    month += 1;
+                }
+                if month > 12 {
+                    month = 1;
+                    year += 1;
+                }
+            }
+            assert_eq!((year, month, day), (2101, 1, 1));
+        }
+    }
+}
+
 /// Version information for model compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelVersion {
@@ -102,7 +280,7 @@ impl ModelMetadata {
             name,
             description: None,
             version: ModelVersion::current(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: rfc3339::now(),
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             architecture,
             input_shapes: Vec::new(),

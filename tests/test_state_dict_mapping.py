@@ -208,14 +208,16 @@ def _bytes_without_the_timestamp(path, fmt):
     """The file's bytes with `created_at` cut out of them.
 
     It is the one field meant to differ between two saves, so it has to come
-    out before they can be compared. It cannot be masked in place, because it
-    is not a fixed width: chrono prints the fractional second to 0, 3, 6 or 9
-    digits depending on how many trailing zeros it has, so two saves a
-    microsecond apart differ in length as well as in content roughly one time
-    in a thousand. All three formats store the field as its RFC 3339 string
-    preceded by the byte giving that string's length -- an opening quote, in
-    JSON -- and both have to go, since the length byte varies with the width
-    too.
+    out before they can be compared. Cutting rather than masking is deliberate
+    and outlives the current format: the field is a fixed 35 characters today,
+    so a mask would work, but it was not when the engine formatted it through
+    `chrono` -- `to_rfc3339` prints the fractional second to 0, 3, 6 or 9
+    digits depending on its trailing zeros, and two saves a microsecond apart
+    differed in length as well as in value about one time in a thousand. All
+    three formats store the field as its RFC 3339 string preceded by the byte
+    giving that string's length -- an opening quote, in JSON -- so the byte
+    before it comes out too, and this keeps working whatever width the engine
+    settles on.
     """
     raw = _read_bytes(path)
     stamp = S.ModelSerializer.load(
