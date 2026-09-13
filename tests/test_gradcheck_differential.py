@@ -819,7 +819,8 @@ def test_the_gradcheck_list_covers_every_differentiable_no_arg_op():
     That is a lower bar than "every differentiable op" -- ops needing arguments
     are out of reach of a no-arg probe -- but it is checkable, and it is what
     caught `leaky_relu` sitting outside the list while its gradient boundary
-    was being changed.
+    was being changed. The ops that do need arguments are swept separately, by
+    `_ARG_GRADCHECK_OPS` at the bottom of this file.
     """
     # Derive coverage from the calls the lambdas actually make, rather than from
     # the parametrize ids: the ids are suffixed to stay unique ("norm1", "pow2",
@@ -853,3 +854,209 @@ def test_the_gradcheck_list_covers_every_differentiable_no_arg_op():
         + ", ".join(missing)
         + " -- add them to _GRADCHECK_OPS, or to _GRADCHECK_EXEMPT with a reason"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Gradcheck for ops that take arguments
+# --------------------------------------------------------------------------- #
+#
+# `test_the_gradcheck_list_covers_every_differentiable_no_arg_op` says plainly
+# what it cannot reach: "ops needing arguments are out of reach of a no-arg
+# probe". That is 165 of the 345 callable tensor methods, and it is where the
+# interesting backward kernels live -- gather and scatter, the linalg family,
+# the fused multiply-adds, the masked reductions. None of them was under a
+# finite-difference check.
+#
+# This is the sweep for them. It does not claim to be exhaustive either: most
+# of those 165 are constructors, comparisons or in-place writes with no
+# gradient to check. What is listed is every argument-taking op with a backward
+# kernel of its own, which is the set where an analytic gradient can be wrong.
+#
+# Constants are built once, at module scope, and never inside a lambda. A
+# lambda that draws a fresh random operand each call makes the two arms of a
+# central difference evaluate different functions -- which looks exactly like a
+# broken gradient, and cost an hour before it was recognised as the harness's
+# own bug rather than the library's.
+
+_ARG_RNG = np.random.default_rng(20260913)
+
+
+def _spd(n):
+    """A well-conditioned symmetric positive-definite matrix."""
+    a = _ARG_RNG.standard_normal((n, n))
+    return a @ a.T + n * np.eye(n)
+
+
+def _f64(values):
+    return mt.Tensor(
+        np.ascontiguousarray(np.asarray(values, dtype=np.float64)), dtype="float64"
+    )
+
+
+_ARG_M = _ARG_RNG.standard_normal((3, 4))
+_ARG_SQ = _ARG_RNG.standard_normal((3, 3))
+_ARG_POS = np.abs(_ARG_RNG.standard_normal((3, 4))) + 0.7
+_ARG_SPD = _spd(3)
+_ARG_VEC3 = _ARG_RNG.standard_normal(3)
+
+_OTHER_34 = _f64(_ARG_RNG.standard_normal((3, 4)))
+_OTHER_43 = _f64(_ARG_RNG.standard_normal((4, 3)))
+_OTHER_3 = _f64(_ARG_RNG.standard_normal(3))
+_POS_34 = _f64(np.abs(_ARG_RNG.standard_normal((3, 4))) + 0.7)
+_BIAS_33 = _f64(_ARG_RNG.standard_normal((3, 3)))
+_RHS_32 = _f64(_ARG_RNG.standard_normal((3, 2)))
+_VEC_4 = _f64(_ARG_RNG.standard_normal(4))
+_ZEROS_34 = _f64(np.zeros((3, 4)))
+_GATHER_IDX = mt.Tensor(np.array([[0, 2, 1, 0], [1, 0, 2, 1]]), dtype="int64")
+_ROW_IDX = mt.Tensor(np.array([0, 2]), dtype="int64")
+_MASK_34 = mt.Tensor(np.array([[True, False, True, False]] * 3), dtype="bool")
+# The complement. `True` in `_MASK_34` means *masked out*, so selecting with it
+# picks the -inf entries of a masked log-softmax, whose gradient is a correct
+# zero and whose finite difference is `-inf` minus `-inf`.
+_UNMASKED_34 = mt.Tensor(np.array([[False, True, False, True]] * 3), dtype="bool")
+
+_ARG_GRADCHECK_OPS = [
+    # binary arithmetic and the fused multiply-adds
+    ("add", lambda x: x.add(_OTHER_34), _ARG_M),
+    ("sub", lambda x: x.sub(_OTHER_34), _ARG_M),
+    ("mul", lambda x: x.mul(_OTHER_34), _ARG_M),
+    ("div", lambda x: x.div(_POS_34), _ARG_M),
+    ("atan2", lambda x: x.atan2(_OTHER_34), _ARG_M),
+    ("hypot", lambda x: x.hypot(_OTHER_34), _ARG_M),
+    ("copysign", lambda x: x.copysign(_OTHER_34), _ARG_M),
+    ("logaddexp", lambda x: x.logaddexp(_OTHER_34), _ARG_M),
+    ("logaddexp2", lambda x: x.logaddexp2(_OTHER_34), _ARG_M),
+    ("xlogy", lambda x: x.xlogy(_POS_34), _ARG_M),
+    ("lerp", lambda x: x.lerp(_OTHER_34, 0.3), _ARG_M),
+    ("float_power", lambda x: x.float_power(2.5), _ARG_POS),
+    ("maximum", lambda x: x.maximum(_OTHER_34), _ARG_M),
+    ("minimum", lambda x: x.minimum(_OTHER_34), _ARG_M),
+    ("fmax", lambda x: x.fmax(_OTHER_34), _ARG_M),
+    ("fmin", lambda x: x.fmin(_OTHER_34), _ARG_M),
+    ("addcmul", lambda x: x.addcmul(_OTHER_34, _POS_34, 0.7), _ARG_M),
+    ("addcdiv", lambda x: x.addcdiv(_OTHER_34, _POS_34, 0.7), _ARG_M),
+    ("renorm", lambda x: x.renorm(2.0, 0, 1.0), _ARG_M),
+    # products
+    ("matmul", lambda x: x.matmul(_OTHER_43), _ARG_M),
+    ("mm", lambda x: x.mm(_OTHER_43), _ARG_M),
+    ("mv", lambda x: x.mv(_VEC_4), _ARG_M),
+    ("dot", lambda x: x.dot(_OTHER_3), _ARG_VEC3),
+    ("inner", lambda x: x.inner(_OTHER_34), _ARG_M),
+    ("vecdot", lambda x: x.vecdot(_OTHER_34), _ARG_M),
+    ("tensordot", lambda x: x.tensordot(_OTHER_43, 1), _ARG_M),
+    ("matrix_power", lambda x: x.matrix_power(3), _ARG_SQ),
+    ("matrix_exp", lambda x: x.matrix_exp(), _ARG_SQ),
+    ("addmm", lambda x: _BIAS_33.addmm(x, _OTHER_43), _ARG_M),
+    # linear algebra
+    ("det", lambda x: x.det(), _ARG_SQ),
+    ("logdet", lambda x: x.logdet(), _ARG_SPD),
+    ("inv", lambda x: x.inv(), _ARG_SQ),
+    ("solve", lambda x: x.solve(_RHS_32), _ARG_SPD),
+    ("eigh", lambda x: x.eigh()[0], _ARG_SPD),
+    ("svd", lambda x: x.svd(False)[1], _ARG_M),
+    # shape
+    ("expand", lambda x: x.expand([2, 3, 4]), _ARG_M),
+    ("permute", lambda x: x.permute([1, 0]), _ARG_M),
+    ("moveaxis", lambda x: x.moveaxis(0, 1), _ARG_M),
+    ("narrow", lambda x: x.narrow(1, 1, 2), _ARG_M),
+    ("repeat", lambda x: x.repeat([2, 1]), _ARG_M),
+    ("repeat_interleave", lambda x: x.repeat_interleave(2), _ARG_M),
+    ("unsqueeze", lambda x: x.unsqueeze(0), _ARG_M),
+    ("view", lambda x: x.view([4, 3]), _ARG_M),
+    ("pad", lambda x: x.pad([1, 1]), _ARG_M),
+    ("chunk", lambda x: x.chunk(2, 1)[0], _ARG_M),
+    ("split", lambda x: x.split(2, 1)[1], _ARG_M),
+    # indexing and masking
+    ("gather", lambda x: x.gather(0, _GATHER_IDX), _ARG_M),
+    ("index_select", lambda x: x.index_select(0, _ROW_IDX), _ARG_M),
+    ("masked_fill", lambda x: x.masked_fill(_MASK_34, 0.5), _ARG_M),
+    ("masked_select", lambda x: x.masked_select(_MASK_34), _ARG_M),
+    (
+        "scatter_add",
+        lambda x: _ZEROS_34.scatter_add(0, _GATHER_IDX[:1].expand([3, 4]), x),
+        _ARG_M,
+    ),
+    ("where", lambda x: x.where(_MASK_34, _POS_34), _ARG_M),
+    # normalisation and masked softmaxes
+    # Sum-invariant: `layer_norm` normalises, so `.sum()` is a constant and its
+    # gradient is zero -- a check that would pass on any backward at all.
+    # Weighting the output makes the scalar depend on the input again.
+    ("layer_norm", lambda x: x.layer_norm([4]).mul(_OTHER_34), _ARG_M),
+    ("rms_norm", lambda x: x.rms_norm([4]), _ARG_M),
+    (
+        "masked_softmax",
+        lambda x: x.masked_softmax(_MASK_34, 1).mul(_OTHER_34),
+        _ARG_M,
+    ),  # as above
+    # `masked_log_softmax` is -inf wherever `_MASK_34` is true, and a sum holding
+    # -inf differences to NaN. Selecting on the complement keeps the whole
+    # backward under test without asking the difference an impossible question.
+    (
+        "masked_log_softmax",
+        lambda x: x.masked_log_softmax(_MASK_34, 1).masked_select(_UNMASKED_34),
+        _ARG_M,
+    ),
+    ("polygamma", lambda x: x.polygamma(1), _ARG_POS),
+]
+
+
+@pytest.mark.parametrize(
+    "name,fn,src", _ARG_GRADCHECK_OPS, ids=[o[0] for o in _ARG_GRADCHECK_OPS]
+)
+def test_gradcheck_ops_that_take_arguments(name, fn, src):
+    src = np.ascontiguousarray(np.asarray(src, dtype=np.float64))
+    analytic = _analytic_grad_f64(fn, src)
+    numeric = _numeric_grad_f64(fn, src)
+    assert (
+        analytic.shape == numeric.shape
+    ), f"{name}: {analytic.shape} != {numeric.shape}"
+
+    assert np.isfinite(analytic).all(), f"{name}: analytic gradient is not finite"
+    assert np.isfinite(numeric).all(), f"{name}: central difference is not finite"
+
+    scale = max(np.max(np.abs(numeric)), np.max(np.abs(analytic)))
+    # Every case here is scalarised so that the gradient is not identically
+    # zero. A zero scale would mean the case had stopped testing anything --
+    # which is what a plain `.sum()` of `layer_norm` quietly did.
+    assert scale > 1e-8, f"{name}: gradient is zero, so this case checks nothing"
+    err = np.max(np.abs(analytic - numeric)) / scale
+    assert err < 2e-5, f"{name}: analytic and central difference differ by {err:.3e}"
+
+
+def test_cholesky_gradient_is_the_symmetric_one():
+    """Checked apart from the sweep, because an entrywise difference is the
+    wrong question to ask it.
+
+    `cholesky` reads one triangle, so perturbing a single upper-triangle entry
+    changes nothing and an entrywise finite difference lands entirely on the
+    lower triangle. The backward returns the symmetric gradient instead --
+    each mirrored pair splitting the sensitivity -- which is right for the only
+    perturbation a Cholesky input admits, and is what the entrywise difference
+    disagrees with. So the check is the directional derivative along symmetric
+    directions, where the two must agree exactly.
+    """
+    matrix = _spd(3)
+    x = mt.Tensor(matrix.copy(), dtype="float64", requires_grad=True)
+    x.cholesky().sum().backward()
+    analytic = np.asarray(x.grad).copy()
+    mt.clear_autograd_graph()
+
+    assert np.allclose(
+        analytic, analytic.T
+    ), "a symmetric input wants a symmetric gradient"
+
+    eps = 1e-5
+    for i in range(3):
+        for j in range(i, 3):
+            plus, minus = matrix.copy(), matrix.copy()
+            plus[i, j] += eps
+            minus[i, j] -= eps
+            if i != j:  # keep the perturbation symmetric
+                plus[j, i] += eps
+                minus[j, i] -= eps
+            up = mt.Tensor(plus, dtype="float64").cholesky().sum()
+            down = mt.Tensor(minus, dtype="float64").cholesky().sum()
+            directional = (float(np.asarray(up)) - float(np.asarray(down))) / (2 * eps)
+            want = analytic[i, j] + (analytic[j, i] if i != j else 0.0)
+            assert directional == pytest.approx(want, abs=1e-6), f"direction ({i},{j})"
+    mt.clear_autograd_graph()
