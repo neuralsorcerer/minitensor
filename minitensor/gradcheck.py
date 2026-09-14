@@ -68,6 +68,14 @@ def gradcheck(
         Every tensor among them with `requires_grad` set is checked. The rest
         are passed through untouched, which is how a non-differentiable
         argument is expressed.
+
+        They must be **independent** of one another. The same tensor passed
+        twice is fine and handled -- both occurrences are perturbed together --
+        but one input computed *from* another is not: perturbing the first
+        leaves the second at its old value, so the numerical derivative is
+        missing a path the analytic gradient has, and the mismatch is reported
+        against a backward that was correct. Build each input from its own
+        data.
     eps:
         Half-width of the central difference.
     atol, rtol:
