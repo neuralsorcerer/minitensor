@@ -1250,3 +1250,211 @@ def test_the_argument_gradcheck_list_covers_every_op_it_can_reach():
         + ", ".join(sorted(missing))
         + " -- add them to _ARG_GRADCHECK_OPS, or to _ARG_GRADCHECK_EXEMPT with a reason"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Gradcheck for module-level functions
+# --------------------------------------------------------------------------- #
+#
+# Both guards above walk `dir(mt.Tensor)`. 166 of the callables in `dir(mt)` are
+# not tensor methods at all, and 62 of those produce a gradient -- `cdist`,
+# `rope`, `glu`, `cov`, `corrcoef`, `convolve`, the cumulative family, the
+# scatter variants. Nothing reached them.
+
+_MOD_RNG = np.random.default_rng(777)
+
+_MOD_M34 = _MOD_RNG.standard_normal((3, 4))
+_MOD_M44 = _MOD_RNG.standard_normal((4, 4))
+_MOD_V6 = _MOD_RNG.standard_normal(6)
+_MOD_POS = np.abs(_MOD_RNG.standard_normal((3, 4))) + 0.7
+_MOD_3D = _MOD_RNG.standard_normal((2, 3, 4))
+# `trim_zeros` trims by value, so its output shape moves when a difference
+# steps across a zero. Away from zero it is the identity and checkable.
+_MOD_NONZERO = _MOD_RNG.standard_normal(6) + 3.0
+
+_MOD_O34 = _f64(_MOD_RNG.standard_normal((3, 4)))
+_MOD_O24 = _f64(_MOD_RNG.standard_normal((2, 4)))
+_MOD_O4 = _f64(_MOD_RNG.standard_normal(4))
+_MOD_V3 = _f64(_MOD_RNG.standard_normal(3))
+_MOD_V6T = _f64(_MOD_RNG.standard_normal(6))
+_MOD_TAKE = mt.Tensor(np.array([0, 3, 5]), dtype="int64")
+_MOD_ALONG = mt.Tensor(np.array([[0], [1], [2]]), dtype="int64")
+
+_MOD_XP = _f64([0.0, 1.0, 2.0, 3.0])
+_MOD_FP = _f64(_MOD_RNG.standard_normal(4))
+_MOD_SRC12 = _f64(_MOD_RNG.standard_normal(12))
+_MOD_MASK34 = mt.Tensor(np.array([[True, False, True, False]] * 3), dtype="bool")
+_MOD_FLAT_IDX = mt.Tensor(np.array([0, 5, 9]), dtype="int64")
+_MOD_V3B = _f64(_MOD_RNG.standard_normal(3))
+_MOD_V4 = _MOD_RNG.standard_normal(4)
+_MOD_INTERP_X = np.array([0.3, 1.4, 2.2, 0.9])
+_MOD_ATTN_K = _f64(_MOD_RNG.standard_normal((2, 3, 4)))
+_MOD_ATTN_V = _f64(_MOD_RNG.standard_normal((2, 3, 4)))
+
+_MOD_GRADCHECK_OPS = [
+    ("append", lambda x: mt.append(x, _MOD_O34), _MOD_M34),
+    ("array_split", lambda x: mt.array_split(x, 2)[0], _MOD_M34),
+    ("atleast_1d", lambda x: mt.atleast_1d(x), _MOD_M34),
+    ("atleast_2d", lambda x: mt.atleast_2d(x), _MOD_M34),
+    ("atleast_3d", lambda x: mt.atleast_3d(x), _MOD_M34),
+    ("average", lambda x: mt.average(x), _MOD_M34),
+    ("block", lambda x: mt.block([[x, _MOD_O34]]), _MOD_M34),
+    ("block_diag", lambda x: mt.block_diag(x, _MOD_O34), _MOD_M34),
+    ("broadcast_arrays", lambda x: mt.broadcast_arrays(x, _MOD_O34)[0], _MOD_M34),
+    ("broadcast_tensors", lambda x: mt.broadcast_tensors(x, _MOD_O34)[0], _MOD_M34),
+    ("broadcast_to", lambda x: mt.broadcast_to(x, [2, 3, 4]), _MOD_M34),
+    ("cdist", lambda x: mt.cdist(x, _MOD_O24), _MOD_M34),
+    ("convolve", lambda x: mt.convolve(x, _MOD_V3), _MOD_V6),
+    ("corrcoef", lambda x: mt.corrcoef(x), _MOD_M34),
+    ("correlate", lambda x: mt.correlate(x, _MOD_V3), _MOD_V6),
+    ("cosine_similarity", lambda x: mt.cosine_similarity(x, _MOD_O34), _MOD_M34),
+    ("cov", lambda x: mt.cov(x), _MOD_M34),
+    ("cummax", lambda x: mt.cummax(x, 1)[0], _MOD_M34),
+    ("cummin", lambda x: mt.cummin(x, 1)[0], _MOD_M34),
+    ("cumulative_sum", lambda x: mt.cumulative_sum(x, 1), _MOD_M34),
+    ("delete", lambda x: mt.delete(x, 1, 1), _MOD_M34),
+    ("diagflat", lambda x: mt.diagflat(x), _MOD_V6),
+    ("diagonal_scatter", lambda x: mt.diagonal_scatter(x, _MOD_O4), _MOD_M44),
+    ("diff", lambda x: mt.diff(x), _MOD_M34),
+    ("dist", lambda x: mt.dist(x, _MOD_O34), _MOD_M34),
+    ("ediff1d", lambda x: mt.ediff1d(x), _MOD_V6),
+    ("expand_dims", lambda x: mt.expand_dims(x, 0), _MOD_M34),
+    ("fliplr", lambda x: mt.fliplr(x), _MOD_M34),
+    ("flipud", lambda x: mt.flipud(x), _MOD_M34),
+    ("glu", lambda x: mt.glu(x, 1), _MOD_M34),
+    ("gradient", lambda x: mt.gradient(x)[0], _MOD_M34),
+    ("hsplit", lambda x: mt.hsplit(x, 2)[0], _MOD_M34),
+    ("kron", lambda x: mt.kron(x, _MOD_O34), _MOD_M34),
+    ("kthvalue", lambda x: mt.kthvalue(x, 2, 1)[0], _MOD_M34),
+    ("logcumsumexp", lambda x: mt.logcumsumexp(x, 1), _MOD_M34),
+    ("matrix_transpose", lambda x: mt.matrix_transpose(x), _MOD_M34),
+    ("msort", lambda x: mt.msort(x), _MOD_M34),
+    ("nancumprod", lambda x: mt.nancumprod(x, 1), _MOD_POS),
+    ("nancumsum", lambda x: mt.nancumsum(x, 1), _MOD_M34),
+    ("nanpercentile", lambda x: mt.nanpercentile(x, 40.0), _MOD_M34),
+    ("normalize", lambda x: mt.normalize(x), _MOD_M34),
+    ("outer", lambda x: mt.outer(x, _MOD_V6T), _MOD_V6),
+    ("pairwise_distance", lambda x: mt.pairwise_distance(x, _MOD_O34), _MOD_M34),
+    ("pdist", lambda x: mt.pdist(x), _MOD_M34),
+    ("percentile", lambda x: mt.percentile(x, 40.0), _MOD_M34),
+    ("ptp", lambda x: mt.ptp(x), _MOD_M34),
+    ("resize", lambda x: mt.resize(x, [2, 3]), _MOD_M34),
+    ("rope", lambda x: mt.rope(x, 10000.0), _MOD_3D),
+    ("rot90", lambda x: mt.rot90(x), _MOD_M34),
+    ("slice_scatter", lambda x: mt.slice_scatter(x, _MOD_O24, 0, 0, 2), _MOD_M34),
+    ("take", lambda x: mt.take(x, _MOD_TAKE), _MOD_M34),
+    ("take_along_dim", lambda x: mt.take_along_dim(x, _MOD_ALONG, 1), _MOD_M34),
+    ("tensor_split", lambda x: mt.tensor_split(x, 2)[0], _MOD_M34),
+    ("tile", lambda x: mt.tile(x, [2, 1]), _MOD_M34),
+    ("trapezoid", lambda x: mt.trapezoid(x), _MOD_M34),
+    ("trapz", lambda x: mt.trapz(x), _MOD_M34),
+    ("trim_zeros", lambda x: mt.trim_zeros(x), _MOD_NONZERO),
+    ("unbind", lambda x: mt.unbind(x, 0)[1], _MOD_M34),
+    ("unstack", lambda x: mt.unstack(x, 0)[1], _MOD_M34),
+    ("vdot", lambda x: mt.vdot(x, _MOD_V6T), _MOD_V6),
+    ("vsplit", lambda x: mt.vsplit(x, 3)[0], _MOD_M34),
+    # Found by the guard below after this list was already written, which is
+    # the whole reason the guard exists: a hand-swept list missed twelve, one
+    # of them `scaled_dot_product_attention`.
+    ("cartesian_prod", lambda x: mt.cartesian_prod(x, _MOD_V3B), _MOD_V4),
+    ("combinations", lambda x: mt.combinations(x, 2), _MOD_V4),
+    ("insert", lambda x: mt.insert(x, 1, _MOD_O4, 0), _MOD_M34),
+    ("interp", lambda x: mt.interp(x, _MOD_XP, _MOD_FP), _MOD_INTERP_X),
+    (
+        "masked_scatter",
+        lambda x: mt.masked_scatter(x, _MOD_MASK34, _MOD_SRC12),
+        _MOD_M34,
+    ),
+    ("meshgrid", lambda x: mt.meshgrid(x, _MOD_V3B)[0], _MOD_V4),
+    ("permute_dims", lambda x: mt.permute_dims(x, [1, 0]), _MOD_M34),
+    ("put", lambda x: mt.put(x, _MOD_FLAT_IDX, _MOD_V3B), _MOD_M34),
+    (
+        "scaled_dot_product_attention",
+        lambda x: mt.scaled_dot_product_attention(x, _MOD_ATTN_K, _MOD_ATTN_V),
+        _MOD_3D,
+    ),
+    ("select", lambda x: mt.select(x, 0, 1), _MOD_M34),
+    ("select_scatter", lambda x: mt.select_scatter(x, _MOD_O4, 0, 1), _MOD_M34),
+    ("take_along_axis", lambda x: mt.take_along_axis(x, _MOD_ALONG, 1), _MOD_M34),
+]
+
+_MOD_GRADCHECK_EXEMPT = {
+    # A sampler. Its output carries `requires_grad` but is not a function of
+    # the input at all -- two calls on the same tensor disagree -- so there is
+    # no derivative for a difference to confirm.
+    "normal": "draws samples; the output is not a function of the input",
+}
+
+
+@pytest.mark.parametrize(
+    "name,fn,src", _MOD_GRADCHECK_OPS, ids=[o[0] for o in _MOD_GRADCHECK_OPS]
+)
+def test_gradcheck_module_level_functions(name, fn, src):
+    src = np.ascontiguousarray(np.asarray(src, dtype=np.float64))
+    analytic = _analytic_grad_f64(fn, src)
+    numeric = _numeric_grad_f64(fn, src)
+    assert (
+        analytic.shape == numeric.shape
+    ), f"{name}: {analytic.shape} != {numeric.shape}"
+    assert np.isfinite(analytic).all(), f"{name}: analytic gradient is not finite"
+    assert np.isfinite(numeric).all(), f"{name}: central difference is not finite"
+    scale = max(np.max(np.abs(numeric)), np.max(np.abs(analytic)))
+    assert scale > 1e-8, f"{name}: gradient is zero, so this case checks nothing"
+    err = np.max(np.abs(analytic - numeric)) / scale
+    assert err < 1e-4, f"{name}: analytic and central difference differ by {err:.3e}"
+
+
+def test_the_module_gradcheck_list_covers_every_function_it_can_reach():
+    """The third guard, for the surface neither of the others walks.
+
+    Both lists above are found by walking `dir(mt.Tensor)`. `mt` itself carries
+    166 callables that are not tensor methods, and 62 of them produce a
+    gradient. This holds that set to the same rule: listed, or exempted with a
+    reason.
+    """
+    recipes, sources = _arg_probe_recipes()
+    recipes = recipes + [(_MOD_O34,), (_MOD_V3,), (40.0,), (10000.0,), ([2, 3],)]
+    text = pathlib.Path(__file__).read_text()
+    listed = set(
+        re.findall(
+            r"\bmt\.([a-z_0-9]+)\(",
+            text[
+                text.index("_MOD_GRADCHECK_OPS = [") : text.index(
+                    "_MOD_GRADCHECK_EXEMPT"
+                )
+            ],
+        )
+    )
+    methods = {n for n in dir(mt.Tensor) if not n.startswith("_")}
+
+    missing = []
+    for name in sorted(n for n in dir(mt) if not n.startswith("_")):
+        if name in methods or name in listed or name in _MOD_GRADCHECK_EXEMPT:
+            continue
+        function = getattr(mt, name)
+        if not callable(function) or isinstance(function, type):
+            continue
+        for source in sources:
+            for args in recipes:
+                try:
+                    probe = mt.Tensor(
+                        np.ascontiguousarray(source.copy()),
+                        dtype="float64",
+                        requires_grad=True,
+                    )
+                    result = function(probe, *args)
+                except Exception:
+                    continue
+                outputs = result if isinstance(result, tuple) else (result,)
+                if any(getattr(o, "requires_grad", False) for o in outputs):
+                    missing.append(name)
+                    break
+            if missing and missing[-1] == name:
+                break
+    mt.clear_autograd_graph()
+
+    assert not missing, (
+        "differentiable module-level functions with no finite-difference check: "
+        + ", ".join(sorted(set(missing)))
+        + " -- add them to _MOD_GRADCHECK_OPS, or to _MOD_GRADCHECK_EXEMPT with a reason"
+    )
