@@ -57,20 +57,6 @@ def _reference(x, output_size, reduce):
     return out
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f()
-        flat[i] = old - eps
-        low = f()
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 # Divisible, indivisible, one axis of each, down to a point, and up.
 CASES = [
     ((2, 3, 8, 8), (4, 4)),
@@ -203,13 +189,15 @@ def test_pooling_an_empty_axis_into_a_non_empty_one_is_refused():
 @pytest.mark.parametrize("shape,output_size", CASES[:5] + [CASES[5]])
 @pytest.mark.parametrize("op,reduce,name", OPS)
 def test_the_gradient_matches_numerical_differentiation(
-    shape, output_size, op, reduce, name
+    shape, output_size, op, reduce, name, numeric_grad
 ):
     rng = np.random.default_rng(11)
     values = rng.standard_normal(shape)
     probe = rng.standard_normal((shape[0], shape[1], *output_size))
 
-    def loss():
+    # The array is captured, so the argument `numeric_grad` passes is
+    # the same object and goes unused.
+    def loss(_captured=None):
         return float(
             (op(mt.Tensor(values, dtype="float64"), output_size).numpy() * probe).sum()
         )
@@ -217,7 +205,7 @@ def test_the_gradient_matches_numerical_differentiation(
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
     (op(t, output_size) * mt.Tensor(probe, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values), rtol=1e-5, atol=1e-7
     )
 
 
@@ -272,11 +260,13 @@ def test_one_dimensional_agrees_with_the_two_dimensional(
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-14)
 
 
-def test_one_dimensional_carries_a_gradient():
+def test_one_dimensional_carries_a_gradient(numeric_grad):
     values = np.random.default_rng(17).standard_normal((1, 2, 7))
     probe = np.random.default_rng(19).standard_normal((1, 2, 3))
 
-    def loss():
+    # The array is captured, so the argument `numeric_grad` passes is
+    # the same object and goes unused.
+    def loss(_captured=None):
         return float(
             (
                 mt.nn.adaptive_avg_pool1d(mt.Tensor(values, dtype="float64"), 3).numpy()
@@ -289,7 +279,7 @@ def test_one_dimensional_carries_a_gradient():
         mt.nn.adaptive_avg_pool1d(t, 3) * mt.Tensor(probe, dtype="float64")
     ).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values), rtol=1e-5, atol=1e-7
     )
 
 

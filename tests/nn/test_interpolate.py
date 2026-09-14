@@ -87,20 +87,6 @@ def _reference(x, output_size, mode, align_corners):
     return out
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f()
-        flat[i] = old - eps
-        low = f()
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 # Up, down, one axis each way, and unchanged.
 CASES = [
     ((2, 3, 4, 4), (8, 8)),
@@ -310,13 +296,15 @@ def test_resampling_an_empty_axis_into_a_non_empty_one_is_refused():
 @pytest.mark.parametrize("shape,output_size", CASES[:5])
 @pytest.mark.parametrize("mode,align_corners", MODES)
 def test_the_gradient_matches_numerical_differentiation(
-    shape, output_size, mode, align_corners
+    shape, output_size, mode, align_corners, numeric_grad
 ):
     rng = np.random.default_rng(13)
     values = rng.standard_normal(shape)
     probe = rng.standard_normal((shape[0], shape[1], *output_size))
 
-    def loss():
+    # The array is captured, so the argument `numeric_grad` passes is
+    # the same object and goes unused.
+    def loss(_captured=None):
         return float(
             (
                 mt.nn.interpolate(
@@ -335,7 +323,7 @@ def test_the_gradient_matches_numerical_differentiation(
         * mt.Tensor(probe, dtype="float64")
     ).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values), rtol=1e-5, atol=1e-7
     )
 
 
@@ -417,11 +405,13 @@ def test_linear_and_bilinear_name_the_same_mode():
     )
 
 
-def test_one_dimensional_carries_a_gradient():
+def test_one_dimensional_carries_a_gradient(numeric_grad):
     values = np.random.default_rng(29).standard_normal((1, 2, 5))
     probe = np.random.default_rng(31).standard_normal((1, 2, 9))
 
-    def loss():
+    # The array is captured, so the argument `numeric_grad` passes is
+    # the same object and goes unused.
+    def loss(_captured=None):
         return float(
             (
                 mt.nn.interpolate(
@@ -436,7 +426,7 @@ def test_one_dimensional_carries_a_gradient():
         mt.nn.interpolate(t, size=9, mode="linear") * mt.Tensor(probe, dtype="float64")
     ).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values), rtol=1e-5, atol=1e-7
     )
 
 

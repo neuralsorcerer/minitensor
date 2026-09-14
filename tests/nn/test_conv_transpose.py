@@ -92,20 +92,6 @@ def _reference(
     return out
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f()
-        flat[i] = old - eps
-        low = f()
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 CONFIGS = [
     dict(
         stride=(1, 1), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1), groups=1
@@ -359,7 +345,7 @@ def test_a_zero_stride_is_refused():
 
 
 @pytest.mark.parametrize("config", CONFIGS)
-def test_every_gradient_matches_numerical_differentiation(config):
+def test_every_gradient_matches_numerical_differentiation(config, numeric_grad):
     x, w, b = _operands(config, seed=23)
 
     def run():
@@ -371,7 +357,9 @@ def test_every_gradient_matches_numerical_differentiation(config):
         ).numpy()
 
     probe = np.random.default_rng(29).standard_normal(run().shape)
-    loss = lambda: float((run() * probe).sum())  # noqa: E731
+    # `x`, `w` and `b` are all captured, so the argument `numeric_grad`
+    # passes is unused -- one closure serves all three.
+    loss = lambda _captured=None: float((run() * probe).sum())  # noqa: E731
 
     tx = mt.Tensor(x.copy(), dtype="float64", requires_grad=True)
     tw = mt.Tensor(w.copy(), dtype="float64", requires_grad=True)
@@ -380,13 +368,13 @@ def test_every_gradient_matches_numerical_differentiation(config):
     (out * mt.Tensor(probe, dtype="float64")).sum().backward()
 
     np.testing.assert_allclose(
-        tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7
+        tx.grad.numpy(), numeric_grad(loss, x), rtol=1e-5, atol=1e-7
     )
     np.testing.assert_allclose(
-        tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7
+        tw.grad.numpy(), numeric_grad(loss, w), rtol=1e-5, atol=1e-7
     )
     np.testing.assert_allclose(
-        tb.grad.numpy(), _numeric_grad(loss, b), rtol=1e-5, atol=1e-7
+        tb.grad.numpy(), numeric_grad(loss, b), rtol=1e-5, atol=1e-7
     )
 
 
@@ -440,7 +428,7 @@ def test_one_dimensional_agrees_with_the_two_dimensional(
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-13)
 
 
-def test_one_dimensional_carries_a_gradient():
+def test_one_dimensional_carries_a_gradient(numeric_grad):
     rng = np.random.default_rng(41)
     x = rng.standard_normal((1, 3, 5))
     w = rng.standard_normal((3, 2, 3))
@@ -454,7 +442,9 @@ def test_one_dimensional_carries_a_gradient():
         .shape
     )
 
-    def loss():
+    # The array is captured, so the argument `numeric_grad` passes is
+    # the same object and goes unused.
+    def loss(_captured=None):
         return float(
             (
                 mt.nn.conv_transpose1d(
@@ -470,10 +460,10 @@ def test_one_dimensional_carries_a_gradient():
     out = mt.nn.conv_transpose1d(tx, tw, None, stride=2)
     (out * mt.Tensor(probe, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        tx.grad.numpy(), _numeric_grad(loss, x), rtol=1e-5, atol=1e-7
+        tx.grad.numpy(), numeric_grad(loss, x), rtol=1e-5, atol=1e-7
     )
     np.testing.assert_allclose(
-        tw.grad.numpy(), _numeric_grad(loss, w), rtol=1e-5, atol=1e-7
+        tw.grad.numpy(), numeric_grad(loss, w), rtol=1e-5, atol=1e-7
     )
 
 

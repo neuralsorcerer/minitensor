@@ -55,20 +55,6 @@ def _numpy_pad(array, padding, mode, value=0.0):
     return np.pad(array, pairs, mode="reflect" if mode == "reflect" else "edge")
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f(arr)
-        flat[i] = old - eps
-        low = f(arr)
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 @pytest.mark.parametrize("shape,padding", CASES)
 @pytest.mark.parametrize("mode", MODES)
 def test_it_matches_numpy(shape, padding, mode):
@@ -184,7 +170,9 @@ def test_an_odd_number_of_padding_values_is_refused():
     "shape,padding", [((5,), [2, 3]), ((3, 4), [1, 2]), ((3, 4), [1, 2, 2, 1])]
 )
 @pytest.mark.parametrize("mode", MODES)
-def test_the_gradient_matches_numerical_differentiation(shape, padding, mode):
+def test_the_gradient_matches_numerical_differentiation(
+    shape, padding, mode, numeric_grad
+):
     rng = np.random.default_rng(7)
     values = rng.standard_normal(shape)
     out_shape = mt.Tensor(values, dtype="float64").pad(padding, mode).numpy().shape
@@ -198,7 +186,7 @@ def test_the_gradient_matches_numerical_differentiation(shape, padding, mode):
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
     (t.pad(padding, mode) * mt.Tensor(weights, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
     )
 
 

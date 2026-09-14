@@ -388,7 +388,48 @@ for name in ["swish", "gelu", "mish", "power", "layer_norm"]:
 
 ## Testing guidance
 
-When adding a real Rust custom operation:
+### Check the backward, whichever way you wrote it
+
+A hand-written backward is the one part of a custom operation nothing else
+verifies. The forward is checked by every test of its values; the gradient is
+wrong only where somebody looks. `mt.gradcheck` compares it against a central
+finite difference of your own forward:
+
+```python
+import minitensor as mt
+from minitensor.autograd import Function
+
+
+class Cube(Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return x * x * x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (x,) = ctx.saved_tensors
+        return grad_output * x * x * 3.0
+
+
+x = mt.Tensor([0.4, -1.1, 2.0], dtype="float64", requires_grad=True)
+print(mt.gradcheck(lambda t: Cube.apply(t).sum(), (x,)))
+```
+
+```text
+True
+```
+
+Drop the `3.0` and it fails, naming the element and by how much -- which is the
+shape of mistake this exists for, since the forward stays exact either way.
+
+Pass float64, as above. A central difference subtracts two nearly equal numbers,
+so in float32 it only agrees to about 1e-2, which is looser than the errors
+worth catching; `gradcheck` refuses a float32 input rather than report a pass it
+cannot stand behind. The function under test must return a scalar, so reduce
+with `.sum()`.
+
+### When adding a real Rust custom operation
 
 - Validate input count, shapes, dtypes, devices, and edge cases explicitly.
 - Write Rust unit tests for `validate_inputs`, `output_shape`, and forward

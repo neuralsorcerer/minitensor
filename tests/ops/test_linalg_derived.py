@@ -362,22 +362,8 @@ def test_matrix_power_rejects_a_rectangular_matrix():
 # --------------------------------------------------------------------------
 
 
-def _numeric_grad(f, a, eps=1e-6):
-    grad = np.zeros_like(a)
-    flat = a.reshape(-1)
-    for index in range(flat.size):
-        original = flat[index]
-        flat[index] = original + eps
-        high = f(a)
-        flat[index] = original - eps
-        low = f(a)
-        flat[index] = original
-        grad.reshape(-1)[index] = (high - low) / (2 * eps)
-    return grad
-
-
 @pytest.mark.parametrize("shape", [(4, 4), (6, 3), (3, 6)])
-def test_pinv_gradient_against_finite_differences(shape):
+def test_pinv_gradient_against_finite_differences(shape, numeric_grad):
     """Smooth wherever the rank does not change, which for a random matrix is
     everywhere nearby."""
     a = _matrix(shape, seed=38)
@@ -386,13 +372,13 @@ def test_pinv_gradient_against_finite_differences(shape):
     def loss(matrix):
         return float((np.linalg.pinv(matrix) * weights).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     t = mt.Tensor.from_numpy(np.ascontiguousarray(a), requires_grad=True)
     (t.pinv() * mt.Tensor.from_numpy(weights)).sum().backward()
     assert np.allclose(t.grad.numpy(), expected, atol=1e-6)
 
 
-def test_lstsq_gradient_against_finite_differences():
+def test_lstsq_gradient_against_finite_differences(numeric_grad):
     a = _matrix((6, 3), seed=40)
     b = _matrix((6,), seed=41)
     weights = _matrix((3,), seed=42)
@@ -400,21 +386,21 @@ def test_lstsq_gradient_against_finite_differences():
     def loss(matrix):
         return float(np.linalg.lstsq(matrix, b, rcond=None)[0] @ weights)
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     t = mt.Tensor.from_numpy(np.ascontiguousarray(a), requires_grad=True)
     (mt.lstsq(t, _t(b)) * mt.Tensor.from_numpy(weights)).sum().backward()
     assert np.allclose(t.grad.numpy(), expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("power", [2, 3, -1])
-def test_matrix_power_gradient_against_finite_differences(power):
+def test_matrix_power_gradient_against_finite_differences(power, numeric_grad):
     a = _matrix((3, 3), seed=43)
     weights = _matrix((3, 3), seed=44)
 
     def loss(matrix):
         return float((np.linalg.matrix_power(matrix, power) * weights).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     t = mt.Tensor.from_numpy(np.ascontiguousarray(a), requires_grad=True)
     (t.matrix_power(power) * mt.Tensor.from_numpy(weights)).sum().backward()
     assert np.allclose(t.grad.numpy(), expected, atol=1e-5)

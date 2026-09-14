@@ -79,20 +79,6 @@ def _conv1d_reference(x, w, b, stride, padding, dilation, groups):
     return out[:, :, 0, :]
 
 
-def _numeric_grad(f, arr, eps=1e-5):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f(arr)
-        flat[i] = old - eps
-        low = f(arr)
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 GEOMETRIES = [
     (1, 0, 1, 1),
     (2, 1, 1, 1),
@@ -228,7 +214,7 @@ def test_dilation_of_one_is_the_old_behaviour():
     ],
 )
 def test_all_three_gradients_match_numerical_differentiation(
-    stride, padding, dilation, groups
+    stride, padding, dilation, groups, numeric_grad
 ):
     rng = np.random.default_rng(1)
     channels, out_channels = 4, 4
@@ -269,13 +255,13 @@ def test_all_three_gradients_match_numerical_differentiation(
     (out * mt.Tensor(coefficients, dtype="float64")).sum().backward()
 
     for got, want, name in (
-        (tx.grad.numpy(), _numeric_grad(lambda a: loss(a, w0, b0), x0.copy()), "input"),
+        (tx.grad.numpy(), numeric_grad(lambda a: loss(a, w0, b0), x0.copy()), "input"),
         (
             tw.grad.numpy(),
-            _numeric_grad(lambda a: loss(x0, a, b0), w0.copy()),
+            numeric_grad(lambda a: loss(x0, a, b0), w0.copy()),
             "weight",
         ),
-        (tb.grad.numpy(), _numeric_grad(lambda a: loss(x0, w0, a), b0.copy()), "bias"),
+        (tb.grad.numpy(), numeric_grad(lambda a: loss(x0, w0, a), b0.copy()), "bias"),
     ):
         np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-7, err_msg=name)
 

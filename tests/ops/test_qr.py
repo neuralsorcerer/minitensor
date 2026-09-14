@@ -54,20 +54,6 @@ def _matrix(shape, seed=0):
     return np.random.default_rng(seed).standard_normal(shape)
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f(arr)
-        flat[i] = old - eps
-        low = f(arr)
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 @pytest.mark.parametrize("shape", SHAPES)
 def test_it_matches_numpy(shape):
     """Element by element, not merely up to a column sign: the reflectors use
@@ -268,7 +254,7 @@ def test_a_rank_deficient_matrix_still_factors():
 
 
 @pytest.mark.parametrize("shape", [(4, 3), (3, 3), (5, 5), (3, 5), (2, 4, 3)])
-def test_the_gradient_matches_numerical_differentiation(shape):
+def test_the_gradient_matches_numerical_differentiation(shape, numeric_grad):
     """Both outputs at once. The two are separate nodes in the graph -- the
     engine hands a node one gradient at a time -- and this is what checks that
     what they produce adds up to the right total."""
@@ -290,13 +276,13 @@ def test_the_gradient_matches_numerical_differentiation(shape):
     ).sum()
     total.backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
     )
 
 
 @pytest.mark.parametrize("shape", [(4, 3), (3, 3), (3, 5)])
 @pytest.mark.parametrize("which", ["q", "r"])
-def test_the_gradient_of_one_output_alone(shape, which):
+def test_the_gradient_of_one_output_alone(shape, which, numeric_grad):
     """Each output carries its own gradient path, and a caller who uses only one
     of them must get that one's derivative -- not half of a combined answer."""
     rng = np.random.default_rng(31)
@@ -313,11 +299,11 @@ def test_the_gradient_of_one_output_alone(shape, which):
     out = t.qr()[index]
     (out * mt.Tensor(weights, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
     )
 
 
-def test_the_gradient_of_a_wide_matrix_covers_both_halves():
+def test_the_gradient_of_a_wide_matrix_covers_both_halves(numeric_grad):
     """A wide `A` splits at its square block: `Q` is fixed by the first `m`
     columns and the rest enter only through `R2 = Q^T A2`. Dropping either half
     leaves a gradient that is zero where it should not be."""
@@ -335,7 +321,7 @@ def test_the_gradient_of_a_wide_matrix_covers_both_halves():
     assert np.abs(grad[:, :3]).max() > 1e-6, "the square half carries gradient"
     assert np.abs(grad[:, 3:]).max() > 1e-6, "so does the rest"
     np.testing.assert_allclose(
-        grad, _numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
+        grad, numeric_grad(loss, values.copy()), rtol=1e-5, atol=1e-7
     )
 
 

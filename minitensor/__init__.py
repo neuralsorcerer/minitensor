@@ -303,6 +303,8 @@ from . import kernels  # noqa: E402  (after `autograd`, which it builds on)
 _sys.modules[__name__ + ".autograd"] = autograd
 _sys.modules[__name__ + ".kernels"] = kernels
 
+from .gradcheck import gradcheck  # noqa: E402  (after `_C`, which it imports)
+
 numpy_compat = getattr(_C, "numpy_compat", None)
 if numpy_compat is not None:
     _sys.modules[__name__ + ".numpy_compat"] = numpy_compat
@@ -584,6 +586,7 @@ _BASE_EXPORTS = (
     "optim",
     "autograd",
     "kernels",
+    "gradcheck",
     "numpy_compat",
     "cross",
     "plugins",

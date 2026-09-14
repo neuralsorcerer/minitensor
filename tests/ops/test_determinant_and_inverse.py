@@ -42,20 +42,6 @@ def _well_conditioned(shape, seed=0):
     return rng.standard_normal(shape) + np.eye(shape[-1]) * 2
 
 
-def _numeric_grad(f, arr, eps=1e-6):
-    grad = np.zeros_like(arr)
-    flat, gflat = arr.reshape(-1), grad.reshape(-1)
-    for i in range(flat.size):
-        old = flat[i]
-        flat[i] = old + eps
-        high = f(arr)
-        flat[i] = old - eps
-        low = f(arr)
-        flat[i] = old
-        gflat[i] = (high - low) / (2 * eps)
-    return grad
-
-
 @pytest.mark.parametrize("shape", SHAPES)
 def test_det_matches_numpy(shape):
     values = _well_conditioned(shape)
@@ -178,7 +164,7 @@ def test_an_integer_input_is_refused(op):
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (2, 3, 3)])
-def test_the_det_gradient_matches_numerical_differentiation(shape):
+def test_the_det_gradient_matches_numerical_differentiation(shape, numeric_grad):
     """Jacobi's formula: `d det(A) / dA = det(A) * A^-T`."""
     rng = np.random.default_rng(19)
     values = _well_conditioned(shape, seed=19)
@@ -193,12 +179,12 @@ def test_the_det_gradient_matches_numerical_differentiation(shape):
         t.det() * mt.Tensor(np.asarray(weights, np.float64), dtype="float64")
     ).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
     )
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (2, 3, 3)])
-def test_the_slogdet_gradient_matches_numerical_differentiation(shape):
+def test_the_slogdet_gradient_matches_numerical_differentiation(shape, numeric_grad):
     """`d log|det(A)| / dA = A^-T`, with no determinant factor -- which is why
     this stays finite where `det`'s gradient has already overflowed."""
     rng = np.random.default_rng(23)
@@ -215,12 +201,12 @@ def test_the_slogdet_gradient_matches_numerical_differentiation(shape):
         logabsdet * mt.Tensor(np.asarray(weights, np.float64), dtype="float64")
     ).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
     )
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (2, 3, 3)])
-def test_the_inv_gradient_matches_numerical_differentiation(shape):
+def test_the_inv_gradient_matches_numerical_differentiation(shape, numeric_grad):
     rng = np.random.default_rng(29)
     values = _well_conditioned(shape, seed=29)
     weights = rng.standard_normal(shape)
@@ -231,7 +217,7 @@ def test_the_inv_gradient_matches_numerical_differentiation(shape):
     t = mt.Tensor(values.copy(), dtype="float64", requires_grad=True)
     (t.inv() * mt.Tensor(weights, dtype="float64")).sum().backward()
     np.testing.assert_allclose(
-        t.grad.numpy(), _numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
+        t.grad.numpy(), numeric_grad(loss, values.copy()), rtol=1e-6, atol=1e-8
     )
 
 

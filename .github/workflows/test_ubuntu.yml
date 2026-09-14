@@ -59,6 +59,47 @@ jobs:
           maturin build --out /tmp/wheel-guard
           ls /tmp/wheel-guard/*.whl
 
+      # The size of the shipped extension has never been measured by anything.
+      # Every `maturin` invocation above is the debug profile, including the
+      # guard step, so the only figure the project stands behind is a comment
+      # in Cargo.toml -- written by hand, from a machine nobody can check, and
+      # free to drift by a factor without a single job going red. This builds
+      # the artifact users actually download and fails if it has grown past a
+      # budget.
+      - name: Release wheel size budget
+        if: matrix.python-version == '3.12'
+        shell: bash
+        env:
+          # Measured at 10.64 MiB on rustc 1.94 / cp312. The budget is set to
+          # catch a step change -- a dependency that does not get stripped, a
+          # generic instantiated across every dtype -- and not to ration the
+          # ordinary growth of the engine, so there is real headroom and a
+          # change that legitimately needs more should raise this number with
+          # the reason in its commit message.
+          MAX_EXTENSION_MIB: 14
+        run: |
+          source .venv/bin/activate
+          maturin build --release --out /tmp/wheel-size
+          python - <<'PY'
+          import glob, os, sys, zipfile
+
+          budget = int(os.environ["MAX_EXTENSION_MIB"]) * 1024 * 1024
+          wheel = glob.glob("/tmp/wheel-size/*.whl")[0]
+          with zipfile.ZipFile(wheel) as archive:
+              extension = max(
+                  (info for info in archive.infolist() if info.filename.endswith(".so")),
+                  key=lambda info: info.file_size,
+              )
+          megabytes = extension.file_size / 1024 / 1024
+          print(f"{extension.filename}: {megabytes:.2f} MiB")
+          print(f"wheel: {os.path.getsize(wheel) / 1024 / 1024:.2f} MiB")
+          if extension.file_size > budget:
+              sys.exit(
+                  f"extension is {megabytes:.2f} MiB, over the "
+                  f"{budget / 1024 / 1024:.0f} MiB budget"
+              )
+          PY
+
   # The plugin path is the library's extension story, and until this job
   # existed nothing ran it: `tests/test_plugin_loading.py` skips itself unless
   # the extension was built with `dynamic-loading` *and* the example plugin is

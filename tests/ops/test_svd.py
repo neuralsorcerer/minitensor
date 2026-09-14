@@ -587,20 +587,6 @@ def test_one_by_one():
 # --------------------------------------------------------------------------
 
 
-def _numeric_grad(f, a, eps=1e-6):
-    grad = np.zeros_like(a)
-    flat = a.reshape(-1)
-    for index in range(flat.size):
-        original = flat[index]
-        flat[index] = original + eps
-        high = f(a)
-        flat[index] = original - eps
-        low = f(a)
-        flat[index] = original
-        grad.reshape(-1)[index] = (high - low) / (2 * eps)
-    return grad
-
-
 def _grad_of(a, loss):
     t = mt.Tensor.from_numpy(np.ascontiguousarray(a), requires_grad=True)
     u, s, vt = t.svd(False)
@@ -619,19 +605,19 @@ def test_singular_value_gradient(shape):
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 3), (3, 5)])
-def test_singular_value_gradient_against_finite_differences(shape):
+def test_singular_value_gradient_against_finite_differences(shape, numeric_grad):
     a = _matrix(shape, seed=15)
 
     def loss(matrix):
         return float(np.linalg.svd(matrix, compute_uv=False).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     got = _grad_of(a, lambda u, s, vt: s.sum())
     assert np.allclose(got, expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 3), (3, 5)])
-def test_weighted_singular_value_gradient(shape):
+def test_weighted_singular_value_gradient(shape, numeric_grad):
     """Distinct weights, so the terms cannot cancel each other's mistakes."""
     a = _matrix(shape, seed=16)
     k = min(shape)
@@ -640,7 +626,7 @@ def test_weighted_singular_value_gradient(shape):
     def loss(matrix):
         return float(np.linalg.svd(matrix, compute_uv=False) @ weights)
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     tensor_weights = mt.Tensor.from_numpy(weights)
     got = _grad_of(a, lambda u, s, vt: (s * tensor_weights).sum())
     assert np.allclose(got, expected, atol=1e-6)
@@ -662,7 +648,7 @@ def _square_weights(shape, seed):
 
 
 @pytest.mark.parametrize("shape", [(3, 3), (4, 4), (5, 3), (3, 5), (6, 2), (2, 6)])
-def test_vector_gradient_against_finite_differences(shape):
+def test_vector_gradient_against_finite_differences(shape, numeric_grad):
     """A loss on the factors themselves, which is where the coupling term and
     the `1 / (s_j^2 - s_i^2)` live.
 
@@ -681,7 +667,7 @@ def test_vector_gradient_against_finite_differences(shape):
         u, _, vt = np.linalg.svd(matrix, full_matrices=False)
         return float((left * u * u).sum() + (right * vt.T * vt.T).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
 
     def tensor_loss(u, s, vt):
         v = vt.transpose(-1, -2)
@@ -692,7 +678,7 @@ def test_vector_gradient_against_finite_differences(shape):
 
 
 @pytest.mark.parametrize("shape", [(4, 4), (5, 3), (3, 5)])
-def test_gradient_of_a_loss_that_couples_u_and_v(shape):
+def test_gradient_of_a_loss_that_couples_u_and_v(shape, numeric_grad):
     """`sum_j (p . u_j)(q . v_j)`, which is sign-invariant only *jointly*.
 
     Flipping column `j` of `U` alone changes it; flipping both columns leaves it
@@ -709,7 +695,7 @@ def test_gradient_of_a_loss_that_couples_u_and_v(shape):
         u, _, vt = np.linalg.svd(matrix, full_matrices=False)
         return float(((p @ u) * (q @ vt.T)).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     tp = mt.Tensor.from_numpy(p)
     tq = mt.Tensor.from_numpy(q)
 
@@ -720,7 +706,7 @@ def test_gradient_of_a_loss_that_couples_u_and_v(shape):
     assert np.allclose(got, expected, atol=1e-6)
 
 
-def test_all_three_gradients_together():
+def test_all_three_gradients_together(numeric_grad):
     """One backward through all three outputs sums three nodes' contributions."""
     a = _matrix((4, 3), seed=19)
     left, tensor_left = _square_weights((4, 3), 104)
@@ -731,7 +717,7 @@ def test_all_three_gradients_together():
         u, s, vt = np.linalg.svd(matrix, full_matrices=False)
         return float((left * u * u).sum() + s @ weights + (right * vt.T * vt.T).sum())
 
-    expected = _numeric_grad(loss, a.copy())
+    expected = numeric_grad(loss, a.copy())
     tensor_weights = mt.Tensor.from_numpy(weights)
 
     def tensor_loss(u, s, vt):
