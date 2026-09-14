@@ -15,10 +15,14 @@ mod domains;
 mod dtype;
 mod error;
 mod functional;
-// Not under `--features blas`: that build linked a BLAS into the engine
-// deliberately, and its GEMM is then the same kind of thing this module reaches
-// for, called directly and without the interpreter in the way.
-#[cfg(not(feature = "blas"))]
+// Compiled in every build. Under `--features blas` the *provider* is not
+// installed -- that build linked a BLAS into the engine deliberately, and its
+// GEMM is then the same kind of thing this module reaches for, called directly
+// and without the interpreter in the way -- but the module itself still
+// registers, so `_core.dispatch` answers `gemm_provider_installed() == False`
+// instead of not existing. Gating the module was the original spelling and it
+// did not compile: the registration below is unconditional, so `--features
+// blas` failed to resolve `gemm` at all.
 mod gemm;
 mod grad_utils;
 mod lr_scheduler;
@@ -39,6 +43,9 @@ use tensor::{PyTensor, ShapeSequence};
 fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     // Before anything can build a tensor: a single large dense product goes to
     // the BLAS `numpy` already brought rather than to the engine's own kernel.
+    // Not under `--features blas`, where the engine has a BLAS of its own and
+    // crossing into the interpreter to reach another one would be a cost for
+    // nothing. `dispatch.PROVIDER_EXPECTED` reports which of the two this is.
     #[cfg(not(feature = "blas"))]
     gemm::install_gemm_provider();
 
@@ -89,7 +96,6 @@ fn _core(py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     plugins::register_plugin_module(py, &plugins_module)?;
     m.add_submodule(&plugins_module)?;
 
-    // Add serialization module
     gemm::register_gemm_module(py, m)?;
     domains::register_domains_module(py, m)?;
 

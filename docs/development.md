@@ -144,6 +144,40 @@ pre-commit run isort --all-files
 python -m pytest tests/tensor/test_tensor_core.py
 ```
 
+### Building with `--features blas`
+
+`blas` links OpenBLAS into the engine instead of using its own GEMM, and it is
+the one feature that changes which code compiles rather than only how it runs:
+`bindings/src/gemm.rs` gates its NumPy provider off, because a build with a
+BLAS of its own has nothing to gain by crossing into the interpreter to reach
+another. Gated code is code no ordinary build type-checks, which is how this
+feature has now twice stopped compiling without anyone noticing.
+
+Check it before pushing anything that touches the bindings:
+
+```bash
+cargo check -p bindings --features blas
+cargo clippy -p bindings --all-targets --features blas -- -D warnings
+```
+
+Neither needs OpenBLAS installed -- they do not link. To run the suite the way
+CI does, which does need it:
+
+```bash
+sudo apt-get install -y libopenblas-dev
+cargo build --release -p bindings --features "extension-module blas"
+cp target/release/libminitensor.so minitensor/_core.so
+python -m pytest
+```
+
+Expect 17 more skips than the default build: `tests/test_batched_gemm_delegation.py`
+skips the two classes that compare the delegated path against the native one,
+because without a provider they would compare the engine's kernel with itself
+and pass without measuring anything. `_core.dispatch.PROVIDER_EXPECTED` is the
+compile-time flag they read, and it is worth knowing about for its own sake --
+it is how a caller tells "this build installs no provider" from "the provider
+failed to install".
+
 ### Running the Python suite against a checked build
 
 `cargo test` compiles with `debug_assert!` and integer overflow checks on, so

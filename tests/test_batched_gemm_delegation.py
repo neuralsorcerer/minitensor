@@ -31,6 +31,15 @@ dispatch = mt._core.dispatch
 # Out of reach of any real product, so nothing is delegated.
 _NEVER = 2**62
 
+# Under `--features blas` no provider is installed, so lowering the thresholds
+# delegates nothing and "the two paths agree" compares the engine's kernel with
+# itself -- green, and measuring nothing. Skip rather than pass emptily; the
+# knobs and the value tests below still run there.
+requires_delegation = pytest.mark.skipif(
+    not dispatch.PROVIDER_EXPECTED,
+    reason="built with --features blas: the engine uses its own BLAS and nothing is delegated",
+)
+
 
 @pytest.fixture
 def restore_thresholds():
@@ -64,6 +73,7 @@ def _t(values):
     return mt.Tensor(values, dtype=str(values.dtype))
 
 
+@requires_delegation
 class TestTheTwoPathsAgree:
     @pytest.mark.parametrize("dtype", ["float32", "float64"])
     @pytest.mark.parametrize(
@@ -118,6 +128,7 @@ class TestTheTwoPathsAgree:
             )
 
 
+@requires_delegation
 class TestGradientsAgree:
     @pytest.mark.parametrize("min_flops,min_k", [(0, 0), (_NEVER, _NEVER)])
     def test_batched_backward(self, min_flops, min_k, restore_thresholds):
@@ -164,8 +175,18 @@ class TestTheKnobs:
             dispatch.DEFAULT_MIN_K,
         )
 
-    def test_a_provider_is_installed(self):
-        # NumPy is a hard dependency, so the provider should always be up. If
-        # this fails the delegated path is silently not being exercised
-        # anywhere, including in the tests above.
-        assert dispatch.gemm_provider_installed() is True
+    def test_the_provider_matches_what_the_build_intends(self):
+        """A provider is up exactly when this build meant to install one.
+
+        NumPy is a hard dependency, so an ordinary build always has one; if it
+        does not, the delegated path is silently not being exercised anywhere,
+        including in the tests above. A `--features blas` build deliberately
+        installs none -- the engine has its own BLAS and crossing into the
+        interpreter for another would buy nothing -- so asserting `is True`
+        outright would fail there for a reason that is not a fault.
+
+        `PROVIDER_EXPECTED` is the compile-time answer to which build this is,
+        which makes the assertion the stronger one either way: not "a provider
+        exists" but "the provider agrees with the build".
+        """
+        assert dispatch.gemm_provider_installed() is dispatch.PROVIDER_EXPECTED

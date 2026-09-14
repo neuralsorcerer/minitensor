@@ -29,16 +29,29 @@
 //! thread pool with one whole matrix per worker and are within 5-45% of NumPy
 //! or ahead of it; integers do not reach a BLAS at all, in either library.
 
+// The provider and everything it needs. Not built under `--features blas`:
+// that build linked a BLAS into the engine, and reaching through the
+// interpreter for another one would be a cost with nothing on the other side
+// of it. The knobs and their reporting below are built either way, so
+// `_core.dispatch` still answers -- see `PROVIDER_EXPECTED`.
+#[cfg(not(feature = "blas"))]
 use engine::ops::linalg::{Gemm, GemmProvider, Storage, set_gemm_provider};
+#[cfg(not(feature = "blas"))]
 use numpy::npyffi::{
     NPY_ARRAY_ALIGNED, NPY_ARRAY_C_CONTIGUOUS, NPY_ARRAY_F_CONTIGUOUS, NPY_ARRAY_WRITEABLE,
     NpyTypes, PY_ARRAY_API, get_type_object, npy_intp,
 };
+#[cfg(not(feature = "blas"))]
 use numpy::{Element, PyArrayDescrMethods};
+#[cfg(not(feature = "blas"))]
 use pyo3::ffi;
 use pyo3::prelude::*;
+#[cfg(not(feature = "blas"))]
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyModule, PyTuple};
+use pyo3::types::PyModule;
+#[cfg(not(feature = "blas"))]
+use pyo3::types::PyTuple;
+#[cfg(not(feature = "blas"))]
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -84,6 +97,7 @@ const DEFAULT_MIN_K: usize = 32;
 /// See [`MIN_FLOPS`] for why this is an atomic and not a constant.
 static MIN_K: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_K);
 
+#[cfg(not(feature = "blas"))]
 /// `numpy.matmul`, looked up once.
 ///
 /// A module attribute lookup per product would be two dictionary probes on the
@@ -92,9 +106,11 @@ static MIN_K: AtomicUsize = AtomicUsize::new(DEFAULT_MIN_K);
 /// not something the engine should follow if they do.
 static MATMUL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
+#[cfg(not(feature = "blas"))]
 /// A dense GEMM through NumPy's C-API, on memory the engine owns.
 struct NumpyGemm;
 
+#[cfg(not(feature = "blas"))]
 /// One `[batch, rows, cols]` array header over `data`, owning nothing.
 ///
 /// `storage` says which way the two matrix axes run in memory. A `Transposed`
@@ -170,6 +186,7 @@ unsafe fn header<'py, T: Element>(
     (!ptr.is_null()).then(|| unsafe { Bound::from_owned_ptr(py, ptr) })
 }
 
+#[cfg(not(feature = "blas"))]
 /// `out = lhs @ rhs` through NumPy, or `false` with `out` untouched.
 ///
 /// # Safety
@@ -254,6 +271,7 @@ fn matrix_product<T: Element + Zero + Copy>(request: &mut Gemm<'_, T>) -> bool {
     })
 }
 
+#[cfg(not(feature = "blas"))]
 impl GemmProvider for NumpyGemm {
     fn gemm_f32(&self, mut request: Gemm<'_, f32>) -> bool {
         matrix_product(&mut request)
@@ -264,6 +282,7 @@ impl GemmProvider for NumpyGemm {
     }
 }
 
+#[cfg(not(feature = "blas"))]
 /// A value of `T` to re-zero a partly written output with.
 ///
 /// `Element` does not require `num_traits::Zero` and the two float types are
@@ -272,18 +291,21 @@ trait Zero {
     fn zero() -> Self;
 }
 
+#[cfg(not(feature = "blas"))]
 impl Zero for f32 {
     fn zero() -> Self {
         0.0
     }
 }
 
+#[cfg(not(feature = "blas"))]
 impl Zero for f64 {
     fn zero() -> Self {
         0.0
     }
 }
 
+#[cfg(not(feature = "blas"))]
 /// Point the engine's dense GEMM at NumPy, once, while the module loads.
 pub fn install_gemm_provider() {
     set_gemm_provider(Box::new(NumpyGemm));
@@ -335,6 +357,13 @@ pub fn register_gemm_module(py: Python, parent: &Bound<PyModule>) -> PyResult<()
     module.add_function(wrap_pyfunction!(gemm_provider_installed, &module)?)?;
     module.add("DEFAULT_MIN_FLOPS", DEFAULT_MIN_FLOPS)?;
     module.add("DEFAULT_MIN_K", DEFAULT_MIN_K)?;
+    // Whether this build installs a provider at all, which is a property of how
+    // the extension was compiled and not otherwise visible from Python. A
+    // `--features blas` build deliberately installs none: the engine has its
+    // own BLAS and there is nothing to gain by crossing into the interpreter to
+    // reach another. Without this, "no provider" and "the provider failed to
+    // install" look the same from here, and only one of them is a bug.
+    module.add("PROVIDER_EXPECTED", cfg!(not(feature = "blas")))?;
     parent.add_submodule(&module)?;
     Ok(())
 }
