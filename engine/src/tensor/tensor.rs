@@ -3060,8 +3060,17 @@ impl Tensor {
     pub fn detach(&self) -> Self {
         let mut detached = self.clone();
         detached.requires_grad = false;
-        detached.grad_fn = None;
-        detached.grad = None;
+        // A fresh identity, not just cleared metadata. The graph keys every
+        // gradient by `TensorId`, so a detached tensor that kept its source's
+        // id is the *same variable* to the tape however its own fields read:
+        // `x.detach().requires_grad_(true)` registered a leaf under x's id, and
+        // a backward through it accumulated into x's gradient slot. Training a
+        // "frozen copy" wrote into the parameter it was copied from, and
+        // `zero_grad` on one cleared the other.
+        //
+        // `detach_inplace` has always called this; only the by-value form did
+        // not, so the two spellings of the same operation disagreed.
+        detached.refresh_autograd_metadata();
         detached
     }
 
