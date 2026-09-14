@@ -19,9 +19,16 @@ somebody looks. This is how to look.
 **Run it in float64.** A central difference subtracts two nearly equal numbers,
 so its accuracy is bounded by the input's precision rather than by `eps`: in
 float32 the surviving agreement is around 1e-2, loose enough to miss a dropped
-factor on one branch of a piecewise function, and in float64 it is around 1e-9,
-which misses nothing. `gradcheck` refuses a float32 input rather than report a
-pass it cannot stand behind.
+factor on one branch of a piecewise function, while in float64 it is around
+1e-9. `gradcheck` refuses a float32 input rather than report a pass it cannot
+stand behind.
+
+That 1e-9 is what the *method* resolves, not what is asserted. The default
+`atol` and `rtol` are the conventional 1e-5 and 1e-3, which catch the errors
+that matter -- a dropped factor, a missing chain-rule term, a sign -- and leave
+room for the conditioning of whatever is being differentiated. Tighten them
+when checking something smooth and well-scaled; there are several orders of
+headroom before the difference itself becomes the limit.
 """
 
 from __future__ import annotations
@@ -75,47 +82,69 @@ def gradcheck(
     """
 
     inputs = tuple(inputs)
-    checked = [
-        index
-        for index, value in enumerate(inputs)
-        if isinstance(value, Tensor) and value.requires_grad
-    ]
-    if not checked:
+
+    # Group the positions by tensor *identity*, not by position. One tensor
+    # passed twice -- `gradcheck(lambda a, b: (a * b).sum(), (x, x))` -- is one
+    # variable appearing twice, and its analytic gradient accumulates from both
+    # occurrences. Perturbing only the first would measure half of that and
+    # report a mismatch against a backward that was right, which is the worst
+    # thing a checking tool can do.
+    groups: dict[int, list[int]] = {}
+    for index, value in enumerate(inputs):
+        if isinstance(value, Tensor) and value.requires_grad:
+            groups.setdefault(id(value), []).append(index)
+    if not groups:
         raise ValueError(
             "gradcheck needs at least one input tensor with requires_grad=True"
         )
-    for index in checked:
-        if str(inputs[index].dtype) != "float64":
+    for positions in groups.values():
+        first = positions[0]
+        if str(inputs[first].dtype) != "float64":
             raise ValueError(
-                f"input {index} is {inputs[index].dtype}; gradcheck needs float64, "
+                f"input {first} is {inputs[first].dtype}; gradcheck needs float64, "
                 "because a central difference in float32 agrees to about 1e-2 and "
                 "that is not evidence of anything"
             )
 
-    analytic = _analytic(func, inputs, checked)
-    for index in checked:
-        numeric = _numeric(func, inputs, index, eps)
-        got = analytic[index]
+    analytic = _analytic(func, inputs, groups)
+    for key, positions in groups.items():
+        numeric = _numeric(func, inputs, positions, eps)
+        got = analytic[key]
         if got is None:
             # No gradient reached this input at all, which is a claim of zero.
             got = np.zeros_like(numeric)
+        if got.shape != numeric.shape:
+            # `np.allclose` would broadcast these and could agree by accident.
+            # The engine rejects a mis-shaped gradient before it reaches here,
+            # so this guards the day that stops being true rather than a case
+            # seen in practice.
+            if not raise_exception:
+                return False
+            raise AssertionError(
+                f"gradient for input {positions[0]} has shape {got.shape}, but the "
+                f"input is {numeric.shape}"
+            )
         if np.allclose(got, numeric, atol=atol, rtol=rtol):
             continue
         if not raise_exception:
             return False
-        raise AssertionError(_describe(index, got, numeric, atol, rtol))
+        raise AssertionError(_describe(positions[0], got, numeric, atol, rtol))
     return True
 
 
-def _analytic(func, inputs, checked) -> dict[int, np.ndarray | None]:
+def _analytic(func, inputs, groups) -> dict[int, np.ndarray | None]:
     # `set_to_none=True`, not a zero fill: gradients accumulate across backward
     # passes here, so a stale one would be added to this one, and a cleared
     # `.grad` is what keeps "no gradient reached this input" distinguishable
     # from "the gradient is zero".
-    for index in checked:
-        inputs[index].zero_grad(True)
+    for positions in groups.values():
+        inputs[positions[0]].zero_grad(True)
 
     output = func(*inputs)
+    if not isinstance(output, Tensor):
+        raise ValueError(
+            f"func must return a scalar tensor; got {type(output).__name__}."
+        )
     if output.numel() != 1:
         raise ValueError(
             f"func must return a scalar tensor; got shape {tuple(output.shape)}. "
@@ -125,41 +154,54 @@ def _analytic(func, inputs, checked) -> dict[int, np.ndarray | None]:
     output.backward()
 
     gradients: dict[int, np.ndarray | None] = {}
-    for index in checked:
-        grad = inputs[index].grad
-        gradients[index] = None if grad is None else np.asarray(grad, np.float64).copy()
+    for key, positions in groups.items():
+        grad = inputs[positions[0]].grad
+        gradients[key] = None if grad is None else np.asarray(grad, np.float64).copy()
     return gradients
 
 
-def _numeric(func, inputs, index, eps) -> np.ndarray:
+def _numeric(func, inputs, positions, eps) -> np.ndarray:
     """One element at a time, with recording off.
+
+    `positions` is every argument slot holding the tensor under test -- more
+    than one when the caller passed it twice. All of them take the perturbed
+    copy, so what this measures is the total derivative, which is what the
+    accumulated analytic gradient is.
 
     The perturbed forwards must not touch the tape: a gradcheck over a large
     input runs thousands of them, and every one would be a node that the
     backward already taken has no use for.
+
+    Elements are addressed by index rather than through `reshape(-1)`, which is
+    a view only for a contiguous array and a silent copy otherwise -- and a copy
+    would throw every perturbation away.
     """
 
-    base = np.asarray(inputs[index], np.float64).copy()
-    flat = base.reshape(-1)
-    out = np.empty_like(flat)
+    base = np.asarray(inputs[positions[0]], np.float64).copy()
+    out = np.empty_like(base)
 
     probe = list(inputs)
+
+    def evaluate() -> float:
+        perturbed = Tensor(base, dtype="float64")
+        for slot in positions:
+            probe[slot] = perturbed
+        return float(np.asarray(func(*probe), np.float64).reshape(()))
+
     with _C.no_grad():
-        for i in range(flat.size):
-            original = flat[i]
+        for index in np.ndindex(base.shape):
+            original = base[index]
 
-            flat[i] = original + eps
-            probe[index] = Tensor(base, dtype="float64")
-            high = float(np.asarray(func(*probe), np.float64).reshape(()))
+            base[index] = original + eps
+            high = evaluate()
 
-            flat[i] = original - eps
-            probe[index] = Tensor(base, dtype="float64")
-            low = float(np.asarray(func(*probe), np.float64).reshape(()))
+            base[index] = original - eps
+            low = evaluate()
 
-            flat[i] = original
-            out[i] = (high - low) / (2.0 * eps)
+            base[index] = original
+            out[index] = (high - low) / (2.0 * eps)
 
-    return out.reshape(base.shape)
+    return out
 
 
 def _describe(index, analytic, numeric, atol, rtol) -> str:

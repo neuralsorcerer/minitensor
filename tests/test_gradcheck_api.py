@@ -93,10 +93,49 @@ def test_an_input_without_requires_grad_is_passed_through():
 
 
 def test_a_matmul_gradient_passes():
-    """Two matrices, so the delegated GEMM is in the path being checked."""
+    """The engine's own GEMM: 6x5x4 is far below the delegation threshold."""
     rng = np.random.default_rng(3)
     a, b = _f64(rng.standard_normal((6, 5))), _f64(rng.standard_normal((5, 4)))
     assert mt.gradcheck(lambda p, q: p.matmul(q).sum(), (a, b))
+
+
+def test_a_delegated_matmul_gradient_passes():
+    """The same product through NumPy's BLAS instead.
+
+    A shape this small never reaches the provider on its own -- the threshold
+    is there precisely because a product this size is cheaper to compute than
+    to hand over -- so the thresholds come down for the duration. Without that
+    the delegated path has no gradient anyone has checked.
+    """
+    dispatch = mt._core.dispatch
+    if not dispatch.gemm_provider_installed:
+        pytest.skip("no GEMM provider in this build")
+
+    previous = dispatch.set_gemm_thresholds(0, 0)
+    try:
+        rng = np.random.default_rng(4)
+        a, b = _f64(rng.standard_normal((6, 5))), _f64(rng.standard_normal((5, 4)))
+        assert mt.gradcheck(lambda p, q: p.matmul(q).sum(), (a, b))
+    finally:
+        dispatch.set_gemm_thresholds(*previous)
+
+
+def test_the_same_tensor_passed_twice():
+    """One variable in two argument slots.
+
+    Its analytic gradient accumulates from both occurrences, so both have to be
+    perturbed together; perturbing one would measure half of it and fail a
+    backward that was correct. For `sum(a * b)` with `a is b` the gradient is
+    `2x`, not `x`.
+    """
+    x = _f64([1.0, 2.0, 3.0])
+    assert mt.gradcheck(lambda a, b: (a * b).sum(), (x, x))
+    np.testing.assert_allclose(np.asarray(x.grad), [2.0, 4.0, 6.0], rtol=1e-9)
+
+
+def test_a_non_tensor_return_is_refused_by_name():
+    with pytest.raises(ValueError, match="scalar tensor; got float"):
+        mt.gradcheck(lambda t: 3.0, (_f64([1.0, 2.0]),))
 
 
 def test_a_correct_custom_function_passes():

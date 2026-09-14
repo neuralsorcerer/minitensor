@@ -50,19 +50,24 @@ def numeric_grad():
 
     `f` is called with `arr` itself, mutated in place and restored, so a caller
     that closes over `arr` sees each perturbation either way.
+
+    Elements are addressed by index rather than through `reshape(-1)`: that is a
+    view only when the array is contiguous, and a copy otherwise, which would
+    throw every perturbation away and quietly return zeros. Every caller today
+    passes a contiguous array, so this is the trap removed rather than a bug
+    fixed.
     """
 
     def compute(f, arr, eps=1e-6):
         grad = np.zeros_like(arr)
-        flat, gflat = arr.reshape(-1), grad.reshape(-1)
-        for i in range(flat.size):
-            original = flat[i]
-            flat[i] = original + eps
+        for index in np.ndindex(arr.shape):
+            original = arr[index]
+            arr[index] = original + eps
             high = f(arr)
-            flat[i] = original - eps
+            arr[index] = original - eps
             low = f(arr)
-            flat[i] = original
-            gflat[i] = (high - low) / (2 * eps)
+            arr[index] = original
+            grad[index] = (high - low) / (2 * eps)
         return grad
 
     return compute
