@@ -198,3 +198,22 @@ def test_gradcheck_leaves_no_graph_behind():
     mt.gradcheck(lambda t: t.tanh().sum(), (x,))
     after, _ = mt.autograd_graph_size()
     assert after == before
+
+
+def test_a_non_finite_comparison_says_so_rather_than_counting_zero():
+    """An out-of-domain input makes the numerical gradient NaN.
+
+    Every comparison against a NaN is false, so the ordinary report would count
+    zero elements as disagreeing while still failing -- a message that reads
+    like a contradiction. `acos` outside (-1, 1) returns NaN rather than
+    raising, which is how a caller lands here without doing anything obviously
+    wrong.
+    """
+    x = _f64([0.37, 1.43])  # 1.43 is outside acos's domain
+    with pytest.raises(AssertionError) as excinfo:
+        mt.gradcheck(lambda t: t.acos().sum(), (x,))
+    message = str(excinfo.value)
+    assert "could not be compared" in message
+    assert "NaN or infinite" in message
+    assert "outside the function's domain" in message
+    assert "elements disagree" not in message

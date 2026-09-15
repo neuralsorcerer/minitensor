@@ -213,6 +213,27 @@ def _numeric(func, inputs, positions, eps) -> np.ndarray:
 
 
 def _describe(index, analytic, numeric, atol, rtol) -> str:
+    unusable = ~(np.isfinite(analytic) & np.isfinite(numeric))
+    if unusable.any():
+        # `np.allclose` refuses these, but every comparison against a NaN is
+        # False, so the ordinary report would count zero elements as disagreeing
+        # while still failing. Say what actually happened instead.
+        #
+        # The common cause is not a wrong backward but an input outside the
+        # function's domain: `acos(1.4)` returns NaN rather than raising, so the
+        # perturbed forwards are NaN and the difference of two of them is too.
+        first = tuple(int(axis) for axis in np.argwhere(unusable)[0])
+        return (
+            f"gradient for input {index} could not be compared: "
+            f"{int(unusable.sum())} of {unusable.size} elements are NaN or "
+            f"infinite (first at index {first}).\n"
+            f"  analytic {float(analytic[first])!r}\n"
+            f"  numeric  {float(numeric[first])!r}\n"
+            "  A non-finite numerical gradient usually means the input is "
+            "outside the function's domain, where the perturbed forward is "
+            "itself non-finite -- check the input before the backward."
+        )
+
     difference = np.abs(analytic - numeric)
     allowed = atol + rtol * np.abs(numeric)
     worst = int(np.argmax(difference - allowed))
