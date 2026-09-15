@@ -6,7 +6,6 @@
 
 use crate::error::_convert_error;
 use crate::tensor::PyTensor;
-use engine::autograd::NoGradGuard;
 use engine::custom_ops::{
     BackwardContext, CustomOp, CustomOpBuilder, examples::register_example_ops, execute_custom_op,
     execute_op, is_custom_op_registered, list_custom_ops, register_custom_op as register_op,
@@ -130,23 +129,19 @@ fn build_python_op(
     num_inputs: usize,
 ) -> PyResult<Arc<dyn CustomOp>> {
     let owned = name.to_string();
-    let detached = backward.is_some();
     let forward_name = owned.clone();
     let mut builder =
         CustomOpBuilder::new(name, num_inputs).forward(move |inputs: &[&Tensor]| {
             Python::attach(|py| {
                 let args = as_python_tensors(py, inputs.iter().map(|t| (*t).clone()))
                     .map_err(|e| from_python(&forward_name, "forward", e))?;
-                // With a backward of its own, what the forward does internally is
-                // an implementation detail: recording it would put a second path
-                // to the same gradient in the graph, and the two would add.
-                let returned = if detached {
-                    let _guard = NoGradGuard::new();
-                    forward.call1(py, &args)
-                } else {
-                    forward.call1(py, &args)
-                }
-                .map_err(|e| from_python(&forward_name, "forward", e))?;
+                // Recording is already off here when this operation has a
+                // backward of its own: `CustomOpBuilder` installs the guard
+                // around every forward it owns, so both authoring paths get
+                // the rule rather than only this one.
+                let returned = forward
+                    .call1(py, &args)
+                    .map_err(|e| from_python(&forward_name, "forward", e))?;
                 tensor_from_result(&forward_name, "forward", returned.bind(py))
             })
         });

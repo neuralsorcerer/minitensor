@@ -7,7 +7,7 @@
 pub mod examples;
 
 use crate::{
-    autograd::{GradientFunction, TensorId, with_grad_fn},
+    autograd::{GradientFunction, NoGradGuard, TensorId, with_grad_fn},
     device::Device,
     error::{MinitensorError, Result},
     tensor::{DataType, Shape, Tensor},
@@ -524,6 +524,24 @@ impl CustomOp for BuiltCustomOp {
     }
 
     fn forward(&self, inputs: &[&Tensor]) -> Result<Tensor> {
+        if self.backward_fn.is_none() {
+            // No backward of its own, so the operation is differentiable only
+            // through whatever its forward composes. That has to record.
+            return (self.forward_fn)(inputs);
+        }
+        // With a backward of its own, what the forward does internally is an
+        // implementation detail. Recording it would put a second path to the
+        // same gradient in the graph, and leave a node nothing can reach once
+        // `execute_op` keys the operation's own node by a fresh id.
+        //
+        // The guard belongs here rather than at either call site because it has
+        // to take effect in whichever copy of this crate owns the operation. A
+        // plugin links its own, with its own thread-local graph, so a guard the
+        // host installs does not reach the plugin's forward: every op a Rust
+        // plugin ran was recording into a graph that `clear_autograd_graph()`
+        // cannot see and nothing ever emptied -- 7.9 MB per 20,000 calls, where
+        // the same operation run in-process retained nothing.
+        let _guard = NoGradGuard::new();
         (self.forward_fn)(inputs)
     }
 
@@ -609,6 +627,64 @@ impl CustomOp for BuiltCustomOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A forward with a backward of its own must not record what it composes.
+    ///
+    /// The operation's own node is the only one that should reach the graph.
+    /// Recording the internals too leaves a node nothing can reach, and in a
+    /// dynamically loaded plugin -- whose copy of this crate has its own
+    /// thread-local graph that `clear_graph` never sees -- leaves it forever.
+    #[test]
+    fn a_forward_with_its_own_backward_does_not_record_what_it_composes() {
+        let op = CustomOpBuilder::new("guarded", 1)
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[0]))
+            .backward(|ctx| {
+                let mut gradients = FxHashMap::default();
+                if let Some(&id) = ctx.input_ids.first() {
+                    gradients.insert(id, ctx.grad_output.clone());
+                }
+                Ok(gradients)
+            })
+            .build()
+            .unwrap();
+
+        let x = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+
+        crate::autograd::clear_graph().unwrap();
+        let before = crate::autograd::graph_size().0;
+        let _ = execute_op(op.as_ref(), &[&x]).unwrap();
+        let added = crate::autograd::graph_size().0 - before;
+
+        // The input's placeholder and the operation's own node, and nothing
+        // from the multiply inside the forward.
+        assert_eq!(
+            added, 2,
+            "expected the input and the op's node; the forward's internals recorded too"
+        );
+        crate::autograd::clear_graph().unwrap();
+    }
+
+    /// Without a backward the operation is differentiable only through what it
+    /// composes, so that has to record.
+    #[test]
+    fn a_forward_with_no_backward_still_records_what_it_composes() {
+        let op = CustomOpBuilder::new("unguarded", 1)
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[0]))
+            .build()
+            .unwrap();
+
+        let x = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+
+        crate::autograd::clear_graph().unwrap();
+        let before = crate::autograd::graph_size().0;
+        let output = execute_op(op.as_ref(), &[&x]).unwrap();
+        assert!(crate::autograd::graph_size().0 > before);
+        assert!(
+            output.grad_fn().is_some(),
+            "composition is the only gradient this op has; it must be recorded"
+        );
+        crate::autograd::clear_graph().unwrap();
+    }
 
     #[test]
     fn test_custom_op_registry() {
