@@ -170,7 +170,7 @@ pub(crate) unsafe fn fill_buffer_view(
     if flags & ffi::PyBUF_WRITABLE == ffi::PyBUF_WRITABLE {
         return Err(PyBufferError::new_err(
             "minitensor tensors export read-only buffers, because several tensors can share one \
-             and a writer would change all of them; use numpy_copy() for an array to write into",
+             and a writer would change all of them; use .numpy() for an array to write into",
         ));
     }
     if tensor.device() != Device::cpu() {

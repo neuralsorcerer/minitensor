@@ -86,7 +86,7 @@ def test_the_view_refuses_to_be_written_to():
 def test_the_copying_spellings_are_still_writeable():
     tensor = mt.Tensor([1.0, 2.0], dtype="float32")
 
-    for made in (np.array(tensor), tensor.numpy(), tensor.numpy_copy()):
+    for made in (np.array(tensor), tensor.numpy()):
         assert made.flags.writeable
         made[0] = 99.0
         # And the tensor is untouched, which is what a copy means.

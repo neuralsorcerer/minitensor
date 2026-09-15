@@ -5,11 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use super::*;
-pub(crate) fn convert_tensor_to_numpy(
-    tensor: &Tensor,
-    py: Python,
-    _force_copy: bool,
-) -> PyResult<Py<PyAny>> {
+pub(crate) fn convert_tensor_to_numpy(tensor: &Tensor, py: Python) -> PyResult<Py<PyAny>> {
     if tensor.device() != Device::cpu() {
         return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Cannot convert GPU tensor to NumPy array. Use .cpu() first.",

@@ -111,13 +111,14 @@ impl PyTensor {
         Ok(interface)
     }
 
-    // NumPy conversion methods
+    /// An owned, writeable NumPy array holding this tensor's values.
+    ///
+    /// Always a copy, which is the point: the array is yours to write into and
+    /// nothing flows back to the tensor through it. The non-copying spelling is
+    /// `numpy.asarray(tensor)`, which goes through `__array_interface__` and
+    /// comes back read-only.
     fn numpy(&self, py: Python) -> PyResult<Py<PyAny>> {
-        convert_tensor_to_numpy(&self.inner, py, false)
-    }
-
-    fn numpy_copy(&self, py: Python) -> PyResult<Py<PyAny>> {
-        convert_tensor_to_numpy(&self.inner, py, true)
+        convert_tensor_to_numpy(&self.inner, py)
     }
 
     #[pyo3(signature = (dtype=None))]

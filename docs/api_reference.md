@@ -854,8 +854,8 @@ The array is **read-only**, and not as a nicety: several tensors can share one
 buffer — `detach`, `reshape`, a no-op `astype` — and each of them is supposed
 to have its own values, so a NumPy array writing into that buffer would change
 all of them at once. When you want something to write into, ask for a copy:
-`numpy.array(tensor)`, `tensor.numpy()` and `tensor.numpy_copy()` all give one,
-and all three are writeable. Asking `numpy.asarray` for a different dtype also
+`numpy.array(tensor)` and `tensor.numpy()` both give one, and both are
+writeable. Asking `numpy.asarray` for a different dtype also
 copies, because a conversion has to.
 
 An in-place operation on the tensor is the other direction of the same sharing.
@@ -2082,9 +2082,8 @@ either way, since they copy on write.
 ### Layout and conversion extras
 
 - `is_contiguous()` reports whether the storage is contiguous.
-- `numpy_copy()` returns a NumPy array that never shares storage. `numpy()`
-  gives one too; the sharing spelling is `numpy.asarray(tensor)`, which is
-  read-only — see
+- `numpy()` returns a NumPy array that never shares storage; the sharing
+  spelling is `numpy.asarray(tensor)`, which is read-only — see
   [Reading a tensor without copying it](#reading-a-tensor-without-copying-it).
 - `split_with_sections(sections, dim)` splits into explicitly sized chunks.
 
@@ -2096,7 +2095,7 @@ t = mt.Tensor([[1.0, 2.0], [3.0, 4.0]])
 print(t.exp().tolist()[0][0] > 2.7, t.pow(2.0).tolist())
 print(t.lt(3.0).tolist())                    # scalars are accepted
 print(t.new_zeros([2]).tolist(), t.new_full([2], 5.0).tolist())
-print(t.is_contiguous(), type(t.numpy_copy()).__name__)
+print(t.is_contiguous(), type(t.numpy()).__name__)
 print([x.shape for x in t.split_with_sections([1, 1], 0)])
 
 target = mt.Tensor([1.0, 2.0])
