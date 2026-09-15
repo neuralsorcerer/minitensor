@@ -237,9 +237,19 @@ pub fn execute_op(op: &dyn CustomOp, inputs: &[&Tensor]) -> Result<Tensor> {
 
     let output = op.forward(inputs)?;
 
-    // Set up gradient tracking if any input requires gradients
+    // Set up gradient tracking if any input requires gradients -- and if this
+    // thread is recording at all. `no_grad()` has to reach here the way it
+    // reaches every built-in: `Tensor::new` gates `requires_grad` on
+    // `is_grad_enabled`, but the flag below is set with `requires_grad_`, which
+    // is deliberately *not* gated because it is how a caller states explicit
+    // intent. Used here it stated the caller's intent for them, and the result
+    // was a tensor that claimed to be differentiable while `add_to_graph`
+    // quietly declined to record it. `backward()` through such an output
+    // returned success and no gradient at all, where the same code written with
+    // a built-in raises. A training step that wrapped a custom operation in
+    // `no_grad` by accident simply stopped learning, and said nothing.
     let requires_grad = inputs.iter().any(|t| t.requires_grad());
-    if requires_grad {
+    if requires_grad && crate::autograd::is_grad_enabled() {
         // The node registered below is keyed by the output's `TensorId`, and
         // until this point that id is whatever the forward happened to hand
         // back. Two ways that is not an identity this graph can key by, and
@@ -683,6 +693,51 @@ mod tests {
             output.grad_fn().is_some(),
             "composition is the only gradient this op has; it must be recorded"
         );
+        crate::autograd::clear_graph().unwrap();
+    }
+
+    /// `no_grad` governs a custom operation the way it governs a built-in.
+    ///
+    /// The flag used to be set with `requires_grad_`, which is deliberately
+    /// ungated, so the output claimed to be differentiable while the graph had
+    /// declined to record it -- and a backward through it succeeded while
+    /// producing nothing.
+    #[test]
+    fn no_grad_leaves_a_custom_op_output_undifferentiable() {
+        let op = CustomOpBuilder::new("under_no_grad", 1)
+            .forward(|inputs| crate::ops::arithmetic::mul(inputs[0], inputs[0]))
+            .backward(|ctx| {
+                let mut gradients = FxHashMap::default();
+                if let Some(&id) = ctx.input_ids.first() {
+                    gradients.insert(id, ctx.grad_output.clone());
+                }
+                Ok(gradients)
+            })
+            .build()
+            .unwrap();
+
+        let x = Tensor::ones(Shape::new(vec![2]), DataType::Float32, Device::cpu(), true);
+
+        crate::autograd::clear_graph().unwrap();
+        let (output, added) = {
+            let _guard = NoGradGuard::new();
+            let before = crate::autograd::graph_size().0;
+            let output = execute_op(op.as_ref(), &[&x]).unwrap();
+            let added = crate::autograd::graph_size().0 - before;
+            (output, added)
+        };
+
+        assert!(
+            !output.requires_grad(),
+            "no_grad must reach a custom op as it reaches a built-in"
+        );
+        assert!(output.grad_fn().is_none(), "and leave no gradient function");
+        assert_eq!(added, 0, "and put nothing on the graph");
+
+        // Outside the guard the same op is differentiable again.
+        let output = execute_op(op.as_ref(), &[&x]).unwrap();
+        assert!(output.requires_grad());
+        assert!(output.grad_fn().is_some());
         crate::autograd::clear_graph().unwrap();
     }
 

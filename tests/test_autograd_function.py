@@ -465,3 +465,43 @@ def test_applying_an_identity_twice_does_not_fold_the_two_calls_together():
     x = _t([2.0], requires_grad=True)
     Identity.apply(Identity.apply(x)).sum().backward()
     np.testing.assert_allclose(x.grad.numpy(), [1.0])
+
+
+# --- no_grad ------------------------------------------------------------------
+
+
+def test_no_grad_reaches_a_function_the_way_it_reaches_a_builtin():
+    """Inside `no_grad` the output is a value, not a differentiable tensor.
+
+    It used to come back claiming `requires_grad` while the graph had quietly
+    declined to record it, so `backward()` through it returned success and no
+    gradient -- a training step that wrapped a `Function` in `no_grad` by
+    accident stopped learning and said nothing.
+    """
+    x = _t([1.0, 2.0], requires_grad=True)
+
+    with mt.no_grad():
+        from_function = Triple.apply(x)
+        from_builtin = x.abs()
+
+    assert from_function.requires_grad == from_builtin.requires_grad is False
+
+    for out in (from_function, from_builtin):
+        with pytest.raises(RuntimeError):
+            out.sum().backward()
+
+
+def test_a_function_outside_no_grad_is_unaffected_by_it():
+    x = _t([1.0, 2.0], requires_grad=True)
+    with mt.no_grad():
+        Triple.apply(x)
+    Triple.apply(x).sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [3.0, 3.0])
+
+
+def test_no_grad_leaves_the_graph_empty_for_a_function():
+    x = _t([1.0, 2.0], requires_grad=True)
+    mt.clear_autograd_graph()
+    with mt.no_grad():
+        Triple.apply(x)
+    assert mt.autograd_graph_size() == (0, 0)
