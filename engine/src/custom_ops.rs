@@ -10,7 +10,7 @@ use crate::{
     autograd::{GradientFunction, NoGradGuard, TensorId, with_grad_fn},
     device::Device,
     error::{MinitensorError, Result},
-    tensor::{DataType, Shape, Tensor},
+    tensor::{DataType, Tensor},
 };
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, RwLock};
@@ -21,9 +21,6 @@ type ForwardFn = Arc<dyn Fn(&[&Tensor]) -> Result<Tensor> + Send + Sync>;
 type BackwardFn =
     Arc<dyn Fn(&BackwardContext) -> Result<FxHashMap<TensorId, Tensor>> + Send + Sync>;
 type ValidateFn = Arc<dyn Fn(&[&Tensor]) -> Result<()> + Send + Sync>;
-type OutputShapeFn = Arc<dyn Fn(&[&Shape]) -> Result<Shape> + Send + Sync>;
-type OutputDtypeFn = Arc<dyn Fn(&[DataType]) -> Result<DataType> + Send + Sync>;
-type OutputDeviceFn = Arc<dyn Fn(&[&Device]) -> Result<Device> + Send + Sync>;
 
 /// What a custom operation's backward pass knows about the forward call it is
 /// differentiating.
@@ -89,15 +86,6 @@ pub trait CustomOp: Send + Sync {
 
     /// Get the expected number of input tensors
     fn num_inputs(&self) -> usize;
-
-    /// Get the expected output shape given input shapes
-    fn output_shape(&self, input_shapes: &[&Shape]) -> Result<Shape>;
-
-    /// Get the expected output data type given input data types
-    fn output_dtype(&self, input_dtypes: &[DataType]) -> Result<DataType>;
-
-    /// Get the expected output device given input devices
-    fn output_device(&self, input_devices: &[&Device]) -> Result<Device>;
 }
 
 /// Registry for custom operations
@@ -398,9 +386,6 @@ pub struct CustomOpBuilder {
     forward_fn: Option<ForwardFn>,
     backward_fn: Option<BackwardFn>,
     validate_fn: Option<ValidateFn>,
-    output_shape_fn: Option<OutputShapeFn>,
-    output_dtype_fn: Option<OutputDtypeFn>,
-    output_device_fn: Option<OutputDeviceFn>,
 }
 
 impl CustomOpBuilder {
@@ -412,9 +397,6 @@ impl CustomOpBuilder {
             forward_fn: None,
             backward_fn: None,
             validate_fn: None,
-            output_shape_fn: None,
-            output_dtype_fn: None,
-            output_device_fn: None,
         }
     }
 
@@ -451,33 +433,6 @@ impl CustomOpBuilder {
         self
     }
 
-    /// Set the output shape function
-    pub fn output_shape<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&[&Shape]) -> Result<Shape> + Send + Sync + 'static,
-    {
-        self.output_shape_fn = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the output dtype function
-    pub fn output_dtype<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&[DataType]) -> Result<DataType> + Send + Sync + 'static,
-    {
-        self.output_dtype_fn = Some(Arc::new(f));
-        self
-    }
-
-    /// Set the output device function
-    pub fn output_device<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&[&Device]) -> Result<Device> + Send + Sync + 'static,
-    {
-        self.output_device_fn = Some(Arc::new(f));
-        self
-    }
-
     /// Build the custom operation
     pub fn build(self) -> Result<Arc<dyn CustomOp>> {
         let forward_fn = self
@@ -490,9 +445,6 @@ impl CustomOpBuilder {
             forward_fn,
             backward_fn: self.backward_fn,
             validate_fn: self.validate_fn,
-            output_shape_fn: self.output_shape_fn,
-            output_dtype_fn: self.output_dtype_fn,
-            output_device_fn: self.output_device_fn,
         }))
     }
 }
@@ -504,9 +456,6 @@ struct BuiltCustomOp {
     forward_fn: ForwardFn,
     backward_fn: Option<BackwardFn>,
     validate_fn: Option<ValidateFn>,
-    output_shape_fn: Option<OutputShapeFn>,
-    output_dtype_fn: Option<OutputDtypeFn>,
-    output_device_fn: Option<OutputDeviceFn>,
 }
 
 impl CustomOp for BuiltCustomOp {
@@ -587,56 +536,12 @@ impl CustomOp for BuiltCustomOp {
     fn num_inputs(&self) -> usize {
         self.num_inputs
     }
-
-    fn output_shape(&self, input_shapes: &[&Shape]) -> Result<Shape> {
-        if let Some(output_shape_fn) = &self.output_shape_fn {
-            output_shape_fn(input_shapes)
-        } else {
-            // Default: use the shape of the first input
-            if input_shapes.is_empty() {
-                Err(MinitensorError::invalid_argument(
-                    "No input shapes provided",
-                ))
-            } else {
-                Ok(input_shapes[0].clone())
-            }
-        }
-    }
-
-    fn output_dtype(&self, input_dtypes: &[DataType]) -> Result<DataType> {
-        if let Some(output_dtype_fn) = &self.output_dtype_fn {
-            output_dtype_fn(input_dtypes)
-        } else {
-            // Default: use the dtype of the first input
-            if input_dtypes.is_empty() {
-                Err(MinitensorError::invalid_argument(
-                    "No input dtypes provided",
-                ))
-            } else {
-                Ok(input_dtypes[0])
-            }
-        }
-    }
-
-    fn output_device(&self, input_devices: &[&Device]) -> Result<Device> {
-        if let Some(output_device_fn) = &self.output_device_fn {
-            output_device_fn(input_devices)
-        } else {
-            // Default: use the device of the first input
-            if input_devices.is_empty() {
-                Err(MinitensorError::invalid_argument(
-                    "No input devices provided",
-                ))
-            } else {
-                Ok(*input_devices[0])
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::Shape;
 
     /// A forward with a backward of its own must not record what it composes.
     ///
@@ -931,7 +836,6 @@ mod tests {
                 }
                 Ok(())
             })
-            .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
             .build()
             .unwrap();
 

@@ -114,17 +114,6 @@ fn create_abs_operation() -> Arc<dyn CustomOp> {
             }
             Ok(gradients)
         })
-        .validate(|inputs| {
-            if inputs.len() != 1 {
-                return Err(MinitensorError::invalid_argument(
-                    "Absolute value operation requires exactly one input",
-                ));
-            }
-            Ok(())
-        })
-        .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
-        .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }
@@ -164,11 +153,9 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
             Ok(gradients)
         })
         .validate(|inputs| {
-            if inputs.len() != 3 {
-                return Err(MinitensorError::invalid_argument(
-                    "Clamp operation requires exactly three inputs: tensor, min, max",
-                ));
-            }
+            // Arity is the builder's job -- `CustomOpBuilder::new(.., 3)`
+            // already refuses a call with the wrong number of inputs. What it
+            // cannot know is that these two in particular have to be scalars.
             if inputs[1].shape().numel() != 1 || inputs[2].shape().numel() != 1 {
                 return Err(MinitensorError::invalid_argument(
                     "Min and max values must be scalars",
@@ -176,9 +163,6 @@ fn create_clamp_operation() -> Arc<dyn CustomOp> {
             }
             Ok(())
         })
-        .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
-        .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }
@@ -215,17 +199,6 @@ fn create_gelu_operation() -> Arc<dyn CustomOp> {
             }
             Ok(gradients)
         })
-        .validate(|inputs| {
-            if inputs.len() != 1 {
-                return Err(MinitensorError::invalid_argument(
-                    "GELU operation requires exactly one input",
-                ));
-            }
-            Ok(())
-        })
-        .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
-        .output_dtype(|input_dtypes| Ok(input_dtypes[0]))
-        .output_device(|input_devices| Ok(*input_devices[0]))
         .build()
         .unwrap()
 }

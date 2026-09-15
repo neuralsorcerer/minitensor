@@ -114,10 +114,7 @@ Each custom operation implements the `CustomOp` trait:
 - `validate_inputs()`: Input validation
 - `forward()`: Forward pass computation
 - `create_gradient_function()`: Backward pass for automatic differentiation
-- `num_inputs()`: Expected number of inputs
-- `output_shape()`: Output shape computation
-- `output_dtype()`: Output data type
-- `output_device()`: Output device
+- `num_inputs()`: Expected number of inputs, enforced by `validate_inputs()`
 
 ## Safety Considerations
 

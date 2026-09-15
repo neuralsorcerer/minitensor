@@ -18,7 +18,7 @@ use super::*;
 use crate::{
     error::Result,
     ops::{activation, arithmetic, normalization, reduction},
-    tensor::{DataType, Tensor},
+    tensor::Tensor,
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -176,15 +176,6 @@ pub fn create_power_op() -> Result<Arc<dyn CustomOp>> {
             }
             Ok(())
         })
-        .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
-        .output_dtype(|input_dtypes| {
-            // Return the higher precision dtype
-            match (input_dtypes[0], input_dtypes[1]) {
-                (DataType::Float64, _) | (_, DataType::Float64) => Ok(DataType::Float64),
-                (DataType::Float32, _) | (_, DataType::Float32) => Ok(DataType::Float32),
-                _ => Ok(input_dtypes[0]),
-            }
-        })
         .build()
 }
 
@@ -290,7 +281,6 @@ pub fn create_layer_norm_op() -> Result<Arc<dyn CustomOp>> {
 
             Ok(())
         })
-        .output_shape(|input_shapes| Ok(input_shapes[0].clone()))
         .build()
 }
 
@@ -319,6 +309,7 @@ pub fn register_example_ops() -> Result<()> {
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::tensor::{DataType, Shape};
 
     #[test]
     fn test_swish_op() {

@@ -209,15 +209,14 @@ pub trait CustomOp: Send + Sync {
         output: &Tensor,
     ) -> Option<Arc<dyn GradientFunction>>;
     fn num_inputs(&self) -> usize;
-    fn output_shape(&self, input_shapes: &[&Shape]) -> Result<Shape>;
-    fn output_dtype(&self, input_dtypes: &[DataType]) -> Result<DataType>;
-    fn output_device(&self, input_devices: &[&Device]) -> Result<Device>;
 }
 ```
 
 The engine also provides `CustomOpBuilder::new(name, num_inputs)` for Rust code.
-A builder can attach forward logic, optional backward logic, validation, and
-output metadata inference before calling `build()`.
+A builder can attach forward logic, optional backward logic, and validation
+before calling `build()`. The output's shape, dtype and device are whatever the
+forward returns; there is nothing to declare, and no declaration to keep in
+step with the code.
 
 ```rust
 let op = CustomOpBuilder::new("my_operation", 2)
@@ -431,9 +430,11 @@ with `.sum()`.
 
 ### When adding a real Rust custom operation
 
-- Validate input count, shapes, dtypes, devices, and edge cases explicitly.
-- Write Rust unit tests for `validate_inputs`, `output_shape`, and forward
-  values.
+- Validate whatever the arity check cannot: shapes, dtypes, devices and edge
+  cases. `CustomOpBuilder::new(name, num_inputs)` already refuses a call with
+  the wrong number of inputs, so a `validate` closure that re-counts them says
+  nothing.
+- Write Rust unit tests for `validate_inputs` and forward values.
 - Compare gradients against finite differences for differentiable operations.
 - Test Python bindings with tensors and wrapper objects.
 - Document whether the operation is a pedagogical example or production-ready
