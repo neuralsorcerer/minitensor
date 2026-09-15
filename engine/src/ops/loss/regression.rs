@@ -814,11 +814,11 @@ pub fn huber_loss(
         let diff_for_grad = diff.clone().detach();
         let abs_diff = activation_abs(&diff.detach())?;
 
-        // Create delta tensor for comparison
-        let delta_tensor = create_scalar_tensor(delta, predictions.dtype(), predictions.device())?;
-
-        // Compute Huber loss element-wise
-        let huber_values = compute_huber_elementwise(&abs_diff, &diff, &delta_tensor, delta)?;
+        // Compute Huber loss element-wise. The threshold stays an `f64` and is
+        // cast once per dtype inside; it used to also be materialised as a
+        // scalar tensor and handed over unread, which cost an allocation per
+        // call and made the comparison look elementwise when it is not.
+        let huber_values = compute_huber_elementwise(&abs_diff, &diff, delta)?;
 
         // Apply reduction
         let n = huber_values.numel() as f64;

@@ -481,12 +481,7 @@ fn triangular_mask_map<T: Copy + Default + Send + Sync>(
 
 // Helper functions for matrix multiplication
 
-pub(crate) fn matmul_f32(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    _output_shape: &Shape,
-) -> Result<()> {
+pub(crate) fn matmul_f32(lhs: &Tensor, rhs: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let lhs_data = lhs.data().as_f32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f32 slice from lhs tensor")
     })?;
@@ -501,12 +496,7 @@ pub(crate) fn matmul_f32(
     optimized_matmul_f32(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
-pub(crate) fn matmul_f64(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    _output_shape: &Shape,
-) -> Result<()> {
+pub(crate) fn matmul_f64(lhs: &Tensor, rhs: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let lhs_data = lhs.data().as_f64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get f64 slice from lhs tensor")
     })?;
@@ -521,12 +511,7 @@ pub(crate) fn matmul_f64(
     optimized_matmul_f64(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
-pub(crate) fn matmul_i32(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
+pub(crate) fn matmul_i32(lhs: &Tensor, rhs: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let lhs_data = lhs.data().as_i32_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i32 slice from lhs tensor")
     })?;
@@ -538,22 +523,10 @@ pub(crate) fn matmul_i32(
         MinitensorError::internal_error("Failed to get mutable i32 slice from output data")
     })?;
 
-    naive_matmul(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-    )
+    naive_matmul(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
-pub(crate) fn matmul_i64(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    output_data: &mut TensorData,
-    output_shape: &Shape,
-) -> Result<()> {
+pub(crate) fn matmul_i64(lhs: &Tensor, rhs: &Tensor, output_data: &mut TensorData) -> Result<()> {
     let lhs_data = lhs.data().as_i64_slice().ok_or_else(|| {
         MinitensorError::internal_error("Failed to get i64 slice from lhs tensor")
     })?;
@@ -565,14 +538,7 @@ pub(crate) fn matmul_i64(
         MinitensorError::internal_error("Failed to get mutable i64 slice from output data")
     })?;
 
-    naive_matmul(
-        lhs_data,
-        rhs_data,
-        output_slice,
-        lhs.shape(),
-        rhs.shape(),
-        output_shape,
-    )
+    naive_matmul(lhs_data, rhs_data, output_slice, lhs.shape(), rhs.shape())
 }
 
 /// Integer matrix multiplication (O(n^3)) with batch support.
@@ -596,7 +562,6 @@ fn naive_matmul<T>(
     output_data: &mut [T],
     lhs_shape: &Shape,
     rhs_shape: &Shape,
-    _output_shape: &Shape,
 ) -> Result<()>
 where
     T: Copy + std::ops::Mul<Output = T> + std::ops::AddAssign + Default + PartialEq + Send + Sync,

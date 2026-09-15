@@ -1046,10 +1046,10 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     if output_shape_obj.numel() != 0 && lhs_cols != 0 {
         // Perform matrix multiplication based on data type
         match lhs.dtype() {
-            DataType::Float32 => matmul_f32(lhs, rhs, &mut output_data, &output_shape_obj)?,
-            DataType::Float64 => matmul_f64(lhs, rhs, &mut output_data, &output_shape_obj)?,
-            DataType::Int32 => matmul_i32(lhs, rhs, &mut output_data, &output_shape_obj)?,
-            DataType::Int64 => matmul_i64(lhs, rhs, &mut output_data, &output_shape_obj)?,
+            DataType::Float32 => matmul_f32(lhs, rhs, &mut output_data)?,
+            DataType::Float64 => matmul_f64(lhs, rhs, &mut output_data)?,
+            DataType::Int32 => matmul_i32(lhs, rhs, &mut output_data)?,
+            DataType::Int64 => matmul_i64(lhs, rhs, &mut output_data)?,
             DataType::Bool => unreachable!("bool dtype checked above"),
         }
     }

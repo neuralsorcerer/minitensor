@@ -285,7 +285,6 @@ pub(crate) fn compute_bce_with_logits_elementwise(
 pub(crate) fn compute_huber_elementwise(
     abs_diff: &Tensor,
     diff: &Tensor,
-    _delta_tensor: &Tensor,
     delta: f64,
 ) -> Result<Tensor> {
     let output_data = match abs_diff.dtype() {
