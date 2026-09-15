@@ -387,3 +387,81 @@ def test_the_backward_agrees_with_finite_differences(argument):
     np.testing.assert_allclose(
         tensors[argument].grad.numpy(), expected, rtol=1e-6, atol=1e-8
     )
+
+
+# --- a forward that hands back one of its own inputs --------------------------
+#
+# The node `apply` registers is keyed by the output's identity. A forward is
+# allowed to return an input unchanged -- an identity, a straight-through
+# estimator, a clamp with nothing to clamp -- and when it did, the node listed
+# itself among its own inputs and `backward()` reported a cycle in a graph the
+# caller wrote nothing cyclic into.
+
+
+class Identity(Function):
+    """Returns the very tensor it was handed."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+
+
+def test_a_forward_may_return_its_input_unchanged():
+    x = _t([1.0, 2.0, 3.0], requires_grad=True)
+    out = Identity.apply(x)
+    np.testing.assert_allclose(out.numpy(), [1.0, 2.0, 3.0])
+    out.sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [1.0, 1.0, 1.0])
+
+
+def test_the_returned_input_is_a_separate_variable_from_the_one_passed_in():
+    """Otherwise the output's gradient and the input's are one slot.
+
+    Sharing it is how the cycle arose: to the graph, output and input were the
+    same variable, so the node depended on itself.
+    """
+    x = _t([1.0, 2.0], requires_grad=True)
+    out = Identity.apply(x)
+    out.sum().backward()
+
+    assert out.grad is None or out.grad is not x.grad
+    np.testing.assert_allclose(x.grad.numpy(), [1.0, 1.0])
+
+
+def test_a_forward_may_return_one_of_several_inputs():
+    """The chosen argument gets the gradient; the others get none of it."""
+
+    class PickSecond(Function):
+        @staticmethod
+        def forward(ctx, first, second):
+            return second
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output * 0.0, grad_output * 2.0
+
+    p = _t([1.0, 2.0], requires_grad=True)
+    q = _t([3.0, 4.0], requires_grad=True)
+    out = PickSecond.apply(p, q)
+    np.testing.assert_allclose(out.numpy(), [3.0, 4.0])
+
+    out.sum().backward()
+    np.testing.assert_allclose(p.grad.numpy(), [0.0, 0.0])
+    np.testing.assert_allclose(q.grad.numpy(), [2.0, 2.0])
+
+
+def test_an_identity_forward_still_composes_with_what_surrounds_it():
+    x = _t([1.0, 2.0], requires_grad=True)
+    (Identity.apply(x * 3.0) * 2.0).sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [6.0, 6.0])
+
+
+def test_applying_an_identity_twice_does_not_fold_the_two_calls_together():
+    """Two nodes, each with its own identity, not one node pointing at itself."""
+    x = _t([2.0], requires_grad=True)
+    Identity.apply(Identity.apply(x)).sum().backward()
+    np.testing.assert_allclose(x.grad.numpy(), [1.0])

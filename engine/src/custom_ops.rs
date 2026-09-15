@@ -239,20 +239,47 @@ pub fn execute_op(op: &dyn CustomOp, inputs: &[&Tensor]) -> Result<Tensor> {
 
     // Set up gradient tracking if any input requires gradients
     let requires_grad = inputs.iter().any(|t| t.requires_grad());
-    if requires_grad && let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
-        // `with_grad_fn`, not `add_to_graph`: the node has to go *on the
-        // output* as well as into the graph, and doing only the second
-        // leaves a tensor the walk treats as a leaf -- `backward()` reached
-        // it, found no gradient function, and stopped, so the custom
-        // gradient never ran and the inputs came back with none.
+    if requires_grad {
+        // The node registered below is keyed by the output's `TensorId`, and
+        // until this point that id is whatever the forward happened to hand
+        // back. Two ways that is not an identity this graph can key by, and
+        // both of them end at the same error message:
         //
-        // The flag is set first for the same reason. A forward that
-        // supplies its own gradient computes the value with recording
-        // *off*, since the operations inside it are an implementation
-        // detail rather than the graph, so the tensor it hands back carries
-        // no flag of its own. It is differentiable because this node says
-        // so, and the flag has to say so too.
-        return with_grad_fn(output.requires_grad_(true), grad_fn);
+        // A forward may legitimately return one of its own inputs -- an
+        // identity, a straight-through estimator, a clamp that found nothing
+        // to clamp. Then the output id *is* an input id, the node lists itself
+        // among its own inputs, and the backward walk reports a cycle in a
+        // graph the caller wrote nothing cyclic into.
+        //
+        // A forward inside a dynamically loaded plugin allocates from that
+        // library's own copy of the engine, whose id counter is a separate
+        // `static` starting again at zero. Those ids are unrelated to this
+        // process's and collide with them on no pattern a caller could see:
+        // whether a plugin operation worked came down to how many tensors
+        // happened to have been built before it ran, so the same op passed or
+        // failed depending on what else the test file did first.
+        //
+        // Minting the identity here, before anything keys anything by it,
+        // closes both. The clone is a refcount bump; the buffer is shared, and
+        // only the identity is new.
+        let mut output = output.clone();
+        output.refresh_autograd_metadata();
+        if let Some(grad_fn) = op.create_gradient_function(inputs, &output) {
+            // `with_grad_fn`, not `add_to_graph`: the node has to go *on
+            // the output* as well as into the graph, and doing only the
+            // second leaves a tensor the walk treats as a leaf --
+            // `backward()` reached it, found no gradient function, and
+            // stopped, so the custom gradient never ran and the inputs came
+            // back with none.
+            //
+            // The flag is set first for the same reason. A forward that
+            // supplies its own gradient computes the value with recording
+            // *off*, since the operations inside it are an implementation
+            // detail rather than the graph, so the tensor it hands back
+            // carries no flag of its own. It is differentiable because this
+            // node says so, and the flag has to say so too.
+            return with_grad_fn(output.requires_grad_(true), grad_fn);
+        }
     }
 
     Ok(output)
