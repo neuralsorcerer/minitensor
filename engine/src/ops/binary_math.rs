@@ -295,7 +295,7 @@ pub(crate) fn float_binary_tensor(
     rhs: &Tensor,
     kernel: FloatBinaryKernel,
 ) -> Result<Tensor> {
-    let output_shape = lhs.shape().broadcast_with(rhs.shape())?;
+    let output_shape = lhs.shape().broadcast_with_dtype(rhs.shape(), lhs.dtype())?;
     let data = float_binary_data(lhs, rhs, lhs.dtype(), &output_shape, kernel)?;
     Ok(Tensor::new(
         Arc::new(data),

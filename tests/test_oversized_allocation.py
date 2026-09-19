@@ -191,6 +191,12 @@ OVERSIZED_RESULTS = [
     "mt.zeros([10**6, 1]) * mt.zeros([1, 10**6])",
     "mt.zeros([10**6, 1]) + mt.zeros([1, 10**6])",
     "mt.kron(mt.zeros([10**6]), mt.zeros([10**6]))",
+    # 2.5 billion elements: 2.5 GB as bool, 20 GB as float64. Checking the
+    # count alone passes this on a 16 GB machine and then aborts, which is why
+    # the broadcast is checked against the dtype it will actually be made of.
+    "mt.zeros([50000,1],dtype='float64') * mt.zeros([1,50000],dtype='float64')",
+    "mt.zeros([50000,1],dtype='float64') + mt.zeros([1,50000],dtype='float64')",
+    "mt.zeros([50000,1],dtype='float64').maximum(mt.zeros([1,50000],dtype='float64'))",
 ]
 
 ORDINARY_RESULTS = [
@@ -199,6 +205,7 @@ ORDINARY_RESULTS = [
     "mt.zeros([3, 1]) * mt.zeros([1, 4])",
     "mt.kron(mt.zeros([2]), mt.zeros([3]))",
     "mt.functional.interpolate(mt.zeros([1, 1, 2, 2]), [4, 4])",
+    "mt.zeros([2, 3], dtype='float64') + mt.zeros([3], dtype='float64')",
 ]
 
 

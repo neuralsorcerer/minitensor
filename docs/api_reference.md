@@ -4040,13 +4040,15 @@ computed: `matmul` and `mm`, the `cat`/`stack`/`vstack`/`hstack` family, `pad`,
 which matters most, since `x[:, None] * y[None, :]` turns two megabytes of
 input into a trillion elements without either operand looking large.
 
-The broadcast check is the one that is deliberately approximate. It runs in
-`Shape::broadcast_with`, which is where all twenty-nine broadcasting operations
-agree on their result shape but before any of them has chosen a dtype, so the
-question it asks is whether the result could be held at one byte per element.
-That never refuses a result a caller could have had, and it catches everything
-impossible at any width; a result that would fit as `bool` but not as `float64`
-still reaches the allocator.
+The broadcast check sits in `Shape::broadcast_with`, where all twenty-nine
+broadcasting operations agree on their result shape. Arithmetic, `minimum` /
+`maximum` and the binary-float operations pass the dtype the result will be
+made of, because the count alone is not the size: 2.5 billion elements is
+2.5 GB as `bool` and 20 GB as `float64`, and on a 16 GB machine only the
+second is impossible. The remaining callers — the ones whose result is
+`bool` regardless, or whose shape is being checked rather than allocated —
+leave it at one byte per element, which never refuses a result they could
+have had.
 
 One limit worth naming: under `vm.overcommit_memory = 1` the kernel grants
 any mapping and enforces nothing until the pages are touched, so `try_reserve`

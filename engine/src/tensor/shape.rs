@@ -128,6 +128,23 @@ impl Shape {
     /// Compute the broadcasted shape with another shape
     #[inline(always)]
     pub fn broadcast_with(&self, other: &Shape) -> Result<Shape> {
+        self.broadcast_with_dtype(other, DataType::Bool)
+    }
+
+    /// [`Self::broadcast_with`], told what the result will be made of.
+    ///
+    /// A broadcast is the one shape operation whose result can dwarf both of
+    /// its inputs -- `x[:, None] * y[None, :]` on two 50,000-element vectors is
+    /// 20 GB of `float64` from 800 KB of input -- and the allocation that
+    /// follows aborts the process rather than failing. Asking here, where every
+    /// broadcasting operation agrees on its result shape, covers all of them.
+    ///
+    /// The dtype matters because the count alone is not the size. Checking at
+    /// one byte per element, which is all `broadcast_with` can assume, passes a
+    /// 2.5-billion-element result that is 2.5 GB as `bool` and 20 GB as
+    /// `float64`; the second aborted. Callers that know what they are about to
+    /// allocate should say so.
+    pub fn broadcast_with_dtype(&self, other: &Shape, dtype: DataType) -> Result<Shape> {
         let self_ndim = self.ndim();
         let other_ndim = other.ndim();
         let max_ndim = self_ndim.max(other_ndim);
@@ -156,21 +173,7 @@ impl Shape {
         result_dims.reverse();
         let broadcast = Shape::new(result_dims);
 
-        // A broadcast is the one shape operation whose result can dwarf both of
-        // its inputs -- `x[:, None] * y[None, :]` on two million-element vectors
-        // is a trillion elements from two megabytes of input -- and the
-        // allocation that follows aborts the process rather than failing. Every
-        // broadcasting operation in the engine computes its output shape here,
-        // which is why the check sits here rather than at twenty-nine call
-        // sites.
-        //
-        // Only the element count is known at this point, not the dtype, so the
-        // question asked is whether the result could be held at *one byte per
-        // element*. That never refuses something a caller could have had, and
-        // it catches the cases that are impossible at any width. A result that
-        // would fit as `bool` but not as `float64` still reaches the allocator;
-        // closing that gap means asking again where the dtype is known.
-        crate::tensor::TensorData::ensure_allocatable(broadcast.try_numel()?, DataType::Bool)?;
+        crate::tensor::TensorData::ensure_allocatable(broadcast.try_numel()?, dtype)?;
         Ok(broadcast)
     }
 }

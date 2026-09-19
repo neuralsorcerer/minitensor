@@ -36,7 +36,9 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
 
     if output_shape.numel() == 0 {
         let mut output = Tensor::empty(
@@ -211,7 +213,9 @@ pub fn sub(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
 
     if output_shape.numel() == 0 {
         let mut output = Tensor::empty(
@@ -281,7 +285,9 @@ pub fn mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
 
     if output_shape.numel() == 0 {
         let mut output = Tensor::empty(
@@ -353,7 +359,9 @@ pub fn div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let rhs_ref = rhs_cast.as_ref();
 
     // Compute broadcasted shape
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
 
     if output_shape.numel() == 0 {
         let mut output = Tensor::empty(
@@ -507,7 +515,9 @@ pub fn floor_div(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
     if output_shape.numel() == 0 {
         return Ok(Tensor::empty(
             output_shape,
@@ -627,7 +637,9 @@ fn modulus(lhs: &Tensor, rhs: &Tensor, convention: ModulusConvention) -> Result<
         })
     };
 
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
     if output_shape.numel() == 0 {
         let output = Tensor::empty(output_shape, result_dtype, lhs.device(), requires_grad);
         return if requires_grad {

@@ -39,7 +39,9 @@ fn binary_minmax(lhs: &Tensor, rhs: &Tensor, op: BinaryOpKind) -> Result<Tensor>
     let lhs_ref = lhs_cast.as_ref();
     let rhs_ref = rhs_cast.as_ref();
 
-    let output_shape = lhs_ref.shape().broadcast_with(rhs_ref.shape())?;
+    let output_shape = lhs_ref
+        .shape()
+        .broadcast_with_dtype(rhs_ref.shape(), result_dtype)?;
 
     /// One dtype arm: fetch both slices, apply the max/min closure with
     /// broadcasting into a fresh buffer, and wrap it as `TensorData`.
