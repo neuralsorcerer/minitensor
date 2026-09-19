@@ -569,25 +569,6 @@ pub fn simd_dot_f32_wide(a: &[f32], b: &[f32]) -> f64 {
     total
 }
 
-/// Unrolled sum for i32 slices to leverage auto-vectorization
-pub fn simd_sum_i32(data: &[i32]) -> i32 {
-    let mut sums = [0i32; 8];
-    let (chunks, rem) = data.as_chunks::<8>();
-    for chunk in chunks {
-        sums[0] = sums[0].wrapping_add(chunk[0]);
-        sums[1] = sums[1].wrapping_add(chunk[1]);
-        sums[2] = sums[2].wrapping_add(chunk[2]);
-        sums[3] = sums[3].wrapping_add(chunk[3]);
-        sums[4] = sums[4].wrapping_add(chunk[4]);
-        sums[5] = sums[5].wrapping_add(chunk[5]);
-        sums[6] = sums[6].wrapping_add(chunk[6]);
-        sums[7] = sums[7].wrapping_add(chunk[7]);
-    }
-    let mut total: i32 = sums.iter().fold(0, |a, &b| a.wrapping_add(b));
-    total = rem.iter().fold(total, |a, &b| a.wrapping_add(b));
-    total
-}
-
 /// Sum an i32 slice into an i64 accumulator.
 ///
 /// `sum` and `prod` report a wider integer than they read, matching NumPy and
@@ -730,25 +711,6 @@ pub fn simd_prod_f64(data: &[f64]) -> f64 {
     }
     let mut total: f64 = prods.iter().product();
     total *= rem.iter().copied().product::<f64>();
-    total
-}
-
-/// Unrolled product for i32 slices to leverage auto-vectorization
-pub fn simd_prod_i32(data: &[i32]) -> i32 {
-    let mut prods = [1i32; 8];
-    let (chunks, rem) = data.as_chunks::<8>();
-    for chunk in chunks {
-        prods[0] = prods[0].wrapping_mul(chunk[0]);
-        prods[1] = prods[1].wrapping_mul(chunk[1]);
-        prods[2] = prods[2].wrapping_mul(chunk[2]);
-        prods[3] = prods[3].wrapping_mul(chunk[3]);
-        prods[4] = prods[4].wrapping_mul(chunk[4]);
-        prods[5] = prods[5].wrapping_mul(chunk[5]);
-        prods[6] = prods[6].wrapping_mul(chunk[6]);
-        prods[7] = prods[7].wrapping_mul(chunk[7]);
-    }
-    let mut total: i32 = prods.iter().fold(1, |a, &b| a.wrapping_mul(b));
-    total = rem.iter().fold(total, |a, &b| a.wrapping_mul(b));
     total
 }
 

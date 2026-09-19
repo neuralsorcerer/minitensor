@@ -567,20 +567,6 @@ impl TensorData {
         }
     }
 
-    /// Create new tensor data from raw bytes on CPU
-    #[inline(always)]
-    pub fn from_bytes(buffer: Vec<u8>, dtype: DataType, numel: usize) -> Self {
-        Self {
-            buffer: UnsafeCell::new(TensorBuffer::Owned(buffer)),
-            layout: MemoryLayout {
-                dtype,
-                numel,
-                is_contiguous: true,
-                device: Device::cpu(),
-            },
-        }
-    }
-
     /// Create tensor data from a vector of typed values.
     ///
     /// # Allocation invariant
@@ -709,26 +695,6 @@ impl TensorData {
     #[inline(always)]
     pub fn from_vec_bool(data: Vec<bool>, device: Device) -> Self {
         Self::from_vec(data, DataType::Bool, device)
-    }
-
-    /// Create tensor data from raw pointer (for GPU or external memory)
-    #[inline(always)]
-    pub fn from_raw_ptr(
-        ptr: *mut u8,
-        size: usize,
-        dtype: DataType,
-        numel: usize,
-        device: Device,
-    ) -> Self {
-        Self {
-            buffer: UnsafeCell::new(TensorBuffer::Raw { ptr, size, device }),
-            layout: MemoryLayout {
-                dtype,
-                numel,
-                is_contiguous: true,
-                device,
-            },
-        }
     }
 
     /// Wrap CPU memory this crate does not own.
