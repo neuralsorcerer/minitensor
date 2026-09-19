@@ -147,12 +147,13 @@ fn human_bytes(bytes: usize) -> String {
 /// interpreter gone and with it whatever was in it. One mistyped exponent in a
 /// notebook took the kernel down.
 ///
-/// `try_reserve` asks the allocator the same question and hands back an `Err`
-/// instead of aborting, so the honest check is simply to ask before
-/// committing: no invented ceiling, no guess at how much memory is free, and
-/// the answer is the one the real allocation would have got. The probe is
-/// skipped below a threshold where it could only ever succeed, so ordinary
-/// tensors do not pay for it, and its own buffer is dropped immediately.
+/// `TensorData::is_allocatable_size` is that question, and its note explains
+/// why it takes two forms rather than one. This used to ask `try_reserve`
+/// here, in a second copy of the same policy, and the copy is what let the two
+/// drift: the engine's grew a physical-memory ceiling after macOS was found to
+/// grant reservations it then kills the process over, and this one would not
+/// have. One decision, two messages -- a Python caller gets `MemoryError` and
+/// a byte count it can read, which is not what the engine's `Result` says.
 pub(crate) fn reject_unallocatable(numel: usize, dtype: DataType, what: &str) -> PyResult<()> {
     let Some(bytes) = numel.checked_mul(dtype.size_bytes()) else {
         return Err(PyValueError::new_err(format!(
@@ -160,24 +161,13 @@ pub(crate) fn reject_unallocatable(numel: usize, dtype: DataType, what: &str) ->
         )));
     };
 
-    // Below this the allocator cannot plausibly refuse, and asking costs a
-    // syscall's worth of work on a path that runs constantly.
-    const PROBE_ABOVE_BYTES: usize = 1 << 30;
-    if bytes <= PROBE_ABOVE_BYTES {
-        return Ok(());
-    }
-
-    let mut probe: Vec<u8> = Vec::new();
-    match probe.try_reserve_exact(bytes) {
-        Ok(()) => {
-            drop(probe);
-            Ok(())
-        }
-        Err(_) => Err(PyMemoryError::new_err(format!(
-            "{what} of {numel} {dtype:?} elements needs {}, which this machine cannot allocate",
+    if !TensorData::is_allocatable_size(bytes) {
+        return Err(PyMemoryError::new_err(format!(
+            "{what} of {numel} {dtype:?} elements needs {}, which this machine cannot hold",
             human_bytes(bytes)
-        ))),
+        )));
     }
+    Ok(())
 }
 
 pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {

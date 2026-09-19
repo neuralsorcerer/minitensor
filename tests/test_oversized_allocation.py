@@ -29,6 +29,15 @@ These tests cannot assert the *absence* of an abort from inside the process
 that would be aborted, so each one runs in a subprocess: a killed child is
 distinguishable from a child that raised, which is exactly the difference being
 tested.
+
+That `returncode == 0` assertion is the whole point of the file and it earned
+its keep on macOS, where seventeen of these failed while every one passed on
+Linux. Eleven of them by exit code -9: the guard asked `try_reserve`, macOS
+granted four terabytes because its allocator hands out address space rather
+than memory, and the kernel killed the process when the buffer was written.
+`TensorData::is_allocatable_size` compares against physical memory as well for
+that reason. If this file is ever red on one platform and green on another,
+that difference is the finding, not the noise.
 """
 
 from __future__ import annotations
@@ -196,7 +205,8 @@ OVERSIZED_RESULTS = [
     # refusal is computed from bytes rather than from the element count is
     # pinned exactly in `storage.rs`, because the size at which a particular
     # host starts saying no is a property of the host. A 20 GB reservation
-    # Linux declines, a Windows runner with a large page file grants.
+    # Linux declines, a Windows page file grants, and macOS grants anything
+    # the address space can hold.
     "mt.zeros([10**6,1],dtype='float64') * mt.zeros([1,10**6],dtype='float64')",
     "mt.zeros([10**6,1],dtype='float64') + mt.zeros([1,10**6],dtype='float64')",
     "mt.zeros([10**6,1],dtype='float64').maximum(mt.zeros([1,10**6],dtype='float64'))",

@@ -4035,15 +4035,19 @@ A shape that *is* addressable but larger than available memory raises
 np.zeros(12 * 10**9, dtype=np.float32)   # MemoryError, caller continues
 mt.zeros(12 * 10**9)                     # MemoryError: tensor of 12000000000
                                          # Float32 elements needs 44.7 GiB,
-                                         # which this machine cannot allocate
+                                         # which this machine cannot hold
 ```
 
-The check asks the allocator the same question the real allocation would ask,
-through `try_reserve`, which returns rather than aborting. So there is no
-invented ceiling and no guess at free memory — a size that genuinely fits is
-still built, and one that does not is refused for this machine rather than
-against a fixed number. It runs only above 1 GiB, where the allocator could
-plausibly say no, so ordinary tensors pay nothing for it.
+The check asks two questions. `try_reserve` puts the real allocation's question
+to the allocator and returns rather than aborting, so a size that genuinely
+fits is still built and one that does not is refused for this machine rather
+than against a fixed number. That alone is the right answer on Linux and on
+Windows, and it is not an answer on macOS, whose allocator hands out address
+space rather than memory: it grants a 4 TB reservation and the kernel then
+kills the process when the buffer is written. So the size is also compared
+against the machine's physical memory, which is the loosest ceiling that is
+still a guard — every one of these paths is about to fill the buffer it asks
+for. Both questions run only above 1 GiB, so ordinary tensors pay nothing.
 
 This covers every size a caller names: the constructors (`zeros`, `ones`,
 `empty`, `full`, `rand`, `randn`, `arange`, `linspace`, `logspace`, `eye`,

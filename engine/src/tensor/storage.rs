@@ -474,7 +474,92 @@ impl TensorData {
         }
     }
 
-    /// Refuse a buffer this machine cannot allocate, rather than aborting.
+    /// Whether this machine could hold a buffer of `bytes`, asked without
+    /// allocating one.
+    ///
+    /// Two questions, because neither one is enough by itself.
+    ///
+    /// `try_reserve` asks the allocator exactly the question the real
+    /// allocation will ask, and returns instead of aborting. On Linux and on
+    /// Windows that is the whole answer: both decline a request past what they
+    /// are willing to back, so there is no invented ceiling and no guess at
+    /// free memory.
+    ///
+    /// It is **not** an answer on an allocator that hands out address space
+    /// rather than memory. macOS granted a 4 TB reservation in CI and the
+    /// process was then killed by the kernel when the buffer was written --
+    /// SIGKILL, which is the outcome this whole mechanism exists to prevent,
+    /// arriving by a different route. Seventeen cases in
+    /// `tests/test_oversized_allocation.py` failed there while passing on
+    /// Linux, which is how this was found.
+    ///
+    /// So the size is also compared against the memory the machine has. That
+    /// is a ceiling rather than a measurement, and it is the loosest one that
+    /// is still a guard: every caller is about to *fill* the buffer it asks
+    /// for, so a buffer past physical memory is a mistake or a swap storm.
+    /// [`Self::total_physical_memory`] returns `None` where the platform will
+    /// not say, and then only the probe applies.
+    ///
+    /// Below a gigabyte neither question is asked and ordinary operations pay
+    /// nothing.
+    pub fn is_allocatable_size(bytes: usize) -> bool {
+        // Below this the allocator cannot plausibly refuse, and asking costs a
+        // syscall's worth of work on a path that runs constantly.
+        const PROBE_ABOVE_BYTES: usize = 1 << 30;
+        if bytes <= PROBE_ABOVE_BYTES {
+            return true;
+        }
+
+        if let Some(total) = Self::total_physical_memory()
+            && bytes > total
+        {
+            return false;
+        }
+
+        let mut probe: Vec<u8> = Vec::new();
+        let held = probe.try_reserve_exact(bytes).is_ok();
+        drop(probe);
+        held
+    }
+
+    /// Total physical memory, when the platform will say, in bytes.
+    ///
+    /// `sysconf` rather than `/proc/meminfo` or a `sysctl` subprocess, because
+    /// this sits on the path of every large allocation and must not read a
+    /// file or spawn a process. It answers on both Linux and macOS.
+    /// `MemoryInfo::detect` in `hardware` looks like it would do instead and
+    /// does not: it runs a bandwidth benchmark, and it substitutes 8 GB when
+    /// detection fails, which as a *ceiling* would be a fabricated refusal.
+    ///
+    /// `None` on Windows and anywhere else that declines to answer. That is
+    /// not a gap: `try_reserve` is already the right answer on Windows, which
+    /// commits what it reserves.
+    ///
+    /// Read once. It cannot change for a running process in any way that
+    /// matters here, and a hot path should not pay a syscall to re-learn it.
+    fn total_physical_memory() -> Option<usize> {
+        static TOTAL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        *TOTAL.get_or_init(|| {
+            #[cfg(unix)]
+            {
+                // SAFETY: `sysconf` reads a static system parameter. It takes
+                // an int, has no preconditions, and reports failure by
+                // returning -1 rather than by any effect on the caller.
+                let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                if pages > 0 && page_size > 0 {
+                    return (pages as usize).checked_mul(page_size as usize);
+                }
+                None
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        })
+    }
+
+    /// Refuse a buffer this machine cannot hold, rather than aborting.
     ///
     /// `Vec`'s allocation calls `handle_alloc_error` when the allocator says
     /// no, and that aborts the process: no exception, nothing to catch, the
@@ -483,13 +568,8 @@ impl TensorData {
     /// returns `Self` and stays infallible. The ones that are not are the
     /// operations whose *output* can dwarf their input -- `cat`, `matmul`,
     /// `kron`, `pad` and the rest -- and they have a `Result` to report
-    /// through. This is what they ask first.
-    ///
-    /// `try_reserve` asks the allocator exactly the question the real
-    /// allocation will ask and returns instead of aborting, so there is no
-    /// invented ceiling here and no guess at free memory. Below a gigabyte the
-    /// allocator cannot plausibly refuse, so nothing is asked and ordinary
-    /// operations pay nothing.
+    /// through. This is what they ask first, and
+    /// [`Self::is_allocatable_size`] is how it is decided.
     pub fn ensure_allocatable(numel: usize, dtype: DataType) -> Result<()> {
         let bytes = numel.checked_mul(dtype.size_bytes()).ok_or_else(|| {
             MinitensorError::invalid_operation(format!(
@@ -497,19 +577,12 @@ impl TensorData {
             ))
         })?;
 
-        const PROBE_ABOVE_BYTES: usize = 1 << 30;
-        if bytes <= PROBE_ABOVE_BYTES {
-            return Ok(());
-        }
-
-        let mut probe: Vec<u8> = Vec::new();
-        probe.try_reserve_exact(bytes).map_err(|_| {
-            MinitensorError::invalid_operation(format!(
+        if !Self::is_allocatable_size(bytes) {
+            return Err(MinitensorError::invalid_operation(format!(
                 "a result of {numel} {dtype:?} elements needs {bytes} bytes, which this \
-                 machine cannot allocate"
-            ))
-        })?;
-        drop(probe);
+                 machine cannot hold"
+            )));
+        }
         Ok(())
     }
 
@@ -1260,12 +1333,13 @@ mod tests {
         // reason `Shape::broadcast_with_dtype` takes a dtype -- a count that
         // fits at one byte per element need not fit at eight.
         //
-        // Both sizes here are refused on every machine, and that is
-        // deliberate. Whether some *particular* size fits is a property of the
-        // host: a 20 GB reservation that Linux declines, a Windows runner with
-        // a large page file grants, so a test that picks a size near the
-        // boundary is testing the runner. What does not vary is that the byte
-        // figure follows the dtype, which is what this pins.
+        // 4 TiB, so that both are refused on every machine rather than only on
+        // the ones this happens to run on. Whether some *particular* size fits
+        // is the host's answer, not the library's, and hosts disagree wildly:
+        // Linux declines a 20 GB reservation that a Windows page file grants,
+        // and macOS grants 4 TB outright. A test that picks a size near any of
+        // those boundaries is testing the runner. What does not vary is that
+        // the byte figure follows the dtype, which is what this pins.
         const NUMEL: usize = 1 << 42;
         let narrow = TensorData::ensure_allocatable(NUMEL, DataType::Bool)
             .unwrap_err()
@@ -1282,6 +1356,23 @@ mod tests {
             wide.contains(&format!("needs {} bytes", NUMEL * 8)),
             "float64 refusal did not name eight bytes per element: {wide}"
         );
+    }
+
+    #[test]
+    fn physical_memory_is_either_unknown_or_plausible() {
+        // A ceiling built from a wrong number is worse than no ceiling: too
+        // small and it refuses work that would have run, too large and it is
+        // not a guard. `None` is a legitimate answer and means the probe alone
+        // applies, so what must not happen is a figure that is neither.
+        match TensorData::total_physical_memory() {
+            None => {}
+            Some(total) => {
+                assert!(
+                    (64 << 20..=1 << 50).contains(&total),
+                    "reported {total} bytes of physical memory, which is not a machine"
+                );
+            }
+        }
     }
 
     #[test]
