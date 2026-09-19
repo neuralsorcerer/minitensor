@@ -95,9 +95,9 @@ def _same_bits(actual, expected, what: str) -> None:
     expected = np.asarray(expected)
     assert actual.shape == expected.shape, f"{what}: {actual.shape} vs {expected.shape}"
     assert actual.dtype == expected.dtype, f"{what}: {actual.dtype} vs {expected.dtype}"
-    assert actual.tobytes() == expected.tobytes(), (
-        f"{what}: got {actual.ravel()[:12]} expected {expected.ravel()[:12]}"
-    )
+    assert (
+        actual.tobytes() == expected.tobytes()
+    ), f"{what}: got {actual.ravel()[:12]} expected {expected.ravel()[:12]}"
 
 
 # --- the cases -------------------------------------------------------------
@@ -307,7 +307,9 @@ def test_median_of_an_even_count_is_the_lower_not_the_average():
         ([9.0], 9.0, 0),
     ],
 )
-def test_mode_breaks_ties_towards_the_smaller_value(run, expected_value, expected_index):
+def test_mode_breaks_ties_towards_the_smaller_value(
+    run, expected_value, expected_index
+):
     tensor = mt.Tensor(np.asarray(run, dtype=np.float32), dtype="float32")
     value, index = mt.mode(tensor, 0, False)
     assert float(np.asarray(value)) == expected_value
