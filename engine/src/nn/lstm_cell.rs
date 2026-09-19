@@ -509,3 +509,199 @@ impl GradientFunction for LstmCellBackward {
         &self.ids
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::Device;
+
+    fn tensor_f64(values: Vec<f64>, shape: Vec<usize>) -> Tensor {
+        Tensor::new(
+            Arc::new(TensorData::from_vec_f64(values, Device::cpu())),
+            Shape::new(shape),
+            DataType::Float64,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    fn tensor_f32(values: Vec<f32>, shape: Vec<usize>) -> Tensor {
+        Tensor::new(
+            Arc::new(TensorData::from_vec_f32(values, Device::cpu())),
+            Shape::new(shape),
+            DataType::Float32,
+            Device::cpu(),
+            false,
+        )
+    }
+
+    /// The forward, against the definition rather than against itself.
+    ///
+    /// `test_recurrent_parameter_gradients.py` checks the *derivative* to a
+    /// central difference, which a forward that is consistently wrong would
+    /// still satisfy. This is the other half: two rows of arbitrary gate
+    /// values, worked through `i, f, g, o` by hand.
+    #[test]
+    fn one_step_matches_the_definition() {
+        let hidden = 2;
+        // Row 0 gates, then row 1: [i0 i1 f0 f1 g0 g1 o0 o1].
+        let gate_values = vec![
+            0.5, -1.0, 2.0, 0.25, -0.75, 1.5, 0.1, -0.3, //
+            -2.0, 0.8, 1.25, -0.5, 0.6, -1.75, 2.5, 0.0,
+        ];
+        let previous = vec![0.3, -0.7, 1.1, -0.2];
+
+        let (h, c) = lstm_cell(
+            &tensor_f64(gate_values.clone(), vec![2, 4 * hidden]),
+            &tensor_f64(previous.clone(), vec![2, hidden]),
+        )
+        .expect("well-formed inputs");
+
+        let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+        for b in 0..2 {
+            for j in 0..hidden {
+                let row = b * 4 * hidden;
+                let i = sigmoid(gate_values[row + j]);
+                let f = sigmoid(gate_values[row + hidden + j]);
+                let g = gate_values[row + 2 * hidden + j].tanh();
+                let o = sigmoid(gate_values[row + 3 * hidden + j]);
+                let expected_c = f * previous[b * hidden + j] + i * g;
+                let expected_h = o * expected_c.tanh();
+
+                let at = b * hidden + j;
+                let got_c = c.data().as_f64_slice().unwrap()[at];
+                let got_h = h.data().as_f64_slice().unwrap()[at];
+                assert!(
+                    (got_c - expected_c).abs() < 1e-12,
+                    "cell[{b}][{j}]: {got_c} vs {expected_c}"
+                );
+                assert!(
+                    (got_h - expected_h).abs() < 1e-12,
+                    "hidden[{b}][{j}]: {got_h} vs {expected_h}"
+                );
+            }
+        }
+    }
+
+    /// A batch wide enough to cross [`band_width`]'s threshold has to produce
+    /// what the same batch produces below it. The bands are cut on row
+    /// boundaries for that reason, and a split anywhere else would hand a task
+    /// half of one gate and half of the next -- which would not fail loudly,
+    /// it would activate the wrong elements with the wrong function.
+    #[test]
+    fn the_parallel_split_changes_nothing() {
+        let hidden = 24; // not a multiple of any SIMD width
+        let batch = 512; // 512 * 96 = 49_152 elements, past the threshold
+        let gates: Vec<f32> = (0..batch * 4 * hidden)
+            .map(|i| ((i % 37) as f32 - 18.0) / 6.0)
+            .collect();
+        let previous: Vec<f32> = (0..batch * hidden)
+            .map(|i| ((i % 19) as f32 - 9.0) / 4.0)
+            .collect();
+
+        assert!(
+            batch * 4 * hidden >= VECTOR_F32_PAR_THRESHOLD,
+            "this test is only meaningful above the threshold"
+        );
+        let (h, c) = lstm_cell(
+            &tensor_f32(gates.clone(), vec![batch, 4 * hidden]),
+            &tensor_f32(previous.clone(), vec![batch, hidden]),
+        )
+        .unwrap();
+
+        // The same rows, one at a time, which never reaches the parallel path.
+        for b in 0..batch {
+            let row = &gates[b * 4 * hidden..][..4 * hidden];
+            let prev = &previous[b * hidden..][..hidden];
+            let (row_h, row_c) = lstm_cell(
+                &tensor_f32(row.to_vec(), vec![1, 4 * hidden]),
+                &tensor_f32(prev.to_vec(), vec![1, hidden]),
+            )
+            .unwrap();
+            assert_eq!(
+                &h.data().as_f32_slice().unwrap()[b * hidden..][..hidden],
+                row_h.data().as_f32_slice().unwrap(),
+                "hidden state of row {b}"
+            );
+            assert_eq!(
+                &c.data().as_f32_slice().unwrap()[b * hidden..][..hidden],
+                row_c.data().as_f32_slice().unwrap(),
+                "cell state of row {b}"
+            );
+        }
+    }
+
+    /// `chunks_exact(0)` panics, and both degenerate shapes reach it.
+    #[test]
+    fn degenerate_shapes_produce_empty_outputs_rather_than_panicking() {
+        for (batch, hidden) in [(0usize, 3usize), (4, 0), (0, 0)] {
+            let (h, c) = lstm_cell(
+                &tensor_f64(vec![0.0; batch * 4 * hidden], vec![batch, 4 * hidden]),
+                &tensor_f64(vec![0.0; batch * hidden], vec![batch, hidden]),
+            )
+            .unwrap_or_else(|e| panic!("batch={batch} hidden={hidden}: {e}"));
+            assert_eq!(h.shape().dims(), &[batch, hidden]);
+            assert_eq!(c.shape().dims(), &[batch, hidden]);
+        }
+    }
+
+    #[test]
+    fn malformed_inputs_are_refused_rather_than_misread() {
+        // Not two-dimensional.
+        assert!(
+            lstm_cell(
+                &tensor_f64(vec![0.0; 8], vec![8]),
+                &tensor_f64(vec![0.0; 2], vec![2])
+            )
+            .is_err()
+        );
+        // Gate axis is not a multiple of four, so there is no gate layout.
+        assert!(
+            lstm_cell(
+                &tensor_f64(vec![0.0; 6], vec![1, 6]),
+                &tensor_f64(vec![0.0; 1], vec![1, 1])
+            )
+            .is_err()
+        );
+        // Cell state does not match the batch and hidden width implied above.
+        assert!(
+            lstm_cell(
+                &tensor_f64(vec![0.0; 8], vec![1, 8]),
+                &tensor_f64(vec![0.0; 3], vec![1, 3])
+            )
+            .is_err()
+        );
+        // Two dtypes.
+        assert!(
+            lstm_cell(
+                &tensor_f64(vec![0.0; 8], vec![1, 8]),
+                &tensor_f32(vec![0.0; 2], vec![1, 2])
+            )
+            .is_err()
+        );
+        // An integer dtype has no derivative and no `tanh`.
+        let ints = Tensor::new(
+            Arc::new(TensorData::from_vec::<i64>(
+                vec![0i64; 8],
+                DataType::Int64,
+                Device::cpu(),
+            )),
+            Shape::new(vec![1, 8]),
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        );
+        let int_cell = Tensor::new(
+            Arc::new(TensorData::from_vec::<i64>(
+                vec![0i64; 2],
+                DataType::Int64,
+                Device::cpu(),
+            )),
+            Shape::new(vec![1, 2]),
+            DataType::Int64,
+            Device::cpu(),
+            false,
+        );
+        assert!(lstm_cell(&ints, &int_cell).is_err());
+    }
+}
