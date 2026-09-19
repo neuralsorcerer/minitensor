@@ -27,6 +27,14 @@ impl PyTensor {
             None => (0.0, start),
         };
 
+        // The count the engine will derive, checked before it allocates it.
+        if step != 0.0 && step.is_finite() && start.is_finite() && end.is_finite() {
+            let span = ((end - start) / step).ceil();
+            if span.is_finite() && span > 0.0 {
+                reject_unallocatable(span as usize, dtype, "arange")?;
+            }
+        }
+
         let tensor = create_arange_tensor(start, end, step, dtype, device, requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }
@@ -50,6 +58,7 @@ impl PyTensor {
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
+        reject_unallocatable(steps, dtype, "linspace")?;
         let tensor = create_linspace_tensor(start, end, steps, dtype, device, requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }
@@ -75,6 +84,7 @@ impl PyTensor {
         let requires_grad = requires_grad.unwrap_or(false);
         let base = base.unwrap_or(10.0);
 
+        reject_unallocatable(steps, dtype, "logspace")?;
         let tensor = create_logspace_tensor(start, end, steps, base, dtype, device, requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }

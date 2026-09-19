@@ -116,6 +116,70 @@ fn reject_overflowing_shape(dims: Vec<usize>, arg_name: &str) -> PyResult<Vec<us
     Ok(dims)
 }
 
+/// A byte count at a scale a reader can hold in their head.
+///
+/// The requests this refuses are often absurd -- `mt.zeros([10**18])` asks for
+/// 3.5 EiB -- and "3725290298.5 GiB" does not read as a number, which is the
+/// moment a caller stops reading the message and starts guessing.
+fn human_bytes(bytes: usize) -> String {
+    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Refuse an allocation this machine cannot make, instead of aborting on it.
+///
+/// [`reject_overflowing_shape`] covers the element *count*; this covers the
+/// bytes. A count well inside `usize` can still ask for more memory than
+/// exists -- `mt.zeros([10**18])` is 4 exabytes in the default dtype -- and
+/// that request did not raise. Rust's `Vec` allocation calls
+/// `handle_alloc_error` when the allocator says no, which **aborts the
+/// process**: not a Python exception, not even a `PanicException`, just the
+/// interpreter gone and with it whatever was in it. One mistyped exponent in a
+/// notebook took the kernel down.
+///
+/// `try_reserve` asks the allocator the same question and hands back an `Err`
+/// instead of aborting, so the honest check is simply to ask before
+/// committing: no invented ceiling, no guess at how much memory is free, and
+/// the answer is the one the real allocation would have got. The probe is
+/// skipped below a threshold where it could only ever succeed, so ordinary
+/// tensors do not pay for it, and its own buffer is dropped immediately.
+pub(crate) fn reject_unallocatable(numel: usize, dtype: DataType, what: &str) -> PyResult<()> {
+    let Some(bytes) = numel.checked_mul(dtype.size_bytes()) else {
+        return Err(PyValueError::new_err(format!(
+            "{what} of {numel} {dtype:?} elements is larger than this platform can address"
+        )));
+    };
+
+    // Below this the allocator cannot plausibly refuse, and asking costs a
+    // syscall's worth of work on a path that runs constantly.
+    const PROBE_ABOVE_BYTES: usize = 1 << 30;
+    if bytes <= PROBE_ABOVE_BYTES {
+        return Ok(());
+    }
+
+    let mut probe: Vec<u8> = Vec::new();
+    match probe.try_reserve_exact(bytes) {
+        Ok(()) => {
+            drop(probe);
+            Ok(())
+        }
+        Err(_) => Err(PyMemoryError::new_err(format!(
+            "{what} of {numel} {dtype:?} elements needs {}, which this machine cannot allocate",
+            human_bytes(bytes)
+        ))),
+    }
+}
+
 pub(crate) fn parse_shape_tuple(shape: &Bound<PyTuple>, arg_name: &str) -> PyResult<Vec<usize>> {
     reject_overflowing_shape(parse_shape_tuple_dims(shape, arg_name)?, arg_name)
 }

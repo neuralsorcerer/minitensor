@@ -64,7 +64,7 @@ use engine::{DataType, Device, MinitensorError, Tensor, TensorIndex};
 use numpy::{PyArray, PyArrayDyn, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{
-    PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
+    PyIndexError, PyMemoryError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;

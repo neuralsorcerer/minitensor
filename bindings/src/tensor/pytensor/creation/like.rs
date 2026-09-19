@@ -460,6 +460,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let m = m.unwrap_or(n);
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(n.saturating_mul(m), dtype, "eye")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -482,6 +483,7 @@ impl PyTensor {
         let requires_grad = requires_grad.unwrap_or(false);
 
         let dims = parse_shape_like(shape, "shape")?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
         Ok(Self::from_tensor(tensor))
     }

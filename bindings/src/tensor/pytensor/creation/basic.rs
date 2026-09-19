@@ -19,6 +19,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -38,6 +39,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -57,6 +59,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -78,6 +81,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -97,6 +101,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -116,6 +121,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -140,6 +146,7 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let dims = parse_shape_tuple(shape, "shape")?;
         let dtype = dtype::resolve_dtype_arg(dtype)?;
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);
 
@@ -209,6 +216,7 @@ macro_rules! fan_init_constructors {
                 ) -> PyResult<Self> {
                     let dims = parse_shape_tuple(shape, "shape")?;
                     let dtype = dtype::resolve_dtype_arg(dtype)?;
+                    reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
                     let device = resolve_device(device)?;
                     let tensor = create_fan_init_tensor(
                         Shape::new(dims),
