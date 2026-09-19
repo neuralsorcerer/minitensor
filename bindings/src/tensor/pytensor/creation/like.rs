@@ -228,6 +228,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::empty(Shape::new(dims), dtype, device, requires_grad);
@@ -247,6 +248,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::zeros(Shape::new(dims), dtype, device, requires_grad);
@@ -266,6 +268,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = Tensor::ones(Shape::new(dims), dtype, device, requires_grad);
@@ -286,6 +289,7 @@ impl PyTensor {
             Some(name) => dtype::parse_dtype(name)?,
             None => self.inner.dtype(),
         };
+        reject_unallocatable(dims.iter().product(), dtype, "tensor")?;
         let device = resolve_device_or(device, self.inner.device())?;
         let requires_grad = requires_grad.unwrap_or(self.inner.requires_grad());
         let tensor = create_full_tensor(dims, fill_value, dtype, device, requires_grad)?;
@@ -440,6 +444,7 @@ impl PyTensor {
                 ));
             }
         }
+        reject_unallocatable(n, dtype, "randperm")?;
 
         let device = resolve_device(device)?;
         let requires_grad = requires_grad.unwrap_or(false);

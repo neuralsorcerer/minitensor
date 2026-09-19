@@ -211,6 +211,19 @@ pub fn lstsq(a: &Tensor, b: &Tensor, rcond: Option<f64>) -> Result<Tensor> {
     } else {
         b.clone()
     };
+    // `rhs` is indexed from the end for its row count, so anything with fewer
+    // than two dimensions subtracts past zero and indexes at `usize::MAX - 1`.
+    // A 0-d right-hand side reached exactly that: `a.lstsq(scalar)` came back
+    // as a Rust panic about an index of 18446744073709551614 rather than as a
+    // refusal naming what it wanted. The vector case above is already promoted
+    // to a matrix by here, so anything still short is genuinely unusable.
+    if rhs.ndim() < 2 {
+        return Err(MinitensorError::invalid_operation(format!(
+            "lstsq: the right-hand side must be a matrix of columns, or a vector \
+             matching the matrix's rows, but it has {} dimension(s)",
+            b.ndim()
+        )));
+    }
     let rows = rhs.shape().dims()[rhs.ndim() - 2];
     if rows != m {
         return Err(MinitensorError::invalid_operation(format!(

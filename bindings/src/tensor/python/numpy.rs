@@ -702,6 +702,15 @@ pub(crate) fn create_arange_tensor(
             "Step cannot be zero",
         ));
     }
+    // A float-to-integer cast saturates rather than wrapping, so an infinite
+    // bound became `usize::MAX` elements and the fill below panicked on
+    // capacity overflow. NaN casts to zero, which is worse: it returned an
+    // empty tensor and called that an answer.
+    if !start.is_finite() || !end.is_finite() || !step.is_finite() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "arange needs finite bounds and step, got start={start}, end={end}, step={step}"
+        )));
+    }
 
     let num_elements = ((end - start) / step).ceil() as usize;
     // One parallel fill with the dtype conversion written once, rather than

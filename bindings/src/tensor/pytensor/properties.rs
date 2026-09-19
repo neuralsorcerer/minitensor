@@ -281,6 +281,14 @@ impl PyTensor {
             repeats.clone().into_any()
         };
         let repeat_vec = normalize_repeat_spec(&repeats_any)?;
+        // `repeat` multiplies the element count rather than taking one, so it
+        // reaches the same failed allocation from the other direction: a (2, 3)
+        // tensor repeated 10**9 by 10**9 is six quintillion elements.
+        let grown = repeat_vec
+            .iter()
+            .try_fold(self.inner.numel(), |acc, &r| acc.checked_mul(r))
+            .unwrap_or(usize::MAX);
+        reject_unallocatable(grown, self.inner.dtype(), "repeat")?;
         let result = self.inner.repeat(repeat_vec).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }
@@ -310,6 +318,13 @@ impl PyTensor {
         output_size: Option<usize>,
     ) -> PyResult<Self> {
         if let Ok(value) = repeats.extract::<usize>() {
+            // Same growth as `repeat`, one element at a time instead of whole
+            // copies: every element becomes `value` of them.
+            reject_unallocatable(
+                self.inner.numel().saturating_mul(value),
+                self.inner.dtype(),
+                "repeat_interleave",
+            )?;
             let result = engine::ops::shape_ops::repeat_interleave(
                 &self.inner,
                 RepeatInterleaveSpec::Scalar(value),

@@ -383,3 +383,71 @@ def test_state_dict_declines_a_mismatched_checkpoint():
     _assert_no_panic(
         "state_dict empty", lambda: nn.DenseLayer(4, 3).load_state_dict({})
     )
+
+
+def test_lstsq_declines_a_right_hand_side_with_no_rows():
+    """A 0-d right-hand side used to index at `usize::MAX - 1`.
+
+    `lstsq` reads its row count as `dims[ndim - 2]`. The vector case is
+    promoted to a matrix before that, but anything still shorter subtracted
+    past zero, and the caller got a Rust panic quoting an index of
+    18446744073709551614 rather than a sentence about what the argument
+    should have been.
+    """
+    matrix = mt.Tensor(np.eye(3), dtype="float64")
+    scalar = mt.Tensor(np.zeros(()), dtype="float64")
+
+    with pytest.raises(ValueError, match="right-hand side"):
+        matrix.lstsq(scalar)
+
+    # The two shapes it does accept are unaffected.
+    vector = mt.Tensor(np.array([1.0, 2.0, 3.0]), dtype="float64")
+    np.testing.assert_allclose(np.asarray(matrix.lstsq(vector)), [1.0, 2.0, 3.0])
+    assert list(matrix.lstsq(mt.Tensor(np.eye(3), dtype="float64")).shape) == [3, 3]
+
+
+# --- sizes and bounds that arithmetic cannot represent ------------------------
+#
+# Found by calling every method on the type with deliberately hostile arguments
+# rather than by listing cases: 7,436 one-argument calls, of which these were
+# the ones that came back as something other than an `Exception`.
+
+
+@pytest.mark.parametrize("offset", [10**18, -(10**18), 2**63])
+def test_diag_embed_declines_an_offset_it_cannot_square(offset):
+    """The output is `side x side` where `side` is the last dim plus `|offset|`.
+
+    Both the sum and the square overflow, and `Shape::numel` panics on overflow
+    rather than returning, so a large offset arrived as a Rust panic about
+    `usize` instead of a sentence.
+    """
+    # `2**63` does not fit the signed integer the argument is converted to, so
+    # pyo3 declines it before the guard is reached. That is still a refusal
+    # rather than a panic, which is what this file is about.
+    with pytest.raises((ValueError, OverflowError)):
+        mt.Tensor(np.arange(6.0).reshape(2, 3), dtype="float64").diag_embed(offset)
+
+
+@pytest.mark.parametrize("bound", [float("inf"), float("-inf"), float("nan")])
+def test_arange_declines_bounds_that_are_not_finite(bound):
+    """A float-to-integer cast saturates; it does not raise.
+
+    `inf` became `usize::MAX` elements and panicked on capacity overflow. `nan`
+    became zero, which is worse than a panic: an empty tensor returned as if it
+    were the answer.
+    """
+    with pytest.raises(ValueError, match="finite"):
+        mt.arange(bound)
+
+
+def test_repeat_and_repeat_interleave_decline_growth_they_cannot_hold():
+    """These reach an impossible size by multiplying rather than by taking one."""
+    tensor = mt.Tensor(np.arange(6.0).reshape(2, 3), dtype="float64")
+    with pytest.raises((ValueError, MemoryError)):
+        tensor.repeat(10**9, 10**9)
+    with pytest.raises((ValueError, MemoryError)):
+        tensor.repeat_interleave(10**18)
+
+    # The ordinary forms are untouched.
+    assert tensor.repeat(2, 2).numel() == 24
+    assert tensor.repeat_interleave(2).numel() == 12

@@ -246,7 +246,30 @@ pub fn diag_embed(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> R
     }
 
     let dims = tensor.shape().dims();
-    let side = dims[dims.len() - 1] + offset.unsigned_abs();
+    // Both of these overflow on a large offset, and `Shape::numel` panics
+    // rather than returning when the product does -- so `x.diag_embed(10**18)`
+    // came back as a Rust panic about `usize` instead of a refusal. The output
+    // is the batch axes times `side` squared, which is what is checked here.
+    let side = dims[dims.len() - 1]
+        .checked_add(offset.unsigned_abs())
+        .ok_or_else(|| {
+            MinitensorError::invalid_operation(format!(
+                "diag_embed: an offset of {offset} is too large for a last dimension of {}",
+                dims[dims.len() - 1]
+            ))
+        })?;
+    if dims[..dims.len() - 1]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .and_then(|batch| batch.checked_mul(side))
+        .and_then(|partial| partial.checked_mul(side))
+        .is_none()
+    {
+        return Err(MinitensorError::invalid_operation(format!(
+            "diag_embed: an offset of {offset} gives {side}x{side} blocks, more elements \
+             than this platform can represent"
+        )));
+    }
     let mut batch = dims[..dims.len() - 1].iter();
     let out_dims: Vec<usize> = (0..out_ndim)
         .map(|position| {

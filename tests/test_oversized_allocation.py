@@ -54,6 +54,14 @@ OVERSIZED = [
     "mt.xavier_uniform([10**18])",
     "mt.Tensor.zeros(10**18)",
     "mt.Tensor.arange(10**18)",
+    # Methods that take a size from the caller rather than a constructor.
+    "mt.Tensor([1.0, 2.0]).new_empty(10**18)",
+    "mt.Tensor([1.0, 2.0]).new_zeros(10**18)",
+    "mt.Tensor([1.0, 2.0]).new_ones(10**18)",
+    "mt.Tensor([1.0, 2.0]).new_full(10**18, 1.0)",
+    # `repeat` reaches the same place by multiplying rather than by taking a
+    # size: a two-element tensor repeated 10**9 by 10**9.
+    "mt.Tensor([1.0, 2.0]).repeat(10**9, 10**9)",
 ]
 
 ORDINARY = [
@@ -65,6 +73,8 @@ ORDINARY = [
     "mt.full([2, 2], 7.0)",
     # Large enough to be worth allocating, small enough that it must succeed.
     "mt.zeros([64, 1024, 1024])",
+    "mt.Tensor([1.0, 2.0]).new_zeros([3, 4])",
+    "mt.Tensor([1.0, 2.0]).repeat(2, 3)",
 ]
 
 _RUNNER = """
@@ -74,7 +84,9 @@ import minitensor as mt
 try:
     {expr}
     print("RETURNED")
-except MemoryError:
+except (MemoryError, ValueError):
+    # ValueError when the byte count itself overflows the address space, which
+    # `repeat` reaches before the allocator is ever asked.
     print("MEMORYERROR")
 except Exception as exc:
     print("OTHER:" + type(exc).__name__)
