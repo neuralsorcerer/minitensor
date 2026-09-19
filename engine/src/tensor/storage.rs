@@ -578,7 +578,13 @@ impl TensorData {
         })?;
 
         if !Self::is_allocatable_size(bytes) {
-            return Err(MinitensorError::invalid_operation(format!(
+            // `memory_error`, so that the same condition reaches Python as the
+            // same exception whichever way it was reached. The constructors go
+            // through `reject_unallocatable` and raise `MemoryError`; this
+            // used to raise `ValueError` for a refusal with an identical
+            // cause, which is a difference a caller would have to learn rather
+            // than reason about.
+            return Err(MinitensorError::memory_error(format!(
                 "a result of {numel} {dtype:?} elements needs {bytes} bytes, which this \
                  machine cannot hold"
             )));

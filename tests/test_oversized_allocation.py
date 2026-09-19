@@ -188,10 +188,17 @@ def test_an_ordinary_layer_is_still_built(expr):
 OVERSIZED_RESULTS = [
     "mt.zeros([10**5, 10]).matmul(mt.zeros([10, 10**5]))",
     "mt.zeros([10**5, 10]).mm(mt.zeros([10, 10**5]))",
-    "mt.cat([mt.zeros([10**9]) for _ in range(20)])",
-    "mt.stack([mt.zeros([10**9]) for _ in range(20)])",
-    "mt.vstack([mt.zeros([10**9]) for _ in range(20)])",
-    "mt.hstack([mt.zeros([10**9]) for _ in range(20)])",
+    # One tensor listed twenty times, not twenty tensors. A concatenation's
+    # result cannot dwarf its inputs -- it is their sum -- so the only way to
+    # ask for an 80 GB one is to have 80 GB of inputs, and *that* is not what
+    # these check. Twenty separate 4 GB tensors killed the process on macOS
+    # before `cat` was ever reached, while Linux held them because its
+    # untouched zero pages cost nothing. Sharing one input asks the same
+    # question of the same guard and leaves the answer to it.
+    "mt.cat([mt.zeros([10**9])] * 20)",
+    "mt.stack([mt.zeros([10**9])] * 20)",
+    "mt.vstack([mt.zeros([10**9])] * 20)",
+    "mt.hstack([mt.zeros([10**9])] * 20)",
     "mt.functional.pad(mt.zeros([4]), [10**10, 10**10])",
     "mt.functional.interpolate(mt.zeros([1, 1, 2, 2]), [10**6, 10**6])",
     "mt.functional.conv_transpose2d(mt.zeros([1,1,2,2]), mt.zeros([1,1,2,2]), None, 10**5)",
