@@ -316,6 +316,16 @@ pub fn interpolate(
     };
 
     let planes = dims[0] * dims[1];
+    // The output is the input's planes times the requested spatial size, which
+    // the caller chooses freely: interpolating a 2x2 image to 10**6 by 10**6
+    // asked for 4 TB and aborted rather than refusing.
+    TensorData::ensure_allocatable(
+        planes
+            .checked_mul(out_h)
+            .and_then(|n| n.checked_mul(out_w))
+            .unwrap_or(usize::MAX),
+        input.dtype(),
+    )?;
     let rows = axis_map(in_h, out_h, mode, align_corners);
     let cols = axis_map(in_w, out_w, mode, align_corners);
 

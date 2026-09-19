@@ -250,6 +250,9 @@ pub fn conv2d(
     let output_height = (input_height + 2 * padding.0 - span_h) / stride.0 + 1;
     let output_width = (input_width + 2 * padding.1 - span_w) / stride.1 + 1;
     let output_shape = Shape::new(vec![batch_size, out_channels, output_height, output_width]);
+    // A transposed convolution's output grows with the stride, which the caller
+    // sets: stride 10**5 on a 2x2 input asks for terabytes and aborted.
+    TensorData::ensure_allocatable(output_shape.try_numel()?, input.dtype())?;
 
     if !input.device().is_cpu() || !weight.device().is_cpu() {
         return Err(MinitensorError::invalid_operation(
@@ -507,6 +510,9 @@ pub fn conv_transpose2d(
     let contiguous = input.contiguous()?;
     let weight_view = weight.contiguous()?;
     let output_shape = Shape::new(vec![batch_size, out_channels, output_height, output_width]);
+    // A transposed convolution's output grows with the stride, which the caller
+    // sets: stride 10**5 on a 2x2 input asks for terabytes and aborted.
+    TensorData::ensure_allocatable(output_shape.try_numel()?, input.dtype())?;
 
     macro_rules! scatter {
         ($ty:ty) => {{

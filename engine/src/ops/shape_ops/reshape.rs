@@ -417,6 +417,10 @@ pub fn concatenate(tensors: &[&Tensor], dim: isize) -> Result<Tensor> {
 
     let dtype = first_tensor.dtype();
     let device = first_tensor.device();
+    // The result is the sum of the inputs along `dim`, so it can be far larger
+    // than any one of them: twenty billion-element tensors concatenated is
+    // 80 GB, and that allocation aborted the process rather than failing.
+    TensorData::ensure_allocatable(output_shape_obj.try_numel()?, dtype)?;
     let requires_grad = tensors.iter().any(|t| t.requires_grad());
 
     let dims = first_tensor.shape().dims();

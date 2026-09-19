@@ -4034,13 +4034,19 @@ This covers every size a caller names: the constructors (`zeros`, `ones`,
 `repeat_interleave`, `one_hot`'s inferred class count, and the parameters of
 every `nn` layer.
 
-**What it does not cover is a size implied by an operation rather than named
-by its caller.** `cat` of twenty billion-element tensors, or a matmul whose
-output is `10**5` by `10**5`, still aborts the process: those allocations
-happen inside the engine, where the constructors return their storage directly
-rather than a `Result`, and propagating an error would have to change all 125
-of them. If a graceful failure matters for an operation's *output*, size it
-before asking.
+A size *implied by an operation* is checked too, where its output shape is
+computed: `matmul` and `mm`, the `cat`/`stack`/`vstack`/`hstack` family, `pad`,
+`interpolate`, `conv_transpose`, and every broadcasting operation — the last of
+which matters most, since `x[:, None] * y[None, :]` turns two megabytes of
+input into a trillion elements without either operand looking large.
+
+The broadcast check is the one that is deliberately approximate. It runs in
+`Shape::broadcast_with`, which is where all twenty-nine broadcasting operations
+agree on their result shape but before any of them has chosen a dtype, so the
+question it asks is whether the result could be held at one byte per element.
+That never refuses a result a caller could have had, and it catches everything
+impossible at any width; a result that would fit as `bool` but not as `float64`
+still reaches the allocator.
 
 One limit worth naming: under `vm.overcommit_memory = 1` the kernel grants
 any mapping and enforces nothing until the pages are touched, so `try_reserve`

@@ -83,7 +83,7 @@ pub fn linear(input: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<
     let out_shape = Shape::new(out_dims);
 
     let mut output_data =
-        TensorData::zeros_on_device(out_shape.numel(), input.dtype(), input.device());
+        TensorData::try_zeros_on_device(out_shape.numel(), input.dtype(), input.device())?;
 
     if rows != 0 && in_features != 0 && out_features != 0 {
         macro_rules! forward {

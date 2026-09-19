@@ -209,7 +209,7 @@ pub fn masked_index(input: &Tensor, mask: &Tensor) -> Result<Tensor> {
     let out_shape = Shape::new(out_dims);
 
     let mut output_data =
-        TensorData::zeros_on_device(out_shape.numel(), input.dtype(), input.device());
+        TensorData::try_zeros_on_device(out_shape.numel(), input.dtype(), input.device())?;
 
     /// Copies the selected trailing blocks for one dtype.
     macro_rules! gather_arm {

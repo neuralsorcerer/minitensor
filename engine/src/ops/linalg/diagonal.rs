@@ -122,7 +122,7 @@ pub fn diagonal(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> Res
     let out_shape = Shape::new(spec.output_dims.clone());
     let dtype = tensor.dtype();
     let device = tensor.device();
-    let mut output_data = TensorData::zeros_on_device(out_shape.numel(), dtype, device);
+    let mut output_data = TensorData::try_zeros_on_device(out_shape.numel(), dtype, device)?;
 
     if out_shape.numel() > 0 {
         match dtype {
@@ -291,7 +291,7 @@ pub fn diag_embed(tensor: &Tensor, offset: isize, dim1: isize, dim2: isize) -> R
     let dtype = tensor.dtype();
     let device = tensor.device();
     let contiguous = tensor.contiguous()?;
-    let mut out_data = TensorData::zeros_on_device(out_shape.numel(), dtype, device);
+    let mut out_data = TensorData::try_zeros_on_device(out_shape.numel(), dtype, device)?;
 
     if out_shape.numel() > 0 {
         macro_rules! place {

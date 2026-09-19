@@ -319,7 +319,7 @@ pub fn pad(tensor: &Tensor, padding: &[usize], mode: PadMode, value: f64) -> Res
     let plan = PadPlan::new(in_dims.clone(), out_dims, pads, mode);
 
     let mut output_data =
-        TensorData::zeros_on_device(out_shape.numel(), tensor.dtype(), tensor.device());
+        TensorData::try_zeros_on_device(out_shape.numel(), tensor.dtype(), tensor.device())?;
 
     macro_rules! fill {
         ($accessor:ident, $accessor_mut:ident, $ty:ty, $fill:expr) => {{

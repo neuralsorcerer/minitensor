@@ -1041,7 +1041,7 @@ pub fn matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 
     // Create output tensor data
     let mut output_data =
-        TensorData::zeros_on_device(output_shape_obj.numel(), lhs.dtype(), lhs.device());
+        TensorData::try_zeros_on_device(output_shape_obj.numel(), lhs.dtype(), lhs.device())?;
 
     if output_shape_obj.numel() != 0 && lhs_cols != 0 {
         // Perform matrix multiplication based on data type
@@ -1162,7 +1162,7 @@ pub fn solve(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     let output_shape = Shape::new(output_shape);
 
     let mut output_data =
-        TensorData::zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device());
+        TensorData::try_zeros_on_device(output_shape.numel(), lhs.dtype(), lhs.device())?;
 
     match lhs.dtype() {
         DataType::Float32 => solve_f32(lhs, rhs, &mut output_data, rhs_cols)?,

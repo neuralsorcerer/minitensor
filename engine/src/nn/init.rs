@@ -55,7 +55,7 @@ impl InitMethod {
         // unchecked, `nn.DenseLayer(10**12, 10**12)` panicked inside
         // `Shape::numel` and `nn.LayerNorm(10**18)` aborted the process in the
         // allocator -- neither of which a caller can catch.
-        ensure_allocatable(shape.try_numel()?, dtype)?;
+        TensorData::ensure_allocatable(shape.try_numel()?, dtype)?;
         match self {
             InitMethod::Zeros => Ok(Tensor::zeros(shape, dtype, device, requires_grad)),
             InitMethod::Ones => Ok(Tensor::ones(shape, dtype, device, requires_grad)),
@@ -471,36 +471,6 @@ pub fn init_parameter(
     device: Device,
 ) -> Result<Tensor> {
     init_method.init_tensor(shape, dtype, device, true) // Parameters require gradients
-}
-
-/// Refuse a parameter this machine cannot allocate, rather than aborting.
-///
-/// `Vec`'s own allocation calls `handle_alloc_error` and aborts when the
-/// allocator refuses; `try_reserve` asks the same question and returns. The
-/// probe only runs where the allocator could plausibly say no, and its buffer
-/// is released at once.
-fn ensure_allocatable(numel: usize, dtype: DataType) -> Result<()> {
-    let bytes = numel.checked_mul(dtype.size_bytes()).ok_or_else(|| {
-        MinitensorError::invalid_operation(format!(
-            "a parameter of {numel} {dtype:?} elements is larger than this platform can address"
-        ))
-    })?;
-
-    const PROBE_ABOVE_BYTES: usize = 1 << 30;
-    if bytes <= PROBE_ABOVE_BYTES {
-        return Ok(());
-    }
-
-    let mut probe: Vec<u8> = Vec::new();
-    probe.try_reserve_exact(bytes).map_err(|_| {
-        MinitensorError::invalid_operation(format!(
-            "a parameter of {numel} {dtype:?} elements needs {} bytes, which this machine \
-             cannot allocate",
-            bytes
-        ))
-    })?;
-    drop(probe);
-    Ok(())
 }
 
 /// Utility function to initialize a bias tensor (typically zeros)

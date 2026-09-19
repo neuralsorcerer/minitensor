@@ -170,6 +170,55 @@ def test_an_ordinary_layer_is_still_built(expr):
     ), f"{expr} gave {out!r} (code {returncode})"
 
 
+# --- results too large, where the size is implied by the operation ----------
+#
+# These are the cases the reference used to say simply abort. The allocation
+# happens inside the engine, so each is checked where its output shape is
+# computed rather than where an argument is parsed.
+
+OVERSIZED_RESULTS = [
+    "mt.zeros([10**5, 10]).matmul(mt.zeros([10, 10**5]))",
+    "mt.zeros([10**5, 10]).mm(mt.zeros([10, 10**5]))",
+    "mt.cat([mt.zeros([10**9]) for _ in range(20)])",
+    "mt.stack([mt.zeros([10**9]) for _ in range(20)])",
+    "mt.vstack([mt.zeros([10**9]) for _ in range(20)])",
+    "mt.hstack([mt.zeros([10**9]) for _ in range(20)])",
+    "mt.functional.pad(mt.zeros([4]), [10**10, 10**10])",
+    "mt.functional.interpolate(mt.zeros([1, 1, 2, 2]), [10**6, 10**6])",
+    "mt.functional.conv_transpose2d(mt.zeros([1,1,2,2]), mt.zeros([1,1,2,2]), None, 10**5)",
+    # A broadcast is the one shape operation whose result can dwarf both
+    # inputs: two megabytes in, a trillion elements out.
+    "mt.zeros([10**6, 1]) * mt.zeros([1, 10**6])",
+    "mt.zeros([10**6, 1]) + mt.zeros([1, 10**6])",
+    "mt.kron(mt.zeros([10**6]), mt.zeros([10**6]))",
+]
+
+ORDINARY_RESULTS = [
+    "mt.zeros([4, 3]).matmul(mt.zeros([3, 2]))",
+    "mt.cat([mt.zeros([4]), mt.zeros([3])])",
+    "mt.zeros([3, 1]) * mt.zeros([1, 4])",
+    "mt.kron(mt.zeros([2]), mt.zeros([3]))",
+    "mt.functional.interpolate(mt.zeros([1, 1, 2, 2]), [4, 4])",
+]
+
+
+@pytest.mark.parametrize("expr", OVERSIZED_RESULTS)
+def test_a_result_too_large_to_hold_is_refused(expr):
+    returncode, out = _run(expr)
+    assert (
+        returncode == 0
+    ), f"{expr} ended the interpreter with code {returncode} rather than raising"
+    assert out == "MEMORYERROR", f"{expr} ended with {out!r}"
+
+
+@pytest.mark.parametrize("expr", ORDINARY_RESULTS)
+def test_an_ordinary_result_is_still_computed(expr):
+    returncode, out = _run(expr)
+    assert (
+        returncode == 0 and out == "RETURNED"
+    ), f"{expr} gave {out!r} (code {returncode})"
+
+
 def test_one_hot_declines_a_label_that_would_set_an_impossible_width():
     """`one_hot` infers its class count as the largest label plus one, so a
     single large label decides the width of the whole result."""

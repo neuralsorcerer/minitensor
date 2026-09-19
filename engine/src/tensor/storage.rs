@@ -5,7 +5,11 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::{
-    device::Device, memory::global_allocate, memory::global_deallocate, tensor::dtype::DataType,
+    device::Device,
+    error::{MinitensorError, Result},
+    memory::global_allocate,
+    memory::global_deallocate,
+    tensor::dtype::DataType,
 };
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
@@ -468,6 +472,51 @@ impl TensorData {
         } else {
             slice.fill(value);
         }
+    }
+
+    /// Refuse a buffer this machine cannot allocate, rather than aborting.
+    ///
+    /// `Vec`'s allocation calls `handle_alloc_error` when the allocator says
+    /// no, and that aborts the process: no exception, nothing to catch, the
+    /// interpreter simply gone. Most callers of [`Self::zeros_on_device`] are
+    /// working from a size the library already validated, which is why it
+    /// returns `Self` and stays infallible. The ones that are not are the
+    /// operations whose *output* can dwarf their input -- `cat`, `matmul`,
+    /// `kron`, `pad` and the rest -- and they have a `Result` to report
+    /// through. This is what they ask first.
+    ///
+    /// `try_reserve` asks the allocator exactly the question the real
+    /// allocation will ask and returns instead of aborting, so there is no
+    /// invented ceiling here and no guess at free memory. Below a gigabyte the
+    /// allocator cannot plausibly refuse, so nothing is asked and ordinary
+    /// operations pay nothing.
+    pub fn ensure_allocatable(numel: usize, dtype: DataType) -> Result<()> {
+        let bytes = numel.checked_mul(dtype.size_bytes()).ok_or_else(|| {
+            MinitensorError::invalid_operation(format!(
+                "a result of {numel} {dtype:?} elements is larger than this platform can address"
+            ))
+        })?;
+
+        const PROBE_ABOVE_BYTES: usize = 1 << 30;
+        if bytes <= PROBE_ABOVE_BYTES {
+            return Ok(());
+        }
+
+        let mut probe: Vec<u8> = Vec::new();
+        probe.try_reserve_exact(bytes).map_err(|_| {
+            MinitensorError::invalid_operation(format!(
+                "a result of {numel} {dtype:?} elements needs {bytes} bytes, which this \
+                 machine cannot allocate"
+            ))
+        })?;
+        drop(probe);
+        Ok(())
+    }
+
+    /// [`Self::zeros_on_device`], having first asked whether it can be had.
+    pub fn try_zeros_on_device(numel: usize, dtype: DataType, device: Device) -> Result<Self> {
+        Self::ensure_allocatable(numel, dtype)?;
+        Ok(Self::zeros_on_device(numel, dtype, device))
     }
 
     /// Create new tensor data with zeros on specified device
