@@ -143,7 +143,9 @@ impl Shape {
     /// one byte per element, which is all `broadcast_with` can assume, passes a
     /// 2.5-billion-element result that is 2.5 GB as `bool` and 20 GB as
     /// `float64`; the second aborted. Callers that know what they are about to
-    /// allocate should say so.
+    /// allocate should say so. Where exactly the allocator starts refusing is
+    /// the host's business -- a page file changes it -- but the factor of eight
+    /// between those two figures is not.
     pub fn broadcast_with_dtype(&self, other: &Shape, dtype: DataType) -> Result<Shape> {
         let self_ndim = self.ndim();
         let other_ndim = other.ndim();

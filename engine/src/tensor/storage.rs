@@ -1254,6 +1254,37 @@ mod tests {
     }
 
     #[test]
+    fn allocatability_is_measured_in_bytes_rather_than_elements() {
+        // The same element count, asked for twice: the refusal names eight
+        // times as many bytes for `Float64` as for `Bool`. That is the whole
+        // reason `Shape::broadcast_with_dtype` takes a dtype -- a count that
+        // fits at one byte per element need not fit at eight.
+        //
+        // Both sizes here are refused on every machine, and that is
+        // deliberate. Whether some *particular* size fits is a property of the
+        // host: a 20 GB reservation that Linux declines, a Windows runner with
+        // a large page file grants, so a test that picks a size near the
+        // boundary is testing the runner. What does not vary is that the byte
+        // figure follows the dtype, which is what this pins.
+        const NUMEL: usize = 1 << 42;
+        let narrow = TensorData::ensure_allocatable(NUMEL, DataType::Bool)
+            .unwrap_err()
+            .to_string();
+        let wide = TensorData::ensure_allocatable(NUMEL, DataType::Float64)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            narrow.contains(&format!("needs {NUMEL} bytes")),
+            "bool refusal did not name one byte per element: {narrow}"
+        );
+        assert!(
+            wide.contains(&format!("needs {} bytes", NUMEL * 8)),
+            "float64 refusal did not name eight bytes per element: {wide}"
+        );
+    }
+
+    #[test]
     fn test_clone_data_independence() {
         let original = TensorData::ones(3, DataType::Float32);
         let mut cloned = original.clone_data();

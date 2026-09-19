@@ -191,12 +191,15 @@ OVERSIZED_RESULTS = [
     "mt.zeros([10**6, 1]) * mt.zeros([1, 10**6])",
     "mt.zeros([10**6, 1]) + mt.zeros([1, 10**6])",
     "mt.kron(mt.zeros([10**6]), mt.zeros([10**6]))",
-    # 2.5 billion elements: 2.5 GB as bool, 20 GB as float64. Checking the
-    # count alone passes this on a 16 GB machine and then aborts, which is why
-    # the broadcast is checked against the dtype it will actually be made of.
-    "mt.zeros([50000,1],dtype='float64') * mt.zeros([1,50000],dtype='float64')",
-    "mt.zeros([50000,1],dtype='float64') + mt.zeros([1,50000],dtype='float64')",
-    "mt.zeros([50000,1],dtype='float64').maximum(mt.zeros([1,50000],dtype='float64'))",
+    # The same broadcast at another dtype, and through a method rather than an
+    # operator. The sizes here are beyond every machine on purpose: that the
+    # refusal is computed from bytes rather than from the element count is
+    # pinned exactly in `storage.rs`, because the size at which a particular
+    # host starts saying no is a property of the host. A 20 GB reservation
+    # Linux declines, a Windows runner with a large page file grants.
+    "mt.zeros([10**6,1],dtype='float64') * mt.zeros([1,10**6],dtype='float64')",
+    "mt.zeros([10**6,1],dtype='float64') + mt.zeros([1,10**6],dtype='float64')",
+    "mt.zeros([10**6,1],dtype='float64').maximum(mt.zeros([1,10**6],dtype='float64'))",
 ]
 
 ORDINARY_RESULTS = [
