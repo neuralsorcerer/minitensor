@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
+    nn::lstm_cell::lstm_cell,
     ops::{
         arithmetic::{add, mul, sub},
         linalg::matmul,
@@ -58,14 +59,13 @@ struct LayerWeights {
 
 /// A stack of recurrent layers, shared by [`LSTM`] and [`GRU`].
 ///
-/// The cells are built from the ordinary autograd-aware tensor operations
-/// (`matmul`, `sigmoid`, `tanh`, elementwise arithmetic) rather than a fused
+/// Every matmul here, and the whole of the GRU's gate arithmetic, is built from
+/// the ordinary autograd-aware tensor operations rather than from a fused
 /// kernel with a hand-written backward. A recurrent backward pass has to
 /// accumulate through every timestep, and writing that by hand is where these
 /// layers usually go wrong; composing means the existing graph derives it, and
-/// it is correct by construction. The cost is the intermediate tensors each step
-/// allocates — a fused kernel would be faster, and is the obvious later
-/// optimisation.
+/// it is correct by construction. The cost is the intermediate tensors each
+/// step allocates.
 ///
 /// Within that composed form, the work that does *not* depend on the recurrence
 /// is hoisted out of the timestep loop: both weight transposes are taken once
@@ -73,8 +73,10 @@ struct LayerWeights {
 /// matmul. See [`Recurrent::forward_with_state`]. What remains per step is the
 /// hidden matmul and the gate arithmetic, which are sequential by definition.
 ///
-/// What that costs, measured, so a fused kernel has a target rather than an
-/// intuition. Backward, per timestep, on a 4-core machine:
+/// # What the composed gate arithmetic cost
+///
+/// Backward, per timestep, on a 4-core machine, before [`crate::nn::lstm_cell`]
+/// existed:
 ///
 /// | hidden, batch | T=16 | T=32 | T=64 | T=128 | T=256 |
 /// | --- | --- | --- | --- | --- | --- |
@@ -83,15 +85,47 @@ struct LayerWeights {
 ///
 /// The graph machinery is linear in the number of nodes -- a plain chain of a
 /// thousand operations back-propagates at a flat 0.8us per node, and so does
-/// the small configuration above. The large one does not: its per-step cost
-/// grows fourfold across the same range, and the sharpest jump is between
-/// T=64 and T=128, where the retained activations cross from 16 MB to 31 MB.
-/// That is the composed form's intermediates falling out of cache, not an
-/// algorithmic problem, and it is what a fused cell would buy back. Below
-/// about a megabyte of live activations there is nothing to win here.
+/// the small configuration above. The large one did not: its per-step cost grew
+/// fourfold across the same range, and the sharpest jump is between T=64 and
+/// T=128, where the retained activations cross from 16 MB to 31 MB. That is
+/// thirteen intermediates per step falling out of cache, not an algorithmic
+/// problem. Below about a megabyte of live activations there is nothing to win.
 ///
-/// The whole backward is 14x the forward for LSTM and 22x for GRU at
-/// `hidden=256, T=64, batch=8`, against roughly 2x for a hand-written BPTT.
+/// # What fusing the LSTM step bought
+///
+/// [`crate::nn::lstm_cell`] replaces those thirteen operations with one, and
+/// its own note records what it does and does not fuse. Both halves of each
+/// column below are the best of four runs of the same script, against builds
+/// that differ only in `lstm_step`. `nn::LSTM(16, 128)`, batch 8:
+///
+/// | T | forward | backward | total |
+/// | --- | --- | --- | --- |
+/// | 16 | 0.92 -> 0.87 ms | 4.00 -> 3.11 ms | 5.00 -> 4.02 ms |
+/// | 64 | 3.18 -> 3.06 ms | 24.5 -> 22.7 ms | 27.8 -> 26.7 ms |
+/// | 256 | 11.4 -> 8.79 ms | 260 -> 221 ms | 272 -> 229 ms |
+///
+/// And a configuration whose per-step buffers are above every parallel
+/// threshold, so the fused cell splits across cores the way the operations it
+/// replaced did -- `nn::LSTM(64, 512)`, batch 128, T=16, six runs each:
+///
+/// | | forward | backward | total |
+/// | --- | --- | --- | --- |
+/// | best | 59.8 -> 70.0 ms | 586 -> 412 ms | 646 -> 536 ms |
+/// | median | 76.1 -> 98.7 ms | 626 -> 501 ms | 703 -> 598 ms |
+///
+/// The backward is 20-30% better there and the total 15-17%. The forward reads
+/// worse and is not: at that size the gate arithmetic is about 4 ms of a 76 ms
+/// forward, so it cannot account for a 20 ms swing. Both columns span a factor
+/// of 1.8 across their own runs, which is what a 4-core container does to a
+/// measurement dominated by GEMM.
+///
+/// At `hidden=256, T=64, batch=8` the backward is unchanged within noise and
+/// the forward is about 15% better. That agrees with the T=64 row above and
+/// with the table before it: what fusing buys back is cache traffic, so it pays
+/// where the live set is large and is a wash where it is not.
+///
+/// The GRU's step is left composed. The LSTM was the trial, and the small
+/// configuration above is the evidence that a second one would need its own.
 #[derive(Clone)]
 pub struct Recurrent {
     kind: CellKind,
@@ -287,16 +321,11 @@ impl Recurrent {
         let from_hidden = Self::affine(h, w_hh_t, b_hh)?;
         let gates = add(from_input, &from_hidden)?;
 
-        // Block order is i, f, g, o — the layout the stored weights use, so a
-        // state dict transfers without permuting.
-        let input_gate = self.gate(&gates, 0)?.sigmoid()?;
-        let forget_gate = self.gate(&gates, 1)?.sigmoid()?;
-        let candidate = self.gate(&gates, 2)?.tanh()?;
-        let output_gate = self.gate(&gates, 3)?.sigmoid()?;
-
-        let new_c = add(&mul(&forget_gate, c)?, &mul(&input_gate, &candidate)?)?;
-        let new_h = mul(&output_gate, &new_c.tanh()?)?;
-        Ok((new_h, new_c))
+        // Everything after this is elementwise, and composing it cost thirteen
+        // retained intermediates per timestep. `lstm_cell` is that arithmetic
+        // as one operation, in the same `i, f, g, o` block order the stored
+        // weights use so a state dict still transfers without permuting.
+        lstm_cell(&gates, c)
     }
 
     /// One GRU step: returns the new `h`.

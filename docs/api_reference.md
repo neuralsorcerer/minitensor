@@ -2926,10 +2926,27 @@ timestep*. State tensors gain a row per direction — `(num_layers * directions,
 batch, hidden_size)` — ordered layer-0-forward, layer-0-reverse, layer-1-forward
 and so on, which matches how PyTorch names `*_l{k}` and `*_l{k}_reverse`.
 
-Both layers are built from ordinary autograd-aware operations rather than a
-fused kernel, so the backward pass through the unrolled sequence is derived by
-the existing graph rather than hand-written. That is the safer choice for a
-recurrence; a fused kernel would be faster and is the obvious later change.
+Every matmul in both layers, and the whole of the GRU's gate arithmetic, is
+built from ordinary autograd-aware operations, so the backward pass through the
+unrolled sequence is derived by the existing graph rather than hand-written.
+That is the safer choice for a recurrence.
+
+The LSTM's elementwise step is the one exception. Composed, it was thirteen
+tensors retained per timestep, and at `hidden=128, batch=8` the backward's
+per-step cost grew fourfold between `T=16` and `T=256` as those intermediates
+left cache. It is now a single fused operation, and at that configuration the
+whole layer runs 20% faster at `T=16` and 16% faster at `T=256`, the gain
+coming from the backward at the short end and from both halves at the long one.
+A batch-128, `hidden=512` configuration improves by the same 15-17%.
+
+The forward is bit-for-bit what the composed form produced — it goes through
+the same vectorized `sigmoid` and `tanh` kernels, in the same operand order.
+The gradients differ from the composed form only by re-association, 1e-14
+relative at float64, and every parameter of eight configurations of these
+layers is value-checked against central differences. The matmul that produces
+the gates is still an ordinary operation, so the gradients to the weights and
+to the previous hidden state still come from the graph.
+
 Packed (variable-length) sequences are not implemented.
 
 ```python

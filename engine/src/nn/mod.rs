@@ -13,6 +13,7 @@ pub mod embedding;
 pub mod init;
 pub mod layer;
 pub mod loss;
+pub mod lstm_cell;
 pub mod normalization;
 pub mod pooling;
 pub mod recurrent;
