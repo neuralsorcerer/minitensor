@@ -261,11 +261,27 @@ def test_median_nan_propagates_global():
 
 
 def test_median_nan_propagates_with_dim():
+    """A NaN makes the whole median NaN, and the index names *that* NaN.
+
+    This asserted index 0 for the NaN row, where the NaN is at index 1. That
+    was not a contract, it was the output buffer: the NaN branch wrote the
+    value and returned without writing the index, so the assertion recorded
+    the zero the buffer happened to hold. `median` reports an index precisely
+    so the caller can identify the element it picked -- that is why it returns
+    the lower of two middles rather than their average -- and an index
+    pointing at an unrelated element breaks the one property it exists for.
+    """
     x = mt.Tensor([[1.0, float("nan"), 3.0], [2.0, 4.0, 6.0]], dtype="float32")
     values, indices = x.median(dim=1)
     assert np.isnan(values.numpy()[0])
     assert values.numpy()[1] == pytest.approx(4.0)
-    np.testing.assert_array_equal(indices.numpy(), np.array([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(indices.numpy(), np.array([1, 1], dtype=np.int64))
+
+    # The property the indices are for: they name the elements returned.
+    recovered = np.take_along_axis(
+        x.numpy(), indices.numpy().reshape(-1, 1), axis=1
+    ).ravel()
+    assert recovered.tobytes() == values.numpy().tobytes()
 
 
 def test_var_std_support_tuple_dims_and_keepdim():

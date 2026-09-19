@@ -153,9 +153,12 @@ pub(crate) fn median_all(tensor: &Tensor) -> Result<(Tensor, Option<Tensor>)> {
 /// selection: the difference was entirely that one of them was running on one
 /// core.
 ///
-/// How a dtype represents and detects NaN: the value to emit for a slice that
-/// contains one, and the predicate that finds it. Integer dtypes have neither.
-type NanHandling<T> = Option<(T, fn(&T) -> bool)>;
+/// How a dtype detects NaN. Integer dtypes have no such value and pass `None`.
+///
+/// This used to carry the NaN to emit as well. It does not need to: the NaN a
+/// slice contains is the one to return, and returning *that* element is what
+/// keeps the reported index honest.
+type NanHandling<T> = Option<fn(&T) -> bool>;
 
 /// `nan` carries the floating-point NaN handling: a NaN anywhere in a slice
 /// makes that whole median NaN. Integer instantiations pass `None` and skip the
@@ -191,20 +194,29 @@ fn median_along_dim_par<T, E, M>(
             {
                 entries.clear();
                 let base = block_base + r;
-                let mut saw_nan = false;
+                let mut nan_at = None;
                 for d in 0..dim_size {
                     let value = input[base + d * inner];
-                    if let Some((_, is_nan)) = nan
+                    if let Some(is_nan) = nan
                         && is_nan(&value)
                     {
-                        saw_nan = true;
+                        nan_at = Some(d);
                         break;
                     }
                     entries.push(make(d, value));
                 }
 
-                if let (true, Some((nan_value, _))) = (saw_nan, nan) {
-                    *value_out = nan_value;
+                // A NaN anywhere makes the whole median NaN, and the index has
+                // to name it. Writing only the value left `index_out` at
+                // whatever the buffer held -- zero -- so `median` reported a
+                // NaN alongside the position of some unrelated element, and
+                // `gather(input, indices)` did not give back `values`. That
+                // equality is the entire reason this reduction returns the
+                // lower of two middles rather than their average.
+                if let Some(d) = nan_at {
+                    let position = base + d * inner;
+                    *value_out = input[position];
+                    *index_out = d as i64;
                     continue;
                 }
 
@@ -312,7 +324,7 @@ pub(crate) fn median_along_dim(
             as_f32_slice,
             as_f32_slice_mut,
             "f32",
-            Some((f32::NAN, |v: &f32| v.is_nan())),
+            Some(|v: &f32| v.is_nan()),
             float_key32,
             false
         ),
@@ -320,7 +332,7 @@ pub(crate) fn median_along_dim(
             as_f64_slice,
             as_f64_slice_mut,
             "f64",
-            Some((f64::NAN, |v: &f64| v.is_nan())),
+            Some(|v: &f64| v.is_nan()),
             float_key64,
             true
         ),

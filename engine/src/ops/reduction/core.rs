@@ -303,6 +303,11 @@ pub(crate) fn ensure_non_empty(numel: usize, op: &str) -> Result<()> {
 /// report the index of the element it selected (returned as the second tuple
 /// element when `dim` is given), since an averaged midpoint belongs to no
 /// element. Use `quantile(0.5)` for the interpolated definition.
+///
+/// A `NaN` anywhere in a reduced slice makes that slice's median `NaN`, and
+/// the index then names the first `NaN` in the slice. The index names the
+/// element returned in every case -- gathering along `dim` gives the values
+/// back -- which is the property the whole convention exists to provide.
 pub fn median(
     tensor: &Tensor,
     dim: Option<isize>,

@@ -1759,8 +1759,12 @@ Invalid argument: max() does not support empty tensors
 `median` and `nanmedian` follow PyTorch: with an even number of elements they
 return the **lower** of the two middle values rather than averaging them the
 way `numpy.median` does. That is also what lets `median(dim=...)` report the
-index of the element it selected. Use `quantile(0.5)` / `nanquantile(0.5)` when
-you want the interpolated, NumPy-compatible definition.
+index of the element it selected, and the index always names that element —
+`take_along_dim(x, indices, dim)` gives back the values. A `NaN` anywhere in a
+reduced slice makes that slice's median `NaN`, and the index then names the
+first `NaN` in the slice rather than a number it did not return. Use
+`quantile(0.5)` / `nanquantile(0.5)` when you want the interpolated,
+NumPy-compatible definition, or `nanmedian` to skip `NaN` entirely.
 
 `nanmedian(dim=None, keepdim=False)` is available as a tensor method,
 functional helper, and top-level helper. It ignores `NaN` values in floating
