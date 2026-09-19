@@ -63,12 +63,10 @@
 use crate::{
     autograd::{GradientFunction, TensorId, with_grad_fn},
     error::{MinitensorError, Result},
-    ops::{
-        map::{
-            EXPENSIVE_PAR_THRESHOLD, SIMD_PAR_CHUNK, SIMD_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD,
-            build_vec, par_out_chunks, unary_map_blocks_threshold,
-        },
-        util::stable_sigmoid_f64,
+    nn::cell::{band_width, sigmoid_block_f64, tanh_block_f64},
+    ops::map::{
+        EXPENSIVE_PAR_THRESHOLD, SIMD_PAR_THRESHOLD, VECTOR_F32_PAR_THRESHOLD, build_vec,
+        par_out_chunks, unary_map_blocks_threshold,
     },
     tensor::{DataType, Shape, Tensor, TensorData},
 };
@@ -83,27 +81,6 @@ const INPUT: usize = 0;
 const FORGET: usize = 1;
 const CANDIDATE: usize = 2;
 const OUTPUT: usize = 3;
-
-/// The chunk width to hand [`par_out_chunks`] for `total` elements laid out in
-/// rows of `row_width`.
-///
-/// Below `threshold` the whole buffer is one chunk, which `par_out_chunks`
-/// runs inline without reaching rayon at all. That is the case that matters:
-/// a recurrent step's tensors are small by construction, and forking a pool
-/// once per timestep would cost more than the arithmetic it splits. The
-/// thresholds are the ones the composed operations used, so the point at which
-/// this starts using every core is the point at which they did.
-///
-/// Above it the bands are whole rows. Which gate an element belongs to is
-/// decided by where it sits within its row, so a split anywhere else would
-/// hand a task half of one gate and half of the next.
-#[inline]
-fn band_width(total: usize, row_width: usize, threshold: usize) -> usize {
-    if total < threshold || row_width == 0 {
-        return total;
-    }
-    row_width * (SIMD_PAR_CHUNK / row_width).max(1)
-}
 
 /// What the backward needs, kept as one buffer rather than four tensors.
 ///
@@ -266,16 +243,8 @@ pub fn lstm_cell(gates: &Tensor, cell_before: &Tensor) -> Result<(Tensor, Tensor
             f64,
             as_f64_slice,
             EXPENSIVE_PAR_THRESHOLD,
-            |src: &[f64], dst: &mut [MaybeUninit<f64>]| {
-                for (out, &x) in dst.iter_mut().zip(src) {
-                    out.write(stable_sigmoid_f64(x));
-                }
-            },
-            |src: &[f64], dst: &mut [MaybeUninit<f64>]| {
-                for (out, &x) in dst.iter_mut().zip(src) {
-                    out.write(x.tanh());
-                }
-            }
+            sigmoid_block_f64,
+            tanh_block_f64
         ),
         other => {
             return Err(MinitensorError::invalid_operation(format!(

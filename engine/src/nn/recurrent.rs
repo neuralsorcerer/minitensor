@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use crate::{
     device::Device,
     error::{MinitensorError, Result},
-    nn::lstm_cell::lstm_cell,
+    nn::{gru_cell::gru_cell, lstm_cell::lstm_cell},
     ops::{
-        arithmetic::{add, mul, sub},
+        arithmetic::add,
         linalg::matmul,
         shape_ops::{concatenate, narrow},
     },
@@ -59,13 +59,16 @@ struct LayerWeights {
 
 /// A stack of recurrent layers, shared by [`LSTM`] and [`GRU`].
 ///
-/// Every matmul here, and the whole of the GRU's gate arithmetic, is built from
-/// the ordinary autograd-aware tensor operations rather than from a fused
-/// kernel with a hand-written backward. A recurrent backward pass has to
-/// accumulate through every timestep, and writing that by hand is where these
-/// layers usually go wrong; composing means the existing graph derives it, and
-/// it is correct by construction. The cost is the intermediate tensors each
-/// step allocates.
+/// Every matmul here is built from the ordinary autograd-aware tensor
+/// operations rather than from a fused kernel with a hand-written backward. A
+/// recurrent backward pass has to accumulate through every timestep, and
+/// writing that by hand is where these layers usually go wrong; composing means
+/// the existing graph derives it, and it is correct by construction.
+///
+/// The elementwise part of each step is the exception, and the measurements
+/// below are why: composed, it was thirteen retained intermediates per timestep
+/// for the LSTM and twelve for the GRU, and that is the whole of what these
+/// layers spend above their matmuls.
 ///
 /// Within that composed form, the work that does *not* depend on the recurrence
 /// is hoisted out of the timestep loop: both weight transposes are taken once
@@ -75,7 +78,7 @@ struct LayerWeights {
 ///
 /// # What the composed gate arithmetic cost
 ///
-/// Backward, per timestep, on a 4-core machine, before [`crate::nn::lstm_cell`]
+/// Backward, per timestep, on a 4-core machine, before either fused cell
 /// existed:
 ///
 /// | hidden, batch | T=16 | T=32 | T=64 | T=128 | T=256 |
@@ -89,43 +92,45 @@ struct LayerWeights {
 /// fourfold across the same range, and the sharpest jump is between T=64 and
 /// T=128, where the retained activations cross from 16 MB to 31 MB. That is
 /// thirteen intermediates per step falling out of cache, not an algorithmic
-/// problem. Below about a megabyte of live activations there is nothing to win.
+/// problem.
 ///
-/// # What fusing the LSTM step bought
+/// # What fusing bought
 ///
-/// [`crate::nn::lstm_cell`] replaces those thirteen operations with one, and
-/// its own note records what it does and does not fuse. Both halves of each
-/// column below are the best of four runs of the same script, against builds
-/// that differ only in `lstm_step`. `nn::LSTM(16, 128)`, batch 8:
+/// [`crate::nn::lstm_cell`] and [`crate::nn::gru_cell`] replace those
+/// intermediates with one operation each, and their own notes record what they
+/// do and do not fuse. `nn::LSTM(16, 128)` and `nn::GRU(16, 128)`, batch 8,
+/// forward and backward, median of five blocks in steady state:
 ///
-/// | T | forward | backward | total |
-/// | --- | --- | --- | --- |
-/// | 16 | 0.92 -> 0.87 ms | 4.00 -> 3.11 ms | 5.00 -> 4.02 ms |
-/// | 64 | 3.18 -> 3.06 ms | 24.5 -> 22.7 ms | 27.8 -> 26.7 ms |
-/// | 256 | 11.4 -> 8.79 ms | 260 -> 221 ms | 272 -> 229 ms |
+/// | T | LSTM | GRU |
+/// | --- | --- | --- |
+/// | 16 | 6.72 -> 5.41 ms | 12.06 -> 7.43 ms |
+/// | 64 | 40.39 -> 36.17 ms | 35.35 -> 21.78 ms |
+/// | 256 | 351.98 -> 281.48 ms | 332.96 -> 247.26 ms |
 ///
-/// And a configuration whose per-step buffers are above every parallel
-/// threshold, so the fused cell splits across cores the way the operations it
-/// replaced did -- `nn::LSTM(64, 512)`, batch 128, T=16, six runs each:
+/// and resident memory at T=256 falls from 82 MB to 68 MB for the LSTM and
+/// from 72 MB to 50 MB for the GRU, which is the retained intermediates made
+/// visible. The forward is 17-43% quicker across those six cells.
 ///
-/// | | forward | backward | total |
-/// | --- | --- | --- | --- |
-/// | best | 59.8 -> 70.0 ms | 586 -> 412 ms | 646 -> 536 ms |
-/// | median | 76.1 -> 98.7 ms | 626 -> 501 ms | 703 -> 598 ms |
+/// The GRU gains more, which is not what the gate count suggests. Its composed
+/// form sliced each projection three ways, and a slice's backward scatters into
+/// a full-width zeroed buffer -- six of those per step against the LSTM's four,
+/// over three projections' worth of width rather than four gates of arithmetic.
 ///
-/// The backward is 20-30% better there and the total 15-17%. The forward reads
-/// worse and is not: at that size the gate arithmetic is about 4 ms of a 76 ms
-/// forward, so it cannot account for a 20 ms swing. Both columns span a factor
-/// of 1.8 across their own runs, which is what a 4-core container does to a
-/// measurement dominated by GEMM.
+/// **On how these were measured**, because the first attempt was wrong in a way
+/// worth recording. Timing a few iterations and taking the minimum reads 40%
+/// low on this container and does not rank the two builds consistently: the
+/// same composed GRU measured 4.33 ms and 11.20 ms at T=16, back to back, under
+/// two harnesses differing only in how many iterations they ran. Short bursts
+/// get a share of the CPU that a sustained run does not, so a four-iteration
+/// window measures the burst allowance rather than the library. There is no
+/// leak behind it -- resident memory and graph size are flat over 160
+/// iterations. The figures above are steady state after warm-up, reported as a
+/// median over blocks, and both builds' numbers come from the same harness.
 ///
-/// At `hidden=256, T=64, batch=8` the backward is unchanged within noise and
-/// the forward is about 15% better. That agrees with the T=64 row above and
-/// with the table before it: what fusing buys back is cache traffic, so it pays
-/// where the live set is large and is a wash where it is not.
-///
-/// The GRU's step is left composed. The LSTM was the trial, and the small
-/// configuration above is the evidence that a second one would need its own.
+/// The whole backward remains an order of magnitude above the forward -- the
+/// recurrence is sequential by definition and every timestep's matmul is
+/// separate -- so this is a constant factor off a cost the shape of the problem
+/// sets, not a change in that shape.
 #[derive(Clone)]
 pub struct Recurrent {
     kind: CellKind,
@@ -300,11 +305,6 @@ impl Recurrent {
         }
     }
 
-    /// Slice gate block `index` out of a `[batch, gates * hidden]` tensor.
-    fn gate(&self, gates: &Tensor, index: usize) -> Result<Tensor> {
-        narrow(gates, 1, index * self.hidden_size, self.hidden_size)
-    }
-
     /// One LSTM step: returns the new `(h, c)`.
     ///
     /// `from_input` is this timestep's slice of the input projection, which the
@@ -341,38 +341,14 @@ impl Recurrent {
     ) -> Result<Tensor> {
         let from_hidden = Self::affine(h, w_hh_t, b_hh)?;
 
-        // Block order is r, z, n.
-        let reset = add(&self.gate(from_input, 0)?, &self.gate(&from_hidden, 0)?)?.sigmoid()?;
-        let update = add(&self.gate(from_input, 1)?, &self.gate(&from_hidden, 1)?)?.sigmoid()?;
-
-        // The reset gate multiplies the *projected* hidden contribution, not the
-        // hidden state before its matmul. The two are not equivalent — with the
-        // bias inside the product, as it is here, `r` also scales `b_hn` — and
-        // this is the detail GRU implementations most often get wrong. This
-        // matches cuDNN.
-        let gated_hidden = mul(&reset, &self.gate(&from_hidden, 2)?)?;
-        let candidate = add(&self.gate(from_input, 2)?, &gated_hidden)?.tanh()?;
-
-        // h' = (1 - z) * n + z * h
-        //
-        // Written this way on purpose. The algebraically equal `n + z * (h - n)`
-        // needs no `ones` tensor and one fewer elementwise op, which makes it a
-        // tempting optimisation — but it is not equal in floating point at the
-        // saturated update gate. `sigmoid` reaches exactly 1.0 in f32 by a logit
-        // of about 17, and there `(1 - z) * n + z * h` yields `h` bit-for-bit
-        // while `n + z * (h - n)` misses it in roughly a third of cases, by up
-        // to 5e-7. A saturated `z` is exactly how a GRU carries state across a
-        // long sequence, so that error would be injected at every step of the
-        // one path that is supposed to be lossless, and accumulate over the
-        // sequence. The allocation buys exact pass-through; keep it.
-        let ones = Tensor::ones(
-            update.shape().clone(),
-            update.dtype(),
-            update.device(),
-            false,
-        );
-        let keep = sub(&ones, &update)?;
-        add(&mul(&keep, &candidate)?, &mul(&update, h)?)
+        // Everything after this is elementwise, and composing it cost twelve
+        // retained intermediates per timestep. `gru_cell` is that arithmetic as
+        // one operation, in the same `r, z, n` block order the stored weights
+        // use. It takes both projections rather than their sum because the
+        // reset gate multiplies only the hidden one's candidate block -- with
+        // the bias inside the product, which is the detail GRU implementations
+        // most often get wrong, and which its own note spells out.
+        gru_cell(from_input, &from_hidden, h)
     }
 
     /// Run the stack, returning the output sequence and the final states.

@@ -2926,26 +2926,35 @@ timestep*. State tensors gain a row per direction — `(num_layers * directions,
 batch, hidden_size)` — ordered layer-0-forward, layer-0-reverse, layer-1-forward
 and so on, which matches how PyTorch names `*_l{k}` and `*_l{k}_reverse`.
 
-Every matmul in both layers, and the whole of the GRU's gate arithmetic, is
-built from ordinary autograd-aware operations, so the backward pass through the
-unrolled sequence is derived by the existing graph rather than hand-written.
-That is the safer choice for a recurrence.
+Every matmul in both layers is built from ordinary autograd-aware operations,
+so the backward pass through the unrolled sequence is derived by the existing
+graph rather than hand-written. That is the safer choice for a recurrence.
 
-The LSTM's elementwise step is the one exception. Composed, it was thirteen
-tensors retained per timestep, and at `hidden=128, batch=8` the backward's
-per-step cost grew fourfold between `T=16` and `T=256` as those intermediates
-left cache. It is now a single fused operation, and at that configuration the
-whole layer runs 20% faster at `T=16` and 16% faster at `T=256`, the gain
-coming from the backward at the short end and from both halves at the long one.
-A batch-128, `hidden=512` configuration improves by the same 15-17%.
+The elementwise part of each step is the exception. Composed, it was thirteen
+tensors retained per timestep for the LSTM and twelve for the GRU, and at
+`hidden=128, batch=8` the backward's per-step cost grew fourfold between `T=16`
+and `T=256` as those intermediates left cache. Each is now a single fused
+operation. Forward and backward together, median of five blocks in steady
+state:
 
-The forward is bit-for-bit what the composed form produced — it goes through
-the same vectorized `sigmoid` and `tanh` kernels, in the same operand order.
-The gradients differ from the composed form only by re-association, 1e-14
-relative at float64, and every parameter of eight configurations of these
-layers is value-checked against central differences. The matmul that produces
-the gates is still an ordinary operation, so the gradients to the weights and
-to the previous hidden state still come from the graph.
+| T | LSTM | GRU |
+| --- | --- | --- |
+| 16 | 6.72 → 5.41 ms | 12.06 → 7.43 ms |
+| 64 | 40.39 → 36.17 ms | 35.35 → 21.78 ms |
+| 256 | 351.98 → 281.48 ms | 332.96 → 247.26 ms |
+
+Resident memory at `T=256` falls from 82 MB to 68 MB for the LSTM and from
+72 MB to 50 MB for the GRU.
+
+The forward is bit-for-bit what the composed form produced — the same
+vectorized `sigmoid` and `tanh` kernels, in the same operand order, including
+the `(1 - z) * n + z * h` form that lets a saturated GRU update gate pass the
+previous state through exactly. The gradients differ from the composed form
+only by re-association, 1e-14 relative at float64, and every parameter of eight
+configurations of these layers is value-checked against central differences.
+The matmuls that produce the gates are still ordinary operations, so the
+gradients to the weights and to the previous hidden state still come from the
+graph.
 
 Packed (variable-length) sequences are not implemented.
 

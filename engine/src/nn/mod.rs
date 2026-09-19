@@ -6,10 +6,12 @@
 
 pub mod activation;
 pub mod attention;
+pub mod cell;
 pub mod conv;
 pub mod dense_layer;
 pub mod dropout;
 pub mod embedding;
+pub mod gru_cell;
 pub mod init;
 pub mod layer;
 pub mod loss;
