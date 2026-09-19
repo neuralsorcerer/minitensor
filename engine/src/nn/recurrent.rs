@@ -72,6 +72,26 @@ struct LayerWeights {
 /// per direction, and each layer projects its whole input sequence in a single
 /// matmul. See [`Recurrent::forward_with_state`]. What remains per step is the
 /// hidden matmul and the gate arithmetic, which are sequential by definition.
+///
+/// What that costs, measured, so a fused kernel has a target rather than an
+/// intuition. Backward, per timestep, on a 4-core machine:
+///
+/// | hidden, batch | T=16 | T=32 | T=64 | T=128 | T=256 |
+/// | --- | --- | --- | --- | --- | --- |
+/// | 16, 1 (0.06-1 MB live) | 15.8us | 15.8us | 18.5us | 18.1us | 21.8us |
+/// | 128, 8 (3.9-63 MB live) | 248us | 300us | 407us | 878us | 1047us |
+///
+/// The graph machinery is linear in the number of nodes -- a plain chain of a
+/// thousand operations back-propagates at a flat 0.8us per node, and so does
+/// the small configuration above. The large one does not: its per-step cost
+/// grows fourfold across the same range, and the sharpest jump is between
+/// T=64 and T=128, where the retained activations cross from 16 MB to 31 MB.
+/// That is the composed form's intermediates falling out of cache, not an
+/// algorithmic problem, and it is what a fused cell would buy back. Below
+/// about a megabyte of live activations there is nothing to win here.
+///
+/// The whole backward is 14x the forward for LSTM and 22x for GRU at
+/// `hidden=256, T=64, batch=8`, against roughly 2x for a hand-written BPTT.
 #[derive(Clone)]
 pub struct Recurrent {
     kind: CellKind,
