@@ -62,6 +62,25 @@ impl Shape {
             })
     }
 
+    /// The element count, or an error where [`Self::numel`] would panic.
+    ///
+    /// `numel` panics deliberately: a wrapped count would under-allocate
+    /// storage that indexing still trusts, so it is the last line of defence.
+    /// It is the wrong answer for a caller that can report a problem, though,
+    /// and `nn.DenseLayer(10**12, 10**12)` reached it straight from Python.
+    #[inline]
+    pub fn try_numel(&self) -> Result<usize> {
+        self.dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                MinitensorError::invalid_operation(format!(
+                    "tensor shape {:?} has more elements than usize can represent",
+                    self.dims
+                ))
+            })
+    }
+
     /// Get the size of a specific dimension
     #[inline(always)]
     pub fn size(&self, dim: usize) -> Result<usize> {

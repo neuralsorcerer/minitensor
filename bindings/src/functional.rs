@@ -637,6 +637,15 @@ pub fn one_hot(
     };
 
     let output_dtype = crate::dtype::parse_dtype(dtype)?;
+    // One row per label, one column per class, so a single large label decides
+    // the width of the whole result: `one_hot(10**18)` infers a quintillion
+    // classes and asks for 3.6 EiB. The allocation aborts the process rather
+    // than failing, so the size is checked before it is committed to.
+    crate::tensor::reject_unallocatable(
+        input_tensor.numel().saturating_mul(classes),
+        output_dtype,
+        "one_hot",
+    )?;
     let mut output_shape = input_tensor.shape().dims().to_vec();
     output_shape.push(classes);
     let data = make_one_hot_data(&labels, classes, output_dtype, input_tensor.device())?;

@@ -122,3 +122,52 @@ def test_a_size_that_fits_is_still_built(expr):
     assert (
         returncode == 0 and out == "RETURNED"
     ), f"{expr} gave {out!r} (code {returncode})"
+
+
+# --- layers, whose parameters are sized by their constructor arguments --------
+
+OVERSIZED_LAYERS = [
+    "mt.nn.DenseLayer(10**12, 10**12)",
+    "mt.nn.Embedding(10**12, 10**12)",
+    "mt.nn.LayerNorm(10**18)",
+    "mt.nn.Conv2d(10**6, 10**6, 3)",
+    "mt.nn.LSTM(10**9, 10**9)",
+    "mt.nn.GRU(10**9, 10**9)",
+]
+
+ORDINARY_LAYERS = [
+    "mt.nn.DenseLayer(4, 3)",
+    "mt.nn.Embedding(10, 4)",
+    "mt.nn.LayerNorm(8)",
+    "mt.nn.Conv2d(3, 8, 3)",
+    "mt.nn.LSTM(4, 8)",
+]
+
+
+@pytest.mark.parametrize("expr", OVERSIZED_LAYERS)
+def test_a_layer_too_large_to_build_says_so(expr):
+    """Both failure modes lived here: a shape whose element count overflows
+    `usize` (panic inside `Shape::numel`) and one that fits but cannot be
+    allocated (abort inside the allocator). Every layer's parameters are built
+    through one function, so one check covers all of them."""
+    returncode, out = _run(expr)
+    assert (
+        returncode == 0
+    ), f"{expr} ended the interpreter with code {returncode} rather than raising"
+    assert out == "MEMORYERROR", f"{expr} ended with {out!r}"
+
+
+@pytest.mark.parametrize("expr", ORDINARY_LAYERS)
+def test_an_ordinary_layer_is_still_built(expr):
+    returncode, out = _run(expr)
+    assert (
+        returncode == 0 and out == "RETURNED"
+    ), f"{expr} gave {out!r} (code {returncode})"
+
+
+def test_one_hot_declines_a_label_that_would_set_an_impossible_width():
+    """`one_hot` infers its class count as the largest label plus one, so a
+    single large label decides the width of the whole result."""
+    returncode, out = _run("mt.functional.one_hot(10**18)")
+    assert returncode == 0, "one_hot ended the interpreter rather than raising"
+    assert out == "MEMORYERROR", f"one_hot ended with {out!r}"
