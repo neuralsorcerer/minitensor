@@ -38,6 +38,47 @@ impl PyTensor {
         self.ge_from_py(other)
     }
 
+    /// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
+    pub fn array_equal(&self, other: &PyTensor) -> PyResult<bool> {
+        if self.inner.shape() != other.inner.shape() {
+            return Ok(false);
+        }
+        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+            .map_err(_convert_error)?;
+        Ok(lhs.array_equal(&rhs))
+    }
+
+    /// Whether every pair of elements is within `rtol`/`atol`.
+    #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
+    pub fn allclose(
+        &self,
+        other: &PyTensor,
+        rtol: Option<f64>,
+        atol: Option<f64>,
+        equal_nan: bool,
+    ) -> PyResult<bool> {
+        let rtol = rtol.unwrap_or(1e-5);
+        let atol = atol.unwrap_or(1e-8);
+        if !rtol.is_finite() || !atol.is_finite() || rtol < 0.0 || atol < 0.0 {
+            return Err(PyValueError::new_err(
+                "rtol and atol must be non-negative, finite values",
+            ));
+        }
+        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
+            .map_err(_convert_error)?;
+        Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
+    }
+}
+
+/// The comparisons themselves, shared with the dunder forms in
+/// `comparison_dunder.rs`.
+///
+/// Outside `#[pymethods]` deliberately. `pub(crate)` is the visibility these
+/// were always meant to have, but a `pub(crate) fn` inside a `#[pymethods]`
+/// block is still exported to Python -- the attribute decides what Python
+/// sees, not the Rust modifier -- so each of these stood as a second public
+/// method doing exactly what its one-line wrapper above does.
+impl PyTensor {
     pub(crate) fn eq_from_py(&self, other: &Bound<PyAny>) -> PyResult<Self> {
         let (lhs, rhs) =
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
@@ -78,36 +119,5 @@ impl PyTensor {
             prepare_binary_operands_from_py(&self.inner, other, false, BinaryOpKind::Add)?;
         let result = lhs.ge(&rhs).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
-    }
-
-    /// Whether two tensors have the same shape and every element equal. NaN is never equal to itself.
-    pub fn array_equal(&self, other: &PyTensor) -> PyResult<bool> {
-        if self.inner.shape() != other.inner.shape() {
-            return Ok(false);
-        }
-        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-            .map_err(_convert_error)?;
-        Ok(lhs.array_equal(&rhs))
-    }
-
-    /// Whether every pair of elements is within `rtol`/`atol`.
-    #[pyo3(signature = (other, rtol=None, atol=None, equal_nan=false))]
-    pub fn allclose(
-        &self,
-        other: &PyTensor,
-        rtol: Option<f64>,
-        atol: Option<f64>,
-        equal_nan: bool,
-    ) -> PyResult<bool> {
-        let rtol = rtol.unwrap_or(1e-5);
-        let atol = atol.unwrap_or(1e-8);
-        if !rtol.is_finite() || !atol.is_finite() || rtol < 0.0 || atol < 0.0 {
-            return Err(PyValueError::new_err(
-                "rtol and atol must be non-negative, finite values",
-            ));
-        }
-        let (lhs, rhs, _) = coerce_binary_operands(&self.inner, &other.inner, BinaryOpKind::Add)
-            .map_err(_convert_error)?;
-        Ok(lhs.allclose_with_equal_nan(&rhs, rtol, atol, equal_nan))
     }
 }
