@@ -264,6 +264,22 @@ impl PyTensor {
     #[pyo3(signature = (*shape))]
     pub fn expand(&self, shape: &Bound<PyTuple>) -> PyResult<Self> {
         let lengths = normalize_variadic_isize_args(shape, "shape")?;
+        // `expand` materialises rather than returning a strided view -- the
+        // layout invariant keeps every tensor contiguous -- so the shape asked
+        // for is the shape allocated, and a wide one aborted the process.
+        // A `-1` keeps the existing length and is resolved by the engine, so
+        // only the lengths actually named are counted here; the engine still
+        // rejects a shape that does not broadcast.
+        // A product that does not fit `usize` is already refused further in,
+        // with a message this suite pins; only a size that *is* representable
+        // needs asking about here.
+        if let Some(named) = lengths
+            .iter()
+            .filter(|&&d| d >= 0)
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+        {
+            reject_unallocatable(named, self.inner.dtype(), "expand")?;
+        }
         let result = self.inner.expand(lengths).map_err(_convert_error)?;
         Ok(Self::from_tensor(result))
     }

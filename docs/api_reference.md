@@ -4011,22 +4011,41 @@ a `ValueError` before anything is allocated — `mt.zeros(2**32, 2**32)`,
 `x.expand([2**32, 2**32])` and the rest of the shape arguments all report
 `has more elements than this platform can represent`.
 
-A shape that *is* addressable but larger than available memory is a different
-matter, and worth knowing about because it does not behave like NumPy:
-**the allocation failure aborts the process.** NumPy raises `MemoryError` and
-PyTorch raises a `RuntimeError`, both catchable; here the Rust allocator's
-failure path terminates the interpreter, so no `try`/`except` can intervene.
+A shape that *is* addressable but larger than available memory raises
+`MemoryError`, naming the size at a scale that can be read:
 
 ```text
 np.zeros(12 * 10**9, dtype=np.float32)   # MemoryError, caller continues
-mt.zeros(12 * 10**9)                     # process aborts
+mt.zeros(12 * 10**9)                     # MemoryError: tensor of 12000000000
+                                         # Float32 elements needs 44.7 GiB,
+                                         # which this machine cannot allocate
 ```
 
-The same applies to any operation whose *output* is too large — `repeat`,
-`contiguous` on a wide `expand`, `arange` — not only to explicit construction.
-Size the allocation before requesting it if a graceful failure matters; the
-tensor constructors return their storage directly rather than a `Result`, so
-propagating an allocation error would have to change every one of them.
+The check asks the allocator the same question the real allocation would ask,
+through `try_reserve`, which returns rather than aborting. So there is no
+invented ceiling and no guess at free memory — a size that genuinely fits is
+still built, and one that does not is refused for this machine rather than
+against a fixed number. It runs only above 1 GiB, where the allocator could
+plausibly say no, so ordinary tensors pay nothing for it.
+
+This covers every size a caller names: the constructors (`zeros`, `ones`,
+`empty`, `full`, `rand`, `randn`, `arange`, `linspace`, `logspace`, `eye`,
+`randperm`, the fan-in initialisers), the `new_*` family, `expand`, `repeat`,
+`repeat_interleave`, `one_hot`'s inferred class count, and the parameters of
+every `nn` layer.
+
+**What it does not cover is a size implied by an operation rather than named
+by its caller.** `cat` of twenty billion-element tensors, or a matmul whose
+output is `10**5` by `10**5`, still aborts the process: those allocations
+happen inside the engine, where the constructors return their storage directly
+rather than a `Result`, and propagating an error would have to change all 125
+of them. If a graceful failure matters for an operation's *output*, size it
+before asking.
+
+One limit worth naming: under `vm.overcommit_memory = 1` the kernel grants
+any mapping and enforces nothing until the pages are touched, so `try_reserve`
+succeeds and the process is OOM-killed later. No library check can promise
+otherwise there; on the default heuristic setting the refusal is real.
 
 `DeviceType` still models CUDA, Metal, and OpenCL, and the `cuda` / `metal` /
 `opencl` Cargo features compile `engine::backends` — device contexts,

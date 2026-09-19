@@ -62,6 +62,9 @@ OVERSIZED = [
     # `repeat` reaches the same place by multiplying rather than by taking a
     # size: a two-element tensor repeated 10**9 by 10**9.
     "mt.Tensor([1.0, 2.0]).repeat(10**9, 10**9)",
+    # `expand` materialises rather than returning a strided view, so the shape
+    # asked for is the shape allocated.
+    "mt.zeros([1, 1]).expand(10**6, 10**6)",
 ]
 
 ORDINARY = [
@@ -75,6 +78,8 @@ ORDINARY = [
     "mt.zeros([64, 1024, 1024])",
     "mt.Tensor([1.0, 2.0]).new_zeros([3, 4])",
     "mt.Tensor([1.0, 2.0]).repeat(2, 3)",
+    "mt.zeros([1, 3]).expand(4, 3)",
+    "mt.zeros([1, 3]).expand(2, -1)",
 ]
 
 _RUNNER = """
